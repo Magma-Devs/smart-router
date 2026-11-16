@@ -398,8 +398,13 @@ func (rpcss *RPCSmartRouterServer) buildRelayEnd(ctx context.Context, in relayEn
 			end.errorCode, end.errorText = returned.errorCode, returned.message
 		}
 	case relayOutcomeWriteUnknown:
-		// What the listener sends, whether or not the router returned a result to carry it.
+		// What the listener sends, whether or not the router returned a result to carry it. A
+		// GraphQL write is the one exception (MAG-5122): graphQLUnclearWriteStatus answers it with
+		// HTTP 200, not 500, so the audit line has to read the status the client actually got.
 		end.status = http.StatusInternalServerError
+		if isGraphQLWrite(in.protocolMessage) {
+			end.status = http.StatusOK
+		}
 		end.errorCode = relayEndWriteUnknownCode(in.cause, end.attempts, requestRanOutOfRoad(end.stopReason))
 		// The message the client reads, with the reason it gives (MAG-4380).
 		end.errorText = relayEndText(unclearWrite.Error())

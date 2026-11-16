@@ -45,7 +45,12 @@ func (p *Policy) Decide(input relaycore.DecisionInput) relaycore.DecisionOutput 
 	// That is a claim about attempts that have COMPLETED, and only the gotResults path
 	// guarantees it — the ticker fires on a timer with a relay still in flight, which may
 	// already have broadcast. So the carve-out does not extend to a hedge.
-	rateLimitRetrySafe := input.Summary.OnlyRateLimited && !input.IsTickerHedge
+	//
+	// A GraphQL write has no such carve-out (MAG-5122, Part I R-L point 2): never re-sent,
+	// including when every copy answered 429. The interface's own clients treat the one send as
+	// final, so a retry here is a second send the ticket exists to rule out — unlike the other
+	// interfaces this carve-out still serves, which MAG-5061 owns.
+	rateLimitRetrySafe := input.Summary.OnlyRateLimited && !input.IsTickerHedge && !input.IsGraphQLWrite
 	// A batch node error is not proof that nothing ran. Under --batch-node-error-on-any one failed
 	// element makes the whole reply a node error, classified by the failed elements' text alone, so a
 	// rate-limited sibling can stand for a batch whose eth_sendRawTransaction was accepted. Only a

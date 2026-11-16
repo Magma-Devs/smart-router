@@ -1626,6 +1626,103 @@ func unclearWriteReason(answered, dispatched int, cutOffs writeCutOffs) *unclear
 	}
 }
 
+// graphQLWriteOutcomeAccepted and graphQLWriteOutcomeUnknown are Lava-Write-Outcome's values for a
+// GraphQL write (MAG-5122, Part I R-L point 4: accepted > unknown > rejected > not_sent). The other
+// two verdicts need the per-copy chain-row classification subtask 3 (MAG-5121) has not built yet,
+// so this router states only the two it can tell apart correctly today.
+const (
+	graphQLWriteOutcomeAccepted = "accepted"
+	graphQLWriteOutcomeUnknown  = "unknown"
+)
+
+// isGraphQLWrite reports whether protocolMessage is a GraphQL write. MAG-5122 scopes its write-
+// outcome behaviour — the HTTP 200 unclear-write reply, the Lava-Write-Outcome header, the
+// rate-limit retry carve-out removal (relaypolicy.Policy.Decide) — to this interface only; every
+// other interface's write behaviour is MAG-5061's to change.
+func isGraphQLWrite(protocolMessage chainlib.ProtocolMessage) bool {
+	if chainlib.GetStateful(protocolMessage) != common.CONSISTENCY_SELECT_ALL_PROVIDERS {
+		return false
+	}
+	collection := protocolMessage.GetApiCollection()
+	return collection != nil && collection.CollectionData.ApiInterface == spectypes.APIInterfaceGraphQL
+}
+
+// ensureWriteOutcomeHeader adds Lava-Write-Outcome to result's reply, unless it is already there —
+// SendParsedRelay's two write-outcome call sites can both reach a given reply, and a client reading
+// a repeated header as a list would see the same verdict twice.
+func ensureWriteOutcomeHeader(result *common.RelayResult, outcome string) {
+	if result.Reply == nil {
+		result.Reply = &pairingtypes.RelayReply{}
+	}
+	for _, md := range result.Reply.Metadata {
+		if md.Name == common.WRITE_OUTCOME_HEADER_NAME {
+			return
+		}
+	}
+	result.Reply.Metadata = append(result.Reply.Metadata, pairingtypes.Metadata{
+		Name:  common.WRITE_OUTCOME_HEADER_NAME,
+		Value: outcome,
+	})
+}
+
+// appendGraphQLWriteOutcomeHeader adds Lava-Write-Outcome (MAG-5122) to a GraphQL write's reply:
+// accepted on success, unknown when unclearWriteOutcomeFor could not settle the outcome. Every
+// other request — a read, a non-GraphQL write, or a GraphQL write this router answered some other
+// way (rejected/not_sent await subtask 3) — is left untouched.
+func (rpcss *RPCSmartRouterServer) appendGraphQLWriteOutcomeHeader(result *common.RelayResult, protocolMessage chainlib.ProtocolMessage, success bool, unclear *unclearWriteError) {
+	if result == nil || !isGraphQLWrite(protocolMessage) {
+		return
+	}
+	if success {
+		ensureWriteOutcomeHeader(result, graphQLWriteOutcomeAccepted)
+		return
+	}
+	if unclear != nil {
+		ensureWriteOutcomeHeader(result, graphQLWriteOutcomeUnknown)
+	}
+}
+
+// graphQLUnknownWriteMessage is the ticket's required wording (MAG-5122, GraphQL interface
+// chapter section 5, point 2): the digest sentence, then the chain's own sentence. tx_hash is
+// always empty today (see graphQLUnclearWriteStatus), so this is the "can't be computed" variant
+// the ticket itself provides for that case, and the chain sentence is Sui's — the only chain this
+// interface serves right now.
+const graphQLUnknownWriteMessage = "Status unknown - this transaction may have been broadcast. " +
+	"Look up the transaction on chain before signing anything new. " +
+	"Re-sending the same signed bytes is safe. If you replace it, reuse the same input objects."
+
+// graphQLUnclearWriteStatus answers a GraphQL write whose outcome unclearWriteOutcomeFor could not
+// settle with HTTP 200 and a GraphQL error document, not withUnclearWriteStatus's 500 (MAG-5122,
+// GraphQL interface chapter section 5, changed 15 Nov in the chapter's change log): a GraphQL
+// client's retry link re-sends a mutation on a 5xx, which would double-send exactly the write this
+// subtask exists to protect. result may be nil (the early no-results branch in SendParsedRelay has
+// none to copy); the Lava-Write-Outcome header is appendGraphQLWriteOutcomeHeader's job at the call
+// site, not this function's.
+//
+// extensions.tx_hash is left out: computing a Sui digest from the request's transaction bytes needs
+// the formula MAG-4909 delivers, which is not in the router yet. Omitting it is the ticket's own
+// fallback for "if it can't be computed".
+func (rpcss *RPCSmartRouterServer) graphQLUnclearWriteStatus(ctx context.Context, result *common.RelayResult) *common.RelayResult {
+	if result == nil {
+		result = &common.RelayResult{}
+	}
+	stamped := *result
+	guidStr := ""
+	if guid, found := utils.GetUniqueIdentifier(ctx); found && guid != 0 {
+		guidStr = strconv.FormatUint(guid, 10)
+	}
+	stamped.StatusCode = http.StatusOK
+	// Router-authored, not an upstream's bytes: UpstreamStatus/Body/ContentType is the one channel
+	// the listener forwards verbatim — status included, no masking (chainlib.buildFailedRelayReply)
+	// — so it is reused here to carry this router-written GraphQL document.
+	stamped.ClientFacing = &common.ClientFacingError{
+		UpstreamStatus:      http.StatusOK,
+		UpstreamBody:        chainlib.ConvertToGraphQLWriteOutcomeError(graphQLUnknownWriteMessage, guidStr, graphQLWriteOutcomeUnknown, ""),
+		UpstreamContentType: common.JSONContentType,
+	}
+	return &stamped
+}
+
 // wakeWaitCap bounds how long a client relay that ends an idle period (or arrives while the wake
 // burst it triggered is still in flight) waits for the first endpoint poll to land before it is
 // routed. One upstream round trip is the intent; the cap keeps a slow upstream from turning idle
@@ -1751,8 +1848,14 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 		// Lava-Provider-Address to say what was tried. unknownWrite is true only for a processor
 		// that dispatched, so the processor is never nil there.
 		if unclear := unknownWrite(); unclear != nil {
-			unclearResult := withUnclearWriteStatus(&common.RelayResult{})
+			var unclearResult *common.RelayResult
+			if isGraphQLWrite(protocolMessage) {
+				unclearResult = rpcss.graphQLUnclearWriteStatus(ctx, nil)
+			} else {
+				unclearResult = withUnclearWriteStatus(&common.RelayResult{})
+			}
 			rpcss.appendHeadersToRelayResult(ctx, unclearResult, relayProcessor.ProtocolErrors(), relayProcessor, protocolMessage, protocolMessage.GetApi().GetName(), analytics, false)
+			rpcss.appendGraphQLWriteOutcomeHeader(unclearResult, protocolMessage, false, unclear)
 			return unclearResult, unclear
 		}
 
@@ -1830,6 +1933,11 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 	}
 
 	pendingProviders := rpcss.appendHeadersToRelayResult(ctx, returnedResult, relayProcessor.ProtocolErrors(), relayProcessor, protocolMessage, protocolMessage.GetApi().GetName(), analytics, err == nil)
+	// Lava-Write-Outcome (MAG-5122): added before the unclear-write check below so a GraphQL
+	// write's successful reply gets "accepted" here, on the one path that reaches it.
+	// unclearWriteOutcomeFor is cheap and pure; calling it again below via unknownWrite() is the
+	// memoised, canonical answer the branch acts on, not a second opinion.
+	rpcss.appendGraphQLWriteOutcomeHeader(returnedResult, protocolMessage, err == nil, unclearWriteOutcomeFor(protocolMessage, relayProcessor))
 
 	// Start the async straggler watcher AFTER the headers snapshot (MAG-2187): it becomes the responses
 	// channel's sole reader and resolves the exact pending set the header just reported. No-op when
@@ -1852,6 +1960,13 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 		// are replaced. The underlying error goes to relay_end's attempts rather than being
 		// concatenated into the reply — "failed relay, insufficient results" in front of "status
 		// unclear" would tell the customer both things at once.
+		//
+		// GraphQL answers this case with HTTP 200 and a GraphQL error document instead of 500
+		// (MAG-5122): a GraphQL client's retry link re-sends a mutation on a 5xx, which would
+		// double-send the write this subtask exists to protect against.
+		if isGraphQLWrite(protocolMessage) {
+			return rpcss.graphQLUnclearWriteStatus(ctx, returnedResult), unclear
+		}
 		return withUnclearWriteStatus(returnedResult), unclear
 	}
 	if err != nil {

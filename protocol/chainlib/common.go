@@ -396,17 +396,48 @@ const graphQLRefusalStatus = fiber.StatusBadRequest
 // router's own log line carries, so support can still join a complaint to the request, which the
 // old body gave up only because it was unreadable.
 func convertToGraphQLError(message, guid string) []byte {
+	extensions := map[string]string{}
+	if guid != "" {
+		extensions["guid"] = guid
+	}
+	return graphQLErrorDocument(message, extensions)
+}
+
+// ConvertToGraphQLWriteOutcomeError returns the router's own GraphQL error document for a write
+// whose outcome it answers as unknown (MAG-5122): the same shape convertToGraphQLError uses — no
+// `data` key (subtask 1's router reply shape) — with write_outcome, and tx_hash when the digest is
+// known, added to `extensions` beside guid. A client reads the verdict from the field GraphQL
+// reserves for structured error metadata rather than parsing the message text.
+//
+// Exported: the GraphQL wire shape belongs to this package, and rpcsmartrouter builds this body
+// for the one write-outcome case it answers with a client-error-free status (MAG-5122).
+func ConvertToGraphQLWriteOutcomeError(message, guid, writeOutcome, txHash string) []byte {
+	extensions := map[string]string{"write_outcome": writeOutcome}
+	if guid != "" {
+		extensions["guid"] = guid
+	}
+	if txHash != "" {
+		extensions["tx_hash"] = txHash
+	}
+	return graphQLErrorDocument(message, extensions)
+}
+
+// graphQLErrorDocument is the one-error GraphQL response body convertToGraphQLError and
+// ConvertToGraphQLWriteOutcomeError share: no `data` key, one entry in `errors`, extensions
+// omitted when empty.
+func graphQLErrorDocument(message string, extensions map[string]string) []byte {
 	type graphQLErrorEntry struct {
 		Message    string            `json:"message"`
 		Extensions map[string]string `json:"extensions,omitempty"`
 	}
+	entry := graphQLErrorEntry{Message: message}
+	if len(extensions) > 0 {
+		entry.Extensions = extensions
+	}
 	body := struct {
 		Errors []graphQLErrorEntry `json:"errors"`
 	}{
-		Errors: []graphQLErrorEntry{{Message: message}},
-	}
-	if guid != "" {
-		body.Errors[0].Extensions = map[string]string{"guid": guid}
+		Errors: []graphQLErrorEntry{entry},
 	}
 	jsonResponse, err := json.Marshal(body)
 	if err != nil {
