@@ -16,6 +16,11 @@ type CrossValidationParams struct {
 	// per-method policy; there is no request header for it. Implies selection front-loads
 	// AgreementThreshold sessions per group (see GetSessionsOptions.PerGroupTarget).
 	PerGroupQuorum bool
+	// IncludeBackups is set when the policy's max-participants resolved from the "all" sentinel
+	// (MAG-2783): selection must top up a primary-only shortfall from the backup tier, up to
+	// MaxParticipants, rather than treating backups as the emergency-only fallback they are for every
+	// other request. There is no request header for it; it is policy-only, like MinGroups.
+	IncludeBackups bool
 }
 
 // DefaultCrossValidationParams are used when cross-validation is not enabled (Selection != CrossValidation)

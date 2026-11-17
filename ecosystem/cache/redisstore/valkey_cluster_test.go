@@ -57,7 +57,7 @@ func TestClusterDocker(t *testing.T) {
 			"--add-host", "host.docker.internal:host-gateway",
 			"-p", fmt.Sprintf("0.0.0.0:%d:%d", port, port),
 			"-p", fmt.Sprintf("0.0.0.0:%d:%d", busPort, busPort),
-			"valkey/valkey:7.2",
+			valkeyImage,
 			"valkey-server", "--port", fmt.Sprint(port),
 			"--cluster-enabled", "yes",
 			"--cluster-announce-ip", "host.docker.internal",
