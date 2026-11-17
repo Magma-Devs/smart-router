@@ -5009,7 +5009,7 @@ func skipCacheWriteAfterDegrade(ctx context.Context, relayProcessor *relaycore.R
 // - Response is a node error
 // - Response body is larger than cacheMaxEntryBytes (--cache-max-entry-bytes)
 // - Requested block is NOT_APPLICABLE
-// - Reply is a null for a concrete block at or below the router's tip (nullForBlockAtOrBelowTip)
+// - Reply answers nothing (a null, {}, an error document) for a concrete block at or below the router's tip (noAnswerForBlockAtOrBelowTip)
 // - Reply is a GraphQL reply with an error, or with a root field that is null or [] (graphQLReplyCacheExclusion)
 // - Requested block is a tag the resolution above leaves negative (EARLIEST/PENDING/SAFE/FINALIZED)
 func (rpcss *RPCSmartRouterServer) tryCacheWrite(
@@ -5121,11 +5121,12 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 		return
 	}
 
-	// A null for a block the router knows exists is one lagging node's answer, not the chain's.
-	// Written, it would be replayed to every caller of that block as a gap (MAG-4124). The caller
-	// that drew it still gets it; only the replay is refused.
-	if tip := int64(rpcss.getLatestBlock()); nullForBlockAtOrBelowTip(requestedBlock, tip, relayResult.Reply.Data) {
-		utils.FormatDebug("cache write skipped: a null for a block at or below the tip",
+	// No answer for a block the router knows exists (a JSON-RPC null, a REST {} or error document)
+	// is one node's answer, not the chain's. Written, it would be replayed to every caller of that
+	// block as a gap (MAG-4124, MAG-5307). The caller that drew it still gets it; only the replay is
+	// refused.
+	if tip := int64(rpcss.getLatestBlock()); noAnswerForBlockAtOrBelowTip(requestedBlock, tip, relayResult.Reply.Data) {
+		utils.FormatDebug("cache write skipped: no answer for a block at or below the tip",
 			utils.LogAttr("chainId", chainId),
 			utils.LogAttr("api", apiName),
 			utils.LogAttr("requestedBlock", requestedBlock),
@@ -5185,6 +5186,13 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 		// transaction answers null) is stamped downstream with the endpoint's observed
 		// tip, and that value must never settle an answer that can still change.
 		finalized = byHashFinalized(extractBlockHeightFromJSONResponse(relayResult.Reply.Data, protocolMessage), int64(rpcss.getLatestBlock()), int64(blockDistanceForFinalizedData))
+	}
+	// An element that names no block took no part in the request's block, so that block being
+	// final says nothing about the element's answer: a gas price batched with a read of a final
+	// block is still a gas price, and filed as final it was served for an hour (MAG-4650). The
+	// entry gets the chain's short lifetime, as a block-less element beside a latest read does.
+	if finalized && protocolMessage.HasBlocklessElement() {
+		finalized = false
 	}
 
 	// Convert LATEST_BLOCK to the concrete block the cache key carries. This MUST be the

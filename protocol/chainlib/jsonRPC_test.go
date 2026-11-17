@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gofiber/fiber/v2"
 	"github.com/gorilla/websocket"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
@@ -568,9 +567,7 @@ func TestJsonRPC_SpecUpdateWithExtensions(t *testing.T) {
 }
 
 func TestJsonRPCChainListener_Shutdown_DrainsWSWaitGroup(t *testing.T) {
-	listener := &JsonRPCChainListener{
-		app: fiber.New(fiber.Config{DisableStartupMessage: true}),
-	}
+	listener := &JsonRPCChainListener{}
 	listener.wsWG.Add(1)
 
 	// Goroutine that simulates a WS connection that drains within the timeout.
@@ -591,9 +588,7 @@ func TestJsonRPCChainListener_Shutdown_DrainsWSWaitGroup(t *testing.T) {
 }
 
 func TestJsonRPCChainListener_Shutdown_RespectsContextDeadline(t *testing.T) {
-	listener := &JsonRPCChainListener{
-		app: fiber.New(fiber.Config{DisableStartupMessage: true}),
-	}
+	listener := &JsonRPCChainListener{}
 	listener.wsWG.Add(1) // never call Done — simulates a stuck WS goroutine
 
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)

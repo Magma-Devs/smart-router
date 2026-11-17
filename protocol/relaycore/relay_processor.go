@@ -826,6 +826,20 @@ func (rp *RelayProcessor) handleResponse(response *RelayResponse) {
 		utils.FormatInfo("Relay received a node error", utils.LogAttr("GUID", rp.guid), utils.LogAttr("Error", nodeError), utils.LogAttr("provider", response.RelayResult.ProviderInfo), utils.LogAttr("Request", rp.RelayStateMachine.GetProtocolMessage().GetApi().Name))
 	}
 
+	// A client read the provider answered with a result. rpc_endpoint_total_relays_serviced counts
+	// every relay the node answered, an error body included, so a reader asking "is this provider
+	// serving clients" needs this count instead (MAG-5179). Left out, each for its own reason:
+	//   - a node error: metered above;
+	//   - an attempt with no answer (response.Err, or no reply): the protocol-error counter's;
+	//   - a stateful request: a write goes to every provider and only one accepts it, so its answers
+	//     say nothing about who serves reads, and the refusals are kept off the node-error counter;
+	//   - the router's own health check: not a client's request.
+	if nodeError == nil && response != nil && response.Err == nil && response.RelayResult.GetReply() != nil &&
+		rp.selection != Stateful && !rp.GetUsedProviders().IsRouterHealthCheck() {
+		chainId, apiInterface := rp.chainIdAndApiInterfaceGetter.GetChainIdAndApiInterface()
+		rp.metricsInf.SetRelayNodeResultMetric(chainId, apiInterface, response.RelayResult.ProviderInfo.ProviderAddress, rp.RelayStateMachine.GetProtocolMessage().GetApi().Name)
+	}
+
 	// Only successful responses (not errors) count toward cross-validation quorum, though every
 	// response marks its provider as answered. Gate on CrossValidation mode: the quorumMap and per-group
 	// tally are only consumed in CV mode (checkEndProcessing / HasRequiredNodeResults), so
