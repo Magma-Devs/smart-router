@@ -1456,27 +1456,34 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		}
 	}))
 
-	// POST /debug/reset-cache — flushes only the external cache-be pod's response
-	// cache (MAG-2454): the BTC-safe, cache-only companion to /debug/reset-all. A
-	// cache-behavior test previously had only reset-all, which also resets
-	// session-manager state that trips a documented BTC-router regression
-	// (MAG-2395) and resets optimizer scores, pairing, endpoint health and
-	// chain-tracker state along with it — none of which a cache test wants
+	// POST /debug/reset-cache — flushes only the cache backend, the --cache-be pod
+	// or the resp-cache store (MAG-2454): the BTC-safe, cache-only companion to
+	// /debug/reset-all. A cache-behavior test previously had only reset-all, which
+	// also resets session-manager state that trips a documented BTC-router
+	// regression (MAG-2395) and resets optimizer scores, pairing, endpoint health
+	// and chain-tracker state along with it — none of which a cache test wants
 	// disturbed. Same pattern as /debug/reset-scores: a focused reset added
 	// because reset-all's bundle is unsafe for one kind of test.
 	//
 	// CacheActive() gates it exactly as it gates reset-all's own cache-be step: a
-	// deployment with no --cache-be pod has nothing to flush, and this reports
+	// deployment with no cache backend has nothing to flush, and this reports
 	// that honestly (cleared: []) rather than erroring.
 	//
-	// Nothing else is touched. In particular, this does NOT call
-	// ProviderOptimizer.ResetState — reset-all's own comments call that "the
-	// in-process Ristretto [response] reset", but what it actually clears is
-	// providersStorage, the optimizer's QoS/score cache (provider_optimizer.go's
-	// ResetState: "Discard all per-provider score caches"), not a response cache.
-	// Every relay reply this router actually caches lives on the cache-be pod
-	// flushed below; clearing providersStorage here would reset scores, which
-	// this endpoint's one job is to leave alone.
+	// Nothing else in this router is touched, but the backend holds more than
+	// replies: under --shared-state it also carries the fleet's sticky-session
+	// claims and the fleet tracker gate's endpoint observations, and Flush drops
+	// those with the replies (the RESP backend every key under the router's
+	// prefix, the sidecar its whole store). This pod's own sticky pins stay, where
+	// reset-all clears them with the session-manager state.
+	//
+	// This does NOT call ProviderOptimizer.ResetState — reset-all's own comments
+	// call that "the in-process Ristretto [response] reset", but what it actually
+	// clears is providersStorage, the optimizer's QoS/score cache
+	// (provider_optimizer.go's ResetState: "Discard all per-provider score
+	// caches"), not a response cache. The Ristretto store is the cache-be pod's
+	// own (ecosystem/cache), which Flush empties; every relay reply this router
+	// caches lives in the backend flushed below. Clearing providersStorage here
+	// would reset scores, which this endpoint's one job is to leave alone.
 	mux.HandleFunc("/debug/reset-cache", debugMethod(http.MethodPost, func(w http.ResponseWriter, r *http.Request) {
 		if deps.cache == nil || !deps.cache.CacheActive() {
 			writeDebugJSONf(w, `{"reset":true,"cleared":[]}`)

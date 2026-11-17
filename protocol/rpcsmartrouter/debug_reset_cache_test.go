@@ -1,12 +1,20 @@
 package rpcsmartrouter
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/alicebob/miniredis/v2"
+	"github.com/magma-Devs/smart-router/ecosystem/cache/core"
+	"github.com/magma-Devs/smart-router/ecosystem/cache/redisstore"
+	"github.com/magma-Devs/smart-router/protocol/performance"
+	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
+	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -150,4 +158,54 @@ func TestDebugResetCache_SmartRouter_DoesNotChangeOffset(t *testing.T) {
 	require.Equal(t, http.StatusOK, getRR.Code)
 	require.Contains(t, getRR.Body.String(), `"offset_seconds":3600`,
 		"/debug/reset-cache must not touch the debug time-warp offset — only /debug/reset-all and /debug/reset-scores do")
+}
+
+// TestDebugResetCache_SmartRouter_RespBackend_HitThenMiss is MAG-2454's acceptance against a real
+// backend instead of a fake flusher: a warm entry is a hit, /debug/reset-cache, and the same lookup
+// is a miss. The flush is prefix-scoped, so another prefix's key survives it. And it empties the
+// whole prefix, not only replies: the fleet's sticky-session claim and fleet tracker gate
+// observation that --shared-state keeps in the same backend go with the reply (docs/RESP-CACHE.md,
+// "Flush semantics").
+func TestDebugResetCache_SmartRouter_RespBackend_HitThenMiss(t *testing.T) {
+	ctx := context.Background()
+	mr := miniredis.RunT(t)
+	store, err := redisstore.NewWithClient(redis.NewClient(&redis.Options{Addr: mr.Addr()}), "sr")
+	require.NoError(t, err)
+	respCache := performance.NewRespCache(store, core.DefaultPolicy())
+	t.Cleanup(func() { _ = respCache.Close() })
+
+	get := &pairingtypes.RelayCacheGet{RequestHash: []byte("warm"), ChainId: "ETH1", RequestedBlock: 100, SeenBlock: 100, Finalized: true}
+	require.NoError(t, respCache.SetEntry(ctx, &pairingtypes.RelayCacheSet{
+		RequestHash: get.RequestHash, ChainId: "ETH1", RequestedBlock: 100, SeenBlock: 100, Finalized: true,
+		AverageBlockTime: int64(12 * time.Second), Response: &pairingtypes.RelayReply{Data: []byte(`"0x1"`), LatestBlock: 100},
+	}))
+	warm, err := respCache.GetEntry(ctx, get)
+	require.NoError(t, err)
+	require.Equal(t, []byte(`"0x1"`), warm.GetReply().GetData(), "the entry is a hit before the reset")
+
+	_, err = respCache.SetStickySessionIfAbsent(ctx, "ETH1", "jsonrpc", "svc", "sticky-1", core.StickyPin{Provider: "p1", Epoch: 1}, time.Minute)
+	require.NoError(t, err)
+	observation := &pairingtypes.EndpointObservationGet{ChainId: "ETH1", ApiInterface: "jsonrpc", EndpointId: "ep1"}
+	require.NoError(t, respCache.SetEndpointObservation(ctx, &pairingtypes.EndpointObservationSet{
+		ChainId: "ETH1", ApiInterface: "jsonrpc", EndpointId: "ep1", PodId: "pod-a", Block: 100, TtlMs: 60_000,
+	}))
+	require.NoError(t, mr.Set("other:rel:f:ETH1:00:100", "another prefix"))
+
+	var offsetNano atomic.Int64
+	mux := buildDebugMux(debugMuxDeps{optimizers: newEmptyOptimizersRouter(), offsetNano: &offsetNano, cache: respCache})
+	rr := postResetCacheRouter(mux)
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.JSONEq(t, `{"reset":true,"cleared":["cache-be"]}`, rr.Body.String())
+
+	cold, err := respCache.GetEntry(ctx, get)
+	require.NoError(t, err)
+	require.Nil(t, cold.GetReply(), "the same lookup is a miss after the reset")
+	require.True(t, mr.Exists("other:rel:f:ETH1:00:100"), "another prefix's key survives the flush")
+
+	_, claimed, err := respCache.GetStickySession(ctx, "ETH1", "jsonrpc", "svc", "sticky-1")
+	require.NoError(t, err)
+	require.False(t, claimed, "the fleet's sticky-session claim lives under the same prefix and goes with the flush")
+	seen, err := respCache.GetEndpointObservation(ctx, observation)
+	require.NoError(t, err)
+	require.False(t, seen.Found, "so does the fleet tracker gate's endpoint observation")
 }
