@@ -90,6 +90,9 @@ func TestClassifyDirectRPCError_A5xxWithANonRetryableBodyEndsTheRelay(t *testing
 		{"solana slot skipped", common.ChainFamilySolana, 503, `{"jsonrpc":"2.0","id":1,"error":{"code":-32009,"message":"Slot 1 was skipped, or missing in long-term storage"}}`},
 		// bitcoind answers a JSON-RPC 1.0 request's error with HTTP 500 and the error in the body.
 		{"bitcoind transaction rejected", common.ChainFamilyBitcoin, 500, `{"result":null,"error":{"code":-26,"message":"mandatory-script-verify-flag-failed"},"id":7}`},
+		{"bitcoind verify error", common.ChainFamilyBitcoin, 500, `{"result":null,"error":{"code":-25,"message":"bad-txns-inputs-missingorspent"},"id":7}`},
+		{"bitcoind already in chain", common.ChainFamilyBitcoin, 500, `{"result":null,"error":{"code":-27,"message":"Transaction already in block chain"},"id":7}`},
+		{"bitcoind insufficient funds", common.ChainFamilyBitcoin, 500, `{"result":null,"error":{"code":-6,"message":"Insufficient funds"},"id":7}`},
 		{"bitcoind invalid params", common.ChainFamilyBitcoin, 500, `{"result":null,"error":{"code":-32602,"message":"Invalid params"},"id":7}`},
 	}
 	for _, tc := range cases {
@@ -141,23 +144,27 @@ func TestClassifyDirectRPCError_A5xxWithAnErrorAnotherProviderMayAnswerStillFail
 	}
 }
 
-// A body whose code no row knows is judged by its status (rulebook Part IV, Appendix C row 8): a
-// 5xx is the provider's fault, so the relay fails over and the endpoint is blamed, as for a 5xx with
-// no body at all.
-func TestClassifyDirectRPCError_A5xxWithACodeNoRowKnowsIsJudgedByItsStatus(t *testing.T) {
-	httpErr := &routersession.HTTPStatusError{
-		StatusCode: 500,
-		Status:     "500 Internal Server Error",
-		Body:       []byte(`{"jsonrpc":"2.0","id":1,"error":{"code":-12345,"message":"something the node never documented"}}`),
+// A 5xx whose body does not explain it is judged by its status (rulebook Part IV, Appendix C row
+// 8): it is the provider's fault, so the relay fails over and the endpoint is blamed. That holds for
+// a JSON-RPC error whose code no row knows, an empty body and a body that is not JSON-RPC at all.
+func TestClassifyDirectRPCError_A5xxTheBodyDoesNotExplainIsJudgedByItsStatus(t *testing.T) {
+	for name, body := range map[string]string{
+		"a code no row knows": `{"jsonrpc":"2.0","id":1,"error":{"code":-12345,"message":"something the node never documented"}}`,
+		"an empty body":       ``,
+		"an HTML body":        `<html>Internal Server Error</html>`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			httpErr := &routersession.HTTPStatusError{StatusCode: 500, Status: "500 Internal Server Error", Body: []byte(body)}
+
+			classified, wrapped := classifyDirectRPCError(httpErr, common.ChainFamilyBitcoin, common.TransportJsonRPC)
+
+			assert.Equal(t, common.RouterErrorNodeInternalError, classified)
+			assert.Same(t, classified, common.AsRouterError(wrapped))
+			assert.True(t, chainlib.ShouldRetryError(wrapped), "the relay fails over")
+			unhealthy, _ := classifyEndpointHealth(healthVerdict(wrapped, common.ChainFamilyBitcoin, common.TransportJsonRPC), false)
+			assert.True(t, unhealthy, "a 5xx the body does not explain is the endpoint's fault")
+		})
 	}
-
-	classified, wrapped := classifyDirectRPCError(httpErr, common.ChainFamilyUnknown, common.TransportJsonRPC)
-
-	assert.Equal(t, common.RouterErrorNodeInternalError, classified)
-	assert.Same(t, classified, common.AsRouterError(wrapped))
-	assert.True(t, chainlib.ShouldRetryError(wrapped), "the relay fails over")
-	unhealthy, _ := classifyEndpointHealth(classified, false)
-	assert.True(t, unhealthy, "a 5xx the body does not explain is the endpoint's fault")
 }
 
 // A body whose verdict still fails over is carried as is: a 503 around a rate limit is a rate
