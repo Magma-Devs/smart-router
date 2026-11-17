@@ -264,3 +264,8 @@ func TestWriteOutcomeIsUnknown_SecondBatchWithASilentEndpoint(t *testing.T) {
 	require.True(t, writeOutcomeIsUnknown(msg, processor),
 		"the retry's endpoint is still silent and may have broadcast; telling the customer the write failed invites a resubmit")
 }
+
+// writeOutcomeIsUnknown is unclearWriteOutcomeFor as a yes or no.
+func writeOutcomeIsUnknown(protocolMessage chainlib.ProtocolMessage, relayProcessor *relaycore.RelayProcessor) bool {
+	return unclearWriteOutcomeFor(protocolMessage, relayProcessor) != nil
+}

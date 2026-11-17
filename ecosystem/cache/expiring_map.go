@@ -85,9 +85,3 @@ func (m *expiringMap[V]) clear() {
 	m.byKey = make(map[string]expiringEntry[V])
 	m.writes = 0
 }
-
-func (m *expiringMap[V]) len() int {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return len(m.byKey)
-}

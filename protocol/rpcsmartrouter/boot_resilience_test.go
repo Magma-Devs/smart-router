@@ -573,3 +573,16 @@ func TestUpdateEpoch_PromotionPrunesOnlyItsOwnTier(t *testing.T) {
 	require.Len(t, rpsr.failedBackupProviders[chainKey], 1,
 		"the backup never recovered — it must stay queued for retry")
 }
+
+// chainIsDark reports whether the chain has no provider registered in either
+// tier. Reads the live session maps rather than the boot-time verdict so the
+// answer tracks recoveries and demotions.
+//
+// This is registration, not reachability: a chain whose registered providers are
+// all failing relays is not "dark" here.
+func (rpsr *RPCSmartRouter) chainIsDark(sessionManagerKey string) bool {
+	rpsr.mu.Lock()
+	defer rpsr.mu.Unlock()
+	return len(rpsr.providerSessions[sessionManagerKey]) == 0 &&
+		len(rpsr.backupProviderSessions[sessionManagerKey]) == 0
+}

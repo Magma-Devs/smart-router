@@ -357,7 +357,7 @@ func (up *UsedProviders) AddUnwantedAddresses(address string, routerKey RouterKe
 // ReleaseFromLatestBatch removes a provider from the current batch as if it
 // had never dispatched. Use when a session is dropped AFTER AddUsed but BEFORE
 // any response was sent to the RelayProcessor (e.g. by a pre-dispatch filter
-// such as filterEndpointsByConsistency in the smart router).
+// such as filterEndpointsByConsistencyWithLag in the smart router).
 //
 // Decrements sessionsLatestBatch so RelayProcessor.checkEndProcessing's
 // "all workers reported back" exit (responsesCount >= sessionsLatestBatch)

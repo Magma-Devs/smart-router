@@ -834,3 +834,20 @@ func TestProviderRegistryStaysBoundedAcrossOutages(t *testing.T) {
 		}, 10*time.Second, 50*time.Millisecond, "batch %d: an unchanged-credentials refresh must forget the collected records", batch)
 	}
 }
+
+// subscriberCount reports live subscriptions: those whose connection is still
+// reachable. It prunes as it counts.
+func (p *StreamingProvider) subscriberCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.liveListenersLocked())
+}
+
+// registrySize is the raw number of records held, collected or not, with no
+// pruning: what a test reads to check that production's own housekeeping,
+// not the counting helper, keeps the registry bounded.
+func (p *StreamingProvider) registrySize() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.listeners)
+}

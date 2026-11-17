@@ -110,3 +110,14 @@ func TestCalculateHalfTime_StretchesOnlyForSparseProviders(t *testing.T) {
 		})
 	}
 }
+
+// size reports how many samples the provider's window holds.
+func (s *relayTimeWindows) size(providerAddress string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	window, found := s.windows[providerAddress]
+	if !found {
+		return 0
+	}
+	return len(window.times)
+}
