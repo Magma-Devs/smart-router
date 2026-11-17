@@ -784,11 +784,27 @@ type graphQLRootFieldInput struct {
 	rootField GraphQLRootField
 }
 
+// GetParams returns the root field's arguments as block_parsing reads them, with every text value
+// left out: a block is pinned only by a number, the way the node reads it (MAG-5120). Sui types a
+// checkpoint as UInt53 and refuses "100" or "0x10" for it, so the router reads such a request as
+// unpinned, and it falls to the api's default (latest) instead of a block the node never reads.
+//
+// Every GraphQL api that reads a block reads it from an argument the chain types as a number, and
+// none reads a hash from the arguments (lava-specs sui.json: checkpoint's sequenceNumber, and
+// atCheckpoint on address, object and package). A chain whose block arguments are text would need
+// its own flag. This view is block_parsing's alone; the root field keeps every argument.
 func (in graphQLRootFieldInput) GetParams() interface{} {
 	if len(in.rootField.Args) == 0 {
 		return nil
 	}
-	return in.rootField.Args
+	numbers := make(map[string]interface{}, len(in.rootField.Args))
+	for name, value := range in.rootField.Args {
+		if _, text := value.(string); text {
+			continue
+		}
+		numbers[name] = value
+	}
+	return numbers
 }
 
 func (in graphQLRootFieldInput) GetResult() json.RawMessage { return nil }

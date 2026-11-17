@@ -798,3 +798,33 @@ func TestParseGraphQLMsgReadsVariablesTheWayTheNodeDoes(t *testing.T) {
 		})
 	}
 }
+
+// MAG-5120: a block is pinned only by a number. The root field input block_parsing reads leaves a
+// text value out, a literal and a variable alike, so "100" and "0x10" pin nothing; the root field
+// itself keeps every argument.
+func TestGraphQLRootFieldInputPinsABlockOnlyByANumber(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		want       interface{}
+	}{
+		{name: "a number literal", body: `{"query":"{ checkpoint(sequenceNumber: 100) { digest } }"}`, want: json.Number("100")},
+		{name: "a number variable", body: `{"query":"query P($n: UInt53!) { checkpoint(sequenceNumber: $n) { digest } }","variables":{"n":100}}`, want: json.Number("100")},
+		{name: "a text literal", body: `{"query":"{ checkpoint(sequenceNumber: \"100\") { digest } }"}`},
+		{name: "a hex text literal", body: `{"query":"{ checkpoint(sequenceNumber: \"0x10\") { digest } }"}`},
+		{name: "a text variable", body: `{"query":"query P($n: UInt53!) { checkpoint(sequenceNumber: $n) { digest } }","variables":{"n":"100"}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			message, err := ParseGraphQLMsg([]byte(tc.body))
+			require.NoError(t, err)
+			params, ok := message.RootFieldInput(0).GetParams().(map[string]interface{})
+			require.True(t, ok)
+			got, present := params["sequenceNumber"]
+			if tc.want == nil {
+				require.False(t, present, "a text value is not a block: %v", got)
+				require.NotNil(t, message.RootFields[0].Args["sequenceNumber"], "the root field keeps the argument")
+				return
+			}
+			require.Equal(t, tc.want, got)
+		})
+	}
+}

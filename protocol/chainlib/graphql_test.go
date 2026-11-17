@@ -465,6 +465,20 @@ func TestGraphQLChainParserReadsTheRequestTheWayTheNodeDoes(t *testing.T) {
 		require.Equal(t, int64(5), requested, "read as the node reads it, not as latest")
 	})
 
+	t.Run("a checkpoint written as text is not a pin", func(t *testing.T) {
+		latest, _ := parse(t, `{"query":"{ checkpoint { sequenceNumber } }"}`).RequestedBlock()
+		for _, body := range []string{
+			`{"query":"query P($n: UInt53!) { checkpoint(sequenceNumber: $n) { sequenceNumber } }","variables":{"n":"100"}}`,
+			`{"query":"{ checkpoint(sequenceNumber: \"0x10\") { sequenceNumber } }"}`,
+			`{"query":"{ address(address: \"0x2\", atCheckpoint: \"100\") { address } }"}`,
+		} {
+			requested, _ := parse(t, body).RequestedBlock()
+			require.Equal(t, latest, requested, "read as unpinned, the way the node refuses it: %s", body)
+		}
+		pinned, _ := parse(t, `{"query":"query P($n: UInt53!) { checkpoint(sequenceNumber: $n) { sequenceNumber } }","variables":{"n":100}}`).RequestedBlock()
+		require.Equal(t, int64(100), pinned, "the same request with a number is still pinned")
+	})
+
 	t.Run("a checkpoint above 2^53 in variables is read exactly", func(t *testing.T) {
 		chainMessage := parse(t, `{"query":"query P($n: UInt53!) { checkpoint(sequenceNumber: $n) { digest } }","variables":{"n":9007199254740993}}`)
 		requested, _ := chainMessage.RequestedBlock()
