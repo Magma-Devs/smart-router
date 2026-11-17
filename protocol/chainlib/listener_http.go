@@ -41,9 +41,10 @@ type httpRelaySpec struct {
 	// answerError may answer a relay error before the masked envelope; handled false falls through.
 	answerError func(ctx context.Context, fiberCtx *fiber.Ctx, err error, reply *pairingtypes.RelayReply) (handled bool, sendErr error)
 	// refusal answers a request the router declined by one of its own limits (MAG-4577): the
-	// status, the body, and the reply text for the failure line; ok false falls through. Unlike
-	// answerError, relayHTTP writes the failure line for it, with the cut body (MAG-4454).
-	refusal func(err error, msgSeed string) (status int, body []byte, loggedReply string, ok bool)
+	// status, the body, the reply text for the failure line, and the headers the reply carries
+	// beside Lava-Guid (Lava-Write-Outcome on a refused write, MAG-5120); ok false falls through.
+	// Unlike answerError, relayHTTP writes the failure line for it, with the cut body (MAG-4454).
+	refusal func(err error, msgSeed string) (status int, body []byte, loggedReply string, headers map[string]string, ok bool)
 	// noAnswer is the shape of the router's own 502/504 when no node answered (MAG-4481).
 	noAnswer noAnswerShape
 	// errorBody builds the masked error envelope.
@@ -97,13 +98,16 @@ func (apil *chainListenerBase) relayHTTP(spec httpRelaySpec) fiber.Handler {
 				}
 			}
 			if spec.refusal != nil {
-				if status, body, loggedReply, ok := spec.refusal(err, msgSeed); ok {
+				if status, body, loggedReply, headers, ok := spec.refusal(err, msgSeed); ok {
 					apil.logger.LogRequestAndResponse(spec.logModule, true, req.logMethod, req.logPath, req.loggedBody, loggedReply, msgSeed, time.Since(startTime), err)
 					fiberCtx.Status(status)
 					// A refusal is made before any provider is asked, so no relay ran to put the
 					// request's headers on it. The request id goes on here, the one the body's guid
 					// and the router's log lines carry (MAG-4351).
 					fiberCtx.Set(common.GUID_HEADER_NAME, msgSeed)
+					for name, value := range headers {
+						fiberCtx.Set(name, value)
+					}
 					return addHeadersAndSendBytes(fiberCtx, reply.GetMetadata(), body)
 				}
 			}
@@ -172,7 +176,7 @@ func (apil *chainListenerBase) listen(ctx context.Context, app *fiber.App) {
 		apil.listeningAddress.Store(&addr)
 	}()
 
-	ListenWithRetry(ctx, app, apil.endpoint.NetworkAddress, addrChannelSafe)
+	listenWithRetry(ctx, app, apil.endpoint.NetworkAddress, addrChannelSafe, &apil.gate)
 }
 
 // answerJsonRpcBatchTooLarge answers a batch over the operator's size limit with 429.

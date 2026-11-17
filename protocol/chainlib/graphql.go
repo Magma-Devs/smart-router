@@ -318,7 +318,6 @@ func (apip *GraphQLChainParser) ChainBlockStats() (allowedBlockLagForQosSync int
 
 type GraphQLChainListener struct {
 	chainListenerBase
-	app *fiber.App // captured during Serve so Shutdown can drain HTTP
 }
 
 // NewGraphQLChainListener creates a new instance of GraphQLChainListener
@@ -346,7 +345,6 @@ func (apil *GraphQLChainListener) Serve(ctx context.Context, cmdFlags common.Con
 	// upgrade on here would turn a health probe into a chain request. GraphQL subscriptions
 	// would need their own transport; gRPC carries streaming on this chain.
 	app := createAndSetupBaseAppListener(cmdFlags, apil.endpoint.HealthCheckPath, apil.healthReporter, false)
-	apil.app = app
 
 	handlerPost := apil.relayHTTP(httpRelaySpec{
 		testMode:    common.IsTestMode(ctx),
@@ -383,12 +381,20 @@ func (apil *GraphQLChainListener) Serve(ctx context.Context, cmdFlags common.Con
 		// request member is quoted as the client sent it, and it differs from a known member only
 		// by letter case (MAG-4908); an unreadable request quotes at most the client's own names and
 		// the token its parser stopped at, never a decoder's error text (MAG-4351).
-		refusal: func(err error, msgSeed string) (int, []byte, string, bool) {
+		//
+		// A refused write's shape (check Q8: a mutation beside another operation, or a mutation
+		// with more than one root field) also says Lava-Write-Outcome: not_sent, so the caller
+		// knows for certain the write never ran and can send it again fixed (MAG-5120).
+		refusal: func(err error, msgSeed string) (int, []byte, string, map[string]string, bool) {
 			refusal := rpcInterfaceMessages.GraphQLRefusalFrom(err)
 			if refusal == nil {
-				return 0, nil, "", false
+				return 0, nil, "", nil, false
 			}
-			return graphQLRefusalStatus, convertToGraphQLError(refusal.ClientMessage(), refusal.Code(), msgSeed), refusal.ClientMessage(), true
+			var headers map[string]string
+			if outcome := refusal.WriteOutcome(); outcome != "" {
+				headers = map[string]string{common.WRITE_OUTCOME_HEADER_NAME: outcome}
+			}
+			return graphQLRefusalStatus, convertToGraphQLError(refusal.ClientMessage(), refusal.Code(), msgSeed), refusal.ClientMessage(), headers, true
 		},
 		errorBody: func(_ *fiber.Ctx, _ *common.RelayResult, errMasking, _ string) []byte {
 			return convertToJsonError(errMasking)
@@ -410,10 +416,10 @@ func (apil *GraphQLChainListener) Serve(ctx context.Context, cmdFlags common.Con
 // Shutdown drains in-flight HTTP requests and closes the listener.
 // GraphQL has no client-facing WebSockets, so no 1001 close frames are needed.
 func (apil *GraphQLChainListener) Shutdown(ctx context.Context) error {
-	if apil == nil || apil.app == nil {
+	if apil == nil {
 		return nil
 	}
-	return apil.app.ShutdownWithContext(ctx)
+	return apil.gate.close(ctx)
 }
 
 type GraphQLChainProxy struct {
