@@ -65,6 +65,8 @@ func TestGraphQLDirectRelay(t *testing.T) {
 		wantRateLimited bool
 		wantAtFault     bool
 		wantCapability  bool
+		// wantTransportFailure: the sender returns an error and no reply.
+		wantTransportFailure bool
 	}{
 		{
 			name:   "a success is passed through",
@@ -193,6 +195,52 @@ func TestGraphQLDirectRelay(t *testing.T) {
 			wantNodeError: true,
 			wantAtFault:   true,
 		},
+		// A page that is not JSON at all is a whole reply from whatever answered (MAG-5121): on a
+		// read it is kept as this provider's reply, blamed as a bad gateway.
+		{
+			name:          "an HTML page inside a 200 is kept, and blamed",
+			status:        http.StatusOK,
+			reply:         "<html><head><title>502 Bad Gateway</title></head><body>nginx</body></html>",
+			wantNodeError: true,
+			wantAtFault:   true,
+		},
+		{
+			name:          "a text page inside a 200 is kept, and blamed",
+			status:        http.StatusOK,
+			reply:         "upstream connect error or disconnect/reset before headers",
+			wantNodeError: true,
+			wantAtFault:   true,
+		},
+		{
+			// The page's words are not read as the provider's own: a quota page is still a gateway.
+			name:          "an HTML quota page inside a 200 is a bad gateway, not a pause",
+			status:        http.StatusOK,
+			reply:         "\n  <html><body>Too Many Requests</body></html>",
+			wantNodeError: true,
+			wantAtFault:   true,
+		},
+		// A body that starts like JSON and does not parse was cut on the way: a dropped
+		// connection, so the sender fails and no reply is kept.
+		{
+			name:                 "JSON cut off inside a 200 is a dropped connection",
+			status:               http.StatusOK,
+			reply:                `{"data":{"chainIdentifier":"358`,
+			wantTransportFailure: true,
+		},
+		{
+			name:                 "a JSON list cut off after whitespace is a dropped connection",
+			status:               http.StatusOK,
+			reply:                "\r\n [{\"data\":",
+			wantTransportFailure: true,
+		},
+		{
+			// A write keeps the transport failure, so the broadcast knows it may have run (MAG-5122).
+			name:                 "an HTML page answering a mutation is still a transport failure",
+			request:              mutationBody,
+			status:               http.StatusOK,
+			reply:                "<html><body>502 Bad Gateway</body></html>",
+			wantTransportFailure: true,
+		},
 		{
 			// On a write this is what ended the broadcast at 0 s while the other provider landed
 			// the transaction (Fuel Sepolia, 2026-10-15).
@@ -229,6 +277,11 @@ func TestGraphQLDirectRelay(t *testing.T) {
 			require.NoError(t, err)
 
 			result, err := sender.SendDirectRelay(ctx, chainMessage, 5*time.Second)
+			if test.wantTransportFailure {
+				require.Error(t, err)
+				require.Nil(t, result)
+				return
+			}
 			require.NoError(t, err)
 
 			require.Equal(t, http.MethodPost, gotMethod)
