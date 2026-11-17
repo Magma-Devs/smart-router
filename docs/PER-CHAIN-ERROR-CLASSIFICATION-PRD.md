@@ -120,24 +120,28 @@ header matcher.
 
 ### 2.3 Class
 
-Every reply falls into one of the rulebook's kinds (Part I, as in MAG-5132's table). A row gives one
-of four to the chain's own verdict; the router assigns the rest.
+The rulebook's classes (Part I v1.0, frozen 2 Nov 2026, with its change log): every provider reply
+gets exactly one, decided once. A row gives one of four to the chain's own verdict; the router
+assigns the rest.
 
-| Class | Meaning | In a spec row | Flags the router sets |
+| Class | Meaning (rulebook) | In a spec row | Router flags today |
 |---|---|---|---|
-| `C1` | Answer: the node served the request | not an error | none |
-| `C2` | The caller's: the request is wrong; every provider would say the same | `class` | `none`, not retryable: not at fault |
-| `C3-data` | Can't serve here, another provider may: this node doesn't hold the data | `class` | `data_scope`, retryable: not at fault |
-| `C3-capability` | Can't serve here, another provider may: this node doesn't offer the method or feature | `class` | `node_capability`, retryable: not at fault |
-| `C4` | Throttled: the provider limits our traffic for a while | never (§4.2) | `rate_limit`: the URL is held off |
-| `C5` | Provider fault: the provider broke | `class` | `none`, retryable: at fault |
-| `C6` | Refuses us: our access was refused (HTTP 401, 402, 403; gRPC PermissionDenied, Unauthenticated) | only by naming a router-owned verdict | the router's (`NODE_UNAUTHORIZED`, `NODE_ACCESS_DENIED`: `node_capability`, retryable) |
-| Unknown | No rule recognises the reply | never | `UNKNOWN_ERROR`, the router's default: retryable |
+| `C1` | Answer: the node answered, with data or with an empty or null result | not an error | none |
+| `C2` | Caller's answer: the request itself is wrong, and every node would say the same. Reason invalid (invalid params, reverted, insufficient funds) or over_limit (a size, depth, range or result limit the chain software enforces on every node) | `class` | `none`, not retryable: not at fault |
+| `C3-data` | Cannot serve here, another node may: a "not found" or "pruned" answer, or this node is behind the block or slot asked for | `class` | `data_scope`, retryable: not at fault |
+| `C3-capability` | Cannot serve here, another node may: a method or feature is off on this node | `class` | `node_capability`, retryable: not at fault |
+| `C4` | Throttled: our traffic is limited for a time: HTTP 429 whatever the body, or a rate-limit or quota answer | never: rate-limit and quota rows are router code (§3.2 step 2.1, §4.2) | `rate_limit`: the URL is held off |
+| `C5` | Provider fault: the provider failed: a 5xx (not 501), a 408, a timeout, a dropped connection, a malformed reply, or an "internal error", "unhealthy" or "syncing" answer | `class` | `none`, retryable: at fault |
+| `C6` | Provider refuses us: HTTP 401, 402 or 403, whatever the body (gRPC PermissionDenied, Unauthenticated: MAG-5132) | only by naming a router-owned verdict (XRP's `noPermission` row) | `NODE_UNAUTHORIZED`, `NODE_ACCESS_DENIED`: `node_capability`, retryable |
+| Unknown (not a class) | An error no rule recognises | never | `UNKNOWN_ERROR`, the router's default: retryable |
 
-`C3` has two values because the router treats them differently (`relay_processor.go:634`,
-`rpcsmartrouter_server.go:7202`). Fault as `EndpointAtFault` (`error_registry.go:136-152`); retry
-as §3.3 says. A chain's own verdict is `CategoryExternal`; the validator prints each row's fault
-decision.
+Also not classes: a composite reply (a batch, a partial GraphQL reply) is classified per element; a
+stale answer is a `C1` (freshness is the consistency gate's). `C3` has two values here because the
+router treats the two halves differently (`relay_processor.go:634`,
+`rpcsmartrouter_server.go:7202`). The last column is the router at `6c237073`, not the rulebook's
+targets (pauses, probes, ejection, `over_limit` counting). Fault as `EndpointAtFault`
+(`error_registry.go:136-152`); retry as §3.3 says. A chain's own verdict is `CategoryExternal`; the
+validator prints each row's fault decision.
 
 ### 2.4 Inheritance
 
@@ -865,8 +869,9 @@ SIDET, STRIDE, STRIDET, TSC, TSCT; AGR, AGRT, CANTO.
 
 ## References
 
-Rulebook v1.0 with the v1.1 edits (Notion `40cf5ce8bcd38108bcf3fd93f85e8af5`): Part I kinds C1–C6,
-R-M, R-L, R-K, R-0.2, Q45. `docs/ERROR-REGISTRY-DESIGN.md`. Jira: MAG-4910, MAG-4898, MAG-4059,
+Rulebook Part I v1.0, frozen 2 Nov 2026, with its change log to 16 Nov (Notion
+`40cf5ce8bcd38108bcf3fd93f85e8af5`): classes C1–C6, R-M, R-L, R-K, R-0.2, Q45; the gRPC status
+table in MAG-5132. `docs/ERROR-REGISTRY-DESIGN.md`. Jira: MAG-4910, MAG-4898, MAG-4059,
 MAG-4748, MAG-5128. The rulebook's interface chapters change how each reader judges a reply
 (MAG-5230 JSON-RPC and Tendermint, MAG-5252 REST, MAG-5095 GraphQL, MAG-5126 gRPC); the record
 (§3.1) takes whatever they land.
