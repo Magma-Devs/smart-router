@@ -10,7 +10,9 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
+	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
+	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 )
@@ -47,8 +49,8 @@ func (m *answerMetrics) counts() (nodeErrors, results []string) {
 // MAG-5179: smartrouter_node_results_total counts the client reads a provider answered with a
 // result, so a reader asking "is this provider serving clients" does not have to take node errors
 // off rpc_endpoint_total_relays_serviced, which cannot be done for a write. Each case checks the
-// processor took the response in (its results tally), so a case that meters nothing is not passing
-// only because the response never arrived.
+// processor took the response in (WaitForResults returns once it has handled it, and its results
+// tally), so a case that meters nothing is not passing only because the response never arrived.
 func TestRelayProcessor_MetersAReadAnsweredWithAResult(t *testing.T) {
 	const provider = "provider@test1"
 	nodeErrorBody := []byte(`{"message":"invalid argument 0: hex string has length 3","code":400}`)
@@ -84,6 +86,11 @@ func TestRelayProcessor_MetersAReadAnsweredWithAResult(t *testing.T) {
 				SendProtocolError(rp, provider, time.Millisecond, errors.New("connection refused"))
 			},
 			took: tally{protocolErrors: 1},
+		},
+		{
+			name:      "an answer with no reply and no error is neither, as the processor counts it",
+			selection: Stateless,
+			send:      func(rp *RelayProcessor) { sendWithoutReply(rp, provider, time.Millisecond) },
 		},
 		{
 			name:      "a write's answer is not a read",
@@ -142,7 +149,7 @@ func TestRelayProcessor_MetersAReadAnsweredWithAResult(t *testing.T) {
 			go tc.send(relayProcessor)
 			waitCtx, waitCancel := context.WithTimeout(ctx, 200*time.Millisecond)
 			defer waitCancel()
-			_ = relayProcessor.WaitForResults(waitCtx)
+			require.NoError(t, relayProcessor.WaitForResults(waitCtx), "the processor took the response in")
 
 			success, nodeErrors, _, protocolErrors := relayProcessor.GetResults()
 			require.Equal(t, tc.took, tally{success, nodeErrors, protocolErrors}, "the processor took the response in")
@@ -151,4 +158,21 @@ func TestRelayProcessor_MetersAReadAnsweredWithAResult(t *testing.T) {
 			require.Equal(t, tc.results, gotResults, "smartrouter_node_results_total")
 		})
 	}
+}
+
+// sendWithoutReply sends an answer that carries neither a reply nor an error. The processor takes
+// it in and records it as nothing (setValidResponse), so it is no result either.
+func sendWithoutReply(relayProcessor *RelayProcessor, provider string, delay time.Duration) {
+	time.Sleep(delay)
+	relayProcessor.GetUsedProviders().RemoveUsed(provider, routersession.NewRouterKey(nil), nil)
+	relayProcessor.SetResponse(&RelayResponse{
+		RelayResult: common.RelayResult{
+			Request: &pairingtypes.RelayRequest{
+				RelaySession: &pairingtypes.RelaySession{},
+				RelayData:    &pairingtypes.RelayPrivateData{},
+			},
+			ProviderInfo: common.ProviderInfo{ProviderAddress: provider},
+			StatusCode:   200,
+		},
+	})
 }
