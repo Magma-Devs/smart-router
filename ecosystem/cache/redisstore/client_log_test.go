@@ -23,15 +23,6 @@ func logLines(t *testing.T, logged string) []map[string]any {
 	return lines
 }
 
-func findLogLine(lines []map[string]any, message string) map[string]any {
-	for _, line := range lines {
-		if line["message"] == message {
-			return line
-		}
-	}
-	return nil
-}
-
 // A failure line is printed once per kind per interval. What an outage
 // repeats in between is counted, and the count rides on the next line.
 func TestClientLoggerLimitsFailureLinesPerKind(t *testing.T) {

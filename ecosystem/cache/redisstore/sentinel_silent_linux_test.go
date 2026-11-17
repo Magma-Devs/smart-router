@@ -317,6 +317,15 @@ func TestClientLeavesASilentSentinel(t *testing.T) {
 	}
 }
 
+func findLogLine(lines []map[string]any, message string) map[string]any {
+	for _, line := range lines {
+		if line["message"] == message {
+			return line
+		}
+	}
+	return nil
+}
+
 // The three lines go-redis prints when the primary or the Sentinel changes are
 // logged at info with their values as attributes. This runs the real library,
 // so a release that rewords one of them fails here.
