@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/magma-Devs/smart-router/ecosystem/cache/core"
@@ -703,7 +704,11 @@ func dialSentinel(ctx context.Context, dial func(context.Context, string, string
 		}
 		return nil, err
 	}
-	return &sentinelConn{Conn: conn, answerTimeout: answerTimeout}, nil
+	wrapped := &sentinelConn{Conn: conn, answerTimeout: answerTimeout}
+	if socket, ok := conn.(syscall.Conn); ok {
+		return &sentinelSocketConn{sentinelConn: wrapped, socket: socket}, nil
+	}
+	return wrapped, nil
 }
 
 // sentinelDialTimeoutError is a Sentinel dial that timed out, without the
@@ -747,6 +752,20 @@ func (c *sentinelConn) SetReadDeadline(t time.Time) error {
 
 func (c *sentinelConn) SetWriteDeadline(t time.Time) error {
 	return c.Conn.SetWriteDeadline(c.clamp(t))
+}
+
+// sentinelSocketConn is a sentinelConn over a plain socket. Before go-redis
+// reuses an idle pooled connection it peeks at the socket, so a connection the
+// Sentinel closed is dropped instead of failing the next question. It reaches
+// the socket only through the outermost connection's SyscallConn, which the
+// wrapper therefore passes on. A TLS connection offers none, wrapped or not.
+type sentinelSocketConn struct {
+	*sentinelConn
+	socket syscall.Conn
+}
+
+func (c *sentinelSocketConn) SyscallConn() (syscall.RawConn, error) {
+	return c.socket.SyscallConn()
 }
 
 // standaloneOptions builds the single-node client options. provider is nil

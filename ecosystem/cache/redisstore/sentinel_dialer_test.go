@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
+	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 )
 
@@ -22,14 +24,14 @@ func TestSentinelDialerWrapsOnlySentinelConnections(t *testing.T) {
 	control, err := dial(context.Background(), "tcp", node.Addr().String())
 	require.NoError(t, err)
 	defer control.Close()
-	wrapped, ok := control.(*sentinelConn)
+	wrapped, ok := control.(*sentinelSocketConn)
 	require.True(t, ok, "an unmarked dial is a Sentinel dial")
 	require.Equal(t, 400*time.Millisecond, wrapped.answerTimeout, "two fifths of the dial budget")
 
 	data, err := markDataDialsHook{}.DialHook(dial)(context.Background(), "tcp", node.Addr().String())
 	require.NoError(t, err)
 	defer data.Close()
-	_, ok = data.(*sentinelConn)
+	_, ok = data.(*sentinelSocketConn)
 	require.False(t, ok, "a marked dial is a data dial")
 }
 
@@ -120,4 +122,29 @@ func TestSentinelDialBoundsTheTLSHandshake(t *testing.T) {
 	require.True(t, netErr.Timeout())
 	require.GreaterOrEqual(t, elapsed, sentinelAnswerTimeout(dialTimeout))
 	require.Less(t, elapsed, dialTimeout)
+}
+
+// go-redis checks an idle pooled connection before it reuses it, by peeking at
+// its socket, so a connection the Sentinel closed is dropped instead of being
+// sent the next question. It reaches the socket only through the connection
+// the dialer returned, so the Sentinel wrapper has to pass it on.
+func TestSentinelConnKeepsThePoolHealthCheck(t *testing.T) {
+	sentinel := miniredis.RunT(t)
+	client := redis.NewSentinelClient(&redis.Options{
+		Addr:   sentinel.Addr(),
+		Dialer: sentinelDialer(nil, time.Second, &endpointTracker{}),
+		// No command retry, so a closed connection handed out by the pool
+		// fails the command instead of being retried away.
+		MaxRetries: -1,
+		PoolSize:   1,
+	})
+	defer client.Close()
+	ctx := context.Background()
+	require.NoError(t, client.Ping(ctx).Err())
+
+	sentinel.Close()
+	require.NoError(t, sentinel.Restart())
+	time.Sleep(50 * time.Millisecond) // the close reaches the client's socket
+
+	require.NoError(t, client.Ping(ctx).Err(), "the pool drops the closed connection and dials a new one")
 }
