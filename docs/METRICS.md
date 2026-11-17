@@ -110,7 +110,7 @@ They split into **endpoint-scoped** (`rpc_endpoint_*`) and **router-scoped**
 
 | Metric | Type | Labels | Description |
 | --- | --- | --- | --- |
-| `rpc_endpoint_total_relays_serviced` | Counter | `spec`, `apiInterface`, `endpoint_id`, `function` | Relays successfully served by this endpoint. |
+| `rpc_endpoint_total_relays_serviced` | Counter | `spec`, `apiInterface`, `endpoint_id`, `function` | Relays this endpoint answered. An answer that carries a node error counts here too (and on `smartrouter_node_errors_total`): only a transport failure or timeout goes to `rpc_endpoint_total_errored`. Whether the endpoint answers clients' reads with results is `smartrouter_node_results_total`. |
 | `rpc_endpoint_total_errored` | Counter | `spec`, `apiInterface`, `endpoint_id`, `function` | Errored relays for this endpoint. Excludes relays the router itself cancelled — see `rpc_endpoint_total_cancelled`. |
 | `rpc_endpoint_total_cancelled` | Counter | `spec`, `apiInterface`, `endpoint_id`, `function` | Relays the router aborted before completion: the losing side of a hedged read, a broadcast delivery still running 5 s after the caller was answered, and client disconnects. **Not an endpoint fault** — excluded from `rpc_endpoint_total_errored` and from QoS/availability scoring. |
 | `rpc_endpoint_requests_in_flight` | Gauge | `spec`, `apiInterface`, `endpoint_id`, `function` | Relays currently in flight to this endpoint. |
@@ -121,14 +121,14 @@ They split into **endpoint-scoped** (`rpc_endpoint_*`) and **router-scoped**
 | `rpc_endpoint_latest_block` | Gauge | `spec`, `apiInterface`, `endpoint_id` | Latest block reported by the endpoint. |
 | `rpc_endpoint_url_latest_block` | Gauge | `spec`, `apiInterface`, `endpoint_id`, `url`, `internal_path` | Latest block one node url of a provider answered with, written on every answered poll (the same block again included) and by the relay harvest: one series per (provider, url), for the stuck-provider alerts. `rpc_endpoint_latest_block` is written by every url of the provider, so it cannot show a url that froze while another moves on (MAG-4204). `url` is a fingerprint of the node url, the first 8 hex digits of its sha256, and nothing of the url itself, since a node url can hold an api key in any part of it; `/debug/endpoint-state` shows it as `URLFingerprint` beside each endpoint, on a router run with its debug server. `internal_path` is the spec path the url serves (`/v2`), empty for the root. ws/wss urls and unregistered urls have no series; a url whose tracker is removed loses it. |
 | `rpc_endpoint_url_answered_until_seconds` | Gauge | as `rpc_endpoint_url_latest_block` | Unix time until which the url counts as answering: its last answer, an answered poll or a harvested relay, plus max(2m, 6 x the interval the url's tracker polls at): up to 4 polls the traffic gate skips, the poll after them, and one interval for that poll's answer. The tracker caps that interval at 1 minute, so BTC polls every minute and a BTC url that dies reads as down 6 minutes after its last answer; ETH and TON keep the 2-minute floor. Past it, the url has stopped answering: it is down, not stuck, and serves no stale block. Compare with `timestamp(rpc_endpoint_url_answered_until_seconds)`, the time the sample was scraped, not `time()`: with `time()` a scrape that arrives late flips an answering url to down, where `timestamp()` only delays the verdict. |
-| `rpc_endpoint_url_relays_serviced_total` | Counter | as `rpc_endpoint_url_latest_block` | Relays one node url of a provider served successfully: the per-url counterpart of `rpc_endpoint_total_relays_serviced`, so a page about a url can ask whether customers' requests reach it. |
+| `rpc_endpoint_url_relays_serviced_total` | Counter | as `rpc_endpoint_url_latest_block` | Relays one node url of a provider answered, an answer carrying a node error included: the per-url counterpart of `rpc_endpoint_total_relays_serviced`, so a page about a url can ask whether customers' requests reach it. |
 | `rpc_endpoint_fetch_latest_fails` | Counter | `spec`, `apiInterface`, `endpoint_id` | Latest-block fetch failures. An **event** counter, not a request counter — see the note below. |
 | `rpc_endpoint_fetch_block_fails` | Counter | `spec`, `apiInterface`, `endpoint_id` | Failed specific-block fetches. |
 | `rpc_endpoint_fetch_latest_success` | Counter | `spec`, `apiInterface`, `endpoint_id` | New-block **detections** by the chain tracker, not successful requests — see the note below. |
 | `rpc_endpoint_fetch_block_success` | Counter | `spec`, `apiInterface`, `endpoint_id` | Successful specific-block fetches. |
 | `rpc_endpoint_tracker_requests_total` | Counter | `spec`, `apiInterface`, `endpoint_id`, `kind` | Upstream requests the per-endpoint chain tracker actually sent, by `kind` (`latest_block`, `block_hash`). The only metric that measures tracker **request volume** — see the note below. |
 | `rpc_endpoint_tracker_gate_errors_total` | Counter | `spec`, `apiInterface`, `endpoint_id`, `op` | Failed calls to the shared fleet observation store, by `op`: `fetch` (reading a peer's observation before polling — the pod polled instead) or `publish` (sharing this pod's own observation). Non-zero means the cache backend is unreachable, slow, or older than the observation RPCs. |
-| `rpc_endpoint_tracker_gate_skips_total` | Counter | `spec`, `apiInterface`, `endpoint_id`, `source` | Poll cycles the tracker's traffic gate suppressed (no upstream request sent), by `source`: `relay` (served traffic kept the tip fresh), `peer` (another pod's poll, borrowed through the cache backend — needs `--shared-state` + `--cache-be`), or `idle` (the chain served no client request within `--chain-tracker-idle-after`). The other half of the tracker's cadence next to `rpc_endpoint_tracker_requests_total`. |
+| `rpc_endpoint_tracker_gate_skips_total` | Counter | `spec`, `apiInterface`, `endpoint_id`, `source` | Poll cycles the tracker's traffic gate suppressed (no upstream request sent), by `source`: `relay` (served traffic kept the tip fresh), `peer` (another pod's poll, borrowed through the cache backend — needs `--shared-state` and a cache backend, `--cache-be` or `resp-cache:`), or `idle` (the chain served no client request within `--chain-tracker-idle-after`). The other half of the tracker's cadence next to `rpc_endpoint_tracker_requests_total`. |
 
 > **Tracker requests vs. fetch events.** `rpc_endpoint_fetch_latest_success` counts NEW BLOCK
 > detections and `rpc_endpoint_fetch_latest_fails` counts latest-block fetch failures. Neither
@@ -243,7 +243,7 @@ They split into **endpoint-scoped** (`rpc_endpoint_*`) and **router-scoped**
 
 | Metric | Type | Labels | Description |
 | --- | --- | --- | --- |
-| `smartrouter_total_relays_serviced` | Counter | `spec`, `apiInterface`, `function` | Relays served by the router. |
+| `smartrouter_total_relays_serviced` | Counter | `spec`, `apiInterface`, `function` | Relays the router's endpoints answered, an answer carrying a node error included. |
 | `smartrouter_total_errored` | Counter | `spec`, `apiInterface`, `function` | Errored relays. |
 | `smartrouter_end_to_end_latency_milliseconds` | Histogram | `spec`, `apiInterface`, `function` | Router-level end-to-end latency. |
 | `smartrouter_overall_health` | Gauge | — | Overall router health (1 / 0). |
@@ -384,7 +384,8 @@ node on the router offers it, the request is still served without it and the rep
 
 | Metric | Type | Labels | Description |
 | --- | --- | --- | --- |
-| `smartrouter_node_errors_total` | Counter | `spec`, `apiInterface`, `provider_address`, `method` | Node errors returned by endpoints. |
+| `smartrouter_node_errors_total` | Counter | `spec`, `apiInterface`, `provider_address`, `method` | Node errors returned by endpoints. Not counted on a stateful request (a write): it goes to every provider and all but one refuse it. |
+| `smartrouter_node_results_total` | Counter | `spec`, `apiInterface`, `provider_address`, `method` | Clients' reads an endpoint answered with a result: an answer, not a node error. Not counted: a stateful request (a write — its answers say nothing about who serves reads), the router's own health check, and an attempt that got no answer. This is the counter that says whether a provider is serving clients; `rpc_endpoint_total_relays_serviced` counts its node errors too. `provider_address` is the endpoint's name, the `endpoint_id` of the `rpc_endpoint_*` series. |
 | `smartrouter_protocol_errors_total` | Counter | `spec`, `apiInterface`, `provider_address`, `method` | Protocol/transport errors (connection/session failures). |
 
 `GET /debug/relay-errors` on the debug server (`--debug-address`) reports the router's own count of
@@ -440,17 +441,18 @@ therefore overlap, so do not add them together.
 #### Rate-limit hold-off
 
 Emitted by the [hold-off registry](RATE-LIMIT-HOLDOFF.md) itself, so every consumer path
-(re-verify, hot path, recovery probe, ws subscriptions) is covered without wiring. A
+(re-verify, hot path, ws subscriptions) is covered without wiring. A
 rate-limited relay releases its session with no QoS sample in either direction, so a
 vendor cap does not show up in `rpc_endpoint_selection_score` — this pair is the direct
 signal that an upstream is refusing us for load.
 
 | Metric | Type | Labels | Description |
 | --- | --- | --- | --- |
-| `smartrouter_rate_limit_holdoffs_total` | Counter | `provider`, `event` | Registry events. `event` is the closed set `recorded` (a 429 held an endpoint off — a new hold-off, or a Retry-After that extended one; a 429 inside a standing hold-off changes nothing and is not counted, so a burst counts once), `escalated` (the hold-off widened to the whole provider name — counted once on the transition, not per refresh), `cleared` (an answer dropped a standing penalty — not counted when there was nothing to clear). |
+| `smartrouter_rate_limit_holdoffs_total` | Counter | `provider`, `event` | Registry events. `event` is the closed set `recorded` (a 429 held an endpoint off — a new hold-off, or a Retry-After that extended one; a 429 inside a standing hold-off changes nothing and is not counted, so a burst counts once), `escalated` (the hold-off widened to the whole provider entry — the provider on one chain and api-interface, not the same name on others (MAG-4732); counted once on the transition, not per refresh), `cleared` (an answer dropped a standing penalty — not counted when there was nothing to clear). |
 | `smartrouter_rate_limit_holdoff_seconds` | Histogram | `provider` | Applied hold-off duration per `recorded` event, in **seconds** (buckets `15, 30, 60, 120, 300, 600, 1800, 3600` — not the shared millisecond latency buckets). Shows upstream `Retry-After` magnitudes against the exponential default. |
 
-`provider` is the configured provider name on the relay / probe / re-verify paths. The
+`provider` is the configured provider name on the relay / probe / re-verify paths, summed
+over chains and api-interfaces: the registry holds each entry apart, the label does not. The
 WS and gRPC subscription paths and the per-url chain tracker key the registry by node URL
 (the tracker so that its poll's 429 holds that URL, not the provider, off — MAG-4165); those
 keys are reduced to `scheme://host` before they become a label, so a `sum by (provider)`
@@ -461,7 +463,7 @@ API keys in their path or query and a credential must never reach a Prometheus s
 # upstreams currently tripping their caps
 sum by (provider) (increase(smartrouter_rate_limit_holdoffs_total{event="recorded"}[15m])) > 0
 
-# a vendor-wide cap: the hold-off escalated across a provider's URLs
+# a vendor-wide cap: the hold-off escalated across the URLs of one provider entry (chain + api-interface)
 increase(smartrouter_rate_limit_holdoffs_total{event="escalated"}[1h]) > 0
 
 # how long upstreams are telling us to wait (p90)
@@ -655,8 +657,8 @@ self-heals in seconds. Alert windows should assume the 3m ceiling.
 
 | Metric | Type | Labels | Description |
 | --- | --- | --- | --- |
-| `smartrouter_provider_verification_failed` | Gauge | `spec`, `apiInterface`, `provider`, `tier`, `scope`, `service`, `check`, `severity` | While a configured provider is failing a verification: the unix time in seconds the failure started. The series exists only while the failure lasts, and a provider that moves to another check in the same `scope` and `service` keeps its start (a `scope=none` warning never borrows another's). `tier` is `static` or `backup`. |
-| `smartrouter_provider_verification_check_failures_total` | Counter | same as above | One per failed check run: at boot, each verification retry, and each 15m epoch pass (a grace run before a demotion included). A rate-limited run is inconclusive and not counted, on any path. `increase(...[$__interval]) > 0` draws one mark per failed run. |
+| `smartrouter_provider_verification_failed` | Gauge | `spec`, `apiInterface`, `provider`, `tier`, `scope`, `service`, `check`, `severity` | While a configured provider is failing a verification: the unix time in seconds the failure started. The series exists only while the failure lasts, and a provider that moves to another check in the same `scope` and `service` keeps its start (a `scope=none` warning never borrows another's). While a provider is out of the pairing it has only its `scope=provider` series; a failure it had before it went out comes back with its own start when it is readmitted and still fails, and no "passes again" line is logged for it at the demote. `tier` is `static` or `backup`. |
+| `smartrouter_provider_verification_check_failures_total` | Counter | same as above | One per failed check run: at boot, each verification retry, and each 15m epoch pass (a grace run before a demotion included). A rate-limited run is inconclusive and not counted, on any path, and a missing websocket url (`missing-url`) ran nothing, so it is not counted either. `increase(...[$__interval]) > 0` draws one mark per failed run. |
 
 The serving tier only drops when a whole tier is gone, so a single provider that fails
 verification while others serve leaves it at `2` (or `1`). Such a provider also has no
@@ -668,9 +670,9 @@ too.
 
 | Label | Values |
 | --- | --- |
-| `scope` | `provider`: the provider is out of the pairing. `service`: the provider still serves, but lost one add-on or extension: no url of it serves that service any more. `url`: the provider still serves, but one of its node urls was refused (MAG-4231 verifies every url on its own): whole when `service` is empty, else for that one service, which another url of the provider still serves. `none`: a check the spec gives severity `Warning` is failing; nothing was switched off. |
-| `service` | The refused add-on or extension (`archive`, `debug`, ...), or for `scope=none` the one the failing check covers; empty for `scope=provider`, for a url refused whole and for a basic check. |
-| `check` | The spec verification that failed (`chain-id`, `pruning`, ...), or one of: `latest-block` (the head probe before any verification), `unsupported-addon` (a node url's addons name something the spec does not define: `scope=service` with that name as `service`, while the url serves the rest; only a `standalone-addons` url that names no add-on the spec defines is refused whole), `connect` (no connection to the node), `config` (the configured urls cannot work as given: no http(s) url, or no websocket url on a chain that subscribes), `not-run` (the provider's verification deadline passed before this check ran), `rate-limited` (a provider out at boot whose only answer so far is a 429; gauge only, never counted), `unknown`. |
+| `scope` | `provider`: the provider is out of the pairing. `service`: the provider still serves, but lost one add-on or extension: no url of it serves that service any more. `url`: the provider still serves, but one of its node urls was refused (MAG-4231 verifies every url on its own): whole when `service` is empty, else for that one service, which another url of the provider still serves. The websocket counts as a service: a ws(s) url carries only subscriptions, so a refused one is published with `service=websocket`, as `scope=service` when the provider has no ws(s) url left and `scope=url` while another still serves (MAG-3950). `none`: a check the spec gives severity `Warning` is failing; nothing was switched off. |
+| `service` | The refused add-on or extension (`archive`, `debug`, ...), `websocket` for the provider's subscriptions (a refused ws(s) url, or none configured), or for `scope=none` the one the failing check covers; empty for `scope=provider`, for an http(s) url refused whole and for a basic check. |
+| `check` | The spec verification that failed (`chain-id`, `pruning`, ...), or one of: `latest-block` (the head probe before any verification), `unsupported-addon` (a node url's addons name something the spec does not define: `scope=service` with that name as `service`, while the url serves the rest; only a `standalone-addons` url that names no add-on the spec defines is refused whole), `connect` (no connection to the node), `config` (the configured urls cannot work as given: no http(s) url), `missing-url` (`service=websocket`, `scope=service`, `PartialFail`: the provider has no ws(s) url on a chain that subscribes, so it serves everything over http but subscriptions; nothing ran and no retry is scheduled, since only a config change fixes it; gauge only, never counted. It is published with `--skip-websocket-verification` too, which the helm chart sets on every router), `not-run` (the provider's verification deadline passed before this check ran), `rate-limited` (a provider out at boot whose only answer so far is a 429; gauge only, never counted), `unknown`. |
 | `severity` | As MAG-3950 names it: `Fail` when the failure takes a url or the provider out, `PartialFail` when it switches off only `service`, `Warning` when it switches off nothing (`scope=none`). A spec value that sets no severity takes the default for where its check sits: `Fail` for a basic check (the base collection's own, no add-on or extension), `PartialFail` for an add-on or extension check. An explicit `Fail` on an add-on check makes the add-on mandatory: its failure takes the url out. A rate-limited `Warning` check, or one the deadline never ran, is not counted: one that failed the last pass keeps its series, and a new one gets none. |
 
 Each check a provider is failing that costs something (MAG-3950) is retried on its own
@@ -679,10 +681,13 @@ doubling for every pass in a row that still does, up to `--verification-retry-ma
 (15m), plus up to 20% jitter, and never before the provider's rate-limit hold-off ends.
 That covers a provider out of the pairing (failed at boot, or demoted), a refused service
 or url, and a url on its first strike. A retry re-runs only the provider's checks that are
-due, on each node url that has them, and keeps every other verdict from the pass before:
+due, at each node url that failed them, and keeps every other verdict from the pass before:
 with `debug` and `archive` both failing, each has its own schedule, and the checks that
-pass (`chain-id` and the rest) are re-run by the epoch alone. A url that could not be
-dialed is retried whole. Checks that failed in the same pass stay due together until
+pass (`chain-id` and the rest) are re-run by the epoch alone, as is a due check at a url
+that passed it. A url that could not be dialed is retried by its dial alone (`connect`), and
+so is a url a pass did not ask because it was held off after a rate limit (MAG-4733): once
+the hold-off ends, that url alone is dialed and verified, and its siblings keep their verdicts.
+Checks that failed in the same pass stay due together until
 their attempts part. While its chain is dark, every provider out of the pairing is
 verified whole from 2s instead, doubling to 3m, and those passes do not push a check's
 own retry back. The epoch pass counts as an attempt for every check it finds failing, so

@@ -76,11 +76,18 @@ func (f *fakeCacheReader) recorded() []*pairingtypes.RelayCacheGet {
 // exercised — a fake that merely records SetEntry cannot prove a follow-up GET hits.
 func startCacheServerForTest(t *testing.T) (*performance.Cache, *ecocache.RelayerCacheServer) {
 	t.Helper()
+	return startCacheServerWithNonFinalizedTTLForTest(t, 5*time.Second)
+}
+
+// startCacheServerWithNonFinalizedTTLForTest is startCacheServerForTest with nonFinalized as the
+// shortest lifetime of an entry that is not final, for tests that watch one expire.
+func startCacheServerWithNonFinalizedTTLForTest(t *testing.T, nonFinalized time.Duration) (*performance.Cache, *ecocache.RelayerCacheServer) {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
 	cs := &ecocache.CacheServer{CacheMaxCost: 1 << 20}
-	cs.InitCache(ctx, time.Hour, 5*time.Second, 5*time.Second, time.Hour, "disabled", 1, 1)
+	cs.InitCache(ctx, time.Hour, nonFinalized, 5*time.Second, time.Hour, "disabled", 1, 1)
 	rcs := &ecocache.RelayerCacheServer{CacheServer: cs}
 
 	lis, err := net.Listen("tcp", "127.0.0.1:0")

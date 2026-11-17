@@ -38,8 +38,6 @@ func startTesting(ctx context.Context, rpcEndpoints []*routersession.RPCProvider
 		return utils.FormatError("--use-static-spec is required in smart-router mode (no blockchain connection available)", nil)
 	}
 
-	chainlib.IgnoreWsEnforcementForTestCommands = true // ignore ws panic for tests
-
 	// errCh receives the first setup error from any goroutine; buffered so
 	// senders never block even if we only read one error.
 	errCh := make(chan error, len(rpcEndpoints))

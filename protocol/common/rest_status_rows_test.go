@@ -7,8 +7,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestRESTStatusRows pins the verdict for every REST status the router can meet, as decided in
-// agent_docs/bug-reports/dfns-investigations/rest-stateful-bug/rest-status-code-map.md:
+// TestRESTStatusRows pins the verdict for every REST status the router can meet, as documented in
+// docs/ERROR-REGISTRY-DESIGN.md section 9:
 // which registry code it maps to, whether it is retried on another provider, and whether the
 // endpoint is blamed. A status missing from the REST table falls to "unknown", which retries AND
 // scores the endpoint, so every row here is deliberate.

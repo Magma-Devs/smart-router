@@ -127,9 +127,11 @@ func stopValidateRetries(err error) bool {
 	return err == nil || IsRateLimitFailure(err)
 }
 
-// isWebSocketUrl reports whether a node url is dialed as a websocket. A gRPC
-// host:port does not parse as a url and is not one.
-func isWebSocketUrl(rawURL string) bool {
+// IsWebSocketURL reports whether a node url is dialed as a websocket, as verification
+// reads it. A gRPC host:port does not parse as a url and is not one. The publisher of
+// the websocket part (refusalsOf in rpcsmartrouter) reads urls through it too, so the
+// two cannot drift.
+func IsWebSocketURL(rawURL string) bool {
 	isWs, err := IsUrlWebSocket(rawURL)
 	return err == nil && isWs
 }
@@ -175,8 +177,11 @@ const (
 	CheckUnsupportedAddon = "unsupported-addon"
 	CheckConnect          = "connect"
 	// CheckConfig is a provider whose configured urls cannot work as given: no
-	// http(s) url, or no websocket url on a chain that subscribes.
+	// http(s) url.
 	CheckConfig = "config"
+	// CheckMissingURL is a part the provider has no node url for: a websocket url on
+	// a chain that subscribes (MissingWebsocket). Nothing ran; no retry can fix it.
+	CheckMissingURL = "missing-url"
 	// CheckNotRun is a check its pass never started, because the provider's
 	// verification deadline had passed. It says nothing about the check itself.
 	CheckNotRun = "not-run"
@@ -255,7 +260,10 @@ type ProviderAdmission struct {
 	refusedURLs       map[int]error
 	throttledServices map[admissionKey]struct{}
 	throttledURLs     map[int]error
-	throttle          error
+	// The url at each throttled position, so the verdicts on its services can be
+	// kept too: a pass that could not ask a url re-checked none of its services.
+	throttledURLAt map[int]common.NodeUrl
+	throttle       error
 	// warned are the failed checks whose severity is Warning, and unsettled the ones
 	// a rate limit or the deadline kept from answering, which keep what the last pass
 	// knew. Neither switches anything off (MAG-3950).
@@ -273,8 +281,10 @@ type ProviderAdmission struct {
 // CheckID names one verification value of a spec: its verification's name, and the
 // add-on and extension the value covers. ETH1's pruning is four of them: the base
 // one, archive, trace, and trace's archive. The zero CheckID is the whole pass, what a
-// retry re-runs for a url that could not be dialed or its checks listed: such a url
-// has no verdicts to keep.
+// retry re-runs for a provider whose pass gave no verdicts to keep. A url that could
+// not be dialed, or that the pass left out for its hold-off, has no verdicts to keep
+// either, but only that url: its retry is its dial, CheckID{Name: CheckConnect}, which
+// no check of another url answers to.
 type CheckID struct {
 	Name      string
 	Addon     string
@@ -329,6 +339,21 @@ func (a ProviderAdmission) Rerun() ProviderAdmission {
 	}
 	rerun, _ := admit(outcomes, false)
 	return rerun
+}
+
+// URLAsked reports whether this pass sent the node url at this position a request: it
+// was dialed, or a check ran on it rather than keeping its verdict from an earlier pass.
+// A url left out because it is held off (ErrNotAskedHeldOff), or one a retry kept whole
+// without dialing, was not. Only a pass's admission knows; any other answers false.
+func (a ProviderAdmission) URLAsked(index int) bool {
+	if index >= len(a.pass) {
+		return false
+	}
+	outcome := a.pass[index]
+	if outcome.err != nil {
+		return !errors.Is(outcome.err, ErrNotAskedHeldOff)
+	}
+	return len(outcome.checks) == 0 || slices.ContainsFunc(outcome.checks, func(c checkOutcome) bool { return !c.kept })
 }
 
 // URLRefusalRan reports whether this pass itself found what refuses the node url at this
@@ -391,9 +416,13 @@ func (a ProviderAdmission) Ran(check string) bool {
 
 // Retries is what a retry of this pass re-runs (MAG-3950), once each and sorted: every
 // check that failed, or that a rate limit or the deadline kept from answering, and the
-// whole pass when a url could not be dialed or its checks listed. A Warning check is
-// not retried: it switches nothing off, and the epoch re-runs it. Neither is an add-on
-// name the spec does not define: the router reads its config once.
+// dial of a url that could not be dialed, or that the pass did not ask because it is
+// held off after a rate limit (ErrNotAskedHeldOff). That retry dials the url again, and
+// runs its checks once it answers; the provider's other urls keep their verdicts, so a
+// dead websocket url, or a url waiting out its hold-off, costs no re-run of the http
+// checks that passed (MAG-4505). A Warning check is not retried: it switches nothing
+// off, and the epoch re-runs it. Neither is an add-on name the spec does not define:
+// the router reads its config once.
 func (a ProviderAdmission) Retries() []CheckID {
 	var ids []CheckID
 	add := func(id CheckID) {
@@ -403,7 +432,11 @@ func (a ProviderAdmission) Retries() []CheckID {
 	}
 	for _, outcome := range a.pass {
 		if outcome.err != nil {
-			if FailedCheck(outcome.err) != CheckUnsupportedAddon {
+			switch {
+			case FailedCheck(outcome.err) == CheckUnsupportedAddon:
+			case FailedCheck(outcome.err) == CheckConnect, errors.Is(outcome.err, ErrNotAskedHeldOff):
+				add(CheckID{Name: CheckConnect})
+			default:
 				add(CheckID{})
 			}
 			continue
@@ -581,18 +614,20 @@ func (a *ProviderAdmission) refuseURL(index int, cause error) {
 	a.refusedURLs[index] = cause
 }
 
-func (a *ProviderAdmission) throttleURL(index int, cause error) {
+func (a *ProviderAdmission) throttleURL(index int, url common.NodeUrl, cause error) {
 	if a.throttledURLs == nil {
 		a.throttledURLs = map[int]error{}
+		a.throttledURLAt = map[int]common.NodeUrl{}
 	}
 	a.throttledURLs[index] = cause
+	a.throttledURLAt[index] = url
 	if a.throttle == nil {
 		a.throttle = cause
 	}
 }
 
-// URLRefused reports whether the configured node url at this position could not be
-// dialed or failed a check no single service owns. The router builds no endpoint
+// URLRefused reports whether the node url at this position of the list the pass
+// verified (URLAt) could not be dialed or failed a check no single service owns. The router builds no endpoint
 // for it and hands it no subscription.
 func (a ProviderAdmission) URLRefused(index int) bool {
 	_, refused := a.refusedURLs[index]
@@ -612,6 +647,16 @@ func (a ProviderAdmission) RefusesURL(url common.NodeUrl) bool {
 	return false
 }
 
+// URLAt is the node url the pass verified at this position. Positions are into that
+// list, the dialed one with its generated per-path urls (MAG-4214), not into the
+// configured one. ok is false for a position the pass did not verify.
+func (a ProviderAdmission) URLAt(index int) (url common.NodeUrl, ok bool) {
+	if index < 0 || index >= len(a.urls) {
+		return common.NodeUrl{}, false
+	}
+	return a.urls[index], true
+}
+
 // URLRefusal is why the node url at this position was refused, nil when it was not.
 func (a ProviderAdmission) URLRefusal(index int) error {
 	return a.refusedURLs[index]
@@ -622,6 +667,11 @@ func (a ProviderAdmission) URLRefusal(index int) error {
 func (a ProviderAdmission) URLThrottled(index int) bool {
 	_, throttled := a.throttledURLs[index]
 	return throttled
+}
+
+// URLRateLimit is the rate limit the node url at this position met, nil when it met none.
+func (a ProviderAdmission) URLRateLimit(index int) error {
+	return a.throttledURLs[index]
 }
 
 // URLThrottle is the rate limit a whole node url met, the first by position: nil when
@@ -680,7 +730,9 @@ func (a ProviderAdmission) Equal(other ProviderAdmission) bool {
 }
 
 // KeepingThrottledFrom settles what this pass could not: each url or service the
-// vendor only rate-limited keeps the verdict previous gave it. Nothing in the result
+// vendor only rate-limited keeps the verdict previous gave it. A url this pass saw
+// only rate-limited, or did not ask because it was held off, also keeps every
+// service refusal previous gave it: none of its services was checked again. Nothing in the result
 // is throttled any more, but it still names the urls this pass could only see
 // rate-limited (URLThrottled): the url grace reads that, since a rate limit settles a
 // url's strike no more than its verdict.
@@ -696,21 +748,39 @@ func (a ProviderAdmission) KeepingThrottledFrom(previous ProviderAdmission) Prov
 			kept.warned[key] = struct{}{}
 		}
 	}
+	keep := func(key admissionKey, check string) {
+		if kept.refused == nil {
+			kept.refused = map[admissionKey]string{}
+		}
+		kept.refused[key] = check
+	}
 	for index, cause := range a.throttledURLs {
 		if previousCause, refused := previous.refusedURLs[index]; refused {
 			kept.refuseURL(index, previousCause)
 		}
 		if kept.throttledURLs == nil {
 			kept.throttledURLs = map[int]error{}
+			kept.throttledURLAt = map[int]common.NodeUrl{}
 		}
 		kept.throttledURLs[index] = cause
+		url := a.throttledURLAt[index]
+		for key, check := range previous.refused {
+			if key.url == url.Url && key.internalPath == url.InternalPath {
+				keep(key, check)
+			}
+		}
+		for key := range previous.warned {
+			if key.url == url.Url && key.internalPath == url.InternalPath {
+				if kept.warned == nil {
+					kept.warned = map[warningKey]struct{}{}
+				}
+				kept.warned[key] = struct{}{}
+			}
+		}
 	}
 	for key := range a.throttledServices {
 		if check, refused := previous.refused[key]; refused {
-			if kept.refused == nil {
-				kept.refused = map[admissionKey]string{}
-			}
-			kept.refused[key] = check
+			keep(key, check)
 		}
 	}
 	return kept
@@ -719,7 +789,7 @@ func (a ProviderAdmission) KeepingThrottledFrom(previous ProviderAdmission) Prov
 // WithoutURLRefusals admits the node urls at these positions again.
 func (a ProviderAdmission) WithoutURLRefusals(indices []int) ProviderAdmission {
 	kept := a.refusals()
-	kept.throttledURLs, kept.throttledServices, kept.throttle = a.throttledURLs, a.throttledServices, a.throttle
+	kept.throttledURLs, kept.throttledURLAt, kept.throttledServices, kept.throttle = a.throttledURLs, a.throttledURLAt, a.throttledServices, a.throttle
 	kept.warned, kept.unsettled, kept.pass = a.warned, a.unsettled, a.pass
 	for _, index := range indices {
 		delete(kept.refusedURLs, index)
@@ -806,7 +876,7 @@ func (a ProviderAdmission) servingError(nodeUrls []common.NodeUrl) error {
 	paths := map[string]*pathState{}
 	var order []string
 	for index, url := range nodeUrls {
-		if isWebSocketUrl(url.Url) {
+		if IsWebSocketURL(url.Url) {
 			continue
 		}
 		state, seen := paths[url.InternalPath]
@@ -898,21 +968,45 @@ func (cf *ChainFetcher) ValidateCollections(ctx context.Context) (ProviderAdmiss
 	return admissionFrom(cf.verifyNodeUrls(ctx, verifyOptions{}))
 }
 
-// ValidateCollectionsAgain re-runs only the checks in only, on each node url that has
-// them, keeps every other verdict from previous, and admits from the result as
-// ValidateCollections does (MAG-3950). A url with none of them is not dialed. A url
+// ErrNotAskedHeldOff stands in for the checks of a node url a pass left out because the
+// url is held off after a rate limit. It is a rate limit, so the pass reads the url as
+// only rate-limited: it decides nothing, and re-verification keeps the url's last verdict
+// (KeepingThrottledFrom) without sending it a request (MAG-4733).
+var ErrNotAskedHeldOff = fmt.Errorf("not asked: held off after a rate limit: %w", common.StatusCodeError429)
+
+// ValidateCollectionsExcept is ValidateCollections that does not ask the node urls at the
+// positions in skip. Each reads as rate-limited with ErrNotAskedHeldOff, and a connection
+// whose every url is skipped is not dialed.
+func (cf *ChainFetcher) ValidateCollectionsExcept(ctx context.Context, skip map[int]struct{}) (ProviderAdmission, error) {
+	return admissionFrom(cf.verifyNodeUrls(ctx, verifyOptions{skip: skip}))
+}
+
+// ValidateCollectionsAgain re-runs only the checks in only, at each node url that failed
+// them in previous (at every url that has them, when previous holds one passing
+// everywhere), keeps every other verdict from previous, and admits from the result as
+// ValidateCollections does (MAG-3950). A url with none of them to re-run is not dialed. A url
 // previous could not dial or list has no verdicts to keep, so it is verified whole, and
 // so is every url when previous is no pass of this provider's urls or only names the
-// whole pass.
-func (cf *ChainFetcher) ValidateCollectionsAgain(ctx context.Context, previous ProviderAdmission, only []CheckID) (ProviderAdmission, error) {
+// whole pass. A retry of a dial (CheckConnect) names no check of any url, so it dials
+// only the urls previous could not dial. The node urls at the positions in skip are not
+// asked, as in ValidateCollectionsExcept.
+func (cf *ChainFetcher) ValidateCollectionsAgain(ctx context.Context, previous ProviderAdmission, only []CheckID, skip map[int]struct{}) (ProviderAdmission, error) {
 	if len(previous.pass) != len(cf.endpoint.NodeUrls) || len(only) == 0 || slices.ContainsFunc(only, CheckID.WholePass) {
-		return cf.ValidateCollections(ctx)
+		return cf.ValidateCollectionsExcept(ctx, skip)
 	}
 	set := make(map[CheckID]struct{}, len(only))
 	for _, id := range only {
 		set[id] = struct{}{}
 	}
-	return admissionFrom(cf.verifyNodeUrls(ctx, verifyOptions{only: set, previous: previous.pass}))
+	failing := map[CheckID]struct{}{}
+	for _, outcome := range previous.pass {
+		for _, check := range outcome.checks {
+			if _, due := set[checkIDOf(check.verification)]; due && check.err != nil {
+				failing[checkIDOf(check.verification)] = struct{}{}
+			}
+		}
+	}
+	return admissionFrom(cf.verifyNodeUrls(ctx, verifyOptions{only: set, previous: previous.pass, failing: failing, skip: skip}))
 }
 
 // VerificationResult is the outcome of running a single spec verification against one node URL.
@@ -982,6 +1076,14 @@ type verifyOptions struct {
 	// verdicts it keeps for the rest, per node url by position.
 	only     map[CheckID]struct{}
 	previous []nodeUrlOutcome
+	// failing is the checks of only that previous holds failing, or undecided, at some
+	// url. A url that passed one of them keeps that verdict: the retry is for the urls
+	// that did not (MAG-4505 finding 16). A check of only that previous holds passing at
+	// every url was made due by a pass that previous is not, one a rate limit left
+	// unrecorded, so it runs at every url.
+	failing map[CheckID]struct{}
+	// skip are the positions of urls not to ask (ValidateCollectionsExcept).
+	skip map[int]struct{}
 }
 
 // kept is the outcome previous gave the url at index, when this pass keeps verdicts
@@ -1146,8 +1248,8 @@ func admit(outcomes []nodeUrlOutcome, logRefusals bool) (ProviderAdmission, erro
 				utils.FormatWarning("refusing node url", failed, utils.LogAttr("url", outcome.url.String()))
 			}
 		case throttled != nil:
-			admission.throttleURL(index, throttled)
-			if logRefusals {
+			admission.throttleURL(index, outcome.url, throttled)
+			if logRefusals && !errors.Is(throttled, ErrNotAskedHeldOff) {
 				utils.FormatWarning("node url rate-limited its checks; not refusing it", throttled, utils.LogAttr("url", outcome.url.String()))
 			}
 		}
@@ -1179,6 +1281,10 @@ func (cf *ChainFetcher) verifyNodeUrls(ctx context.Context, opts verifyOptions) 
 			defer wg.Done()
 			group := cf.newConnectionGroup(cf.endpoint.NodeUrls[positions[0]])
 			for _, index := range positions {
+				if _, skipped := opts.skip[index]; skipped {
+					outcomes[index] = group.notAsked(cf.endpoint.NodeUrls[index])
+					continue
+				}
 				outcomes[index] = group.verify(ctx, cf.endpoint.NodeUrls[index], opts, opts.kept(index))
 			}
 		}()
@@ -1256,13 +1362,23 @@ func (g *connectionGroup) dial(ctx context.Context) (ChainRouter, error) {
 	return g.router, g.dialErr
 }
 
+// notAsked is the share of a pass of a url the pass leaves out: rate-limited, with nothing
+// sent (ErrNotAskedHeldOff).
+func (g *connectionGroup) notAsked(url common.NodeUrl) nodeUrlOutcome {
+	outcome := nodeUrlOutcome{url: url, served: url, err: ErrNotAskedHeldOff, head: spectypes.NOT_APPLICABLE}
+	if served, err := ServedAs(g.parser, url); err == nil {
+		outcome.served = served
+	}
+	return outcome
+}
+
 // verify is one url's share of a pass. A websocket url answers only for the checks
 // the router widens to the websocket extension, and for none when websocket
 // verification is off — it is then only dialed.
 //
 // With kept, the url's outcome in the pass a retry keeps verdicts from, it re-runs only
-// the checks in opts.only and keeps the verdicts of the rest. A url with none of them
-// to re-run is not dialed: its outcome is kept whole.
+// the checks in opts.only that it failed, and keeps the verdicts of the rest. A url with
+// none of them to re-run is not dialed: its outcome is kept whole.
 func (g *connectionGroup) verify(ctx context.Context, url common.NodeUrl, opts verifyOptions, kept *nodeUrlOutcome) (outcome nodeUrlOutcome) {
 	outcome.url, outcome.served = url, url
 	utils.FormatInfo("starting validation for url", utils.LogAttr("url", url.String()))
@@ -1280,16 +1396,19 @@ func (g *connectionGroup) verify(ctx context.Context, url common.NodeUrl, opts v
 		outcome.err = chargedTo(CheckUnsupportedAddon, err)
 		return outcome
 	}
-	socket := isWebSocketUrl(url.Url)
+	socket := IsWebSocketURL(url.Url)
 	if socket {
 		verifications = socketVerifications(g.parser, verifications)
 	} else if len(verifications) == 0 {
 		utils.FormatWarning("no verifications for url", nil, utils.LogAttr("url", url.String()))
 	}
 
-	// The checks this pass runs, and the verdicts it keeps for the others. A check with
-	// no verdict to keep runs too, whether the url's checks changed since the kept pass
-	// or its verdict there was inconclusive.
+	// The checks this pass runs, and the verdicts it keeps for the others. A due check
+	// runs again where this url failed it. A url that passed it keeps that verdict when
+	// another url failed it in the kept pass, since the retry is for that url (MAG-4505
+	// finding 16); when no url did, the kept pass is older than what made it due, and it
+	// runs here too. A check with no verdict to keep runs too, whether the url's checks
+	// changed since the kept pass or its verdict there was inconclusive.
 	var keptVerdicts map[string]error
 	toRun := verifications
 	if kept != nil {
@@ -1300,8 +1419,9 @@ func (g *connectionGroup) verify(ctx context.Context, url common.NodeUrl, opts v
 		toRun = nil
 		for _, verification := range verifications {
 			_, due := opts.only[checkIDOf(verification)]
+			_, failedElsewhere := opts.failing[checkIDOf(verification)]
 			verdict, known := keptVerdicts[verdictKey(verification)]
-			if (due || !known || inconclusive(verdict)) && !skipVerification(url, verification.Name) {
+			if (!known || inconclusive(verdict) || (due && (verdict != nil || !failedElsewhere))) && !skipVerification(url, verification.Name) {
 				toRun = append(toRun, verification)
 			}
 		}

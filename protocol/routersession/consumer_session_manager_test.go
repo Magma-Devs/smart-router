@@ -1331,7 +1331,7 @@ func TestNoPairingsError(t *testing.T) {
 	err := csm.UpdateAllProviders(firstEpochHeight, pairingList, nil) // update the providers.
 	require.NoError(t, err)
 	time.Sleep(5 * time.Millisecond) // let probes finish
-	_, err = csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{}, nil, 10, 100, "invalid", nil, common.NO_STATE, "", "")
+	_, err = csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{}, nil, 10, 100, "invalid", nil, nil, common.NO_STATE, "", "")
 	require.Error(t, err)
 	require.True(t, errors.Is(err, PairingListEmptyError))
 }
@@ -1353,7 +1353,7 @@ func TestSelectedProviderAlreadyFailedReturnsError(t *testing.T) {
 	pinned := validAddresses[0]
 
 	// Sanity: when not ignored, the pinned address is returned successfully.
-	got, err := csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{}, nil, 10, 100, "", nil, common.NO_STATE, "", pinned)
+	got, err := csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{}, nil, 10, 100, "", nil, nil, common.NO_STATE, "", pinned)
 	require.NoError(t, err)
 	require.Equal(t, []string{pinned}, got)
 
@@ -1361,7 +1361,7 @@ func TestSelectedProviderAlreadyFailedReturnsError(t *testing.T) {
 	// (simulating a prior failed connect attempt in the same GetSessions call),
 	// the helper must return an error instead of re-selecting the same address.
 	ignored := map[string]struct{}{pinned: {}}
-	_, err = csm.getValidProviderAddresses(context.Background(), 1, ignored, nil, 10, 100, "", nil, common.NO_STATE, "", pinned)
+	_, err = csm.getValidProviderAddresses(context.Background(), 1, ignored, nil, 10, 100, "", nil, nil, common.NO_STATE, "", pinned)
 	require.Error(t, err)
 	require.True(t, errors.Is(err, SelectedProviderAlreadyFailedError),
 		"expected SelectedProviderAlreadyFailedError, got: %v", err)
@@ -1378,7 +1378,7 @@ func TestSelectedProviderUnknownNameIsNotReportedAsAFailure(t *testing.T) {
 	require.NoError(t, err)
 	time.Sleep(5 * time.Millisecond) // let probes finish
 
-	_, err = csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{}, nil, 10, 100, "", nil, common.NO_STATE, "", "no-such-provider")
+	_, err = csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{}, nil, 10, 100, "", nil, nil, common.NO_STATE, "", "no-such-provider")
 	require.Error(t, err)
 	require.True(t, errors.Is(err, SelectedProviderUnavailableError),
 		"expected SelectedProviderUnavailableError, got: %v", err)
@@ -1405,7 +1405,7 @@ func TestSelectedProviderMatchesCaseInsensitively(t *testing.T) {
 		strings.ToLower(pinned),
 		strings.ToUpper(pinned[:1]) + pinned[1:], // "Provider0"
 	} {
-		got, err := csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{}, nil, 10, 100, "", nil, common.NO_STATE, "", requested)
+		got, err := csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{}, nil, 10, 100, "", nil, nil, common.NO_STATE, "", requested)
 		require.NoError(t, err, "header %q should resolve to %q", requested, pinned)
 		// The canonical address comes back, not the caller's spelling.
 		require.Equal(t, []string{pinned}, got, "header %q must resolve to the registered address", requested)
@@ -1426,7 +1426,7 @@ func TestSelectedProviderAlreadyFailedIsCaseInsensitive(t *testing.T) {
 	pinned := validAddresses[0]
 
 	ignored := map[string]struct{}{pinned: {}}
-	_, err = csm.getValidProviderAddresses(context.Background(), 1, ignored, nil, 10, 100, "", nil, common.NO_STATE, "", strings.ToUpper(pinned))
+	_, err = csm.getValidProviderAddresses(context.Background(), 1, ignored, nil, 10, 100, "", nil, nil, common.NO_STATE, "", strings.ToUpper(pinned))
 	require.Error(t, err)
 	require.True(t, errors.Is(err, SelectedProviderAlreadyFailedError),
 		"expected SelectedProviderAlreadyFailedError, got: %v", err)
@@ -1445,17 +1445,17 @@ func TestSelectedProviderIgnoredSetDoesNotFoldOntoACaseTwin(t *testing.T) {
 	require.ElementsMatch(t, []string{"Lava", "lava"}, csm.getValidAddresses("", nil, context.Background()))
 
 	// `lava` failed earlier in this request; the header pins `Lava`, which did not.
-	got, err := csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{"lava": {}}, nil, 10, 100, "", nil, common.NO_STATE, "", "Lava")
+	got, err := csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{"lava": {}}, nil, 10, 100, "", nil, nil, common.NO_STATE, "", "Lava")
 	require.NoError(t, err, "Lava never failed — its case-twin's failure must not reject it")
 	require.Equal(t, []string{"Lava"}, got)
 
 	// ...and the reverse, so neither spelling is privileged.
-	got, err = csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{"Lava": {}}, nil, 10, 100, "", nil, common.NO_STATE, "", "lava")
+	got, err = csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{"Lava": {}}, nil, 10, 100, "", nil, nil, common.NO_STATE, "", "lava")
 	require.NoError(t, err)
 	require.Equal(t, []string{"lava"}, got)
 
 	// The spin bound still holds when it is the pinned provider itself that failed.
-	_, err = csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{"Lava": {}}, nil, 10, 100, "", nil, common.NO_STATE, "", "Lava")
+	_, err = csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{"Lava": {}}, nil, 10, 100, "", nil, nil, common.NO_STATE, "", "Lava")
 	require.Error(t, err)
 	require.True(t, errors.Is(err, SelectedProviderAlreadyFailedError),
 		"expected SelectedProviderAlreadyFailedError, got: %v", err)
@@ -1470,7 +1470,7 @@ func TestSelectedProviderAmbiguousCaseIsRejected(t *testing.T) {
 	require.NoError(t, err)
 	time.Sleep(5 * time.Millisecond) // let probes finish
 
-	_, err = csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{}, nil, 10, 100, "", nil, common.NO_STATE, "", "LAVA")
+	_, err = csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{}, nil, 10, 100, "", nil, nil, common.NO_STATE, "", "LAVA")
 	require.Error(t, err)
 	require.True(t, errors.Is(err, SelectedProviderUnavailableError),
 		"expected SelectedProviderUnavailableError, got: %v", err)
@@ -1560,28 +1560,35 @@ func TestPairingWithStateful(t *testing.T) {
 	})
 }
 
-// A provider that keeps failing must eventually exhaust the pairing list rather than loop forever.
+// A provider with no room for another concurrent session must exhaust the pairing list rather
+// than loop forever.
 //
-// The ceiling that produces this used to be the retired-session one at MaxSessionsAllowedPerProvider/3.
-// FAILOVER-TASKS section 2 removed it — see TestRetiredSessionCapacityRecovers for why — so the
-// property is now delivered by the total-session ceiling instead, one session further along. Same
-// guarantee, three times as much rope.
+// Before MAG-5063 this was driven by retiring one session per iteration: a BlockListed session
+// cost the provider its capacity for the rest of the epoch, so MaxSessionsAllowedPerProvider+1
+// retirements alone reached the total-session ceiling. That is the bug MAG-5063 fixes — a
+// retired session is reclaimed as soon as GetConsumerSessionInstanceFromEndpoint next scans past
+// it (its own lock is free, since OnSessionFailure always calls Free) — so retiring sessions no
+// longer reaches this ceiling at all. What still does: MaxSessionsAllowedPerProvider+1 sessions
+// genuinely in flight at once, none of them freed, each one a real concurrent request this
+// provider cannot also serve. That is what this test now drives, and it is the case the ceiling
+// exists to bound.
 func TestSessionCeilingErrorsInPairingListEmpty(t *testing.T) {
 	ctx := context.Background()
 	csm := CreateConsumerSessionManager()
 	pairingList := createPairingList("", true)
+	// createPairingList's stub CU budget (200) is sized for a handful of requests, not
+	// MaxSessionsAllowedPerProvider+1 concurrent ones; none of them is ever done, so none of
+	// their compute units is ever released either.
+	pairingList[0].MaxComputeUnits = uint64(MaxSessionsAllowedPerProvider+10) * cuForFirstRequest
 	err := csm.UpdateAllProviders(firstEpochHeight, map[uint64]*ConsumerSessionsWithProvider{0: pairingList[0]}, nil) // update the providers.
 	require.NoError(t, err)
 	utils.FormatDebug(fmt.Sprintf("%v", len(csm.validAddresses)))
-	// One past the ceiling: every session is retired on failure, so the last iteration is the one
-	// that leaves the provider with no room to create another.
+	// One past the ceiling: every session stays locked (never freed, as a real in-flight relay
+	// would leave it), so the last iteration is the one that leaves the provider with no room to
+	// create another.
 	for i := 0; i <= MaxSessionsAllowedPerProvider; i++ {
-		css, err := csm.GetSessions(ctx, 1, cuForFirstRequest, NewUsedProviders(nil), servicedBlockNumber, "", nil, common.NO_STATE, 0, "", "") // get a session
+		_, err := csm.GetSessions(ctx, 1, cuForFirstRequest, NewUsedProviders(nil), servicedBlockNumber, "", nil, common.NO_STATE, 0, "", "") // get a session, and never free it
 		require.NoError(t, err)
-		for _, cs := range css {
-			err = csm.OnSessionFailure(cs.Session, errors.Join(BlockProviderError, SessionOutOfSyncError))
-			require.NoError(t, err)
-		}
 	}
 
 	_, err = csm.GetSessions(ctx, 1, cuForFirstRequest, NewUsedProviders(nil), servicedBlockNumber, "", nil, common.NO_STATE, 0, "", "") // get a session
@@ -1667,6 +1674,7 @@ func TestDeadConnectionCleanup(t *testing.T) {
 		"",    // addon
 		nil,   // extensionNames
 		nil,   // internalPath
+		nil,   // holdoffs
 	)
 
 	// Should successfully connect (we have one valid connection)
@@ -1834,7 +1842,7 @@ func TestBackupProviderOptimizerSelection(t *testing.T) {
 	}
 
 	// First call: optimizer picks one backup.
-	result1, err := csm.getValidConsumerSessionsWithProviderFromBackupProviderList(ctx, ignoredProv, cuForFirstRequest, servicedBlockNumber, "", []string{}, 0, NewUsedProviders(nil))
+	result1, err := csm.getValidConsumerSessionsWithProviderFromBackupProviderList(ctx, 1, ignoredProv, cuForFirstRequest, servicedBlockNumber, "", []string{}, 0, NewUsedProviders(nil))
 	require.NoError(t, err)
 	require.Len(t, result1, 1, "expected exactly one backup provider returned per call")
 	var first string
@@ -1847,7 +1855,7 @@ func TestBackupProviderOptimizerSelection(t *testing.T) {
 	require.True(t, firstIgnored, "selected backup should be in ignoredProviders after call")
 
 	// Second call: optimizer picks the other backup (first is now ignored).
-	result2, err := csm.getValidConsumerSessionsWithProviderFromBackupProviderList(ctx, ignoredProv, cuForFirstRequest, servicedBlockNumber, "", []string{}, 0, NewUsedProviders(nil))
+	result2, err := csm.getValidConsumerSessionsWithProviderFromBackupProviderList(ctx, 1, ignoredProv, cuForFirstRequest, servicedBlockNumber, "", []string{}, 0, NewUsedProviders(nil))
 	require.NoError(t, err)
 	require.Len(t, result2, 1, "expected exactly one backup provider returned per call")
 	var second string
@@ -1857,7 +1865,7 @@ func TestBackupProviderOptimizerSelection(t *testing.T) {
 	require.NotEqual(t, first, second, "second call should return the other backup provider")
 
 	// Third call: both backups are now ignored — expect an error.
-	_, err = csm.getValidConsumerSessionsWithProviderFromBackupProviderList(ctx, ignoredProv, cuForFirstRequest, servicedBlockNumber, "", []string{}, 0, NewUsedProviders(nil))
+	_, err = csm.getValidConsumerSessionsWithProviderFromBackupProviderList(ctx, 1, ignoredProv, cuForFirstRequest, servicedBlockNumber, "", []string{}, 0, NewUsedProviders(nil))
 	require.Error(t, err, "expected error when all backup providers are exhausted")
 }
 
@@ -1901,7 +1909,7 @@ func TestBackupProviderOptimizerSelection_EndpointCountBoundaries(t *testing.T) 
 			seen := make(map[string]struct{})
 			for call := 0; call < tc.backupCount; call++ {
 				result, err := csm.getValidConsumerSessionsWithProviderFromBackupProviderList(
-					ctx, ignoredProv, cuForFirstRequest, servicedBlockNumber, "",
+					ctx, 1, ignoredProv, cuForFirstRequest, servicedBlockNumber, "",
 					[]string{}, 0, NewUsedProviders(nil))
 				require.NoError(t, err, "call #%d of %d must succeed", call+1, tc.backupCount)
 				require.Len(t, result, 1, "exactly one backup per call (got %d)", len(result))
@@ -1916,7 +1924,7 @@ func TestBackupProviderOptimizerSelection_EndpointCountBoundaries(t *testing.T) 
 
 			// One more call exhausts the pool.
 			_, err := csm.getValidConsumerSessionsWithProviderFromBackupProviderList(
-				ctx, ignoredProv, cuForFirstRequest, servicedBlockNumber, "",
+				ctx, 1, ignoredProv, cuForFirstRequest, servicedBlockNumber, "",
 				[]string{}, 0, NewUsedProviders(nil))
 			require.Error(t, err, "expected exhaustion error after %d backups served", tc.backupCount)
 		})
@@ -2129,6 +2137,7 @@ func TestCanceledContextDoesNotPenalizeEndpoint(t *testing.T) {
 		"",    // addon
 		nil,   // extensionNames
 		nil,   // internalPath
+		nil,   // holdoffs
 	)
 
 	// Connection should fail (context canceled), but the endpoint must not be penalized.
@@ -2206,7 +2215,7 @@ func TestBlockProvider_BackupProviderFilteredFromSelection(t *testing.T) {
 	// Attempting to get backup sessions should fail — no eligible backup providers
 	ignored := &ignoredProviders{providers: make(map[string]struct{}), currentEpoch: firstEpochHeight}
 	_, err = csm.getValidConsumerSessionsWithProviderFromBackupProviderList(
-		context.Background(), ignored, 1, servicedBlockNumber, "", nil, 0, NewUsedProviders(nil),
+		context.Background(), 1, ignored, 1, servicedBlockNumber, "", nil, 0, NewUsedProviders(nil),
 	)
 	require.Error(t, err, "blocked backup provider should not be selectable")
 }
@@ -2590,6 +2599,10 @@ func TestGetAllDirectRPCEndpoints_IncludesBackupProviders(t *testing.T) {
 		"backup with a dedicated URL must be included so startup ChainTracker init covers it")
 	require.False(t, isBackup["blockpi1"], "a pairing endpoint is not marked as a backup")
 	require.True(t, isBackup["backup1"], "a backup-list endpoint is marked as one")
+	for _, r := range results {
+		require.Equal(t, csm.holdoffKey(r.ProviderAddress), r.HoldoffKey, "the key the relay path holds its urls under")
+		require.NotEqual(t, r.ProviderAddress, r.HoldoffKey)
+	}
 }
 
 // TestProbeDirectRPCEndpoints_RespectsDisabledEndpoint guards the endpoint.Enabled

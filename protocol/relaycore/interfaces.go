@@ -36,6 +36,9 @@ type ResultsCheckerInf interface {
 // MetricsInterface for relay processor metrics
 type MetricsInterface interface {
 	SetRelayNodeErrorMetric(chainId string, apiInterface string, providerAddress string, method string)
+	// SetRelayNodeResultMetric counts a client read the provider answered with a result: the
+	// answers handleResponse does not meter as node errors, less the ones that are not reads.
+	SetRelayNodeResultMetric(chainId string, apiInterface string, providerAddress string, method string)
 }
 
 // ChainIdAndApiInterfaceGetter interface
@@ -150,6 +153,12 @@ type DecisionInput struct {
 	// that upstream or not at all: Decide never retries or hedges it on another one (MAG-2280,
 	// MAG-4123). A plain lava-select-provider is not Pinned and keeps its failover (MAG-4826).
 	Pinned bool
+	// IsGraphQLWrite is true when the request is a GraphQL mutation (MAG-5122). It turns off the
+	// Stateful rate-limit carve-out below: a GraphQL write is never re-sent, including when every
+	// copy answered 429, because the interface's own clients treat one send as final and a second
+	// send risks the double-spend this subtask exists to prevent. Every other interface keeps the
+	// carve-out until MAG-5061 decides whether to remove it there too.
+	IsGraphQLWrite bool
 }
 
 // RelayPolicyInf is the interface that the policy engine must implement.

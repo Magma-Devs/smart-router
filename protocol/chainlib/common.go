@@ -200,19 +200,17 @@ func constructFiberCallbackWithHeaderAndParameterExtraction(callbackToBeCalled f
 }
 
 // drainHTTPThenWS performs the graceful shutdown sequence shared by every
-// chain listener: drain in-flight HTTP via app.ShutdownWithContext, then wait
-// for the per-listener websocket WaitGroup to reach zero. The HTTP shutdown
-// runs first so that (a) the listener stops accepting new /ws upgrades and
-// (b) any in-flight upgrade handler — which performs wsWG.Add(1) synchronously
-// in the upgrade middleware — has been observed before wsWG.Wait runs. If the
-// caller's context expires before wsWG drains, we log a warning and return;
-// the listener is already closed and remaining WS conns will tear down when
-// the process exits. name is used to disambiguate the warning across listeners.
-func drainHTTPThenWS(ctx context.Context, app *fiber.App, wg *sync.WaitGroup, name string) error {
-	if app == nil {
-		return nil
-	}
-	httpErr := app.ShutdownWithContext(ctx)
+// chain listener that serves websockets: close the serve gate, which drains
+// in-flight HTTP, then wait for the per-listener websocket WaitGroup to reach
+// zero. The HTTP shutdown runs first so that (a) the listener stops accepting
+// new /ws upgrades and (b) any in-flight upgrade handler — which performs
+// wsWG.Add(1) synchronously in the upgrade middleware — has been observed
+// before wsWG.Wait runs. If the caller's context expires before wsWG drains,
+// we log a warning and return; the listener is already closed and remaining WS
+// conns will tear down when the process exits. name is used to disambiguate
+// the warning across listeners.
+func drainHTTPThenWS(ctx context.Context, gate *serveGate, wg *sync.WaitGroup, name string) error {
+	httpErr := gate.close(ctx)
 
 	done := make(chan struct{})
 	go func() {
@@ -361,8 +359,10 @@ func convertToJsonError(errorMsg string) []byte {
 	return jsonResponse
 }
 
-// graphQLRefusalStatus is the HTTP status the GraphQL listener answers a request it refuses by one
-// of its own limits with (MAG-4577).
+// graphQLRefusalStatus is the HTTP status the GraphQL listener answers a request it refuses with:
+// one past the router's own limits (MAG-4577), one the router and the node would read differently
+// (MAG-4908), and one the router cannot read (MAG-4351, whose owner decided 400 on 2026-11-09; the
+// GraphQL-over-HTTP draft answers a parse failure with 400 too).
 //
 // 400, for three reasons. The request itself is the reason and no retry of it can succeed, which is
 // the 4xx half of the status line and the whole point of the change: a 500 told every alert rule and
@@ -374,8 +374,8 @@ func convertToJsonError(errorMsg string) []byte {
 // length, which is not what these limits measure: a query with 301 root fields can be a few hundred
 // bytes.
 //
-// ONE constant for the three limits, so the owner's answer is one edit. The router owner was asked
-// to confirm 400 against 413 and 422 on MAG-4577; the ticket records the choice as theirs.
+// ONE constant for every refusal, so the owner's answer is one edit. The router owner was asked to
+// confirm 400 against 413 and 422 on MAG-4577; the ticket records the choice as theirs.
 const graphQLRefusalStatus = fiber.StatusBadRequest
 
 // convertToGraphQLError returns a GraphQL response carrying one error, which is what a GraphQL
@@ -395,18 +395,58 @@ const graphQLRefusalStatus = fiber.StatusBadRequest
 // guid goes in `extensions`, which the specification reserves for exactly this. It is the id the
 // router's own log line carries, so support can still join a complaint to the request, which the
 // old body gave up only because it was unreadable.
-func convertToGraphQLError(message, guid string) []byte {
+//
+// code goes in `extensions` too, where GraphQL servers put an error's code: GRAPHQL_PARSE_FAILED
+// for a query that does not parse, REQUEST_REFUSED for any other request the router cannot read
+// (MAG-4351). Empty leaves it out, which is the limits' and MAG-4908's reply as decided (MAG-4577).
+// The router's own error field (`router_error` in the rulebook) is not written yet: its name waits
+// on one naming decision for every interface, and GraphQL follows it in MAG-4911.
+func convertToGraphQLError(message, code, guid string) []byte {
+	extensions := map[string]string{}
+	if code != "" {
+		extensions["code"] = code
+	}
+	if guid != "" {
+		extensions["guid"] = guid
+	}
+	return graphQLErrorDocument(message, extensions)
+}
+
+// ConvertToGraphQLWriteOutcomeError returns the router's own GraphQL error document for a write
+// whose outcome it answers as unknown (MAG-5122): the same shape convertToGraphQLError uses — no
+// `data` key (subtask 1's router reply shape) — with write_outcome, and tx_hash when the digest is
+// known, added to `extensions` beside guid. A client reads the verdict from the field GraphQL
+// reserves for structured error metadata rather than parsing the message text.
+//
+// Exported: the GraphQL wire shape belongs to this package, and rpcsmartrouter builds this body
+// for the one write-outcome case it answers with a client-error-free status (MAG-5122).
+func ConvertToGraphQLWriteOutcomeError(message, guid, writeOutcome, txHash string) []byte {
+	extensions := map[string]string{"write_outcome": writeOutcome}
+	if guid != "" {
+		extensions["guid"] = guid
+	}
+	if txHash != "" {
+		extensions["tx_hash"] = txHash
+	}
+	return graphQLErrorDocument(message, extensions)
+}
+
+// graphQLErrorDocument is the one-error GraphQL response body convertToGraphQLError and
+// ConvertToGraphQLWriteOutcomeError share: no `data` key, one entry in `errors`, extensions
+// omitted when empty.
+func graphQLErrorDocument(message string, extensions map[string]string) []byte {
 	type graphQLErrorEntry struct {
 		Message    string            `json:"message"`
 		Extensions map[string]string `json:"extensions,omitempty"`
 	}
+	entry := graphQLErrorEntry{Message: message}
+	if len(extensions) > 0 {
+		entry.Extensions = extensions
+	}
 	body := struct {
 		Errors []graphQLErrorEntry `json:"errors"`
 	}{
-		Errors: []graphQLErrorEntry{{Message: message}},
-	}
-	if guid != "" {
-		body.Errors[0].Extensions = map[string]string{"guid": guid}
+		Errors: []graphQLErrorEntry{entry},
 	}
 	jsonResponse, err := json.Marshal(body)
 	if err != nil {
@@ -521,12 +561,17 @@ func validateEndpoints(endpoints []common.NodeUrl, apiInterface string) {
 	}
 }
 
-func ListenWithRetry(ctx context.Context, app *fiber.App, address string, chosenAddrCh *common.SafeChannelSender[string]) {
+// listenWithRetry binds address and serves app on it, binding again after a failure, until
+// ctx ends or gate is closed. A socket bound after the gate closed is closed unserved.
+func listenWithRetry(ctx context.Context, app *fiber.App, address string, chosenAddrCh *common.SafeChannelSender[string], gate *serveGate) {
 	for {
 		ln, err := net.Listen("tcp", address)
 		if err != nil {
 			utils.FormatError("net.Listen(tcp, address)", err, utils.LogAttr("address", address))
 		} else {
+			if !gate.open(app, ln) {
+				return
+			}
 			chosenAddrCh.Send(ln.Addr().String())
 
 			err = app.Listener(ln)
@@ -535,9 +580,11 @@ func ListenWithRetry(ctx context.Context, app *fiber.App, address string, chosen
 			}
 		}
 
-		// Stop retrying when the caller cancels (graceful shutdown). Without this,
-		// after app.ShutdownWithContext returns from app.Listener, the loop would
-		// sleep and rebind the port, undoing the shutdown.
+		// Stop retrying on shutdown. Without this, after app.Listener returns the
+		// loop would sleep and rebind the port, undoing the shutdown.
+		if gate.isClosed() {
+			return
+		}
 		select {
 		case <-ctx.Done():
 			return
@@ -816,6 +863,54 @@ type chainListenerBase struct {
 	healthReporter   HealthReporter
 	logger           *metrics.RPCConsumerLogs
 	listeningAddress atomic.Pointer[string]
+	gate             serveGate
+}
+
+// serveGate orders a listener's Shutdown against its serve loop, whichever runs first.
+// fasthttp's Shutdown closes only the listeners its Serve has already taken, and returns at
+// once when there are none, so a Shutdown that ran before Serve took the socket left the server
+// to serve it afterwards. Shutdown closes the gate instead: a socket bound but not yet served is
+// closed under it, and one the loop binds afterwards is closed before Serve sees it.
+type serveGate struct {
+	mu     sync.Mutex
+	closed bool
+	app    *fiber.App
+	ln     net.Listener
+}
+
+// open records app and the listener it is about to serve. Once the gate is closed it closes
+// ln instead and reports false.
+func (g *serveGate) open(app *fiber.App, ln net.Listener) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.closed {
+		_ = ln.Close()
+		return false
+	}
+	g.app, g.ln = app, ln
+	return true
+}
+
+func (g *serveGate) isClosed() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.closed
+}
+
+// close shuts the gate, drains the in-flight requests of the app it let through, and closes
+// that app's listener, which Serve may not have taken yet.
+func (g *serveGate) close(ctx context.Context) error {
+	g.mu.Lock()
+	g.closed = true
+	app, ln := g.app, g.ln
+	g.mu.Unlock()
+	if app == nil {
+		return nil
+	}
+	err := app.ShutdownWithContext(ctx)
+	// Already closed when Serve had taken it.
+	_ = ln.Close()
+	return err
 }
 
 func (apil *chainListenerBase) GetListeningAddress() string {

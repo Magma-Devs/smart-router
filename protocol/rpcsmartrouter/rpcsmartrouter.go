@@ -1456,6 +1456,53 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		}
 	}))
 
+	// POST /debug/reset-cache — flushes only the cache backend, the --cache-be pod
+	// or the resp-cache store (MAG-2454): the BTC-safe, cache-only companion to
+	// /debug/reset-all. A cache-behavior test previously had only reset-all, which
+	// also resets session-manager state that trips a documented BTC-router
+	// regression (MAG-2395) and resets optimizer scores, pairing, endpoint health
+	// and chain-tracker state along with it — none of which a cache test wants
+	// disturbed. Same pattern as /debug/reset-scores: a focused reset added
+	// because reset-all's bundle is unsafe for one kind of test.
+	//
+	// CacheActive() gates it exactly as it gates reset-all's own cache-be step: a
+	// deployment with no cache backend has nothing to flush, and this reports
+	// that honestly (cleared: []) rather than erroring.
+	//
+	// Nothing else in this router is touched, but the backend holds more than
+	// replies: under --shared-state it also carries the fleet's sticky-session
+	// claims and the fleet tracker gate's endpoint observations, and Flush drops
+	// those with the replies (the RESP backend every key under the router's
+	// prefix, the sidecar its whole store). This pod's own sticky pins stay, where
+	// reset-all clears them with the session-manager state.
+	//
+	// This does NOT call ProviderOptimizer.ResetState — reset-all's own comments
+	// call that "the in-process Ristretto [response] reset", but what it actually
+	// clears is providersStorage, the optimizer's QoS/score cache
+	// (provider_optimizer.go's ResetState: "Discard all per-provider score
+	// caches"), not a response cache. The Ristretto store is the cache-be pod's
+	// own (ecosystem/cache), which Flush empties; every relay reply this router
+	// caches lives in the backend flushed below. Clearing providersStorage here
+	// would reset scores, which this endpoint's one job is to leave alone.
+	mux.HandleFunc("/debug/reset-cache", debugMethod(http.MethodPost, func(w http.ResponseWriter, r *http.Request) {
+		if deps.cache == nil || !deps.cache.CacheActive() {
+			writeDebugJSONf(w, `{"reset":true,"cleared":[]}`)
+			return
+		}
+		flushCtx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		err := deps.cache.Flush(flushCtx)
+		cancel()
+		switch {
+		case err == nil:
+			writeDebugJSONf(w, `{"reset":true,"cleared":["cache-be"]}`)
+		case status.Code(err) == codes.Unimplemented:
+			utils.FormatWarning("cache-be does not implement FlushCache; treating as legacy pod", err)
+			writeDebugJSONf(w, `{"reset":true,"cleared":[]}`)
+		default:
+			http.Error(w, fmt.Sprintf("cache-be flush failed: %v", err), http.StatusInternalServerError)
+		}
+	}))
+
 	// POST /debug/reset-pairing — cold-rebuild every chain's pairing table from
 	// the startup provider config, re-admitting providers the per-epoch spec
 	// re-verifier (applyReverification) demoted. Additive companion to
@@ -1592,12 +1639,7 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 					"LatestBlock":              obs.LatestBlock,
 					"ObservedAt":               debugTimeRFC3339(obs.ObservedAt),
 					"Source":                   obs.Source.String(),
-					// The MAG-2550 replay gate, made visible: a disabled endpoint with a
-					// RelayProbeMethod is held pending a successful replay of that method (or
-					// the attempt-budget fallback) — NOT merely earning its poll streak.
-					"RelayProbeMethod":   health.RelayProbeMethod,
-					"RelayProbeAttempts": health.RelayProbeAttempts,
-					"ReenableProbeFlaps": health.ReenableProbeFlaps,
+					"ReenableProbeFlaps":       health.ReenableProbeFlaps,
 					// MAG-3986: Enabled is the event slot only. Usable is what selection
 					// sees — Enabled AND no state reason. StateReasons lists head-stalled
 					// with when it was added and the block it was stuck on; SameBlockCycles
@@ -1794,17 +1836,10 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 				"EndpointsScored":     s.EndpointsScored,
 				"ReEnabledCount":      s.ReEnabledCount,
 				"SyncOmittedCount":    s.SyncOmittedCount,
-				// MAG-2550 replay-gate telemetry: how many disabled endpoints are held on
-				// recorded relay evidence, and the cumulative replay outcomes.
-				"EvidenceGatedCount": s.EvidenceGatedCount,
 				// Idle mode: the last cycle withheld its QoS feed / skipped the head-stall step
 				// because the chain was idle or a wake burst was still re-polling.
 				"QoSFeedPausedIdle":   s.QoSFeedPausedIdle,
 				"HeadStallPausedIdle": s.HeadStallPausedIdle,
-				"ReplaysAttempted":    s.ReplaysAttempted,
-				"ReplaysRecovered":    s.ReplaysRecovered,
-				"ReplaysStillFailing": s.ReplaysStillFailing,
-				"ReplaysInconclusive": s.ReplaysInconclusive,
 				// MAG-3986 head-stall transitions, cumulative since process start.
 				"StalledAdded":    s.StalledAdded,
 				"StalledRemoved":  s.StalledRemoved,
@@ -3037,7 +3072,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 		for _, p := range tier.providers {
 			if _, failed := tier.failed[p]; !failed {
 				inputs.countRefusals(tier.tier, p, admissionFor(p))
-				inputs.retries.reconcile(tier.tier, p.Name, nil, inputs.retriesOf(p, admissionFor(p), nil), heldOffUntil(nil, p), true)
+				inputs.retries.reconcile(tier.tier, p.Name, nil, inputs.retriesOf(p, admissionFor(p), nil), heldOffUntil(nil, p, inputs.chainParser), true)
 			}
 		}
 	}
@@ -3873,7 +3908,7 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 	cmdRPCSmartRouter.Flags().String(common.CorsMethodsFlag, "GET,POST,PUT,DELETE,OPTIONS", "set up Allowed OPTIONS methods, defaults to: \"GET,POST,PUT,DELETE,OPTIONS\"")
 	cmdRPCSmartRouter.Flags().String(common.CorsExposeHeadersFlag, "", "Set up CORS Access-Control-Expose-Headers — response headers a browser may read (e.g. \"Lava-Provider-Address\", or \"*\" for all). Empty by default (only simple response headers are readable from JS).")
 	cmdRPCSmartRouter.Flags().String(common.CDNCacheDurationFlag, "86400", "set up preflight options response cache duration, default 86400 (24h in seconds)")
-	cmdRPCSmartRouter.Flags().Bool(common.SharedStateFlag, false, "Share state across router replicas through the cache backend (cache-be or resp-cache): the consumer consistency seen-block travels through either. The per-endpoint chain-tracker poll observations (an upstream polled about once per interval fleet-wide instead of once per pod) additionally require --cache-be — the RESP backend does not carry them, so a RESP-backed router polls locally and logs a warning (docs/RESP-CACHE.md). Cross-pod sticky sessions (a lava-stickiness id resolving to the same upstream on every replica) travel through either backend; without this flag stickiness stays pod-local")
+	cmdRPCSmartRouter.Flags().Bool(common.SharedStateFlag, false, "Share state across router replicas through the cache backend (cache-be or resp-cache). Three things travel through either: the consumer consistency seen-block, the per-endpoint chain-tracker poll observations (an upstream polled about once per interval fleet-wide instead of once per pod; on resp-cache, among routers on the same key-prefix, see docs/RESP-CACHE.md), and cross-pod sticky sessions (a lava-stickiness id resolving to the same upstream on every replica). Without this flag stickiness stays pod-local")
 	// relays health check related flags
 	cmdRPCSmartRouter.Flags().Bool(common.RelaysHealthEnableFlag, RelaysHealthEnableFlagDefault, "enables relays health check; when false, /readyz and /metrics/overall-health report 503 unconditionally, so keep it on under a readiness probe")
 	cmdRPCSmartRouter.Flags().Duration(common.RelayHealthIntervalFlag, RelayHealthIntervalFlagDefault, "interval between relay health checks")
@@ -3906,7 +3941,7 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 	cmdRPCSmartRouter.Flags().Duration(common.WebsocketKeepAliveIntervalFlag, chainlib.DefaultWebSocketKeepAliveInterval, "how often to ping an open websocket connection so proxies in front of the router do not reap it as idle, 0 disables. A duration with a unit (30s, 500ms) — unlike "+common.LimitWebsocketIdleTimeFlag+", a bare number here means nanoseconds and is rejected at startup")
 	cmdRPCSmartRouter.Flags().Duration(common.WebsocketWriteTimeoutFlag, chainlib.DefaultWebSocketWriteTimeout, "how long one websocket frame write may take before the router closes the connection of a client that stopped reading, 0 disables the deadline. A duration with a unit (10s, 500ms) — a bare number here means nanoseconds and is rejected at startup")
 
-	cmdRPCSmartRouter.Flags().BoolVar(&chainlib.SkipWebsocketVerificationDefault, common.SkipWebsocketVerificationFlag, chainlib.SkipWebsocketVerificationDefault, "skip websocket verification for chains that require ws/wss endpoints")
+	cmdRPCSmartRouter.Flags().BoolVar(&chainlib.SkipWebsocketVerificationDefault, common.SkipWebsocketVerificationFlag, chainlib.SkipWebsocketVerificationDefault, "dial ws(s) node urls without running any check over them")
 	cmdRPCSmartRouter.Flags().BoolVar(&chainlib.SkipAllVerifications, common.SkipAllVerificationsFlag, chainlib.SkipAllVerifications, "skip ALL spec verifications for every provider this process serves, healthy ones included. An escape hatch for bringing a router up against upstreams that cannot survive being probed; prefer the per-node-url skip-verifications config (which accepts \"*\") for anything ongoing")
 
 	cmdRPCSmartRouter.Flags().DurationVar(&routersession.ProbeLoopInterval, common.ProbeLoopIntervalFlagName, routersession.ProbeLoopInterval, "cadence of the proactive health prober (MAG-2161 Topic D); must be > 0, default 5s")
@@ -4328,11 +4363,19 @@ func (rpsr *RPCSmartRouter) publishVerificationFailedLocked(chainKey string, inp
 // fails, as the metric publishes them. A provider keeps serving through all of it:
 //   - scope=service: an add-on or extension no node url of the provider serves any more;
 //   - scope=url with a service: a service one url lost while another url still serves it;
-//   - scope=url with no service: a node url refused whole;
+//   - scope=url with no service: an http(s) node url refused whole;
 //   - scope=none: a check whose severity is Warning; nothing was switched off.
+//
+// The websocket is one of the provider's services here (MAG-3950). A ws(s) url carries
+// no relay, only subscriptions (MAG-3477), so a refused one costs the provider its
+// websocket: scope=service when no ws(s) url of it is left, scope=url while another
+// serves. A refused url is read from the list the admission verified, the dialed one
+// with its generated per-path urls (MAG-4214). A provider with no ws(s) url on a chain
+// that subscribes is published as the websocket's missing-url; its configured urls say so
+// as the dialed ones would, since expanding a url never changes its transport.
 func refusalsOf(chainParser chainlib.ChainParser, provider *routersession.RPCStaticProviderEndpoint, admission chainlib.ProviderAdmission) []metrics.ProviderVerificationFailure {
-	refused, urlChecks := admission.Refused(), admission.RefusedURLChecks()
-	failures := make([]metrics.ProviderVerificationFailure, 0, len(refused)+len(urlChecks))
+	refused, refusedURLs := admission.Refused(), admission.RefusedURLs()
+	failures := make([]metrics.ProviderVerificationFailure, 0, len(refused)+len(refusedURLs)+1)
 	for _, r := range refused {
 		scope := metrics.VerificationScopeService
 		if servedElsewhere(chainParser, provider, admission, r.Service) {
@@ -4340,8 +4383,30 @@ func refusalsOf(chainParser chainlib.ChainParser, provider *routersession.RPCSta
 		}
 		failures = append(failures, metrics.ProviderVerificationFailure{Scope: scope, Service: r.Service, Check: r.Check})
 	}
-	for _, check := range urlChecks {
-		failures = append(failures, metrics.ProviderVerificationFailure{Scope: metrics.VerificationScopeURL, Check: check})
+	urlFailures := make([]metrics.ProviderVerificationFailure, 0, len(refusedURLs))
+	for _, index := range refusedURLs {
+		failure := metrics.ProviderVerificationFailure{Scope: metrics.VerificationScopeURL, Check: failureCheck(admission.URLRefusal(index))}
+		if url, ok := admission.URLAt(index); ok && chainlib.IsWebSocketURL(url.Url) {
+			failure.Service = chainlib.WebSocketExtension
+			if !websocketLeft(chainParser, provider, admission) {
+				failure.Scope = metrics.VerificationScopeService
+			}
+		}
+		if !slices.Contains(urlFailures, failure) {
+			urlFailures = append(urlFailures, failure)
+		}
+	}
+	slices.SortFunc(urlFailures, func(x, y metrics.ProviderVerificationFailure) int {
+		if c := strings.Compare(x.Service, y.Service); c != 0 {
+			return c
+		}
+		return strings.Compare(x.Check, y.Check)
+	})
+	failures = append(failures, urlFailures...)
+	if chainlib.MissingWebsocket(provider.NodeUrls, chainParser) {
+		failures = append(failures, metrics.ProviderVerificationFailure{
+			Scope: metrics.VerificationScopeService, Service: chainlib.WebSocketExtension, Check: chainlib.CheckMissingURL,
+		})
 	}
 	for _, w := range admission.Warnings() {
 		failures = append(failures, metrics.ProviderVerificationFailure{
@@ -4349,6 +4414,22 @@ func refusalsOf(chainParser chainlib.ChainParser, provider *routersession.RPCSta
 		})
 	}
 	return failures
+}
+
+// websocketLeft reports whether a ws(s) url the provider dials is still admitted. It
+// reads the dialed list, generated per-path urls included, and finds each url's verdict
+// by value, as servedElsewhere does (MAG-4214).
+func websocketLeft(chainParser chainlib.ChainParser, provider *routersession.RPCStaticProviderEndpoint, admission chainlib.ProviderAdmission) bool {
+	urls := provider.NodeUrls
+	if chainParser != nil {
+		urls = dialedNodeUrls(urls, chainParser, provider.ApiInterface)
+	}
+	for _, url := range urls {
+		if chainlib.IsWebSocketURL(url.Url) && !admission.RefusesURL(url) {
+			return true
+		}
+	}
+	return false
 }
 
 // servedElsewhere reports whether a node url of the provider still serves service: a
@@ -4470,7 +4551,7 @@ func activeProviders(
 // only those checks and keeps the other verdicts from previous, the pass that refused
 // the provider (MAG-3950).
 var retryValidateFn = func(ctx context.Context, provider *routersession.RPCStaticProviderEndpoint, chainParser chainlib.ChainParser, previous chainlib.ProviderAdmission, only []chainlib.CheckID) (chainlib.ProviderAdmission, error) {
-	return revalidateProviderCollections(ctx, provider, chainParser, BootValidateTimeout, previous, only)
+	return revalidateProviderCollections(ctx, provider, chainParser, BootValidateTimeout, previous, only, nil)
 }
 
 // revalidateTier re-runs verification over one tier's failed providers, returning
@@ -4560,7 +4641,7 @@ func (rpsr *RPCSmartRouter) revalidateTier(
 			// One back with something still failing, a url still refused, stays on the
 			// schedule for what still fails.
 			inputs.retries.reconcile(tier, provider.Name, result.ran, inputs.retriesOf(provider, result.admission, nil),
-				heldOffUntil(inputs.rateLimitHoldoff, provider), countAttempt)
+				heldOffUntil(inputs.rateLimitHoldoff, provider, inputs.chainParser), countAttempt)
 		}
 		recovered = append(recovered, provider)
 		utils.FormatInfo("[+] provider recovered and passed verification",

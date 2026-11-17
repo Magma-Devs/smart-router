@@ -95,16 +95,6 @@ func TestStateReason_SurvivesProbeReEnable(t *testing.T) {
 	require.True(t, e.IsUsable())
 }
 
-func TestStateReason_SurvivesConfirmRelayRecovery(t *testing.T) {
-	e := &Endpoint{NetworkAddress: "https://replay.example", Enabled: true}
-	disableAt(t, e, probeBase)
-	require.True(t, e.AddStateReason(EndpointDisableHeadStalled, probeBase, stalledBlock))
-
-	require.True(t, e.ConfirmRelayRecovery())
-	require.True(t, e.IsEnabled())
-	require.False(t, e.IsUsable())
-}
-
 // Normal selection and the reconnect path skip a stalled endpoint: the reconnect path otherwise
 // re-enables whatever it reconnects to. Only the last chance lends it, and lending clears nothing.
 func TestFetchEndpointConnection_SkipsStalledEndpoint(t *testing.T) {
@@ -118,7 +108,7 @@ func TestFetchEndpointConnection_SkipsStalledEndpoint(t *testing.T) {
 	}
 
 	for _, mode := range []endpointPickMode{endpointPickSkipDisabled, endpointPickReconnectDisabled} {
-		connected, endpoints, _, err := cswp.fetchEndpointConnectionFromConsumerSessionWithProvider(context.Background(), mode, true, "", nil, nil)
+		connected, endpoints, _, err := cswp.fetchEndpointConnectionFromConsumerSessionWithProvider(context.Background(), mode, true, "", nil, nil, nil)
 		require.NoError(t, err)
 		require.True(t, connected)
 		require.Len(t, endpoints, 1, "mode=%v", mode)
@@ -130,7 +120,7 @@ func TestFetchEndpointConnection_SkipsStalledEndpoint(t *testing.T) {
 		PublicAddress: "vendor",
 		Endpoints:     []*Endpoint{stuck},
 	}
-	connected, endpoints, _, err := lendOnly.fetchEndpointConnectionFromConsumerSessionWithProvider(context.Background(), endpointPickLendDisabled, false, "", nil, nil)
+	connected, endpoints, _, err := lendOnly.fetchEndpointConnectionFromConsumerSessionWithProvider(context.Background(), endpointPickLendDisabled, false, "", nil, nil, nil)
 	require.NoError(t, err)
 	require.True(t, connected, "the last chance lends a stalled endpoint")
 	require.Equal(t, "https://stuck.example", endpoints[0].endpoint.NetworkAddress)
@@ -148,7 +138,7 @@ func TestFetchEndpointConnection_AllStalledIsAllDisabled(t *testing.T) {
 		PublicAddress: "vendor",
 		Endpoints:     []*Endpoint{stuck},
 	}
-	connected, _, _, err := cswp.fetchEndpointConnectionFromConsumerSessionWithProvider(context.Background(), endpointPickSkipDisabled, false, "", nil, nil)
+	connected, _, _, err := cswp.fetchEndpointConnectionFromConsumerSessionWithProvider(context.Background(), endpointPickSkipDisabled, false, "", nil, nil, nil)
 	require.False(t, connected)
 	require.ErrorIs(t, err, AllProviderEndpointsDisabledError)
 }

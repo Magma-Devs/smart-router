@@ -1,7 +1,7 @@
 package rpcInterfaceMessages
 
 import (
-	"errors"
+	"encoding/json"
 	"net/http"
 	"testing"
 
@@ -169,8 +169,9 @@ func TestGraphQLMessageGetParamsResolvesVariables(t *testing.T) {
 
 	params, ok := message.GetParams().(map[string]interface{})
 	require.True(t, ok)
-	// Keyed by the argument name, carrying the variable's resolved value.
-	require.EqualValues(t, 314800000, params["sequenceNumber"])
+	// Keyed by the argument name, carrying the variable's resolved value, as its exact text: a
+	// number in variables is read like a literal one (MAG-5120).
+	require.Equal(t, json.Number("314800000"), params["sequenceNumber"])
 }
 
 func TestGraphQLMessageGetParamsMultiRootIsPerRoot(t *testing.T) {
@@ -453,6 +454,8 @@ func TestParseGraphQLMsgRejectsSubscriptions(t *testing.T) {
 	// the read named checkpoints.
 	_, err := ParseGraphQLMsg([]byte(`{"query":"subscription { checkpoints { sequenceNumber } }"}`))
 	require.ErrorContains(t, err, "subscriptions are not served")
+	// Refused, and sent to no provider (MAG-4351, MAG-4577).
+	require.Equal(t, GraphQLRequestRefusedCode, GraphQLRefusalFrom(err).Code())
 }
 
 func TestGraphQLMessageRawRequestHash(t *testing.T) {
@@ -486,11 +489,12 @@ func TestParseGraphQLMsgSharedFragmentIsNotCyclic(t *testing.T) {
 }
 
 func TestParseGraphQLMsgSiblingFragmentsAreNotCyclic(t *testing.T) {
-	// Two different fragments that both spread a third are also valid.
+	// Two different fragments that both spread a third are also valid. Both put chainIdentifier
+	// under the same response key, which the node runs once, so it is one root field (MAG-5120).
 	body := `{"query":"fragment Base on Query { chainIdentifier } fragment L on Query { ...Base } fragment R on Query { ...Base } { ...L ...R }"}`
 	message, err := ParseGraphQLMsg([]byte(body))
 	require.NoError(t, err)
-	require.Equal(t, []string{"chainIdentifier", "chainIdentifier"}, message.RootFieldNames())
+	require.Equal(t, []string{"chainIdentifier"}, message.RootFieldNames())
 }
 
 // TestParseGraphQLMsgRefusesKeysTheNodeWouldReadDifferently is MAG-4908.
@@ -575,12 +579,72 @@ func TestParseGraphQLMsgRefusesKeysTheNodeWouldReadDifferently(t *testing.T) {
 		})
 	}
 
-	// A body the check cannot read as an object is the decoder's to report, as before.
-	for _, body := range []string{`["query"]`, `{"query":`} {
+	// A body the check cannot read as an object is the envelope decoder's to report. That used to be
+	// an error and not a refusal, answered 500 until MAG-4351 decided the unreadable family; it is now
+	// that family's refusal, with its code, rather than this check's.
+	for body, wantMessage := range map[string]string{
+		`["query"]`: "graphql request body is a JSON array",
+		`{"query":`: "graphql request body is not JSON",
+	} {
 		_, err := ParseGraphQLMsg([]byte(body))
-		require.Error(t, err, body)
-		require.False(t, errors.Is(err, ErrGraphQLRequestRefused), "not a refusal: %s", body)
-		require.ErrorContains(t, err, "failed unmarshalling graphql request body")
+		require.ErrorIs(t, err, ErrGraphQLRequestRefused, body)
+		require.Equal(t, GraphQLRequestRefusedCode, GraphQLRefusalFrom(err).Code(), body)
+		require.ErrorContains(t, err, wantMessage, body)
+	}
+}
+
+// TestParseGraphQLMsgRefusesWhatItCannotRead is MAG-4351, as its owner decided on 2026-11-09: every
+// request the router cannot read is a refusal with a code. GRAPHQL_PARSE_FAILED is a query the
+// parser cannot read; REQUEST_REFUSED is the body, a member, the operation, a fragment or a
+// subscription. The message is the caller's to read, so it is written from the decoders' typed
+// fields and never carries their error text, which names the router's Go types.
+func TestParseGraphQLMsgRefusesWhatItCannotRead(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, wantCode, wantMessage string
+	}{
+		{"a syntax error", `{"query":"{ checkpoint { sequenceNumber }"}`, GraphQLParseFailedCode, "failed parsing graphql query: Expected Name, found <EOF> (line 1, column 32)"},
+		{"a query that is not GraphQL", `{"query":"not graphql at all"}`, GraphQLParseFailedCode, `failed parsing graphql query: Unexpected Name "not" (line 1, column 1)`},
+		// The lexer itself refuses these three, before the parser ever runs (checkGraphQLQueryDepth
+		// reads the document first, to bound recursion). Each must carry the LEXER's own specific
+		// reason, not the parser's generic re-derivation of the same failure ("Unexpected <Invalid>"
+		// for all three, were it reached): re-parsing to get a message throws the detail away.
+		{"a string the lexer cannot read", `{"query":"{ a(\"x) }"}`, GraphQLParseFailedCode, "failed parsing graphql query: Unterminated string. (line 1, column 10)"},
+		{"a bad escape the lexer cannot read", `{"query":"{ a(x: \"ab\\zcd\") }"}`, GraphQLParseFailedCode, `failed parsing graphql query: Invalid character escape sequence: \z. (line 1, column 12)`},
+		{"a bad number the lexer cannot read", `{"query":"{ a(x: 1.2.3) }"}`, GraphQLParseFailedCode, `failed parsing graphql query: Cannot parse the unexpected character ".". (line 1, column 11)`},
+		{"an empty body", ``, GraphQLRequestRefusedCode, "graphql request body is empty"},
+		{"a body of whitespace", " \n\t", GraphQLRequestRefusedCode, "graphql request body is empty"},
+		{"a body that is not JSON", `not json at all`, GraphQLRequestRefusedCode, "graphql request body is not JSON"},
+		{"a body cut short", `{"query":`, GraphQLRequestRefusedCode, "graphql request body is not JSON"},
+		{"a body with more after the object", `{"query":"{ chainIdentifier }"} {}`, GraphQLRequestRefusedCode, "graphql request body is not JSON"},
+		{"a batch", `[{"query":"{ chainIdentifier }"}]`, GraphQLRequestRefusedCode, "graphql request body is a JSON array: batched requests are not served"},
+		{"a string body", `"{ chainIdentifier }"`, GraphQLRequestRefusedCode, "graphql request body is not a JSON object"},
+		{"a null body", `null`, GraphQLRequestRefusedCode, "graphql request body is not a JSON object"},
+		{"a query that is not a string", `{"query":5}`, GraphQLRequestRefusedCode, `graphql request member "query" must be a string`},
+		{"an operation name that is not a string", `{"query":"{ chainIdentifier }","operationName":["A"]}`, GraphQLRequestRefusedCode, `graphql request member "operationName" must be a string`},
+		{"variables that are a number", `{"query":"{ chainIdentifier }","variables":7}`, GraphQLRequestRefusedCode, `graphql request member "variables" must be an object`},
+		{"variables that are an array", `{"query":"{ chainIdentifier }","variables":[1]}`, GraphQLRequestRefusedCode, `graphql request member "variables" must be an object`},
+		{"a variable the decoder cannot hold", `{"query":"{ chainIdentifier }","variables":{"n":1e999}}`, GraphQLRequestRefusedCode, `graphql request member "variables" holds a value the router cannot read`},
+		{"an empty query", `{"query":"   "}`, GraphQLRequestRefusedCode, "graphql request carries no query"},
+		{"a null query", `{"query":null}`, GraphQLRequestRefusedCode, "graphql request carries no query"},
+		{"no query member", `{"variables":{}}`, GraphQLRequestRefusedCode, "graphql request carries no query"},
+		{"a document of fragments only", `{"query":"fragment F on Query { chainIdentifier }"}`, GraphQLRequestRefusedCode, "graphql document defines no operation"},
+		{"two operations and no operation name", `{"query":"query A { chainIdentifier } query B { checkpoint { digest } }"}`, GraphQLRequestRefusedCode, "graphql document defines multiple operations and the request names none"},
+		{"an operation name that matches none", `{"query":"query A { chainIdentifier }","operationName":"Missing"}`, GraphQLRequestRefusedCode, `graphql document defines no operation named "Missing"`},
+		{"an undefined fragment", `{"query":"{ ...Missing }"}`, GraphQLRequestRefusedCode, `graphql query spreads undefined fragment "Missing"`},
+		{"a cyclic fragment", `{"query":"fragment A on Query { ...B } fragment B on Query { ...A } { ...A }"}`, GraphQLRequestRefusedCode, `graphql fragment "A" is cyclic`},
+		{"a subscription", `{"query":"subscription { checkpoints { sequenceNumber } }"}`, GraphQLRequestRefusedCode, "graphql subscriptions are not served over HTTP POST"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ParseGraphQLMsg([]byte(tc.body))
+			refusal := GraphQLRefusalFrom(err)
+			require.NotNil(t, refusal, "a refusal, not an error the listener answers 500: %v", err)
+			require.ErrorIs(t, err, ErrGraphQLRequestRefused)
+			require.Equal(t, tc.wantCode, refusal.Code())
+			require.Contains(t, refusal.ClientMessage(), tc.wantMessage)
+			for _, decoderText := range []string{"graphQLRequestEnvelope", "Go struct", "Go value", "input:"} {
+				require.NotContains(t, refusal.ClientMessage(), decoderText, "a decoder's own text")
+			}
+		})
 	}
 }
 
@@ -614,4 +678,159 @@ func TestParseGraphQLMsgADocumentHoldingAMutationIsAWrite(t *testing.T) {
 	require.NoError(t, err, "a document of queries only is not affected")
 	require.False(t, read.IsMutation())
 	require.Equal(t, []string{"checkpoint"}, read.RootFieldNames())
+}
+
+// MAG-5120, check Q8: a mutation that selects more than one root field once its fragments are
+// expanded, __typename not counted, is refused as a write's shape, with REQUEST_REFUSED and
+// Lava-Write-Outcome: not_sent.
+func TestParseGraphQLMsgRefusesAMutationWithMoreThanOneRootField(t *testing.T) {
+	const write = `executeTransaction(transactionDataBcs: \"AA==\") { digest }`
+	for _, tc := range []struct {
+		name, query string
+		refused     bool
+	}{
+		{"a write beside a read", `mutation { ` + write + ` chainIdentifier }`, true},
+		{"two writes under two aliases", `mutation { a: ` + write + ` b: ` + write + ` }`, true},
+		{"a second root field in a fragment", `mutation { ...W } fragment W on Mutation { ` + write + ` chainIdentifier }`, true},
+		{"a second root field in an inline fragment", `mutation { ... on Mutation { ` + write + ` } chainIdentifier }`, true},
+		{"three root fields", `mutation { ` + write + ` chainIdentifier epoch { epochId } }`, true},
+		{"one write", `mutation { ` + write + ` }`, false},
+		{"one write in a fragment", `mutation { ...W } fragment W on Mutation { ` + write + ` }`, false},
+		{"__typename beside the write", `mutation { __typename ` + write + ` }`, false},
+		{"a query with two root fields is no write", `{ chainIdentifier epoch { epochId } }`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ParseGraphQLMsg([]byte(`{"query":"` + tc.query + `"}`))
+			if !tc.refused {
+				require.NoError(t, err)
+				return
+			}
+			refusal := GraphQLRefusalFrom(err)
+			require.NotNil(t, refusal, "refused as a write's shape: %v", err)
+			require.Contains(t, refusal.ClientMessage(), "root fields; send each write in a request of its own")
+			require.Equal(t, GraphQLRequestRefusedCode, refusal.Code())
+			require.Equal(t, GraphQLWriteOutcomeNotSent, refusal.WriteOutcome())
+		})
+	}
+}
+
+// Every refusal carries a code (MAG-5120): GRAPHQL_PARSE_FAILED for a query that does not parse and
+// REQUEST_REFUSED for every other one, the router's own limits and MAG-4908's wrapper and mixed
+// document included. Only a write's shape says not_sent.
+func TestParseGraphQLMsgEveryRefusalCarriesACode(t *testing.T) {
+	deep := nestedSelection(MaxGraphQLQueryDepth + 1)
+	for _, tc := range []struct {
+		name, body, wantCode, wantOutcome string
+	}{
+		{"a query that does not parse", `{"query":"{ checkpoint { sequenceNumber }"}`, GraphQLParseFailedCode, ""},
+		{"a repeated wrapper member", `{"query":"{ chainIdentifier }","query":"{ epoch { epochId } }"}`, GraphQLRequestRefusedCode, ""},
+		{"a wrapper member that differs by letter case", `{"query":"{ chainIdentifier }","QUERY":"{ epoch { epochId } }"}`, GraphQLRequestRefusedCode, ""},
+		{"a document past the depth limit", `{"query":"` + deep + `"}`, GraphQLRequestRefusedCode, ""},
+		{"a query beside a mutation", `{"query":"query R { chainIdentifier } mutation W { executeTransaction { digest } }","operationName":"R"}`, GraphQLRequestRefusedCode, GraphQLWriteOutcomeNotSent},
+		{"a subscription", `{"query":"subscription { checkpoints { cursor } }"}`, GraphQLRequestRefusedCode, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ParseGraphQLMsg([]byte(tc.body))
+			refusal := GraphQLRefusalFrom(err)
+			require.NotNil(t, refusal, "refused: %v", err)
+			require.Equal(t, tc.wantCode, refusal.Code())
+			require.Equal(t, tc.wantOutcome, refusal.WriteOutcome())
+		})
+	}
+}
+
+// MAG-5120: the root fields are the fields the node runs, so the router names, routes, charges and
+// caches a request by what the node does with it. A selection @skip or @include leaves out is left
+// out, a field repeated under one response key is one field, and a variable takes its declared
+// default when the request leaves it out.
+func TestParseGraphQLMsgReadsTheRootFieldsTheWayTheNodeDoes(t *testing.T) {
+	for _, tc := range []struct {
+		name, query, variables string
+		want                   []string
+	}{
+		{name: "@skip(if: true) leaves a field out", query: `{ checkpoint(sequenceNumber: 1) @skip(if: true) { digest } chainIdentifier }`, want: []string{"chainIdentifier"}},
+		{name: "@skip(if: false) keeps it", query: `{ checkpoint(sequenceNumber: 1) @skip(if: false) { digest } chainIdentifier }`, want: []string{"checkpoint", "chainIdentifier"}},
+		{name: "@include(if: false) leaves a field out", query: `{ checkpoint @include(if: false) { digest } chainIdentifier }`, want: []string{"chainIdentifier"}},
+		{name: "@include(if: true) keeps it", query: `{ checkpoint @include(if: true) { digest } chainIdentifier }`, want: []string{"checkpoint", "chainIdentifier"}},
+		{name: "@skip(if: true) wins over @include(if: true)", query: `{ checkpoint @skip(if: true) @include(if: true) { digest } chainIdentifier }`, want: []string{"chainIdentifier"}},
+		{name: "a condition from a variable", query: `query Q($s: Boolean!) { checkpoint @skip(if: $s) { digest } chainIdentifier }`, variables: `{"s":true}`, want: []string{"chainIdentifier"}},
+		{name: "a condition from a variable's default", query: `query Q($s: Boolean = true) { checkpoint @skip(if: $s) { digest } chainIdentifier }`, want: []string{"chainIdentifier"}},
+		{name: "a variable sent beats its default", query: `query Q($s: Boolean = true) { checkpoint @skip(if: $s) { digest } chainIdentifier }`, variables: `{"s":false}`, want: []string{"checkpoint", "chainIdentifier"}},
+		{name: "a condition the router cannot read keeps the field", query: `query Q($s: Boolean!) { checkpoint @skip(if: $s) { digest } chainIdentifier }`, want: []string{"checkpoint", "chainIdentifier"}},
+		{name: "a skipped inline fragment leaves its fields out", query: `{ ... @skip(if: true) { checkpoint { digest } } chainIdentifier }`, want: []string{"chainIdentifier"}},
+		{name: "a skipped fragment spread leaves its fields out", query: `{ ...F @skip(if: true) chainIdentifier } fragment F on Query { checkpoint { digest } }`, want: []string{"chainIdentifier"}},
+		{name: "a field left out inside a fragment", query: `{ ...F } fragment F on Query { checkpoint @include(if: false) { digest } chainIdentifier }`, want: []string{"chainIdentifier"}},
+		{name: "every root field left out is named as written", query: `{ chainIdentifier @skip(if: true) }`, want: []string{"chainIdentifier"}},
+		{name: "a field repeated under one response key is one field", query: `{ epoch { epochId } epoch { startTimestamp } }`, want: []string{"epoch"}},
+		{name: "two aliases are two fields", query: `{ a: epoch { epochId } b: epoch { startTimestamp } }`, want: []string{"epoch", "epoch"}},
+		{name: "a field repeated through a fragment is one field", query: `{ epoch { epochId } ...F } fragment F on Query { epoch { startTimestamp } }`, want: []string{"epoch"}},
+		{name: "an alias that repeats a field name is that field's key", query: `{ epoch { epochId } epoch: epoch { startTimestamp } }`, want: []string{"epoch"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `{"query":"` + tc.query + `"`
+			if tc.variables != "" {
+				body += `,"variables":` + tc.variables
+			}
+			message, err := ParseGraphQLMsg([]byte(body + `}`))
+			require.NoError(t, err)
+			require.Equal(t, tc.want, message.RootFieldNames())
+		})
+	}
+}
+
+// MAG-5120: a variable the request leaves out takes the default the operation declares, and a
+// number in variables keeps its exact text, so a checkpoint above 2^53 is not rounded.
+func TestParseGraphQLMsgReadsVariablesTheWayTheNodeDoes(t *testing.T) {
+	const query = `query P($n: UInt53 = 5) { checkpoint(sequenceNumber: $n) { digest } }`
+	for _, tc := range []struct {
+		name, variables string
+		want            interface{}
+	}{
+		{name: "no variables: the declared default", want: json.Number("5")},
+		{name: "an empty variables object: the declared default", variables: `{}`, want: json.Number("5")},
+		{name: "a variable sent beats the default", variables: `{"n":7}`, want: json.Number("7")},
+		{name: "a variable sent as null stays null", variables: `{"n":null}`, want: nil},
+		{name: "a number above 2^53 keeps its exact text", variables: `{"n":9007199254740993}`, want: json.Number("9007199254740993")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `{"query":"` + query + `"`
+			if tc.variables != "" {
+				body += `,"variables":` + tc.variables
+			}
+			message, err := ParseGraphQLMsg([]byte(body + `}`))
+			require.NoError(t, err)
+			require.Len(t, message.RootFields, 1)
+			require.Equal(t, tc.want, message.RootFields[0].Args["sequenceNumber"])
+		})
+	}
+}
+
+// MAG-5120: a block is pinned only by a number. The root field input block_parsing reads leaves a
+// text value out, a literal and a variable alike, so "100" and "0x10" pin nothing; the root field
+// itself keeps every argument.
+func TestGraphQLRootFieldInputPinsABlockOnlyByANumber(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		want       interface{}
+	}{
+		{name: "a number literal", body: `{"query":"{ checkpoint(sequenceNumber: 100) { digest } }"}`, want: json.Number("100")},
+		{name: "a number variable", body: `{"query":"query P($n: UInt53!) { checkpoint(sequenceNumber: $n) { digest } }","variables":{"n":100}}`, want: json.Number("100")},
+		{name: "a text literal", body: `{"query":"{ checkpoint(sequenceNumber: \"100\") { digest } }"}`},
+		{name: "a hex text literal", body: `{"query":"{ checkpoint(sequenceNumber: \"0x10\") { digest } }"}`},
+		{name: "a text variable", body: `{"query":"query P($n: UInt53!) { checkpoint(sequenceNumber: $n) { digest } }","variables":{"n":"100"}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			message, err := ParseGraphQLMsg([]byte(tc.body))
+			require.NoError(t, err)
+			params, ok := message.RootFieldInput(0).GetParams().(map[string]interface{})
+			require.True(t, ok)
+			got, present := params["sequenceNumber"]
+			if tc.want == nil {
+				require.False(t, present, "a text value is not a block: %v", got)
+				require.NotNil(t, message.RootFields[0].Args["sequenceNumber"], "the root field keeps the argument")
+				return
+			}
+			require.Equal(t, tc.want, got)
+		})
+	}
 }

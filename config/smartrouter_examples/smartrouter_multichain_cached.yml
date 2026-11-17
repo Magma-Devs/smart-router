@@ -13,10 +13,12 @@
 #   3361  SOLANA     jsonrpc   solana-rpc.publicnode.com   + api.mainnet-beta.solana.com
 #   3362  COSMOSHUB  rest      cosmos-rest.publicnode.com  + cosmos-api.polkachu.com
 #
-# ETH1 requires websocket support, so its providers pair an http url with a wss
-# url; http-only providers are excluded at startup. SOLANA (jsonrpc) and
-# COSMOSHUB (rest) are HTTP-only here, so run with --skip-websocket-verification
-# (the docker-compose example does this).
+# ETH1 serves subscriptions over websocket, so its providers pair an http url
+# with a wss url. SOLANA (jsonrpc) and COSMOSHUB (rest) are HTTP-only here and
+# serve everything but subscriptions; SOLANA's spec subscribes, so its providers
+# publish the websocket's missing-url (MAG-3950). No flag is needed for that;
+# the docker-compose example passes --skip-websocket-verification, which only
+# stops checks over ws(s) urls.
 #
 # Specs required (resolve via --use-static-spec specs/):
 #   ETH1      -> specs/ethereum.json   (already in repo)

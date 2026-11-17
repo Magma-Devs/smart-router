@@ -14,8 +14,6 @@ import (
 	"google.golang.org/grpc/metadata"
 )
 
-var IgnoreWsEnforcementForTestCommands = false
-
 type chainRouterEntry struct {
 	ChainProxy
 	addonsSupported map[string]struct{}
@@ -314,30 +312,6 @@ func newChainRouter(ctx context.Context, nConns uint, rpcProviderEndpoint router
 		return nil, utils.FormatError("not all requirements supported in chainRouter, missing extensions or addons in definitions", nil, utils.Attribute{Key: "required", Value: requiredMap}, utils.Attribute{Key: "supported", Value: supportedMap})
 	}
 
-	_, apiCollection, hasSubscriptionInSpec := chainParser.GetParsingByTag(spectypes.FUNCTION_TAG_SUBSCRIBE)
-	// A SUBSCRIBE directive on a gRPC collection describes server streaming, which
-	// rides the same HTTP/2 connection as every other gRPC call — there is no
-	// WebSocket anywhere in that picture. Requiring a ws:// URL for it would reject a
-	// perfectly good gRPC endpoint at startup (MAG-2643). The requirement still holds
-	// for the interfaces that genuinely subscribe over a socket.
-	subscriptionNeedsWebSocket := hasSubscriptionInSpec &&
-		apiCollection.GetCollectionData().ApiInterface != spectypes.APIInterfaceGrpc
-
-	// validating we have websocket support for subscription supported specs.
-	webSocketSupported := false
-	for _, requirement := range supportedMap {
-		if requirement.IsRequirementMet(WebSocketExtension) {
-			webSocketSupported = true
-			break
-		}
-	}
-	if !IgnoreWsEnforcementForTestCommands && subscriptionNeedsWebSocket && apiCollection.Enabled && !webSocketSupported && !chainParser.SkipWebsocketVerification() {
-		return nil, utils.FormatError("subscriptions are applicable for this chain, but websocket is not provided in 'supported' map. By not setting ws/wss your provider wont be able to accept ws subscriptions, therefore might receive less rewards and lower QOS score.", nil,
-			utils.LogAttr("apiInterface", apiCollection.CollectionData.ApiInterface),
-			utils.LogAttr("supportedMap", supportedMap),
-			utils.LogAttr("required", WebSocketExtension),
-		)
-	}
 	utils.FormatDebug("router keys", utils.LogAttr("chainProxyRouter", chainProxyRouter))
 
 	// make sure all chainProxyRouter entries have one without a method routing. Checked here and

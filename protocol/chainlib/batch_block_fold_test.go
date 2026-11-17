@@ -2,6 +2,7 @@ package chainlib
 
 import (
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 
@@ -22,6 +23,11 @@ import (
 // unjudgeable: folded away, a pinned read whose block did not parse would be cached and routed as
 // a latest read. So the fold asks the element's api whether it names a block, and never reads the
 // value alone. The failed-parse rows below pin that side.
+//
+// MAG-4650: the request's block says nothing about the answer of an element left out of it, so
+// the message records that an element was left out (HasBlocklessElement) and the cache never
+// writes such a request as final. Every row checks the record: set exactly when the request has a
+// "none" element, and never for a block that failed to parse.
 
 // blockFoldCase is one request and the (latest, earliest) requested blocks it must fold to.
 type blockFoldCase struct {
@@ -63,6 +69,7 @@ func requireFoldedBlocks(t *testing.T, chainMessage ChainMessage, test blockFold
 	if test.latest != spectypes.NOT_APPLICABLE {
 		require.NotEqual(t, spectypes.NOT_APPLICABLE, latest, "the request would be skipped by the cache")
 	}
+	require.Equal(t, slices.Contains(test.elements, "none"), chainMessage.HasBlocklessElement(), "the message records an element left out of its block")
 }
 
 // suiBlockFoldSpec mirrors lava-specs sui.json's graphql collection where blocks are concerned:
@@ -137,7 +144,7 @@ func TestGraphQLBlocklessRootFieldDoesNotDecideTheRequestedBlock(t *testing.T) {
 		t.Run(query, func(t *testing.T) {
 			chainMessage, err := chainParser.ParseMsg("", []byte(`{"query":"`+query+`"}`), http.MethodPost, nil, extensionslib.ExtensionInfo{})
 			require.NoError(t, err)
-			requireFoldedBlocks(t, chainMessage, blockFoldCase{latest: spectypes.LATEST_BLOCK, earliest: spectypes.LATEST_BLOCK})
+			requireFoldedBlocks(t, chainMessage, blockFoldCase{elements: []string{"latest", "none"}, latest: spectypes.LATEST_BLOCK, earliest: spectypes.LATEST_BLOCK})
 		})
 	}
 
