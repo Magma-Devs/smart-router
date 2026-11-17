@@ -2,6 +2,7 @@ package rpcInterfaceMessages
 
 import (
 	"bytes"
+	"cmp"
 	"errors"
 	"fmt"
 	"net/http"
@@ -24,8 +25,8 @@ const GraphQLMethodSeparator = "&"
 
 // graphQLWriteNodeErrorCodes are the codes that make an error on a MUTATION the node's fault, each
 // with the HTTP status the error registry classifies it under. A mutation's other errors are the
-// caller's (a 400). Writes keep this table until their own verdicts land (MAG-5122); reads use
-// graphQLReadRows (MAG-5121).
+// caller's (a 400). A write on a chain whose list has write rows is read by them instead (MAG-4909);
+// reads use the chain's rows, then graphQLReadRows (MAG-5121).
 var graphQLWriteNodeErrorCodes = map[string]int{
 	graphQLRateLimitCode:    http.StatusTooManyRequests,
 	"INTERNAL_SERVER_ERROR": http.StatusInternalServerError,
@@ -124,6 +125,9 @@ type GraphQLRootField struct {
 	// "foo" and escape the mutation's own compute units, stateful flag and cross-validation
 	// policy.
 	Name string
+	// ResponseKey is the key the field's result sits under in the reply's data, and the first
+	// element of the path of an error on it: the caller's alias, or Name when there is none.
+	ResponseKey string
 	// Args holds the field's literal arguments with variable references already resolved from
 	// the request's `variables`, so block_parsing can read a pinned checkpoint out of the body.
 	Args map[string]interface{}
@@ -141,6 +145,9 @@ type GraphQLMessage struct {
 	// RootFields are the operation's root selections, in document order.
 	RootFields []GraphQLRootField
 	chainproxy.BaseMessage
+	// chainRows is the list of the chain the request is sent to (SetChainFamily), nil for a chain
+	// that has none.
+	chainRows *graphQLChainRows
 }
 
 // ParseGraphQLMsg decodes a GraphQL-over-HTTP POST body and resolves the operation's root field
@@ -275,8 +282,9 @@ func graphQLRootFields(doc *ast.QueryDocument, operation *ast.OperationDefinitio
 					return RefuseGraphQLRequest("graphql operation selects more than %d root fields", MaxGraphQLRootFields)
 				}
 				rootFields = append(rootFields, GraphQLRootField{
-					Name: typed.Name,
-					Args: graphQLArguments(typed.Arguments, variables),
+					Name:        typed.Name,
+					ResponseKey: cmp.Or(typed.Alias, typed.Name),
+					Args:        graphQLArguments(typed.Arguments, variables),
 				})
 			case *ast.InlineFragment:
 				if err := walk(typed.SelectionSet, nesting+1); err != nil {
@@ -391,9 +399,10 @@ func (gm *GraphQLMessage) GetRawRequestHash() ([]byte, error) {
 // CheckResponseError classifies a GraphQL reply: hasError is false only for an answer.
 //
 // GraphQL answers most errors inside an HTTP 200, so the status alone cannot say what a reply
-// means. A read is classified by readVerdict (MAG-5121); a write by writeVerdict, until the write
-// verdicts land (MAG-5122). ClassificationStatus gives the same verdict as the status the error
-// registry files it under.
+// means. A read is classified by readVerdict (MAG-5121), with the chain's rows first (MAG-4909). A
+// write on a chain with write rows is classified by them: only an accepted copy is an answer
+// (MAG-4909, MAG-5122). Any other write keeps writeVerdict. ClassificationStatus gives the same
+// verdict as the status the error registry files it under.
 func (gm *GraphQLMessage) CheckResponseError(data []byte, httpStatusCode int) (hasError bool, errorMessage string) {
 	verdict, isError := gm.verdict(data, httpStatusCode)
 	if !isError {
@@ -414,10 +423,17 @@ func (gm *GraphQLMessage) ClassificationStatus(data []byte, httpStatusCode int) 
 }
 
 func (gm *GraphQLMessage) verdict(data []byte, httpStatusCode int) (graphQLVerdict, bool) {
+	if gm.hasChainWriteRows() {
+		copyReading := gm.chainRows.writeCopy(gm, data, httpStatusCode)
+		if copyReading.outcome == GraphQLWriteAccepted {
+			return graphQLVerdict{kind: graphQLVerdictAnswer, status: httpStatusCode}, false
+		}
+		return copyReading.verdict, true
+	}
 	if gm.IsMutation() {
 		return writeVerdict(data, httpStatusCode)
 	}
-	return readVerdict(data, httpStatusCode)
+	return readVerdict(data, httpStatusCode, gm)
 }
 
 // writeVerdict is a mutation's verdict, unchanged by MAG-5121 except that every reply is now

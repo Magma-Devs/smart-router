@@ -1,6 +1,7 @@
 package rpcsmartrouter
 
 import (
+	"cmp"
 	"encoding/json"
 	"net/http"
 	"sync/atomic"
@@ -67,39 +68,131 @@ func TestGraphQLWrite_UnclearOutcomeAnswersWithHTTP200(t *testing.T) {
 	require.Contains(t, body.Errors[0].Message, "Status unknown")
 	require.Contains(t, body.Errors[0].Message, "may have been broadcast")
 	require.NotContains(t, body.Errors[0].Extensions, "tx_hash",
-		"the Sui digest formula (MAG-4909) is not in the router yet; tx_hash must be omitted, not faked")
+		"the request's transaction bytes are not Base64, so there is no digest: tx_hash is omitted, not faked")
+	require.Contains(t, body.Errors[0].Message, "Look up the transaction on chain before signing anything new",
+		"without a digest, the message says how to find the transaction anyway")
 
 	require.Equal(t, "unknown", writeOutcomeHeader(t, result))
 }
 
-// TestGraphQLWrite_AcceptedOnlyOnTheChainSuccessRow is the other half of MAG-5122's
-// Lava-Write-Outcome header. accepted is the chain's success row only: Sui's write field carries
-// effects with SUCCESS or FAILURE (a transaction that ran and paid gas, MAG-4742). Every other 2xx
-// gets no header, because the router cannot yet tell it apart from "may have run": effects: null
-// (MAG-4518), a reply that did not select effects, and a rejected transaction, which answers with a
-// GraphQL error inside a 200 and still comes back with err == nil.
-func TestGraphQLWrite_AcceptedOnlyOnTheChainSuccessRow(t *testing.T) {
-	rand.InitRandomSeed()
+// suiSnapshotTransactionBcs is a TransactionData in BCS, Base64, from Sui's own test snapshot
+// (crates/sui-indexer-alt-e2e-tests/tests/graphql/transactions/bcs.snap), and suiSnapshotDigest the
+// digest Sui reports for it there.
+const (
+	suiSnapshotTransactionBcs = "AAACAAgqAAAAAAAAAAAgp7AycDh4qnTDEmk1eJ/R1NfhEdWRGwkkfWljBhwxK1oCAgABAQAAAQECAAABAQD8zJpCG7sTwaZqGqmPCtdQKe3pSFd3nGkVtE+UBouSHgHhFa5/+bVpRPr+9v0BXVEKL9ljttQuyKYmZAnA6kD7NgMAAAAAAAAAIEzrkQF+I9IJ4x0c30+YdFP63Y1T+vAeA9YRM4e19EVk/MyaQhu7E8GmahqpjwrXUCnt6UhXd5xpFbRPlAaLkh7oAwAAAAAAAADyBSoBAAAAAA=="
+	suiSnapshotDigest         = "gHrD7i4MD93GsSzM3ZYibg2CQpBCmZFnxGdANrXFYMP"
+)
+
+// suiWriteOf is the GraphQL write case sending Sui's snapshot transaction, selecting its effects.
+func suiWriteOf(t *testing.T) writeInterfaceCase {
+	t.Helper()
 	tc := graphQLWriteCase(t)
+	tc.body = `{"query":"mutation Submit($tx: Base64!) { executeTransaction(transactionDataBcs: $tx, signatures: [\"AA==\"]) { effects { status } } }","variables":{"tx":"` + suiSnapshotTransactionBcs + `"}}`
+	return tc
+}
+
+// unknownWriteReply reads the router's unknown reply off a result: its message and extensions.
+func unknownWriteReply(t *testing.T, result *common.RelayResult) (message string, extensions map[string]string) {
+	t.Helper()
+	require.NotNil(t, result)
+	require.Equal(t, http.StatusOK, result.StatusCode)
+	cf := result.GetClientFacing()
+	require.NotNil(t, cf, "the router answers an unknown write itself")
+	var body struct {
+		Errors []struct {
+			Message    string            `json:"message"`
+			Extensions map[string]string `json:"extensions"`
+		} `json:"errors"`
+	}
+	require.NoError(t, json.Unmarshal(cf.UpstreamBody, &body))
+	require.Len(t, body.Errors, 1)
+	return body.Errors[0].Message, body.Errors[0].Extensions
+}
+
+// TestGraphQLWrite_UnknownReplyCarriesTheDigest (MAG-4909 Sui data 3, MAG-5122 test 7): when the
+// outcome is unknown, the client gets the transaction's digest, computed from the bytes it sent with
+// Sui's formula, so it can look the transaction up before signing anything new.
+func TestGraphQLWrite_UnknownReplyCarriesTheDigest(t *testing.T) {
+	rand.InitRandomSeed()
+	tc := suiWriteOf(t)
+	chainParser := tc.parser(t)
+	badGateway := writeUpstream{status: http.StatusBadGateway, body: `{"message":"bad gateway"}`}
+	a, b := badGateway, badGateway
+	a.name, b.name = "a-"+t.Name(), "b-"+t.Name()
+	_, server := newTwoPrimaryWriteServer(t, tc, chainParser, [2]writeUpstream{a, b})
+
+	result, err := sendWrite(t, tc, chainParser, server)
+	require.Error(t, err)
+	message, extensions := unknownWriteReply(t, result)
+	require.Equal(t, "unknown", extensions["write_outcome"])
+	require.Equal(t, suiSnapshotDigest, extensions["tx_hash"])
+	require.Equal(t, "Status unknown - this transaction may have been broadcast. Look up "+suiSnapshotDigest+
+		" before signing anything new. Re-sending the same signed bytes is safe. If you replace it, reuse the same input objects.", message)
+	require.Equal(t, "unknown", writeOutcomeHeader(t, result))
+}
+
+// TestGraphQLWrite_SuiWriteRowsDecideTheOutcome (MAG-4909 write rows, MAG-5122 verdict per copy):
+// each of two primaries answers the write, and Sui's rows read each copy as accepted, refused or "may
+// have run". A copy that ran is the answer, with Lava-Write-Outcome: accepted. With none, a copy that
+// may have run leaves the outcome unknown, and the client gets the router's unknown reply instead of
+// an error that would make it sign again. Copies that were all refused keep the node's reply as is.
+func TestGraphQLWrite_SuiWriteRowsDecideTheOutcome(t *testing.T) {
+	rand.InitRandomSeed()
+	const (
+		ran        = `{"data":{"executeTransaction":{"effects":{"status":"SUCCESS"}}}}`
+		ranFailed  = `{"data":{"executeTransaction":{"effects":{"status":"FAILURE","executionError":{"message":"MoveAbort"}}}}}`
+		ranBeside  = `{"data":{"executeTransaction":{"effects":{"status":"SUCCESS","balanceChanges":null}}},"errors":[{"message":"Failed to load balance changes","path":["executeTransaction","effects","balanceChanges"],"extensions":{"code":"INTERNAL_SERVER_ERROR"}}]}`
+		ranBelow   = `{"data":{"executeTransaction":{"effects":null}},"errors":[{"message":"Failed to read effects","path":["executeTransaction","effects"],"extensions":{"code":"INTERNAL_SERVER_ERROR"}}]}`
+		noEffects  = `{"data":{"executeTransaction":{"effects":null}}}`
+		refusedBcs = `{"data":null,"errors":[{"message":"Invalid BCS-encoded TransactionData: unexpected end of input","path":["executeTransaction"],"extensions":{"code":"BAD_USER_INPUT"}}]}`
+		vendorStop = `{"data":null,"errors":[{"message":"quota exceeded","extensions":{"code":"RESOURCE_EXHAUSTED"}}]}`
+		networkNo  = `{"data":null,"errors":[{"message":"Invalid argument: Transaction is rejected as invalid by more than 1/3 of validators by stake (non-retriable). Non-retriable errors: [Transaction 6sW1ruByXbFjZzVvX5b7PBY5ZCyZTzPS2fVZFuMuRH1z was already executed { v1 } with 6667 stake].","path":["executeTransaction"],"extensions":{"code":"BAD_USER_INPUT"}}]}`
+		locked     = `{"data":null,"errors":[{"message":"Failed to execute transaction","path":["executeTransaction"],"extensions":{"chain":["code: 'The system is not in a state required for the operation's execution', message: \"Object (0x5, SequenceNumber(7), o#abc) already locked by a different transaction: TransactionDigest(x)\""],"code":"INTERNAL_SERVER_ERROR"}}]}`
+		internal   = `{"data":null,"errors":[{"message":"Failed to execute transaction","path":["executeTransaction"],"extensions":{"chain":["code: 'The service is currently unavailable', message: \"timed-out before finality could be reached\""],"code":"INTERNAL_SERVER_ERROR"}}]}`
+	)
+	tc := suiWriteOf(t)
 	for _, c := range []struct {
-		name, body, header string
+		name             string
+		a, b             string
+		statusA, statusB int    // 200 when 0
+		served           string // the reply the client gets as is; "" for the router's unknown reply
+		header           string
 	}{
-		{"effects SUCCESS", `{"data":{"executeTransaction":{"effects":{"status":"SUCCESS"}}}}`, "accepted"},
-		{"effects FAILURE", `{"data":{"executeTransaction":{"effects":{"status":"FAILURE","executionError":{"message":"MoveAbort"}}}}}`, "accepted"},
-		{"effects null", `{"data":{"executeTransaction":{"effects":null}}}`, ""},
-		{"no effects selected", tc.success, ""},
-		{"rejected with a GraphQL error", `{"errors":[{"message":"Invalid user signature"}]}`, ""},
+		{name: "W1 effects SUCCESS", a: ran, b: ran, served: ran, header: "accepted"},
+		{name: "W1 effects FAILURE: it ran and paid gas", a: ranFailed, b: ranFailed, served: ranFailed, header: "accepted"},
+		{name: "W1 with an error beside the effects", a: ranBeside, b: ranBeside, served: ranBeside, header: "accepted"},
+		{name: "W2 an error below the field", a: ranBelow, b: ranBelow, served: ranBelow, header: "accepted"},
+		{name: "a copy that ran wins over one that may have run", a: ran, b: networkNo, served: ran, header: "accepted"},
+		{name: "W1 effects inside a 429 (MAG-5122 T14)", a: ran, statusA: http.StatusTooManyRequests, b: networkNo, served: ran, header: "accepted"},
+		{name: "W1 effects inside a 503", a: ran, statusA: http.StatusServiceUnavailable, b: networkNo, served: ran, header: "accepted"},
+		{name: "W11 effects null may have run", a: noEffects, b: noEffects, header: "unknown"},
+		{name: "W9 the network refused it: may have run", a: networkNo, b: networkNo, header: "unknown"},
+		{name: "W10 competing transactions: may have run", a: locked, b: locked, header: "unknown"},
+		{name: "W11 an internal error: may have run", a: internal, b: internal, header: "unknown"},
+		{name: "W11 every copy a bare 503 (MAG-5122 T13)", a: "upstream down", statusA: http.StatusServiceUnavailable, b: "upstream down", statusB: http.StatusServiceUnavailable, header: "unknown"},
+		{name: "a refused copy beside one that may have run", a: refusedBcs, b: networkNo, header: "unknown"},
+		{name: "W6 every copy refused: the node's reply as is", a: refusedBcs, b: refusedBcs, served: refusedBcs},
+		{name: "W12 every copy stopped by the vendor's quota: the node's reply as is", a: vendorStop, b: vendorStop, served: vendorStop},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			chainParser := tc.parser(t)
-			served := writeUpstream{status: http.StatusOK, body: c.body}
-			a, b := served, served
-			a.name, b.name = "a-"+t.Name(), "b-"+t.Name()
-			_, server := newTwoPrimaryWriteServer(t, tc, chainParser, [2]writeUpstream{a, b})
+			a := writeUpstream{name: "a-" + t.Name(), status: cmp.Or(c.statusA, http.StatusOK), body: c.a}
+			b := writeUpstream{name: "b-" + t.Name(), status: cmp.Or(c.statusB, http.StatusOK), body: c.b}
+			hits, server := newTwoPrimaryWriteServer(t, tc, chainParser, [2]writeUpstream{a, b})
 
 			result, _ := sendWrite(t, tc, chainParser, server)
 			require.NotNil(t, result)
+			require.Equal(t, [2]int64{1, 1}, [2]int64{atomic.LoadInt64(&hits[0]), atomic.LoadInt64(&hits[1])}, "one copy per provider")
 			require.Equal(t, c.header, writeOutcomeHeader(t, result))
+			if c.served == "" {
+				_, extensions := unknownWriteReply(t, result)
+				require.Equal(t, "unknown", extensions["write_outcome"])
+				require.Equal(t, suiSnapshotDigest, extensions["tx_hash"])
+				return
+			}
+			require.Nil(t, result.GetClientFacing(), "a node's reply, not the router's")
+			require.NotNil(t, result.Reply)
+			require.JSONEq(t, c.served, string(result.Reply.Data))
 		})
 	}
 }

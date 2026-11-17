@@ -123,12 +123,13 @@ func TestResultsManager_GraphQLInBodyFaultIsClassifiedByItsCode(t *testing.T) {
 			wantLevel:   "error",
 		},
 		{
-			name:        "REQUEST_TIMEOUT is a gateway timeout, logged at ERROR",
-			request:     graphQLResultsCheckpointRead,
-			reply:       graphQLErrorReply("Request timed out", "REQUEST_TIMEOUT"),
-			wantName:    common.RouterErrorNodeGatewayTimeout.Name,
-			wantAtFault: true,
-			wantLevel:   "error",
+			// Sui's R20 (MAG-4909): a query timeout is the operator's setting, so another provider
+			// may serve the read. Filed as a capability this node does not offer, not blamed.
+			name:      "REQUEST_TIMEOUT on Sui is this operator's limit",
+			request:   graphQLResultsCheckpointRead,
+			reply:     graphQLErrorReply("Query timed out after 40.00s", "REQUEST_TIMEOUT"),
+			wantName:  common.RouterErrorNodeUnimplemented.Name,
+			wantLevel: "debug",
 		},
 		{
 			name:      "RESOURCE_EXHAUSTED is a rate limit: busy, not broken",
@@ -147,11 +148,11 @@ func TestResultsManager_GraphQLInBodyFaultIsClassifiedByItsCode(t *testing.T) {
 			wantLevel: "debug",
 		},
 		{
-			// CheckResponseError's mutation rule: any error on a write is a node error, and
-			// ClassificationStatus files a code-less one as the caller's 400.
-			name:      "a code-less error on a mutation is the caller's invalid request",
+			// Any error on a write is a node error. Sui's W9 (MAG-4909): the network refused the
+			// copy, which ClassificationStatus files as the caller's 400.
+			name:      "a refused write is the caller's invalid request",
 			request:   graphQLResultsSubmit,
-			reply:     graphQLErrorReply("Invalid user signature", ""),
+			reply:     graphQLErrorReply("Invalid argument: Invalid user signature: Signature is not valid", "BAD_USER_INPUT"),
 			wantName:  common.RouterErrorUserInvalidRequest.Name,
 			wantLevel: "debug",
 		},
