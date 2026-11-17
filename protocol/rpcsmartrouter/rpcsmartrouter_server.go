@@ -5081,6 +5081,15 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 		return
 	}
 
+	// A record no provider held (MAG-5121 P6): served as an answer, but a provider that holds it
+	// later must be asked again.
+	if relayResult.IsNotFoundAnswer {
+		utils.FormatDebug("cache write skipped: not-found answer",
+			utils.LogAttr("GUID", ctx),
+		)
+		return
+	}
+
 	// Skip if no reply data
 	if relayResult.Reply == nil {
 		utils.FormatDebug("cache write skipped: no reply data",
@@ -6289,6 +6298,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	relayResult.RetryAfter = result.RetryAfter
 	relayResult.IsDataScope = result.IsDataScope
 	relayResult.IsNodeCapability = result.IsNodeCapability
+	relayResult.IsNotFoundAnswer = result.IsNotFoundAnswer
 	relayResult.IsNodeAtFault = result.IsNodeAtFault
 	relayResult.ProviderInfo = result.ProviderInfo
 	if relayResult.Reply != nil {

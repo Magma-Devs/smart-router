@@ -1501,6 +1501,17 @@ func (rp *RelayProcessor) processNonCrossValidationResult(
 				return &result, nil
 			}
 		}
+		// No provider held the record, and one answered that it does not (MAG-5121 P6): that
+		// answer is the reply, as an answer (no node-error header), and it is never cached
+		// (IsNotFoundAnswer). It beats a fault or a refusal from another provider: those are claims
+		// about the provider, this one is about the record.
+		for i := range nodeErrors {
+			if nodeErrors[i].IsNotFoundAnswer {
+				result := nodeErrors[i]
+				result.IsNodeError = false
+				return &result, nil
+			}
+		}
 		result := nodeErrors[0]
 		return &result, nil
 	}

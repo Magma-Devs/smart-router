@@ -1025,6 +1025,8 @@ func (d *DirectRPCRelaySender) sendGraphQLRelay(
 			ProviderGroup:   d.groupLabel,
 		},
 		IsNodeError: isNodeError,
+		// A Sui transaction looked up by its digest and answered null (MAG-5121 P6, R23).
+		IsNotFoundAnswer: hasError && graphqlMessage.ReplyIsNotFound(response.Body, response.StatusCode),
 	}
 	if hasError {
 		// A GraphQL node error usually arrives inside a 200, so the status alone would leave
