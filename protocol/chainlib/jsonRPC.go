@@ -373,8 +373,8 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 	// Setup HTTP Server
 	// true: this listener registers a GET catch-all that upgrades, so the health
 	// route may hand an upgrade on its own path past the health handler.
-	// true: a DELETE reaches the routes, which serve none, so fiber refuses it with 405 and
-	// the Allow a PUT gets, instead of the shared 204 that told the caller it was done (MAG-4524).
+	// true: a DELETE goes on to this listener's own refusal below, instead of the shared 204
+	// that told the caller it was done (MAG-4524).
 	app := createAndSetupBaseAppListener(cmdFlags, apil.endpoint.HealthCheckPath, apil.healthReporter, true, true)
 	apil.app = app
 
@@ -446,6 +446,18 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 		}
 		return fiberCtx.Next()
 	}, wsUpgradeMiddleware, websocketCallbackWithDappID)
+	// A DELETE is refused the way a GET without an upgrade is: 405 and Allow: POST, the only method
+	// this listener serves outside the upgrade, at any path (MAG-4524). It is a Use handler, not a
+	// DELETE route: fiber builds a 405's Allow from the routes of the other methods, so a DELETE
+	// route would add DELETE to the Allow a PUT or a PATCH gets, and Use handlers are left out of
+	// it.
+	app.Use("/*", func(fiberCtx *fiber.Ctx) error {
+		if fiberCtx.Method() != fiber.MethodDelete {
+			return fiberCtx.Next()
+		}
+		fiberCtx.Set(fiber.HeaderAllow, fiber.MethodPost)
+		return fiber.ErrMethodNotAllowed
+	})
 
 	apil.listen(ctx, app)
 }

@@ -345,8 +345,9 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 	// Setup HTTP Server
 	// true: this listener registers a GET catch-all that upgrades, so the health
 	// route may hand an upgrade on its own path past the health handler.
-	// true: a DELETE reaches the routes, which serve none, so fiber refuses it with 405 and
-	// the Allow a PUT gets, instead of the shared 204 that told the caller it was done (MAG-4524).
+	// true: a DELETE goes on to the routes, which serve none, so fiber refuses it as it refuses a
+	// PUT: 405, with an Allow of the methods this listener does serve (GET and POST), instead of the
+	// shared 204 that told the caller it was done (MAG-4524).
 	app := createAndSetupBaseAppListener(cmdFlags, apil.endpoint.HealthCheckPath, apil.healthReporter, true, true)
 	apil.app = app
 
