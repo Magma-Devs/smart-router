@@ -27,8 +27,9 @@ func specsImporting(imports map[string][]string) map[string]spectypes.Spec {
 }
 
 // A chain the root table does not list takes its family from its imports, as lava-specs (main
-// 4bbb5e9) declares them. HOD1 and AVALANCHEC were missing from the hand-kept map, so no chain row
-// could ever apply to them (MAG-5246); AGR and MOVEMENT were listed as EVM against their imports.
+// 4bbb5e9) declares them. The seven production chains of MAG-5246 had no family, so no chain row
+// could ever apply to them: HOD1, AVALANCHEC and AVALANCHECT (EVM), POLKADOTASSETHUB and POLYMESH
+// (Substrate), TEZOS and TEZOST (Tezos). AGR and MOVEMENT were listed as EVM against their imports.
 func TestChainFamilyComesFromImports(t *testing.T) {
 	RegisterChainFamilies(specsImporting(map[string][]string{
 		"ETH1": nil, "HOD1": {"ETH1"}, "AVALANCHEC": {"ETH1"}, "AVALANCHECT": {"AVALANCHEC"},
@@ -38,6 +39,10 @@ func TestChainFamilyComesFromImports(t *testing.T) {
 		"COSMOSSDKFULL": {"COSMOSSDK", "COSMOSWASM"}, "AGR": {"COSMOSSDKFULL", "COSMOSSDK45DEP"},
 		"APT1": nil, "MOVEMENT": {"APT1"}, "MOVEMENTT": {"MOVEMENT"},
 		"SOLANA": nil, "KOII": {"SOLANA"}, "KOIIT": {"KOII"},
+		"POLKADOTASSETHUB": nil, "POLKADOTASSETHUBT": {"POLKADOTASSETHUB"},
+		"POLYMESH": nil, "POLYMESHT": {"POLYMESH"},
+		"TEZOS": nil, "TEZOST": {"TEZOS"},
+		"MONERO": nil, "MONEROT": {"MONERO"},
 		// Imports from two families: the first import that has a family decides.
 		"CANTO": {"ETH1", "COSMOSSDK", "COSMOSSDK45DEP"},
 		"EVMOS": {"COSMOSSDK50", "ETHERMINT", "ETH1"},
@@ -57,6 +62,13 @@ func TestChainFamilyComesFromImports(t *testing.T) {
 		{"MOVEMENT", ChainFamilyAptos}, // was EVM
 		{"MOVEMENTT", ChainFamilyAptos},
 		{"KOIIT", ChainFamilySolana},
+		{"POLKADOTASSETHUB", ChainFamilySubstrate},
+		{"POLKADOTASSETHUBT", ChainFamilySubstrate},
+		{"POLYMESH", ChainFamilySubstrate},
+		{"POLYMESHT", ChainFamilySubstrate},
+		{"TEZOS", ChainFamilyTezos},
+		{"TEZOST", ChainFamilyTezos},
+		{"MONEROT", ChainFamilyMonero}, // not Bitcoin: monero.json imports nothing
 		{"CANTO", ChainFamilyEVM},
 		{"EVMOS", ChainFamilyCosmosSDK},
 	}
@@ -65,6 +77,20 @@ func TestChainFamilyComesFromImports(t *testing.T) {
 		require.True(t, ok, "%s has no family, tc #%d", tc.chainID, tcIndex)
 		require.Equal(t, tc.want, family, "%s, tc #%d", tc.chainID, tcIndex)
 		require.Equal(t, tc.want, GetChainFamilyOrDefault(tc.chainID), "%s, tc #%d", tc.chainID, tcIndex)
+	}
+}
+
+// A family's name is what logs and test names show for it, so every family a spec can take has one
+// of its own.
+func TestEveryChainFamilyHasAName(t *testing.T) {
+	names := map[string]ChainFamily{}
+	for _, family := range rootChainFamilies {
+		name := family.String()
+		require.NotEqual(t, fmt.Sprintf("ChainFamily(%d)", int(family)), name, "family %d has no name", int(family))
+		if other, taken := names[name]; taken {
+			require.Equal(t, other, family, "families %d and %d are both named %s", int(other), int(family), name)
+		}
+		names[name] = family
 	}
 }
 

@@ -235,6 +235,34 @@ const (
 	ChainFamilyCardano
 	ChainFamilyTron
 	ChainFamilySui
+	ChainFamilyTezos
+	// Substrate: Polkadot, Kusama, their parachains and other chains built on the Substrate
+	// framework, which answer the same JSON-RPC methods and Sidecar REST routes.
+	ChainFamilySubstrate
+	// One chain each: a root spec with its own node software and no rows yet. Each is its own
+	// family so a row written for one never reaches another chain.
+	ChainFamilyAleo
+	ChainFamilyAlgorand
+	ChainFamilyArweave
+	ChainFamilyAvalancheP
+	ChainFamilyCanton
+	ChainFamilyCasper
+	ChainFamilyConcordium
+	ChainFamilyDecred
+	ChainFamilyFuel
+	ChainFamilyICP
+	ChainFamilyION
+	ChainFamilyIOTA
+	ChainFamilyKaspa
+	ChainFamilyMina
+	ChainFamilyMonero
+	ChainFamilyMoralis
+	ChainFamilyMultiversX
+	ChainFamilyQuai
+	ChainFamilySia
+	ChainFamilyStacks
+	ChainFamilySubsquid
+	ChainFamilyVeChain
 )
 
 func (cf ChainFamily) String() string {
@@ -269,6 +297,54 @@ func (cf ChainFamily) String() string {
 		return "Tron"
 	case ChainFamilySui:
 		return "Sui"
+	case ChainFamilyTezos:
+		return "Tezos"
+	case ChainFamilySubstrate:
+		return "Substrate"
+	case ChainFamilyAleo:
+		return "Aleo"
+	case ChainFamilyAlgorand:
+		return "Algorand"
+	case ChainFamilyArweave:
+		return "Arweave"
+	case ChainFamilyAvalancheP:
+		return "AvalancheP"
+	case ChainFamilyCanton:
+		return "Canton"
+	case ChainFamilyCasper:
+		return "Casper"
+	case ChainFamilyConcordium:
+		return "Concordium"
+	case ChainFamilyDecred:
+		return "Decred"
+	case ChainFamilyFuel:
+		return "Fuel"
+	case ChainFamilyICP:
+		return "ICP"
+	case ChainFamilyION:
+		return "ION"
+	case ChainFamilyIOTA:
+		return "IOTA"
+	case ChainFamilyKaspa:
+		return "Kaspa"
+	case ChainFamilyMina:
+		return "Mina"
+	case ChainFamilyMonero:
+		return "Monero"
+	case ChainFamilyMoralis:
+		return "Moralis"
+	case ChainFamilyMultiversX:
+		return "MultiversX"
+	case ChainFamilyQuai:
+		return "Quai"
+	case ChainFamilySia:
+		return "Sia"
+	case ChainFamilyStacks:
+		return "Stacks"
+	case ChainFamilySubsquid:
+		return "Subsquid"
+	case ChainFamilyVeChain:
+		return "VeChain"
 	default:
 		return fmt.Sprintf("ChainFamily(%d)", int(cf))
 	}
@@ -322,6 +398,30 @@ var rootChainFamilies = map[string]ChainFamily{
 
 	// Cardano
 	"CARDANO": ChainFamilyCardano,
+
+	// Tezos — REST (Octez RPC)
+	"TEZOS": ChainFamilyTezos,
+
+	// Substrate — relay chains, asset hubs and parachains, each its own spec
+	"POLKADOT": ChainFamilySubstrate, "POLKADOTASSETHUB": ChainFamilySubstrate,
+	"KUSAMA": ChainFamilySubstrate, "KUSAMAASSETHUB": ChainFamilySubstrate,
+	"POLYMESH": ChainFamilySubstrate, "ACA": ChainFamilySubstrate, "AVT": ChainFamilySubstrate,
+	"BITTENSOR": ChainFamilySubstrate, "BSX": ChainFamilySubstrate, "ENJ": ChainFamilySubstrate,
+	"ENJIN": ChainFamilySubstrate, "HYDRATION": ChainFamilySubstrate, "LIT": ChainFamilySubstrate,
+	"TRAC": ChainFamilySubstrate, "XRT": ChainFamilySubstrate,
+
+	// One chain each
+	"ALEO": ChainFamilyAleo, "ALGORAND": ChainFamilyAlgorand, "ARWEAVE": ChainFamilyArweave,
+	"CANTON": ChainFamilyCanton, "CASPER": ChainFamilyCasper, "CONCORDIUM": ChainFamilyConcordium,
+	"DCR": ChainFamilyDecred, "FUELNETWORK": ChainFamilyFuel, "ICP": ChainFamilyICP,
+	"ION": ChainFamilyION, "IOTA": ChainFamilyIOTA, "KASPA": ChainFamilyKaspa,
+	"MINA": ChainFamilyMina, "MORALIS": ChainFamilyMoralis, "MULTIVERSX": ChainFamilyMultiversX,
+	"QUAI": ChainFamilyQuai, "SC": ChainFamilySia, "SQDSUBGRAPH": ChainFamilySubsquid,
+	"STACKS": ChainFamilyStacks, "VECHAIN": ChainFamilyVeChain,
+	// The P-Chain's platform.* API; the EVM C-Chain is AVALANCHEC, which imports ETH1.
+	"AVALANCHEP": ChainFamilyAvalancheP,
+	// monero.json imports nothing and monerod speaks JSON-RPC 2.0: not a Bitcoin Core derivative.
+	"MONERO": ChainFamilyMonero,
 }
 
 // chainFamilies is the family of every chain id the router can classify: rootChainFamilies, plus
