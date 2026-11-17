@@ -37,15 +37,18 @@ func classifyDirectRPCError(err error, chainFamily common.ChainFamily, transport
 }
 
 // retryVerdict is the verdict an attempt's error carries into retry, failover and the client
-// reply. It is the classification, except for one case: a status error whose body is a JSON-RPC
-// error that would end the relay (invalid params, execution reverted, nonce too low, ...) where
-// its status alone would not. Such an attempt keeps its status's verdict, so the relay still fails
-// over to the next provider as it did before the body was read; the body decides only the
-// endpoint's health (healthVerdict). Whether a non-retryable body inside a 5xx should end the
-// relay instead is a retry-semantics decision left to its owners (review of #613, 613-1).
+// reply. A status error whose body is the node's JSON-RPC error is read by that body for the retry
+// too, as it is for the endpoint's health (healthVerdict) and as the same error is read under a
+// 2xx (rulebook Part IV, Appendix C row 14). So a 5xx around invalid params, execution reverted or
+// nonce too low ends the relay, and the client gets that node's reply instead of the same error
+// from every provider. A body whose code no row knows was already judged by its status (row 8),
+// so it still fails over.
+//
+// The verdicts in statusDecidesRetry are the exception: such an attempt keeps its status's
+// verdict, so the relay still fails over to the next provider as it did before the body was read.
 func retryVerdict(err error, classified *common.RouterError, chainFamily common.ChainFamily, transport common.TransportType) *common.RouterError {
 	httpErr, ok := err.(*routersession.HTTPStatusError)
-	if !ok || httpErr == nil || len(httpErr.Body) == 0 || !endsRelay(classified, err) {
+	if !ok || httpErr == nil || len(httpErr.Body) == 0 || !endsRelay(classified, err) || !statusDecidesRetry[classified] {
 		return classified
 	}
 	statusOnly, _, _ := chainlib.ClassifyNodeErrorWithDetails(
@@ -54,6 +57,21 @@ func retryVerdict(err error, classified *common.RouterError, chainFamily common.
 		return classified
 	}
 	return statusOnly
+}
+
+// statusDecidesRetry holds the body verdicts that would end the relay where another provider may
+// still answer, so inside a status error they keep the status's verdict for the retry:
+//   - USER_PARSE_ERROR and USER_INVALID_REQUEST: from a node they are not the caller's mistake,
+//     because the router sent the node a well-formed request (rulebook Part IV, Appendix C
+//     row 13).
+//   - NODE_LIMIT_EXCEEDED: -32005 has two meanings, and one of them, a node's own limit on a
+//     log query, is a limit another provider with a higher one can answer.
+//
+// The body still decides the endpoint's health for all three.
+var statusDecidesRetry = map[*common.RouterError]bool{
+	common.RouterErrorUserParseError:     true,
+	common.RouterErrorUserInvalidRequest: true,
+	common.RouterErrorNodeLimitExceeded:  true,
 }
 
 // endsRelay reports whether an attempt failing with err under verdict stops the relay: the
