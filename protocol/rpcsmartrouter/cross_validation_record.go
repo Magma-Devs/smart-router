@@ -27,11 +27,12 @@ package rpcsmartrouter
 // Emission is deliberately NOT routed through utils.FormatInfo: that family's level gate means a
 // router operated at --log-level warn (or above) would silently stop producing compliance evidence,
 // which is unacceptable for a record whose entire purpose is regulatory evidence. crossValidationRecordLogger
-// below is a dedicated, fixed-level logger that writes to the same stream (stderr, in the same
+// below picks a dedicated, fixed-level logger that writes to the same stream (stderr, in the same
 // JSON-vs-console format the rest of the process uses) so it still flows into the existing log
 // pipeline the router already ships to Loki on S3, but can never be silenced by the operator's
 // ordinary verbosity knob.
 import (
+	"context"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -40,9 +41,11 @@ import (
 
 	"github.com/rs/zerolog"
 
+	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
+	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	"github.com/magma-Devs/smart-router/utils"
 )
 
@@ -90,11 +93,15 @@ type crossValidationRecord struct {
 	Time time.Time `json:"time"`
 	// Seq is a monotonic per-process counter, assigned when the record is first built — before it is
 	// known whether the write queue will have room — so a dropped record still spends its slot and
-	// leaves a visible gap in the sequence the next successfully-written record carries.
+	// leaves a visible gap in the sequence the next successfully-written record carries. A record
+	// deferred to the straggler watcher is built at reply time and written only when its stragglers
+	// resolve, so the stream is not in Seq order: a missing Seq is a drop only once the straggler
+	// deadline has passed. It starts again at 1 in every process.
 	Seq       uint64 `json:"seq"`
 	RequestID string `json:"requestId"`
-	// Tenant identifies the caller for this record (the customer-id/dapp-id header, bounded the same
-	// way the "customer" Prometheus label is — see crossValidationRecordTenantMaxLength).
+	// Tenant identifies the caller for this record: the customer-id/dapp-id header as sent, bounded in
+	// length and to valid UTF-8 like the "customer" Prometheus label, but not in count (the label also
+	// caps distinct values per spec) — see crossValidationRecordTenant. A line-body field, never a label.
 	Tenant       string `json:"tenant,omitempty"`
 	ChainID      string `json:"chainId"`
 	ApiInterface string `json:"apiInterface"`
@@ -181,6 +188,9 @@ func buildCrossValidationRecord(in crossValidationRecordInputs) *crossValidation
 		BlockHeight:            in.BlockHeight,
 		Finality:               in.Finality,
 		DigestAlgorithmVersion: crossValidationRecordDigestAlgorithmVersion,
+		// [] rather than null when no provider was asked (a request-time fail-fast), so the field is
+		// always an array to a reader.
+		Endpoints: []crossValidationEndpointOutcome{},
 	}
 	if in.CVParams != nil {
 		rec.AgreementThreshold = in.CVParams.AgreementThreshold
@@ -264,14 +274,19 @@ func crossValidationRecordGroup(group string) string {
 // Endpoints entry from the provisional not-received outcome to the real one, and appends the same
 // resolution to LateResolutions so "how it resolved" survives even though Endpoints only keeps the
 // final state. Safe without a lock: called only from the single straggler-watcher goroutine, strictly
-// before the record is hexposed to emitCrossValidationRecord (see watchCrossValidationStragglers).
+// before the record is handed to emitCrossValidationRecord (see watchCrossValidationStragglers).
 func patchCrossValidationRecordStraggler(rec *crossValidationRecord, straggler relaycore.CrossValidationStragglerResult) {
 	resolved := crossValidationEndpointOutcome{
 		ProviderAddress: straggler.ProviderAddress,
-		ProviderGroup:   crossValidationRecordGroup(straggler.ProviderGroup),
 		Outcome:         straggler.Outcome,
 		Digest:          crossValidationHashHex(straggler.ResponseHash),
 		DelayMs:         straggler.Delay.Milliseconds(),
+	}
+	// A group is learned only from a response. A straggler given up on as not-received carries none,
+	// so it keeps no group, the same as a not-received entry built at reply time, rather than being
+	// filed under the default group it may not belong to.
+	if straggler.Outcome != common.CrossValidationStragglerOutcomeNotReceived {
+		resolved.ProviderGroup = crossValidationRecordGroup(straggler.ProviderGroup)
 	}
 	for i := range rec.Endpoints {
 		if rec.Endpoints[i].ProviderAddress == straggler.ProviderAddress {
@@ -299,6 +314,45 @@ func crossValidationRecordTenant(analytics *metrics.RelayMetrics) string {
 	return customer
 }
 
+// recordCrossValidationFailFast writes the record of a request that cross-validation refused at
+// request time (insufficient-capacity / insufficient-groups) — the path that returns from
+// SendParsedRelay before appendHeadersToRelayResult, which is where every other record is built.
+// crossValidationFailFast counts such a request as a failed cross-validated request, so it gets its
+// record too: failed, the structural reason, the policy as resolved, and no endpoints, since every
+// fail-fast site fires before any relay is dispatched. The reply gets Lava-Guid for the same reason
+// every other record's request does: so the caller can name this record.
+func (rpcss *RPCSmartRouterServer) recordCrossValidationFailFast(ctx context.Context, relayProcessor *relaycore.RelayProcessor, protocolMessage chainlib.ProtocolMessage, analytics *metrics.RelayMetrics, reason string, failFast *common.RelayResult) {
+	var chainId, apiInterface string
+	if rpcss.listenEndpoint != nil {
+		chainId, apiInterface = rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface
+	}
+	// The policy as resolved for the request is the state machine's. The processor of a request the
+	// capacity check refused carries the single-relay defaults instead: ProcessRelaySend sizes nothing
+	// from the value it has just rejected.
+	cvParams := relayProcessor.GetCrossValidationParams()
+	if relayProcessor.RelayStateMachine != nil {
+		if resolved := relayProcessor.RelayStateMachine.GetCrossValidationParams(); resolved != nil {
+			cvParams = resolved
+		}
+	}
+	requestedBlock, _ := protocolMessage.RequestedBlock()
+	requestID := crossValidationRequestID(ctx)
+	rpcss.emitCrossValidationRecord(buildCrossValidationRecord(crossValidationRecordInputs{
+		ChainID:       chainId,
+		ApiInterface:  apiInterface,
+		Method:        protocolMessage.GetApi().GetName(),
+		RequestID:     requestID,
+		Tenant:        crossValidationRecordTenant(analytics),
+		BlockHeight:   requestedBlock,
+		Finality:      rpcss.crossValidationFinalityLabel(protocolMessage),
+		CVParams:      cvParams,
+		FailureReason: reason,
+	}))
+	if requestID != "" && failFast != nil && failFast.Reply != nil {
+		failFast.Reply.Metadata = append(failFast.Reply.Metadata, pairingtypes.Metadata{Name: common.GUID_HEADER_NAME, Value: requestID})
+	}
+}
+
 // crossValidationRecordChan is the async write queue. Unbuffered sends would put log I/O on the
 // relay's hot path; emitCrossValidationRecord only ever does a non-blocking send into this, so a slow
 // or unavailable log pipeline can never fail a relay (MAG-2787's rule).
@@ -315,22 +369,29 @@ var crossValidationRecordWriterStart = sync.OnceFunc(func() {
 	}()
 })
 
-// crossValidationRecordLogger is a dedicated logger fixed at Info level, independent of the
-// operator's --log-level: see the file-level doc comment for why a compliance record must not be
-// silenceable by that unrelated operational knob. Writes to stderr in the same format
-// (JSON in production, console otherwise) the rest of the process uses, so the line still flows into
-// whatever already scrapes the process's existing output into Loki.
-var crossValidationRecordLogger = newCrossValidationRecordLogger()
+// crossValidationRecordJSONLogger and crossValidationRecordConsoleLogger are dedicated loggers fixed
+// at Info level, independent of the operator's --log-level: see the file-level doc comment for why a
+// compliance record must not be silenceable by that unrelated operational knob. Both write to stderr;
+// crossValidationRecordLogger picks the one matching the format the rest of the process uses (JSON in
+// production, console otherwise), so the line still flows into whatever already scrapes the
+// process's existing output into Loki.
+var (
+	crossValidationRecordJSONLogger    = zerolog.New(os.Stderr).Level(zerolog.InfoLevel).With().Timestamp().Logger()
+	crossValidationRecordConsoleLogger = zerolog.New(zerolog.ConsoleWriter{Out: os.Stderr, NoColor: true, TimeFormat: time.Stamp}).Level(zerolog.InfoLevel).With().Timestamp().Logger()
+)
 
-func newCrossValidationRecordLogger() zerolog.Logger {
+// crossValidationRecordLogger reads utils.JsonFormat at write time, not at package init: RunE applies
+// --log-format after every package-level var is initialized, so a logger chosen at init always took
+// the console default and wrote records as text beside JSON lines.
+func crossValidationRecordLogger() *zerolog.Logger {
 	if utils.JsonFormat {
-		return zerolog.New(os.Stderr).Level(zerolog.InfoLevel).With().Timestamp().Logger()
+		return &crossValidationRecordJSONLogger
 	}
-	return zerolog.New(zerolog.ConsoleWriter{Out: os.Stderr, NoColor: true}).Level(zerolog.InfoLevel).With().Timestamp().Logger()
+	return &crossValidationRecordConsoleLogger
 }
 
 func writeCrossValidationRecord(rec *crossValidationRecord) {
-	crossValidationRecordLogger.Info().Interface("crossValidationRecord", rec).Msg("cross-validation record")
+	crossValidationRecordLogger().Info().Interface("crossValidationRecord", rec).Msg("cross-validation record")
 }
 
 // crossValidationRecordObserveForTest, when non-nil, is called with every record passed to

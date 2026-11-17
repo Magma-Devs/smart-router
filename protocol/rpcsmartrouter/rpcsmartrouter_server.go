@@ -1851,7 +1851,9 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 		// capacity/diversity failure from a generic upstream error (the "reuse header channel" contract).
 		if relayProcessor != nil {
 			if reason := relayProcessor.GetCrossValidationFailFastReason(); reason != "" {
-				return rpcss.crossValidationFailFast(reason, protocolMessage), err
+				failFast := rpcss.crossValidationFailFast(reason, protocolMessage)
+				rpcss.recordCrossValidationFailFast(ctx, relayProcessor, protocolMessage, analytics, reason, failFast)
+				return failFast, err
 			}
 		}
 
@@ -6505,6 +6507,12 @@ func (rpcss *RPCSmartRouterServer) watchCrossValidationStragglers(ctx context.Co
 			MismatchCounted: mismatchCounted,
 			DelayMs:         straggler.Delay.Milliseconds(),
 		})
+		// MAG-2787: patch this provider's entry in the compliance record owned by this request from
+		// its provisional not-received state to the real resolution. Safe without a lock: record() runs
+		// sequentially on the single watcher goroutine below, strictly before WatchCrossValidationStragglers
+		// returns and the record is emitted. Before the metrics guard below: the record is written
+		// whether or not the router exposes metrics (--metrics-listen-address defaults to disabled).
+		patchCrossValidationRecordStraggler(complianceRecord, straggler)
 		if rpcss.smartRouterEndpointMetrics == nil {
 			return
 		}
@@ -6513,12 +6521,6 @@ func (rpcss *RPCSmartRouterServer) watchCrossValidationStragglers(ctx context.Co
 			rpcss.smartRouterEndpointMetrics.SetCrossValidationMismatchMetric(chainId, apiInterface, apiName, group, finality)
 		}
 		rpcss.smartRouterEndpointMetrics.SetCrossValidationStragglerMetric(chainId, apiInterface, apiName, straggler.Outcome)
-
-		// MAG-2787: patch this provider's entry in the compliance record owned by this request from
-		// its provisional not-received state to the real resolution. Safe without a lock: record() runs
-		// sequentially on the single watcher goroutine below, strictly before WatchCrossValidationStragglers
-		// returns and the record is emitted.
-		patchCrossValidationRecordStraggler(complianceRecord, straggler)
 	}
 
 	// WithoutCancel: the reply has already been sent, so the watcher must outlive the request context;

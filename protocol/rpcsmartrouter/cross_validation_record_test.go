@@ -1,9 +1,12 @@
 package rpcsmartrouter
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
+	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"testing"
@@ -16,9 +19,12 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	"github.com/magma-Devs/smart-router/protocol/relaycoretest"
+	"github.com/magma-Devs/smart-router/protocol/relayprotocol"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
+	"github.com/magma-Devs/smart-router/utils"
+	"github.com/magma-Devs/smart-router/utils/rand"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
@@ -347,11 +353,21 @@ func TestCrossValidationRecord_EndToEnd(t *testing.T) {
 // but a provider was still in flight: appendHeadersToRelayResult must emit NOTHING for this request
 // (the straggler watcher owns it), and the watcher must emit exactly one record, carrying the
 // straggler's real resolution, once it is done — the full MAG-2187 scenario this ticket's "late
-// responses... and how they resolved" bullet describes.
+// responses... and how they resolved" bullet describes. Run with and without a metrics manager:
+// --metrics-listen-address defaults to disabled, which leaves the server with none, and the record
+// must carry the resolution either way.
 func TestCrossValidationRecord_DeferredToStragglerWatcher(t *testing.T) {
+	t.Run("metrics enabled", func(t *testing.T) { testCrossValidationRecordDeferred(t, true) })
+	t.Run("metrics disabled", func(t *testing.T) { testCrossValidationRecordDeferred(t, false) })
+}
+
+func testCrossValidationRecordDeferred(t *testing.T, withMetrics bool) {
 	ctx := context.Background()
-	mm := metrics.NewSmartRouterMetricsManager(metrics.SmartRouterMetricsManagerOptions{})
-	require.NotNil(t, mm)
+	var mm *metrics.SmartRouterMetricsManager
+	if withMetrics {
+		mm = metrics.NewSmartRouterMetricsManager(metrics.SmartRouterMetricsManagerOptions{})
+		require.NotNil(t, mm)
+	}
 	noop := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, "ETH1", spectypes.APIInterfaceJsonRPC, noop, nil, "../../", nil)
 	if closeServer != nil {
@@ -427,4 +443,110 @@ func TestCrossValidationRecord_DeferredToStragglerWatcher(t *testing.T) {
 		byProvider[e.ProviderAddress] = e
 	}
 	require.Equal(t, common.CrossValidationStragglerOutcomeDisagreed, byProvider["p3"].Outcome, "the final Endpoints state reflects the resolved outcome, not the provisional one")
+}
+
+// TestPatchCrossValidationRecordStraggler_NotReceivedKeepsNoGroup: a provider that never answered
+// has no group the record could know (a group is learned only from a response), at reply time and
+// after the straggler deadline alike. The patch used to file the deadline case under the default
+// group.
+func TestPatchCrossValidationRecordStraggler_NotReceivedKeepsNoGroup(t *testing.T) {
+	replyTime := buildCrossValidationRecord(crossValidationRecordInputs{AllProviders: []string{"p3"}})
+	deferred := buildCrossValidationRecord(crossValidationRecordInputs{CVSuccess: true, AllProviders: []string{"p3"}})
+	patchCrossValidationRecordStraggler(deferred, relaycore.CrossValidationStragglerResult{ProviderAddress: "p3", Outcome: common.CrossValidationStragglerOutcomeNotReceived, Delay: time.Second})
+	require.Equal(t, "", replyTime.Endpoints[0].ProviderGroup)
+	require.Equal(t, "", deferred.Endpoints[0].ProviderGroup)
+	require.Equal(t, "", deferred.LateResolutions[0].ProviderGroup)
+
+	// A straggler that answered keeps the group it answered from; an unlabelled one is the default.
+	patchCrossValidationRecordStraggler(deferred, relaycore.CrossValidationStragglerResult{ProviderAddress: "p3", Outcome: common.CrossValidationStragglerOutcomeNodeError})
+	require.Equal(t, common.DefaultProviderGroup, deferred.Endpoints[0].ProviderGroup)
+}
+
+// TestCrossValidationRecord_LineFollowsLogFormat writes a record in a fresh process, in the order a
+// router runs: package init, then RunE applies --log-format, then the first record. A logger chosen
+// at package init missed the flag and wrote every record as console text beside JSON lines.
+func TestCrossValidationRecord_LineFollowsLogFormat(t *testing.T) {
+	if format := os.Getenv("CV_RECORD_LOG_FORMAT_CHILD"); format != "" {
+		utils.JsonFormat = format == "json" // what RunE does with --log-format
+		writeCrossValidationRecord(&crossValidationRecord{Seq: 7, RequestID: "123"})
+		os.Exit(0)
+	}
+	for _, format := range []string{"json", "text"} {
+		t.Run(format, func(t *testing.T) {
+			cmd := exec.Command(os.Args[0], "-test.run=^TestCrossValidationRecord_LineFollowsLogFormat$")
+			cmd.Env = append(os.Environ(), "CV_RECORD_LOG_FORMAT_CHILD="+format)
+			var stderr bytes.Buffer
+			cmd.Stderr = &stderr
+			require.NoError(t, cmd.Run())
+			var line string
+			for _, l := range strings.Split(stderr.String(), "\n") {
+				if strings.Contains(l, "cross-validation record") {
+					line = l
+					break
+				}
+			}
+			require.NotEmpty(t, line, "the child wrote no record line: %q", stderr.String())
+			var parsed struct {
+				Message string                `json:"message"`
+				Record  crossValidationRecord `json:"crossValidationRecord"`
+			}
+			jsonErr := json.Unmarshal([]byte(line), &parsed)
+			if format == "json" {
+				require.NoError(t, jsonErr, "with --log-format json the record line must be JSON: %q", line)
+				require.Equal(t, "cross-validation record", parsed.Message)
+				require.Equal(t, uint64(7), parsed.Record.Seq)
+				return
+			}
+			require.Error(t, jsonErr, "with --log-format text the record line is console text, like every other line: %q", line)
+		})
+	}
+}
+
+// TestCrossValidationRecord_FailFastBeforeDispatch sends a request the capacity guard refuses before
+// any provider is asked (max-participants 5 against three paired providers) through SendParsedRelay.
+// crossValidationFailFast counts it as a failed cross-validated request, but the path returns before
+// appendHeadersToRelayResult, so it produced no record, and its reply had no Lava-Guid to name one.
+func TestCrossValidationRecord_FailFastBeforeDispatch(t *testing.T) {
+	rand.InitRandomSeed()
+	ctx := utils.WithUniqueIdentifier(context.Background(), 771200001)
+	logs, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
+	require.NoError(t, err)
+	noop := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, "ETH1", spectypes.APIInterfaceJsonRPC, noop, nil, "../../", nil)
+	if closeServer != nil {
+		defer closeServer()
+	}
+	require.NoError(t, err)
+	hits, server := newPinOverrideServer(t, chainParser, logs, false)
+
+	body := []byte(`{"jsonrpc":"2.0","method":"eth_getBalance","params":["0x0000000000000000000000000000000000000001","latest"],"id":1}`)
+	chainMessage, err := chainParser.ParseMsg("", body, http.MethodPost, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
+	require.NoError(t, err)
+	relayData := relayprotocol.NewRelayData(ctx, http.MethodPost, "", body, 0, spectypes.LATEST_BLOCK, spectypes.APIInterfaceJsonRPC,
+		chainMessage.GetRPCMessage().GetHeaders(), chainlib.GetAddon(chainMessage), common.GetExtensionNames(chainMessage.GetExtensions()))
+	protocolMessage := chainlib.NewProtocolMessage(chainMessage, map[string]string{
+		common.CROSS_VALIDATION_HEADER_MAX_PARTICIPANTS:    "5",
+		common.CROSS_VALIDATION_HEADER_AGREEMENT_THRESHOLD: "2",
+	}, relayData, "dapp", "1.2.3.4")
+
+	getRecords := observeCrossValidationRecords(t)
+	callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	result, sendErr := server.SendParsedRelay(callCtx, nil, protocolMessage)
+	require.Error(t, sendErr)
+	require.NotNil(t, result)
+	require.Equal(t, common.CrossValidationReasonInsufficientCapacity, result.CrossValidationFailureReason)
+	require.Equal(t, []int64{0, 0, 0}, loadPinOverrideHits(hits), "setup: the guard refuses before any provider is asked")
+
+	records := getRecords()
+	require.Len(t, records, 1, "a cross-validated request refused at request time still gets its one record")
+	rec := records[0]
+	require.Equal(t, "failed", rec.Status)
+	require.Equal(t, common.CrossValidationReasonInsufficientCapacity, rec.FailureReason)
+	require.Equal(t, 5, rec.MaxParticipants, "the policy as resolved for the request")
+	require.Equal(t, 2, rec.AgreementThreshold)
+	require.Empty(t, rec.Endpoints, "no provider was asked")
+	require.Equal(t, "", rec.ServedDigest)
+	require.Equal(t, "771200001", rec.RequestID)
+	require.Equal(t, rec.RequestID, pinOverrideReplyHeader(result, common.GUID_HEADER_NAME), "the reply names the record in Lava-Guid")
 }

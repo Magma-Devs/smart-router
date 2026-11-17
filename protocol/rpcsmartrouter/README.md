@@ -366,9 +366,9 @@ The record carries digests and metadata only, **never** a request or response bo
 
 | Field | Meaning |
 | --- | --- |
-| `seq` | process-wide monotonic counter, assigned before the record is queued for writing — a gap in the sequence as seen in the log stream is how a dropped record becomes visible, rather than silent |
+| `seq` | process-wide monotonic counter, assigned before the record is queued for writing — a gap in the sequence as seen in the log stream is how a dropped record becomes visible, rather than silent. A request whose stragglers were still in flight is written when they resolve, up to the straggler deadline after its reply, so records are not in `seq` order: a missing `seq` is a drop only once that deadline has passed. It starts again at 1 when the process restarts |
 | `requestId` | the same value returned in the `Lava-Guid` response header |
-| `tenant` | the caller's customer-id/dapp-id header, bounded the same way the `customer` Prometheus label is |
+| `tenant` | the caller's customer-id/dapp-id header as sent: up to 128 bytes of valid UTF-8, else `other`; `DefaultDappID` when absent. Unlike the `customer` Prometheus label it is not capped in count, so keep it in the line body and never promote it to a Loki label |
 | `agreementThreshold`, `maxParticipants`, `minGroups` | the policy **as resolved for this request**, not whatever the config says when the record is later read |
 | `status`, `failureReason` | `success` or `failed`; the closed failure-reason enum on failure |
 | `servedDigest` | which answer was served — empty on failure, where there was no winner |
