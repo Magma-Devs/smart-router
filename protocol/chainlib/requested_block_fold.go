@@ -20,9 +20,15 @@ import (
 // keeps the request unjudgeable: a pinned read whose block could not be read must not be cached or
 // routed as a latest read. The two share the value, which is why the fold asks the element's api
 // instead of reading the value alone.
+//
+// The fold records each element it leaves out (MAG-4650). The request's block says nothing about
+// such an element's answer: a gas price batched with a read of a final block is still a gas
+// price, and that block being final does not make the gas price final. The parsers put the record
+// on the message, and the cache never writes such a request as final.
 type requestedBlockFold struct {
 	latest, earliest int64
 	folded           bool
+	skippedBlockless bool
 }
 
 // add folds one element in. parsedBlock is the element's requested block, and elementEarliest what
@@ -31,6 +37,7 @@ type requestedBlockFold struct {
 // when the element's api names no block and nothing else, such as a header override, gave it one.
 func (fold *requestedBlockFold) add(parsedBlock, elementEarliest int64, parsedInput *parser.ParsedInput, namesNoBlock bool) {
 	if namesNoBlock && parsedBlock == spectypes.NOT_APPLICABLE {
+		fold.skippedBlockless = true
 		return
 	}
 	if !fold.folded {
@@ -50,6 +57,11 @@ func (fold *requestedBlockFold) blocks() (latest, earliest int64) {
 		return spectypes.NOT_APPLICABLE, spectypes.NOT_APPLICABLE
 	}
 	return fold.latest, fold.earliest
+}
+
+// skippedBlocklessElement reports whether add left out an element whose api names no block.
+func (fold *requestedBlockFold) skippedBlocklessElement() bool {
+	return fold.skippedBlockless
 }
 
 // apiNamesNoBlock reports whether api has no way to name a block: no block parser

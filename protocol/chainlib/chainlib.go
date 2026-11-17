@@ -112,6 +112,11 @@ type ChainMessage interface {
 	UpdateEarliestInMessage(incomingEarliest int64) bool
 	SetExtension(extension *spectypes.Extension)
 	GetUsedDefaultValue() bool
+	// HasBlocklessElement reports whether an element of the request names no block and so took
+	// no part in its requested block: a gas price batched with a read of block N asks for block
+	// N, but N being final says nothing about the gas price. The cache never writes such a request
+	// as final (MAG-4650).
+	HasBlocklessElement() bool
 	// IsBatch returns true if this is a batch request (e.g., JSON-RPC batch)
 	IsBatch() bool
 

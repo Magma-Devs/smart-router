@@ -37,6 +37,9 @@ type baseChainMessageContainer struct {
 	forceCacheRefresh     bool
 	parseDirective        *spectypes.ParseDirective // setting the parse directive related to the api, can be nil
 	usedDefaultValue      bool
+	// blocklessElement is set when an element of the request names no block and so took no part
+	// in its requested block (requestedBlockFold, MAG-4650).
+	blocklessElement bool
 
 	// resultErrorParsingMethod passed by each api interface message to parse the result of the message
 	// and validate it doesn't contain a node error
@@ -146,6 +149,12 @@ func (bcnc baseChainMessageContainer) RequestedBlock() (latest int64, earliest i
 
 func (bcnc baseChainMessageContainer) GetRPCMessage() rpcInterfaceMessages.GenericMessage {
 	return bcnc.msg
+}
+
+// HasBlocklessElement reports whether an element of the request names no block and so took no
+// part in its requested block (MAG-4650).
+func (bcnc baseChainMessageContainer) HasBlocklessElement() bool {
+	return bcnc.blocklessElement
 }
 
 // IsBatch returns true if this is a batch request (e.g., JSON-RPC batch)

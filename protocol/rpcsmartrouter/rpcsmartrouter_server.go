@@ -5123,6 +5123,13 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 		// tip, and that value must never settle an answer that can still change.
 		finalized = byHashFinalized(extractBlockHeightFromJSONResponse(relayResult.Reply.Data, protocolMessage), int64(rpcss.getLatestBlock()), int64(blockDistanceForFinalizedData))
 	}
+	// An element that names no block took no part in the request's block, so that block being
+	// final says nothing about the element's answer: a gas price batched with a read of a final
+	// block is still a gas price, and filed as final it was served for an hour (MAG-4650). The
+	// entry gets the chain's short lifetime, as a block-less element beside a latest read does.
+	if finalized && protocolMessage.HasBlocklessElement() {
+		finalized = false
+	}
 
 	// Convert LATEST_BLOCK to the concrete block the cache key carries. This MUST be the
 	// block the lookup in sendRelayToEndpoint computes for the same request, which is why
