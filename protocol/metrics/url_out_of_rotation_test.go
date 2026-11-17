@@ -41,7 +41,7 @@ func outSeries(t *testing.T, metric, provider string) map[string]float64 {
 
 const (
 	outGauge   = "rpc_endpoint_url_out_of_rotation"
-	outCounter = "rpc_endpoint_url_out_of_rotation_total"
+	outCounter = "rpc_endpoint_url_out_of_rotation_exits_total"
 )
 
 func TestURLOutOfRotation_SetWhileOutAndClearedWhenBack(t *testing.T) {

@@ -1,13 +1,40 @@
 package rpcsmartrouter
 
 import (
+	"maps"
 	"sort"
 	"testing"
 
+	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
+	spectypes "github.com/magma-Devs/smart-router/types/spec"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
+
+// gatheredCounter reads the value of the one series of a counter whose labels are exactly labels.
+func gatheredCounter(t *testing.T, name string, labels map[string]string) float64 {
+	t.Helper()
+	mfs, err := prometheus.DefaultGatherer.Gather()
+	require.NoError(t, err)
+	for _, mf := range mfs {
+		if mf.GetName() != name {
+			continue
+		}
+		for _, mtr := range mf.GetMetric() {
+			lm := map[string]string{}
+			for _, lp := range mtr.GetLabel() {
+				lm[lp.GetName()] = lp.GetValue()
+			}
+			if maps.Equal(lm, labels) {
+				return mtr.GetCounter().GetValue()
+			}
+		}
+	}
+	t.Fatalf("no %s series with labels %v", name, labels)
+	return 0
+}
 
 // MAG-5244 — collectURLsOutOfRotation, the read-only step that turns the endpoints' own records into
 // what the per-url out-of-rotation metrics publish.
@@ -41,7 +68,7 @@ func TestURLOutOfRotation_ReportsEachReasonThatHolds(t *testing.T) {
 	disableForTest(t, both.Endpoint, routersession.EndpointDisableNodeError)
 	require.True(t, both.Endpoint.AddStateReason(routersession.EndpointDisableHeadStalled, stallNow, 100))
 
-	recs, _ := collectURLsOutOfRotation([]*routersession.EndpointWithDirectConnection{healthy, stuck, both}, nil)
+	recs, _ := collectURLsOutOfRotation([]*routersession.EndpointWithDirectConnection{healthy, stuck, both}, urlOutSeen{})
 
 	require.Len(t, recs, 3, "every url is listed, in or out, so the publisher can clear the ones that came back")
 	require.Empty(t, outFor(t, recs, "provA", "https://a.example").Reasons)
@@ -54,7 +81,7 @@ func TestURLOutOfRotation_CountsAnExitOnceAcrossCycles(t *testing.T) {
 	eps := []*routersession.EndpointWithDirectConnection{e}
 	require.True(t, e.Endpoint.AddStateReason(routersession.EndpointDisableHeadStalled, stallNow, 100))
 
-	recs, seen := collectURLsOutOfRotation(eps, nil)
+	recs, seen := collectURLsOutOfRotation(eps, urlOutSeen{})
 	require.Equal(t, map[string]uint64{"head-stalled": 1}, outFor(t, recs, "provA", "https://a.example").WentOut)
 
 	recs, seen = collectURLsOutOfRotation(eps, seen)
@@ -74,7 +101,7 @@ func TestURLOutOfRotation_CountsAnExitOnceAcrossCycles(t *testing.T) {
 func TestURLOutOfRotation_CountsAHoldThatEndedBeforeTheCycle(t *testing.T) {
 	e := ep("https://a.example", "provA", true)
 	eps := []*routersession.EndpointWithDirectConnection{e}
-	_, seen := collectURLsOutOfRotation(eps, nil)
+	_, seen := collectURLsOutOfRotation(eps, urlOutSeen{})
 
 	require.True(t, e.Endpoint.AddStateReason(routersession.EndpointDisableHeadStalled, stallNow, 100))
 	require.True(t, e.Endpoint.RemoveStateReason(routersession.EndpointDisableHeadStalled))
@@ -93,7 +120,7 @@ func TestURLOutOfRotation_URLListedTwiceIsOneRecordAndOneExit(t *testing.T) {
 	require.True(t, plain.Endpoint.AddStateReason(routersession.EndpointDisableHeadStalled, stallNow, 100))
 	require.True(t, archive.Endpoint.AddStateReason(routersession.EndpointDisableHeadStalled, stallNow, 100))
 
-	recs, _ := collectURLsOutOfRotation([]*routersession.EndpointWithDirectConnection{plain, archive}, nil)
+	recs, _ := collectURLsOutOfRotation([]*routersession.EndpointWithDirectConnection{plain, archive}, urlOutSeen{})
 
 	require.Len(t, recs, 1)
 	require.Equal(t, []string{"head-stalled"}, recs[0].Reasons)
@@ -106,7 +133,7 @@ func TestURLOutOfRotation_URLListedTwiceIsOutWhenEitherEntryIs(t *testing.T) {
 	archive := ep("https://a.example", "provA", true)
 	disableForTest(t, archive.Endpoint, routersession.EndpointDisableUnreachable)
 
-	recs, _ := collectURLsOutOfRotation([]*routersession.EndpointWithDirectConnection{plain, archive}, nil)
+	recs, _ := collectURLsOutOfRotation([]*routersession.EndpointWithDirectConnection{plain, archive}, urlOutSeen{})
 
 	require.Len(t, recs, 1)
 	require.Equal(t, []string{"unreachable"}, recs[0].Reasons)
@@ -118,24 +145,118 @@ func TestURLOutOfRotation_SameEndpointListedTwiceCountsOnce(t *testing.T) {
 	require.True(t, e.Endpoint.AddStateReason(routersession.EndpointDisableHeadStalled, stallNow, 100))
 	dup := &routersession.EndpointWithDirectConnection{Endpoint: e.Endpoint, ProviderAddress: "provA", Backup: true}
 
-	recs, seen := collectURLsOutOfRotation([]*routersession.EndpointWithDirectConnection{e, dup}, nil)
+	recs, seen := collectURLsOutOfRotation([]*routersession.EndpointWithDirectConnection{e, dup}, urlOutSeen{})
 
 	require.Len(t, recs, 1)
 	require.Equal(t, map[string]uint64{"head-stalled": 1}, recs[0].WentOut)
-	require.Len(t, seen, 1)
+	require.Len(t, seen.endpoints, 1)
 }
 
-// A pairing rebuild replaces the Endpoint objects. The new one starts counting at zero, and that
-// must not hide its first exit behind the old object's count.
-func TestURLOutOfRotation_RebuiltEndpointCountsFromZero(t *testing.T) {
-	old := ep("https://a.example", "provA", true)
-	require.True(t, old.Endpoint.AddStateReason(routersession.EndpointDisableHeadStalled, stallNow, 100))
-	_, seen := collectURLsOutOfRotation([]*routersession.EndpointWithDirectConnection{old}, nil)
+// The review's example: one node behind two entries dies. Normal requests take the plain entry out
+// in one cycle, an archive request takes the archive entry out in the next. One node went out once:
+// the url counts one exit, not one per entry.
+func TestURLOutOfRotation_URLListedTwiceOutInTwoCyclesIsOneExit(t *testing.T) {
+	plain := ep("https://a.example", "provA", true)
+	archive := ep("https://a.example", "provA", true)
+	eps := []*routersession.EndpointWithDirectConnection{plain, archive}
 
-	rebuilt := ep("https://a.example", "provA", true)
-	require.True(t, rebuilt.Endpoint.AddStateReason(routersession.EndpointDisableHeadStalled, stallNow, 100))
-	recs, seen := collectURLsOutOfRotation([]*routersession.EndpointWithDirectConnection{rebuilt}, seen)
+	disableForTest(t, plain.Endpoint, routersession.EndpointDisableUnreachable)
+	recs, seen := collectURLsOutOfRotation(eps, urlOutSeen{})
+	require.Equal(t, map[string]uint64{"unreachable": 1}, recs[0].WentOut, "cycle 1: the plain entry takes the url out")
 
-	require.Equal(t, map[string]uint64{"head-stalled": 1}, recs[0].WentOut)
-	require.Len(t, seen, 1, "the replaced endpoint is forgotten")
+	disableForTest(t, archive.Endpoint, routersession.EndpointDisableUnreachable)
+	recs, seen = collectURLsOutOfRotation(eps, seen)
+	require.Empty(t, recs[0].WentOut, "cycle 2: the archive entry joins an outage already counted")
+	require.Equal(t, []string{"unreachable"}, recs[0].Reasons)
+
+	// Both come back, then the node dies again: a new outage, counted again.
+	require.True(t, plain.Endpoint.ResetHealth())
+	require.True(t, archive.Endpoint.ResetHealth())
+	recs, seen = collectURLsOutOfRotation(eps, seen)
+	require.Empty(t, recs[0].Reasons)
+	disableForTest(t, archive.Endpoint, routersession.EndpointDisableUnreachable)
+	recs, _ = collectURLsOutOfRotation(eps, seen)
+	require.Equal(t, map[string]uint64{"unreachable": 1}, recs[0].WentOut)
+}
+
+// Joining is per reason: the other entry being out for another reason does not hide this exit.
+func TestURLOutOfRotation_URLListedTwiceOtherReasonStillCounts(t *testing.T) {
+	plain := ep("https://a.example", "provA", true)
+	archive := ep("https://a.example", "provA", true)
+	eps := []*routersession.EndpointWithDirectConnection{plain, archive}
+
+	disableForTest(t, plain.Endpoint, routersession.EndpointDisableUnreachable)
+	_, seen := collectURLsOutOfRotation(eps, urlOutSeen{})
+
+	disableForTest(t, archive.Endpoint, routersession.EndpointDisableNodeError)
+	recs, _ := collectURLsOutOfRotation(eps, seen)
+	require.Equal(t, map[string]uint64{"node-error": 1}, recs[0].WentOut)
+}
+
+// A pairing rebuild replaces the Endpoint objects, and the new one starts counting at zero. Its
+// first exit counts when the url was in rotation before the rebuild. When the url was already out
+// for that reason, it is the same outage carried across the rebuild, and adds nothing: the gauge
+// never cleared either.
+func TestURLOutOfRotation_RebuiltEndpoint(t *testing.T) {
+	t.Run("url was in rotation: its first exit counts", func(t *testing.T) {
+		old := ep("https://a.example", "provA", true)
+		_, seen := collectURLsOutOfRotation([]*routersession.EndpointWithDirectConnection{old}, urlOutSeen{})
+
+		rebuilt := ep("https://a.example", "provA", true)
+		require.True(t, rebuilt.Endpoint.AddStateReason(routersession.EndpointDisableHeadStalled, stallNow, 100))
+		recs, seen := collectURLsOutOfRotation([]*routersession.EndpointWithDirectConnection{rebuilt}, seen)
+
+		require.Equal(t, map[string]uint64{"head-stalled": 1}, recs[0].WentOut)
+		require.Len(t, seen.endpoints, 1, "the replaced endpoint is forgotten")
+	})
+	t.Run("url was already out: same outage", func(t *testing.T) {
+		old := ep("https://a.example", "provA", true)
+		require.True(t, old.Endpoint.AddStateReason(routersession.EndpointDisableHeadStalled, stallNow, 100))
+		_, seen := collectURLsOutOfRotation([]*routersession.EndpointWithDirectConnection{old}, urlOutSeen{})
+
+		rebuilt := ep("https://a.example", "provA", true)
+		require.True(t, rebuilt.Endpoint.AddStateReason(routersession.EndpointDisableHeadStalled, stallNow, 100))
+		recs, _ := collectURLsOutOfRotation([]*routersession.EndpointWithDirectConnection{rebuilt}, seen)
+
+		require.Empty(t, recs[0].WentOut)
+		require.Equal(t, []string{"head-stalled"}, recs[0].Reasons)
+	})
+}
+
+// The server's own path, end to end through a real metrics manager: a url registered the way
+// CreateSmartRouterEndpoint registers it goes out, and the series the probe step publishes carry
+// exactly the labels of the url's other per-url series (the relay counter, written by the relay
+// path), plus reason. A test of the collector or of the manager alone passes with the wiring wrong.
+func TestURLOutOfRotation_ServerPublishesUnderTheURLsOwnLabels(t *testing.T) {
+	const chain, provider = "OUTROT-WIRING-5244", "provider@outrotWiring"
+	mm := metrics.NewSmartRouterMetricsManager(metrics.SmartRouterMetricsManagerOptions{})
+	listen := &routersession.RPCEndpoint{ChainID: chain, ApiInterface: spectypes.APIInterfaceRest}
+	nodeURL := common.NodeUrl{Url: "http://outrot-wiring.example/api/v3", InternalPath: "/v3"}
+	registerEndpointMetrics(mm, listen, nodeURL, provider)
+	rpcss := &RPCSmartRouterServer{smartRouterEndpointMetrics: mm, listenEndpoint: listen}
+
+	e := ep(nodeURL.Url, provider, true)
+	eps := []*routersession.EndpointWithDirectConnection{e}
+	rpcss.countURLRelayServiced(provider, nodeURL.Url)
+	served := urlSeriesLabels(t, "rpc_endpoint_url_relays_serviced_total", provider)
+	require.Len(t, served, 1)
+	want := map[string]string{"reason": "node-error"}
+	for k, v := range served[0] {
+		want[k] = v
+	}
+
+	rpcss.publishURLsOutOfRotation(eps)
+	require.Empty(t, urlSeriesLabels(t, "rpc_endpoint_url_out_of_rotation", provider), "in rotation: no series")
+
+	disableForTest(t, e.Endpoint, routersession.EndpointDisableNodeError)
+	rpcss.publishURLsOutOfRotation(eps)
+	rpcss.publishURLsOutOfRotation(eps) // still out on the next cycle: no second exit
+	require.Equal(t, []map[string]string{want}, urlSeriesLabels(t, "rpc_endpoint_url_out_of_rotation", provider))
+	require.Equal(t, []map[string]string{want}, urlSeriesLabels(t, "rpc_endpoint_url_out_of_rotation_exits_total", provider))
+	require.Equal(t, 1.0, gatheredCounter(t, "rpc_endpoint_url_out_of_rotation_exits_total", want))
+
+	require.True(t, e.Endpoint.ResetHealth())
+	rpcss.publishURLsOutOfRotation(eps)
+	require.Empty(t, urlSeriesLabels(t, "rpc_endpoint_url_out_of_rotation", provider), "back in rotation: the gauge series goes")
+	require.Len(t, urlSeriesLabels(t, "rpc_endpoint_url_out_of_rotation_exits_total", provider), 1, "the counter stays")
 }

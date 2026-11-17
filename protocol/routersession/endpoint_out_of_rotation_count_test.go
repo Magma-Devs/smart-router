@@ -7,7 +7,7 @@ import (
 )
 
 // MAG-5244 — an endpoint counts every time it leaves rotation, per reason. The metrics publisher
-// turns the count into rpc_endpoint_url_out_of_rotation_total, so it must move on the edge only:
+// turns the count into rpc_endpoint_url_out_of_rotation_exits_total, so it must move on the edge only:
 // once when the endpoint goes out, never again while it stays out.
 
 func TestOutOfRotationCount_EventDisableCountsTheEdgeOnly(t *testing.T) {

@@ -12,26 +12,47 @@ import (
 // now that was only in log lines and /debug/endpoint-state. Once per probe cycle this step reads
 // every endpoint's own record and hands it to the metrics manager, which publishes
 // rpc_endpoint_url_out_of_rotation (1 while out, per reason) and
-// rpc_endpoint_url_out_of_rotation_total (times it went out, per reason).
+// rpc_endpoint_url_out_of_rotation_exits_total (times it went out, per reason).
 //
 // It only reads. Nothing here decides whether a url is in or out.
 
-// urlOutCountsSeen is, per endpoint, the out-of-rotation counts already handed to the metrics
-// manager. Touched only by the probe loop.
-type urlOutCountsSeen map[*routersession.Endpoint]map[routersession.EndpointDisableReason]uint64
+// urlReasonKey names one url of a provider and one reason it can be out for.
+type urlReasonKey struct{ provider, url, reason string }
+
+// endpointOutSeen is what the last probe cycle saw of one endpoint: its out-of-rotation counts, and
+// the reasons it was out for.
+type endpointOutSeen struct {
+	counts map[routersession.EndpointDisableReason]uint64
+	out    map[string]struct{}
+}
+
+// urlOutSeen is what the last probe cycle saw, kept for the next one. The zero value is a cycle that
+// saw nothing. Touched only by the probe loop.
+type urlOutSeen struct {
+	// endpoints is keyed by endpoint, not by url, because a pairing rebuild replaces the Endpoint
+	// objects and their counts start again at zero.
+	endpoints map[*routersession.Endpoint]endpointOutSeen
+	// urlsOut is every (provider, url, reason) that was out, whichever entry of the url held it.
+	urlsOut map[urlReasonKey]struct{}
+}
 
 // collectURLsOutOfRotation turns this cycle's endpoints into one record per (provider, url): the
 // reasons the url is out for now, and how many times it newly went out since the cycle before.
-// It returns the records and the counts to remember for the next cycle.
+// It returns the records and what to remember for the next cycle.
 //
 // One url can back several endpoints of a provider (the chart writes an archive url twice). They are
-// one node and one series, so the url is out for a reason when any of its endpoints is, and an
-// event that takes all of them out together counts once: the largest increase among them.
+// one node and one series, so the url is out for a reason when any of its entries is, and an exit is
+// the url going out, not an entry:
+//   - entries that go out in the same cycle are one exit: the largest increase among them;
+//   - an entry that goes out while another entry of the url was already out for that reason at the
+//     cycle before joins that outage and adds nothing. Without this, one dead node behind two
+//     entries counted two exits whenever the entries crossed their failure threshold in different
+//     cycles.
 //
-// seen is keyed by endpoint, not by url, because a pairing rebuild replaces the Endpoint objects and
-// their counts start again at zero. An endpoint not seen before is counted from zero, and one that
-// is gone is forgotten.
-func collectURLsOutOfRotation(endpoints []*routersession.EndpointWithDirectConnection, seen urlOutCountsSeen) ([]metrics.URLOutOfRotation, urlOutCountsSeen) {
+// An endpoint not seen before is counted from zero, and one that is gone is forgotten. A rebuilt
+// endpoint that is out for a reason the url was already out for is the same outage, so it adds
+// nothing either.
+func collectURLsOutOfRotation(endpoints []*routersession.EndpointWithDirectConnection, seen urlOutSeen) ([]metrics.URLOutOfRotation, urlOutSeen) {
 	type urlKey struct{ provider, url string }
 	type urlAcc struct {
 		reasons map[string]struct{}
@@ -39,17 +60,27 @@ func collectURLsOutOfRotation(endpoints []*routersession.EndpointWithDirectConne
 	}
 	var order []urlKey
 	accs := make(map[urlKey]*urlAcc)
-	nextSeen := make(urlOutCountsSeen, len(endpoints))
+	next := urlOutSeen{
+		endpoints: make(map[*routersession.Endpoint]endpointOutSeen, len(endpoints)),
+		urlsOut:   make(map[urlReasonKey]struct{}),
+	}
 
 	for _, ep := range endpoints {
 		if ep == nil || ep.Endpoint == nil {
 			continue
 		}
-		if _, dup := nextSeen[ep.Endpoint]; dup {
+		if _, dup := next.endpoints[ep.Endpoint]; dup {
 			continue // a provider in both pools lists the same Endpoint twice
 		}
 		snap := ep.Endpoint.HealthSnapshot()
-		nextSeen[ep.Endpoint] = snap.OutOfRotationCounts
+		out := make(map[string]struct{})
+		if !snap.Enabled {
+			out[string(snap.DisableReason)] = struct{}{}
+		}
+		for _, rec := range snap.StateReasons {
+			out[string(rec.Reason)] = struct{}{}
+		}
+		next.endpoints[ep.Endpoint] = endpointOutSeen{counts: snap.OutOfRotationCounts, out: out}
 
 		key := urlKey{provider: ep.ProviderAddress, url: ep.Endpoint.NetworkAddress}
 		acc := accs[key]
@@ -58,21 +89,29 @@ func collectURLsOutOfRotation(endpoints []*routersession.EndpointWithDirectConne
 			accs[key] = acc
 			order = append(order, key)
 		}
-		if !snap.Enabled {
-			acc.reasons[string(snap.DisableReason)] = struct{}{}
+		for reason := range out {
+			acc.reasons[reason] = struct{}{}
+			next.urlsOut[urlReasonKey{key.provider, key.url, reason}] = struct{}{}
 		}
-		for _, rec := range snap.StateReasons {
-			acc.reasons[string(rec.Reason)] = struct{}{}
-		}
-		before := seen[ep.Endpoint]
+
+		before := seen.endpoints[ep.Endpoint]
 		for reason, count := range snap.OutOfRotationCounts {
-			if increase := count - before[reason]; count > before[reason] && increase > acc.wentOut[string(reason)] {
-				acc.wentOut[string(reason)] = increase
+			if count <= before.counts[reason] {
+				continue
+			}
+			r := string(reason)
+			if _, entryWasOut := before.out[r]; !entryWasOut {
+				if _, urlWasOut := seen.urlsOut[urlReasonKey{key.provider, key.url, r}]; urlWasOut {
+					continue // joined an outage of the url already under way
+				}
+			}
+			if increase := count - before.counts[reason]; increase > acc.wentOut[r] {
+				acc.wentOut[r] = increase
 			}
 		}
 	}
 
-	out := make([]metrics.URLOutOfRotation, 0, len(order))
+	records := make([]metrics.URLOutOfRotation, 0, len(order))
 	for _, key := range order {
 		acc := accs[key]
 		rec := metrics.URLOutOfRotation{Provider: key.provider, URL: key.url}
@@ -82,9 +121,9 @@ func collectURLsOutOfRotation(endpoints []*routersession.EndpointWithDirectConne
 		if len(acc.wentOut) > 0 {
 			rec.WentOut = acc.wentOut
 		}
-		out = append(out, rec)
+		records = append(records, rec)
 	}
-	return out, nextSeen
+	return records, next
 }
 
 // publishURLsOutOfRotation wires collectURLsOutOfRotation to this server's metrics. It runs at the
@@ -95,6 +134,6 @@ func (rpcss *RPCSmartRouterServer) publishURLsOutOfRotation(endpoints []*routers
 		return
 	}
 	var urls []metrics.URLOutOfRotation
-	urls, rpcss.urlOutCountsSeen = collectURLsOutOfRotation(endpoints, rpcss.urlOutCountsSeen)
+	urls, rpcss.urlOutSeen = collectURLsOutOfRotation(endpoints, rpcss.urlOutSeen)
 	rpcss.smartRouterEndpointMetrics.PublishURLsOutOfRotation(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, urls)
 }

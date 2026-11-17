@@ -51,7 +51,7 @@ type SmartRouterMetricsManager struct {
 	endpointURLBlockTracking       *prometheus.GaugeVec   // rpc_endpoint_url_block_tracking
 	endpointURLRelaysServiced      *prometheus.CounterVec // rpc_endpoint_url_relays_serviced_total
 	endpointURLOutOfRotation       *prometheus.GaugeVec   // rpc_endpoint_url_out_of_rotation
-	endpointURLOutOfRotationTotal  *prometheus.CounterVec // rpc_endpoint_url_out_of_rotation_total
+	endpointURLOutOfRotationExits  *prometheus.CounterVec // rpc_endpoint_url_out_of_rotation_exits_total
 	endpointFetchLatestFails       *prometheus.CounterVec // rpc_endpoint_fetch_latest_fails
 	endpointFetchBlockFails        *prometheus.CounterVec // rpc_endpoint_fetch_block_fails
 	endpointFetchLatestSuccess     *prometheus.CounterVec // rpc_endpoint_fetch_latest_success
@@ -322,8 +322,10 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		Name: "rpc_endpoint_url_out_of_rotation",
 		Help: "1 while one node url of a provider is out of rotation, labelled with why: unreachable (requests got no answer), node-error (the node answered with its own failure), head-stalled (it answers, but its block stopped moving while another url moved on), unspecified (should not appear). A url out for two reasons has two series. The series exists only while the url is out. Written once per probe cycle. url and internal_path as rpc_endpoint_url_latest_block.",
 	}, urlReasonLabels))
-	m.endpointURLOutOfRotationTotal = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "rpc_endpoint_url_out_of_rotation_total",
+	// Not rpc_endpoint_url_out_of_rotation_total: OpenMetrics names a counter's family without
+	// _total, which would declare the gauge's name a second time and make the page invalid.
+	m.endpointURLOutOfRotationExits = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "rpc_endpoint_url_out_of_rotation_exits_total",
 		Help: "Times one node url of a provider left rotation, by reason (as rpc_endpoint_url_out_of_rotation). Counts every time, including a hold shorter than a scrape, which the gauge cannot show.",
 	}, urlReasonLabels))
 
@@ -1057,7 +1059,7 @@ type URLOutOfRotation struct {
 // PublishURLsOutOfRotation publishes, for one chain and interface, why each node url is out of
 // rotation (MAG-5244). urls is every url the caller looked at this cycle, in or out. For each one
 // it sets rpc_endpoint_url_out_of_rotation to 1 under every reason that holds, and adds the new
-// times it left rotation to rpc_endpoint_url_out_of_rotation_total. Then it deletes every gauge
+// times it left rotation to rpc_endpoint_url_out_of_rotation_exits_total. Then it deletes every gauge
 // series it published for this chain and interface on an earlier cycle that no longer holds: a
 // url that came back, and also a url that is no longer listed at all (its provider left the
 // pairing), which would otherwise stay at 1 for ever.
@@ -1087,10 +1089,10 @@ func (m *SmartRouterMetricsManager) PublishURLsOutOfRotation(spec, apiInterface 
 			m.endpointURLOutOfRotation.WithLabelValues(values...).Set(1)
 			now[strings.Join(values, "\x00")] = values
 		}
-		if m.endpointURLOutOfRotationTotal != nil {
+		if m.endpointURLOutOfRotationExits != nil {
 			for reason, n := range u.WentOut {
 				if n > 0 {
-					m.endpointURLOutOfRotationTotal.WithLabelValues(append(slices.Clone(base), reason)...).Add(float64(n))
+					m.endpointURLOutOfRotationExits.WithLabelValues(append(slices.Clone(base), reason)...).Add(float64(n))
 				}
 			}
 		}
@@ -1134,8 +1136,8 @@ func (m *SmartRouterMetricsManager) ForgetEndpointURLLatestBlock(spec, apiInterf
 		if m.endpointURLOutOfRotation != nil {
 			m.endpointURLOutOfRotation.DeletePartialMatch(byURL)
 		}
-		if m.endpointURLOutOfRotationTotal != nil {
-			m.endpointURLOutOfRotationTotal.DeletePartialMatch(byURL)
+		if m.endpointURLOutOfRotationExits != nil {
+			m.endpointURLOutOfRotationExits.DeletePartialMatch(byURL)
 		}
 	}
 }
