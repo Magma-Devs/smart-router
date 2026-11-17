@@ -9,10 +9,12 @@ revision history are in this file's git history (`861d71a2`).
 
 - Must-have 1 (spec versioning: tags, change log, source pinning, source metric) is out of scope.
   Routers load whatever source they're given; a release is tied only to its bundled commit.
-- Every interface is classified alike. The router turns each failed or refused reply on JSON-RPC,
-  Tendermint, REST, GraphQL and gRPC into one error record (§2.5), and each chain's spec declares
-  where its errors sit in a reply (envelopes). The router ships the engine and each interface's
-  standard shape, no chain shape.
+- Chain reply shapes move to the spec. Besides code or message → class, each chain's spec declares
+  where its errors sit in a reply and when a success reply carries one (envelopes, §2.5), for the
+  router's decisions only: the client still gets the node's reply as is (invariant 10). The router
+  keeps only each interface's standard shape, and its three chain readers move to specs. Rows gain
+  a `status` matcher, string codes and `detail` matching. The ticket's split kept reply reading in
+  code.
 - Chain rows may read inside HTTP 400, 404, 410, 422 and 500 on REST, 400 and 500 on the other HTTP
   interfaces, and gRPC InvalidArgument, NotFound, AlreadyExists, FailedPrecondition, OutOfRange,
   Internal and Unknown (the node's own answers). Every other HTTP status with a router rule, and
@@ -24,22 +26,22 @@ revision history are in this file's git history (`861d71a2`).
 
 **Out of scope:** how the router parses, caches and matches (R&D's design); the per-chain research
 (MAG-4898); write-error ranking (MAG-4059); remembering accepted hashes (MAG-4748); gRPC streams;
-what clients get back (the rulebook's interface chapters).
+the router's own replies, when no node's reply goes back (the rulebook's interface chapters).
 
 ## 1. Model and invariants
 
 A **row** says which node code or message means which **verdict**. A **verdict** is a name, a code
 and flags (`sub_category`, `retryable`, `class`). An **envelope** says where a chain puts its error
-code and text in a reply, and when a success reply is an error. Rows match the **error record** the
-router builds from a reply (§2.5). Rows, verdicts and envelopes live in the chain's spec and inherit
-through `imports`. The router keeps: the record and each interface's standard shape; the flag
-vocabulary and what each flag does (retry, fault, scoring, hold-off, caching); interface, status
-and connection rules; rate-limit detection; the unknown default; write safety; and the
-**router-owned verdicts**: every verdict a transport row points at, the 25 the router's logic
-references by identity (`CHAIN_TX_ALREADY_KNOWN`, `CHAIN_BLOCK_NOT_FOUND`,
-`CHAIN_SOLANA_MISSING_LONG_TERM`, `NODE_RATE_LIMITED`, `NODE_GATEWAY_TIMEOUT`, `NODE_BAD_GATEWAY`,
-`NODE_ENDPOINT_NOT_FOUND`, 16 protocol, 2 user), all protocol, connection and status verdicts, and
-`UNKNOWN_ERROR`.
+code and text in a reply, and when a success reply is an error; it reads a reply and never changes
+it (invariant 10). Rows match the **error record** the router builds from a reply (§2.5). Rows,
+verdicts and envelopes live in the chain's spec and inherit through `imports`. The router keeps:
+the record and each interface's standard shape; the flag vocabulary and what each flag does
+(retry, fault, scoring, hold-off, caching); interface, status and connection rules; rate-limit
+detection; the unknown default; write safety; and the **router-owned verdicts**: every verdict a
+transport row points at, the 25 the router's logic references by identity
+(`CHAIN_TX_ALREADY_KNOWN`, `CHAIN_BLOCK_NOT_FOUND`, `CHAIN_SOLANA_MISSING_LONG_TERM`,
+`NODE_RATE_LIMITED`, `NODE_GATEWAY_TIMEOUT`, `NODE_BAD_GATEWAY`, `NODE_ENDPOINT_NOT_FOUND`, 16
+protocol, 2 user), all protocol, connection and status verdicts, and `UNKNOWN_ERROR`.
 
 Invariants the router enforces at run time, for every spec from every source:
 
@@ -48,7 +50,11 @@ Invariants the router enforces at run time, for every spec from every source:
 2. No spec row runs ahead of the locked prefix (§3).
 3. A row can't name a `PROTOCOL_*`, rate-limit, `CHAIN_TX_ALREADY_KNOWN` or `UNKNOWN_ERROR` verdict;
    a spec can't define a rate-limit or internal verdict or redefine a router-owned name or code.
-4. A write that fails with a slot-already-used answer is reported unknown, whatever row matched.
+4. A write can be reported rejected only through a row that matched the chain's own code or text,
+   never on a status alone (a bare REST 400, a bare gRPC InvalidArgument), and never for a
+   slot-already-used answer, whatever row matched. Until MAG-4748 ships, a slot-used answer carries
+   no `Lava-Write-Outcome`; after it, the outcome is `unknown` (rulebook Q45). Either way the client
+   gets the node's reply as is (invariant 10).
 5. A known write method is stateful whether the spec marks it, clears it or omits it.
 6. A chain's effective policy acts only if it matches a signed approval covering rows, verdicts,
    envelopes, order and imports.
@@ -57,10 +63,17 @@ Invariants the router enforces at run time, for every spec from every source:
 8. No spec verdict blames the endpoint for a reply whose status is a readable client status: HTTP
    400, 404, 410 or 422 on REST, HTTP 400 on the other HTTP interfaces, or gRPC InvalidArgument,
    NotFound, AlreadyExists, FailedPrecondition or OutOfRange (§3 step 3).
-9. An envelope can mark a success reply as an error and fill the record's code and text. It never
-   sets a status and never turns an error into a success. Safety envelopes (§2.5) run first, in
-   every fallback too, and no policy can remove, narrow or shadow them or change the router
+9. An envelope can mark a success reply as a node error and fill the record's code and text. It
+   never sets a status and never turns an error into a success. Safety envelopes (§2.5) run first,
+   in every fallback too, and no policy can remove, narrow or shadow them or change the router
    decision they lead to (§4.6, §5.6).
+10. Classification never changes what the client receives. When the router returns a node's
+    reply, the client gets the status and body as the node sent them, in masked mode too
+    (`failed_relay_reply.go:35-38`). Rows and envelopes only decide how the router treats a reply:
+    retry, endpoint health, metrics, and which node's reply the client gets. They never edit, wrap
+    or replace a reply. The router answers in a node's place only where it does today: no node
+    answered, or a write is unclear (MAG-4218, `withUnclearWriteStatus`); there, a success an
+    envelope marks counts as a node error, as the three chain checks in code do today.
 
 ## 2. Spec format
 
@@ -285,10 +298,12 @@ Example, XRP's in-result errors (in code today at `xrplEngineResult.go:64-104`):
   on an absent or null value fails, except `exists: false`; a value of the wrong type fails its
   check. For `code` and `text`, absent, null or non-scalar values are unresolved.
 - Order: safety envelopes first, then the rest in inheritance order. On a success reply the first
-  envelope whose `error_when` holds makes the reply a node error (`in_success`), handled like any
-  other: classified, counted, and never a write's success. On an error reply the first envelope
-  whose `error_when` holds fills `code` and `text` where the standard shape left them empty. When a
-  safety envelope marks a reply, its `code` and `text` stand and no other envelope runs.
+  envelope whose `error_when` holds marks the reply as a node error (`in_success`) for the router's
+  decisions: classified, counted, and never taken as a write's success, so a write waits for
+  another copy. On an error reply the first envelope whose `error_when` holds fills the record's
+  `code` and `text` where the standard shape left them empty. When a safety envelope marks a reply,
+  its `code` and `text` stand and no other envelope runs. Envelopes act on the record only; the
+  reply the client gets is a node's reply as the node sent it (invariant 10).
 - Step 1 moves today's chain shapes in code to envelopes, with the same verdicts: the Cosmos
   `tx_response` check (`restMessage.go:55-60, 83-96`) into `cosmossdk.json`; Tendermint's
   `result.response` check (`tendermintRPCMessage.go:39-51`: `code ≠ 0` and a non-empty `log`, so
@@ -356,11 +371,11 @@ Step 2 is the only change to today's order. Replayed at `6c237073`: 102 fixtures
 counterexamples unchanged. Changes by design (locked statuses now win over a matching chain row):
 REST 403 "account not found" → `NODE_ACCESS_DENIED`; REST 409 "account sequence mismatch" →
 `CHAIN_TX_ALREADY_KNOWN`; REST 402/408/451/501/405 with family text → the status verdict; JSON-RPC
-`HTTP 503: …` → `NODE_SERVICE_UNAVAILABLE` (also for `-32602` bodies and `tefPAST_SEQ`, which still
-ends unknown on a write via §5.2); JSON-RPC `HTTP 408: …` → `UNKNOWN_ERROR` (no JSON-RPC 408 row);
-gRPC 14/8/10 "insufficient fee" → `NODE_SERVICE_UNAVAILABLE`/`UNKNOWN_ERROR`/`NODE_ABORTED`; gRPC
-1/4/7/8/15/16 with text a gRPC text row matches ("not implemented", `error_classifier.go:540-542`)
-→ `UNKNOWN_ERROR` (was `NODE_UNIMPLEMENTED`); once
+`HTTP 503: …` → `NODE_SERVICE_UNAVAILABLE` (also for `-32602` bodies and `tefPAST_SEQ`, which on a
+write still matches its §5.2 signature); JSON-RPC `HTTP 408: …` → `UNKNOWN_ERROR` (no JSON-RPC 408
+row); gRPC 14/8/10 "insufficient fee" → `NODE_SERVICE_UNAVAILABLE`/`UNKNOWN_ERROR`/`NODE_ABORTED`;
+gRPC 1/4/7/8/15/16 with text a gRPC text row matches ("not implemented",
+`error_classifier.go:540-542`) → `UNKNOWN_ERROR` (was `NODE_UNIMPLEMENTED`); once
 spec rows act, a family row that blames the endpoint (Solana `-32005`, Bitcoin `-28`/`-10`/`-9`,
 Starknet `63`, NEAR `NOT_SYNCED_YET`, XRP `noNetwork`/`amendmentBlocked`/`internal…`) answering
 under JSON-RPC HTTP 400 → `UNKNOWN_ERROR` (step 3; no fixture has this shape, and Step 1 counts it
@@ -457,7 +472,7 @@ them a REST route).
 
 §3 step 2. Enforced regardless of what validation said about a row's text.
 
-### 5.2 Slot already used → unknown (rulebook Q45)
+### 5.2 Slot already used is never rejected (rulebook Q45)
 
 - A signature table in router code reads the record's family, interface, code and text,
   independent of row matching:
@@ -486,11 +501,12 @@ them a REST route).
 
   Bitcoin `-27` / Starknet `59` ("already there") may instead be reported accepted under MAG-4059
   (§10).
-- A write with no accepted attempt and any signature match is reported unknown, on every interface.
-  The signatures read every record, including a JSON-RPC or Tendermint 5xx body carried as
-  `HTTPStatusError` (`direct_rpc_relay.go:600-612`) and an error an envelope found in a success. Add
-  a fifth reason to `*unclearWriteError` (`rpcsmartrouter_server.go:1421-1445`). R&D picks the wire
-  form.
+- A write with no accepted attempt and any signature match is never reported rejected, on every
+  interface, and the client gets the node's reply as is: a match never makes the router answer in
+  the node's place (invariant 10). Until MAG-4748 ships the reply carries no `Lava-Write-Outcome`;
+  after it, `unknown` (rulebook Q45). The signatures read every record, including a JSON-RPC or
+  Tendermint 5xx body carried as `HTTPStatusError` (`direct_rpc_relay.go:600-612`) and an error an
+  envelope found in a success.
 - Record the signature before retry decisions: no further fan-out, not even via the all-rate-limited
   exception, even if a classifier also calls the answer a rate limit. Accepted siblings follow the
   accepted-result rules; reads classify as usual.
@@ -594,8 +610,8 @@ ref missing, not an archive, nothing parses) the router boots on the bundled spe
   (`listenForUpstreamMessages`, `direct_ws_subscription_manager.go:1386-1398`), on `jsonrpc` and
   `tendermintrpc`, each build a record (`status` 0; `code`, `text` and `detail` from the frame's
   error object) and go through §3 with the subscribe api's scope. Submit-and-watch methods are
-  writes: a §5.2 match is recorded as an unclear write in relay_end, and the client still gets the
-  node's frame. relay_end uses the same verdict.
+  writes: a §5.2 match is never reported rejected. The client gets the node's frame as the node
+  sent it. relay_end uses the same verdict.
 - The verdict is counted in `smartrouter_errors_total` and decides the URL's availability as on the
   relay path (`shouldFailSessionForResult`, `rpcsmartrouter_server.go:2585-2620`): a rate limit
   holds it off; a verdict that path scores (`UNKNOWN_ERROR` included) counts a failure
@@ -622,10 +638,10 @@ ref missing, not an archive, nothing parses) the router boots on the bundled spe
 ## 7. Rollout
 
 **Step 0 (no spec row or envelope read yet).** Visible changes: boot on bundled specs instead of
-refusing; writes relayed stateful even when cleared or undeclared; slot-already-used writes
-reported unclear; locked statuses decide their own replies; WebSocket subscription errors counted
-and judged by their verdict (§5.7); node errors served from cache get their verdict on every
-interface; `smartrouter_errors_total` gains `apiInterface`. Deliverables:
+refusing; writes relayed stateful even when cleared or undeclared; a slot-already-used answer
+ends a write's fan-out; locked statuses decide their own replies; WebSocket subscription errors
+counted and judged by their verdict (§5.7); node errors served from cache get their verdict on
+every interface; `smartrouter_errors_total` gains `apiInterface`. Deliverables:
 `compatibility.json`, `SPEC_COMMIT`, `make specs`, folder-matches-commit check, bundled specs in
 the image, source fallback (§6, §5.6); `cmd/specvalidate`, schema, `spec_guards.yml` jobs,
 owner-review and evidence checks, approval pipeline (§4, §8.1); the error record on every
@@ -762,10 +778,16 @@ shape covered, and keeps the bundled policy for any chain whose external policy 
   `TestDirectRPCRelaySender_HTTPStatusOverridesRetryableBodyCode_MAG1870`
   (`direct_rpc_integration_test.go:530`) pass unchanged with the verdicts loaded from specs.
 - Slot-already-used: every signature as a full pair through the stateful path of each interface it
-  lists ends unknown; the same pair on a read keeps its verdict; every fixture with
+  lists is never reported rejected, and the client gets the node's reply byte for byte with no
+  `Lava-Write-Outcome`; the same pair on a read keeps its verdict; every fixture with
   `CHAIN_NONCE_TOO_LOW`, `CHAIN_INVALID_SEQUENCE` or `CHAIN_STARKNET_INVALID_NONCE` matches a
   signature; mixed with rate-limit answers, or matching a rate-limit phrase too, no second fan-out;
   include an accepted sibling and prefixed XRP replies.
+- Reply as is (invariant 10), on every interface, in masked and unmasked mode: a reply a spec row
+  classifies and a success an envelope marks (Cosmos `tx_response`, Tendermint `result.response`,
+  XRP `tefPAST_SEQ`) reach the client with the node's status and body byte for byte; a write whose
+  copies all answered with marked replies returns one of them; a bare REST 400 or gRPC
+  InvalidArgument on a write goes back as is, with no `Lava-Write-Outcome`.
 - Coverage: each chain's effective rows and verdicts vs the PR's base commit; gains, losses,
   reorders or flag changes fail unless declared and approved.
 - Generated row tests: per changed row a source-backed positive reply and a near-miss (one per
@@ -779,9 +801,9 @@ shape covered, and keeps the bundled policy for any chain whose external policy 
 - Safety envelopes (§2.5, §4.6): a policy that disables or narrows one, or changes its `code` or
   `text`, is rejected; a child envelope that matches the same XRP `tefPAST_SEQ` reply but extracts
   only `engine_result_message` changes nothing, because the safety envelope runs first, and the
-  write still ends unknown (§5.2); with the chain on reduced coverage and on whole-source fallback,
-  XRP HTTP 200 replies carrying `tefPAST_SEQ` and `tooBusy` still reach the signature and the rate
-  limit.
+  write still matches its §5.2 signature; with the chain on reduced coverage and on whole-source
+  fallback, XRP HTTP 200 replies carrying `tefPAST_SEQ` and `tooBusy` still reach the signature and
+  the rate limit.
 - WebSocket (§5.7), on `jsonrpc` and `tendermintrpc`: a refused subscribe and an error frame
   delivered to the subscription's error channel (injected there on `tendermintrpc`) are counted
   with their verdict and `apiInterface`; a client-fault refusal counts no failure, an unclassified
@@ -866,7 +888,7 @@ description names the rule (`stateful`, `stateful_default`, `status_fault`).
 | Decision | Needed before |
 |---|---|
 | Update MAG-4910 for the five departures | approval is recorded |
-| Wire form for unknown writes; Bitcoin `-27` / Starknet `59` unknown or accepted (MAG-4059) | Step 0 write-safety ships |
+| Bitcoin `-27` / Starknet `59` ("already there"): a slot-used signature or accepted (MAG-4059) | Step 0 write-safety ships |
 | Whether a non-retryable verdict inside a JSON-RPC 5xx should end the relay instead of failing over (review 613-1, `error_mapper.go:39-45`); until then the status decides retry (§2.3) | a spec relies on `retryable: false` under a JSON-RPC 5xx |
 | Initial write-method table | Step 0 write guards ship |
 | Reserved code range (proposal 5000–5999; split e.g. 5000–5499 `NODE_*`, 5500–5999 `CHAIN_*` to match `TestRegistry_CodeRanges` and `docs/ERROR-REGISTRY-DESIGN.md`); docs follow-up (`ERROR-REGISTRY-DESIGN.md`, public docs, `docs/RELAY-END-EVENT.md:65, 138`) | Step 0 validator |
