@@ -152,7 +152,7 @@ Theory predicts roughly a third of unpinned rounds should fail with heads at H, 
 
 ```bash
 docker/sticky-test/run-qa.sh                          # 7 scenarios, ~6 min
-STICKY_SHARED_STATE=false docker/sticky-test/run-qa.sh # negative control: 5 of 7 MUST fail
+STICKY_SHARED_STATE=false docker/sticky-test/run-qa.sh # negative control: all but select-provider should fail
 ```
 
 Brings the stack up once and runs every scenario against it, including the ones that need the
@@ -162,15 +162,39 @@ infrastructure disturbed — a replica restarted, the registry stopped and start
 |---|---|---|
 | Customer sequence across replicas | head-then-fetch over 3 replicas, no false gaps | yes |
 | Session id on every call | the id must be on the head request too, not only the fetch | yes |
-| Concurrent requests on one id | simultaneous requests do not split across upstreams | weakly |
+| Concurrent requests on one id | simultaneous requests for one id do not split across upstreams, for each of 6 ids | yes |
 | `lava-select-provider` beats a claim | naming a provider explicitly still wins | no, by design |
-| A replica restarts | a pod with an empty table adopts the fleet's claim | yes |
+| A replica restarts | a pod with an empty table adopts the fleet's claim | weakly, one id |
 | Registry unreachable | sticky fails closed; traffic without the header is unaffected | yes |
-| Registry restored | sticky works again | yes |
+| Registry restored | sticky works again | weakly, one id |
 
-Two of these do not discriminate, and that is stated on purpose rather than left to look stronger
-than it is: `select-provider` does not depend on shared state at all, and the concurrency check
-passed once with the feature disabled.
+One of these does not discriminate, and that is stated on purpose rather than left to look
+stronger than it is: `select-provider` does not depend on shared state at all.
+
+The concurrency check used to be the second. It asked with one id, and without the registry the
+three replicas pick the same upstream by chance at least one time in nine (2 of 24 trials), so it
+passed with the feature disabled. A replica sends its share of the 24 requests almost entirely to
+one upstream, so more requests per id barely help; more ids do. Every one of 6 has to hold
+(MAG-4129).
+
+`restarted-pod` and `cache-recovered` are still weak for the same reason: each asks with one id,
+so with the feature disabled each passes whenever the replicas happen to agree. `restarted-pod`
+did, once in three negative-control runs. It also first uses its id after the restart, so no
+claim predates the restart it is named for.
+
+**Reading a failure.** Which upstream answered is read from the router's `Lava-Provider-Address`,
+not from the `servedBy` the fake writes into the body: a reply from the response cache carries the
+body of whichever upstream filled the cache, and its header says `Cached`. A sticky reply that
+says `Cached` fails the scenario as a MAG-4122 regression instead of being counted as an upstream.
+A false gap in a round that carries the id on both calls prints both replies' upstream,
+`Lava-Retries` and replica, and names the path that produced it.
+
+**Refused rounds are not gaps.** A pinned call fails rather than move to another upstream when
+the router believes the pinned one is more than 10 blocks behind the tip (MAG-4123). The fakes
+advance a block a second, faster than the router polls their heads, so here about one pinned head
+call in ten is refused with `pinned provider is too far behind the chain tip`. The customer and
+id-on-every-call scenarios report those rounds and leave them out of the gap count: the caller saw
+an error, which a silent gap is not.
 
 **Closed gap.** A sticky request used to be answered from the response cache before any upstream
 was chosen, so the pin was not consulted: on a cold start, 24 sticky requests produced 19 claim
