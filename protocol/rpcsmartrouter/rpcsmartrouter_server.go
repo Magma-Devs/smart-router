@@ -962,7 +962,8 @@ func (rpcss *RPCSmartRouterServer) validateCrossValidationCapacity(ctx context.C
 	candidateProviders, candidateGroups := rpcss.sessionManager.ProviderAndGroupCountsForRequest(addon, extensions, ctx)
 	if params.IncludeBackups {
 		// max-participants: all (MAG-2783) fans out to the backup tier too, so a backup that can serve the
-		// request is a candidate as well. It adds no group: backups carry no group label.
+		// request is a candidate as well. The group check below still counts the primaries' groups alone,
+		// as the selection does, although the quorum counts a backup's answer under its group-label.
 		candidateProviders += rpcss.sessionManager.BackupCountForRequest(addon, extensions, ctx)
 	}
 	if params.MaxParticipants > candidateProviders {

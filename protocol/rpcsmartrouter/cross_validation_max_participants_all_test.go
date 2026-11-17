@@ -3,7 +3,9 @@ package rpcsmartrouter
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -26,18 +28,22 @@ import (
 
 // bootParticipantsTestEndpoint runs the real CreateSmartRouterEndpoint for an ETH1 JSON-RPC endpoint with
 // the given primaries and backups and one enabled policy on eth_getBalance (agreement-threshold 2), whose
-// max-participants is the given value, and returns the endpoint's server.
-func bootParticipantsTestEndpoint(t *testing.T, maxParticipants any, primaries, backups []*routersession.RPCStaticProviderEndpoint) *RPCSmartRouterServer {
+// max-participants is the given value, and returns the endpoint's server. extra adds policy fields.
+func bootParticipantsTestEndpoint(t *testing.T, maxParticipants any, primaries, backups []*routersession.RPCStaticProviderEndpoint, extra ...map[string]any) *RPCSmartRouterServer {
 	t.Helper()
 	rand.InitRandomSeed()
 	prevSkipWS := chainlib.SkipWebsocketVerificationDefault
 	chainlib.SkipWebsocketVerificationDefault = true
 	t.Cleanup(func() { chainlib.SkipWebsocketVerificationDefault = prevSkipWS })
 	prevPolicies := viper.Get(common.CrossValidationConfigName)
-	viper.Set(common.CrossValidationConfigName, map[string]any{"policies": []any{map[string]any{
+	policy := map[string]any{
 		"chain-id": "ETH1", "api-interface": "jsonrpc", "method": "eth_getBalance",
 		"enabled": true, "agreement-threshold": 2, "max-participants": maxParticipants,
-	}}})
+	}
+	for _, fields := range extra {
+		maps.Copy(policy, fields)
+	}
+	viper.Set(common.CrossValidationConfigName, map[string]any{"policies": []any{policy}})
 	t.Cleanup(func() { viper.Set(common.CrossValidationConfigName, prevPolicies) })
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -174,4 +180,74 @@ func TestCrossValidationShortfall_AllCountsTheBackups(t *testing.T) {
 		require.NotNil(t, advisory, "the numeric policy never draws on backups")
 		require.True(t, advisory.configuredShort)
 	})
+}
+
+// balanceUpstream is fleetTestUpstream that answers eth_getBalance with the given result.
+func balanceUpstream(t *testing.T, balance string) *httptest.Server {
+	t.Helper()
+	inner := fleetTestUpstream(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if strings.Contains(string(body), `"eth_getBalance"`) {
+			var req struct {
+				ID json.RawMessage `json:"id"`
+			}
+			_ = json.Unmarshal(body, &req)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": balance})
+			return
+		}
+		resp, err := http.Post(inner.URL, "application/json", bytes.NewReader(body)) //nolint:noctx // test-only forwarder
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.Copy(w, resp.Body)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TestCrossValidationAll_ABackupCountsAsItsGroupInTheQuorum pins what CROSS-VALIDATION.md says about a
+// backup that max-participants: all folds in: when the quorum counts groups for min-groups, its answer
+// counts under its own group-label, or under the implicit "default" group when it has none, the same
+// rule as for a primary. Primaries sim-1 (group a) and sim-2 (group b) and one backup; sim-1 and the
+// backup answer 0x1, sim-2 answers 0x2, under min-groups 2 and agreement-threshold 2. Only one primary
+// group agrees with the backup, so the backup's group decides the quorum.
+func TestCrossValidationAll_ABackupCountsAsItsGroupInTheQuorum(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		backupGroup string
+		wantStatus  string
+	}{
+		{"an unlabeled backup counts as the default group", "", "success"},
+		{"a backup labeled c counts as group c", "c", "success"},
+		{"a backup labeled a adds no group to sim-1's", "a", "failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := bootParticipantsTestEndpoint(t, "all",
+				[]*routersession.RPCStaticProviderEndpoint{
+					fleetTestPrimary("sim-1", "a", balanceUpstream(t, "0x1").URL),
+					fleetTestPrimary("sim-2", "b", balanceUpstream(t, "0x2").URL),
+				},
+				[]*routersession.RPCStaticProviderEndpoint{fleetTestPrimary("backup-1", tc.backupGroup, balanceUpstream(t, "0x1").URL)},
+				map[string]any{"min-groups": 2})
+
+			result, _ := server.SendRelay(context.Background(), "", `{"jsonrpc":"2.0","id":1,"method":"eth_getBalance","params":["0x00000000000000000000000000000000000000c1","latest"]}`,
+				http.MethodPost, "", "", nil, nil)
+			require.NotNil(t, result)
+			headers := map[string]string{}
+			for _, md := range result.Reply.GetMetadata() {
+				headers[md.Name] = md.Value
+			}
+			require.Equal(t, tc.wantStatus, headers[common.CROSS_VALIDATION_STATUS_HEADER_NAME], "headers: %v", headers)
+			if tc.wantStatus == "success" {
+				require.Equal(t, "backup-1,sim-1", headers[common.CROSS_VALIDATION_AGREEING_PROVIDERS_HEADER])
+			} else {
+				require.Equal(t, common.CrossValidationReasonDiversityUnmet, headers[common.CROSS_VALIDATION_FAILURE_REASON_HEADER])
+			}
+		})
+	}
 }

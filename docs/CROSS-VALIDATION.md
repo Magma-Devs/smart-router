@@ -100,11 +100,13 @@ left to give once every configured upstream is already in the fan-out. `primary`
 same `direct-rpc` providers the group-diversity fan-out already draws on; `all` adds
 `backup-direct-rpc` on top.
 
-**`all`'s backup participants are a count, not a group.** The backup tier carries no
-`group-label` today, so a backup folded in by `all` contributes to `max-participants` and the
-agreement quorum, but not to a `min-groups` diversity requirement — diversity is still judged
-on the primaries alone. A policy combining `max-participants: all` with `min-groups` > 1 gets
-both effects independently, not a backup that counts toward the group spread.
+**A backup that `all` folds in is a group in the quorum.** When the quorum counts groups for
+`min-groups`, a backup's answer counts under its own `group-label`, or under the implicit
+`"default"` group when it has none: the same rule as for a primary. So with primaries in groups
+`a` and `b` and an unlabeled backup, one primary of group `a` agreeing with the backup meets
+`min-groups: 2`. Give each backup the `group-label` of its vendor, or it can stand in for a group
+it does not belong to. The request-time `insufficient-groups` check and the selection still count
+the primaries' groups alone, so a backup never makes a request pass that check.
 
 Resolution happens once the router knows the endpoint's real provider counts (after dialing,
 before serving), so the two strings behave exactly like the equivalent number from then on —
