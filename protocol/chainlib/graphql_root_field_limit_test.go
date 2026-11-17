@@ -30,8 +30,20 @@ func TestGraphQLChainParserRefusesAmplifiedRequests(t *testing.T) {
 	_, err := chainParser.ParseMsg("", body, graphqlConnectionType, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 	require.ErrorContains(t, err, fmt.Sprintf("graphql operation selects more than %d root fields", rpcInterfaceMessages.MaxGraphQLRootFields))
 
-	atLimit := []byte(`{"query":"{ ` + strings.Repeat("chainIdentifier ", rpcInterfaceMessages.MaxGraphQLRootFields) + `}"}`)
+	// At the limit, under 300 aliases: 300 response keys, which the node runs 300 times.
+	aliased := make([]string, rpcInterfaceMessages.MaxGraphQLRootFields)
+	for i := range aliased {
+		aliased[i] = fmt.Sprintf("a%d: chainIdentifier", i)
+	}
+	atLimit := []byte(`{"query":"{ ` + strings.Join(aliased, " ") + ` }"}`)
 	chainMessage, err := chainParser.ParseMsg("", atLimit, graphqlConnectionType, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 	require.NoError(t, err)
 	require.Len(t, strings.Split(chainMessage.GetApi().Name, rpcInterfaceMessages.GraphQLMethodSeparator), rpcInterfaceMessages.MaxGraphQLRootFields)
+
+	// The same field written 300 times is one response key: the node runs it once, so it is
+	// named and charged once (MAG-5120). The limit still counted all 300 selections.
+	repeated := []byte(`{"query":"{ ` + strings.Repeat("chainIdentifier ", rpcInterfaceMessages.MaxGraphQLRootFields) + `}"}`)
+	chainMessage, err = chainParser.ParseMsg("", repeated, graphqlConnectionType, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
+	require.NoError(t, err)
+	require.Equal(t, "chainIdentifier", chainMessage.GetApi().Name)
 }
