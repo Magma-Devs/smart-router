@@ -10,7 +10,6 @@ import (
 
 	chaintracker "github.com/magma-Devs/smart-router/protocol/chaintracker"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
-	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/stretchr/testify/require"
 )
@@ -144,19 +143,4 @@ func TestHeadOnly_KeepsPolling(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return fetcher.latestCalls.Load() > after+2
 	}, 5*time.Second, TimeForPollingMock, "head-only must keep polling FetchLatestBlockNum; that call is what feeds the per-endpoint tip observation")
-}
-
-func TestHeadOnly_GetLatestBlockDataReturnsNoHashes(t *testing.T) {
-	fetcher := &headlessFetcher{latestBlock: 100}
-	tracker, err := chaintracker.NewChainTracker(context.Background(), fetcher, headOnlyConfig(true))
-	require.NoError(t, err)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	require.NoError(t, tracker.StartAndServe(ctx))
-
-	latest, hashes, _, err := tracker.GetLatestBlockData(spectypes.NOT_APPLICABLE, spectypes.NOT_APPLICABLE, spectypes.NOT_APPLICABLE)
-	require.NoError(t, err)
-	require.Equal(t, int64(100), latest)
-	require.Empty(t, hashes, "head-only keeps no block queue, so callers must see an empty hash set — data reliability has to be off for such a chain")
 }

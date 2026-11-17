@@ -173,10 +173,9 @@ type EndpointMonitor struct {
 	wakeBursts atomic.Uint64
 
 	// Callbacks for events (optional)
-	onFork        func(endpointURL string, blockNum int64)
-	onNewBlock    func(endpointURL string, fromBlock, toBlock int64)
-	onConsistency func(endpointURL string, oldBlock, newBlock int64)
-	onFetchError  func(endpointURL string)
+	onFork       func(endpointURL string, blockNum int64)
+	onNewBlock   func(endpointURL string, fromBlock, toBlock int64)
+	onFetchError func(endpointURL string)
 	// onTipObservation, if set, is invoked with every positive block observed by EITHER the
 	// poll path or the relay-harvest path (MAG-2160 / Topic C): it feeds the cheap monotonic
 	// per-chain ChainState tip (SetLatestBlock). Fired AFTER obsMu is released so the tip lock
@@ -237,10 +236,9 @@ type EndpointChainTrackerConfig struct {
 	IdlePollInterval time.Duration
 
 	// Optional callbacks
-	OnFork        func(endpointURL string, blockNum int64)
-	OnNewBlock    func(endpointURL string, fromBlock, toBlock int64)
-	OnConsistency func(endpointURL string, oldBlock, newBlock int64)
-	OnFetchError  func(endpointURL string)
+	OnFork       func(endpointURL string, blockNum int64)
+	OnNewBlock   func(endpointURL string, fromBlock, toBlock int64)
+	OnFetchError func(endpointURL string)
 	// OnTipObservation, if set, feeds every positive poll/relay block into the per-chain
 	// ChainState tip (MAG-2160). See EndpointMonitor.onTipObservation.
 	OnTipObservation TipObservationFunc
@@ -337,7 +335,6 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 		relayGateFreshness: avgBlockTime,
 		onFork:             config.OnFork,
 		onNewBlock:         config.OnNewBlock,
-		onConsistency:      config.OnConsistency,
 		onFetchError:       config.OnFetchError,
 		onTipObservation:   config.OnTipObservation,
 		onPollBlock:        config.OnPollBlock,
@@ -555,12 +552,6 @@ func (m *EndpointMonitor) GetOrCreateTracker(
 		// Default: just advance the tracker state (tip is written via recordPollObservation).
 		config.NewLatestCallback = func(fromBlock, toBlock int64, hash string) {
 			m.setTrackerState(endpointURL, EndpointChainTrackerPolling, nil)
-		}
-	}
-
-	if m.onConsistency != nil {
-		config.ConsistencyCallback = func(oldBlock, newBlock int64) {
-			m.onConsistency(endpointURL, oldBlock, newBlock)
 		}
 	}
 
@@ -787,21 +778,6 @@ func (m *EndpointMonitor) GetLatestBlockNum(endpointURL string) int64 {
 	}
 
 	return tracker.GetAtomicLatestBlockNum()
-}
-
-// GetLatestBlockData returns detailed block data for an endpoint.
-// Returns latest block number, change time, and whether data exists.
-func (m *EndpointMonitor) GetLatestBlockData(endpointURL string) (latestBlock int64, changeTime time.Time, exists bool) {
-	m.mu.RLock()
-	tracker, trackerExists := m.trackers[endpointURL]
-	m.mu.RUnlock()
-
-	if !trackerExists {
-		return 0, time.Time{}, false
-	}
-
-	latestBlock, changeTime = tracker.GetLatestBlockNum()
-	return latestBlock, changeTime, true
 }
 
 // ResetAllLatestBlocks clears BOTH per-endpoint tip sources so the next consistency

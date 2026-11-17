@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -20,12 +19,6 @@ import (
 
 // IChainTracker represents the interface for chain tracking functionality
 type IChainTracker interface {
-	// GetLatestBlockData returns block hashes for the specified block range and a specific block
-	GetLatestBlockData(fromBlock, toBlock, specificBlock int64) (latestBlock int64, requestedHashes []*BlockStore, changeTime time.Time, err error)
-
-	// GetLatestBlockNum returns the current latest block number and the time it was last changed
-	GetLatestBlockNum() (int64, time.Time)
-
 	// GetAtomicLatestBlockNum returns the current latest block number atomically
 	GetAtomicLatestBlockNum() int64
 
@@ -99,14 +92,12 @@ func (cs *DefaultChainTrackerFetcher) FetchBlockHashByNum(ctx context.Context, b
 }
 
 type ChainTracker struct {
-	chainFetcher            ChainFetcher // used to communicate with the node
-	blocksToSave            uint64       // how many finalized blocks to keep
+	blocksToSave            uint64 // how many finalized blocks to keep
 	latestBlockNum          int64
 	blockQueueMu            sync.RWMutex
-	blocksQueue             []BlockStore                    // holds all past hashes up until latest block
-	forkCallback            func(int64)                     // a function to be called when a fork is detected
-	newLatestCallback       func(int64, int64, string)      // a function to be called when a new block is detected, from what block to what block including gaps
-	oldBlockCallback        func(latestBlockTime time.Time) // a function to be called when an old block is detected
+	blocksQueue             []BlockStore               // holds all past hashes up until latest block
+	forkCallback            func(int64)                // a function to be called when a fork is detected
+	newLatestCallback       func(int64, int64, string) // a function to be called when a new block is detected, from what block to what block including gaps
 	consistencyCallback     func(oldBlock int64, block int64)
 	fetchErrorCallback      func() // a function to be called when the latest-block fetch fails
 	serverBlockMemory       uint64
@@ -114,11 +105,7 @@ type ChainTracker struct {
 	blockCheckpointDistance uint64 // used to do something every X blocks
 	blockCheckpoint         uint64 // last time checkpoint was met
 	timer                   *time.Timer
-	latestChangeTime        time.Time
-	startupTime             time.Time
 
-	// initial config
-	averageBlockTime time.Duration
 	// flatPollInterval is the tracker's cadence: the poll runs at this interval capped at
 	// BACKOFF_MAX_TIME (HealthyPollInterval), slowed only by failure backoff. Always
 	// positive — NewChainTracker floors a non-positive config value to the average block
@@ -197,68 +184,12 @@ func FetchTimeout() time.Duration {
 	return max(10*time.Second, common.MinimumTimePerRelayDelay)
 }
 
-// this function returns block hashes of the blocks: [from block - to block] inclusive. an additional specific block hash can be provided. order is sorted ascending
-// it supports requests for [spectypes.LATEST_BLOCK-distance1, spectypes.LATEST_BLOCK-distance2)
-// spectypes.NOT_APPLICABLE in fromBlock or toBlock results in only returning specific block.
-// if specific block is spectypes.NOT_APPLICABLE it is ignored
-func (cs *ChainTracker) GetLatestBlockData(fromBlock, toBlock, specificBlock int64) (latestBlock int64, requestedHashes []*BlockStore, changeTime time.Time, err error) {
-	cs.blockQueueMu.RLock()
-	defer cs.blockQueueMu.RUnlock()
-
-	latestBlock = cs.GetAtomicLatestBlockNum()
-	// Head-only (MAG-2218): an empty queue is the steady state here, not a fault. Answer with
-	// the head and no hashes, the way DummyChainTracker does, rather than returning an error
-	// and logging at ERROR on every call. Chains in this mode must run with data reliability
-	// and finalization proofs off, since neither can be satisfied without hashes.
-	if cs.headOnly {
-		return latestBlock, []*BlockStore{}, cs.latestChangeTime, nil
-	}
-	if len(cs.blocksQueue) == 0 {
-		return latestBlock, nil, time.Time{}, utils.FormatError("ChainTracker GetLatestBlockData had no blocks", nil, utils.Attribute{Key: "latestBlock", Value: latestBlock})
-	}
-	earliestBlockSaved := cs.getEarliestBlockUnsafe().Block
-	wantedBlocksData := WantedBlocksData{}
-	err = wantedBlocksData.New(fromBlock, toBlock, specificBlock, latestBlock, earliestBlockSaved)
-	if err != nil {
-		return latestBlock, nil, time.Time{}, utils.FormatDebug("invalid input for GetLatestBlockData",
-			utils.LogAttr("err", err),
-			utils.LogAttr("fromBlock", fromBlock),
-			utils.LogAttr("toBlock", toBlock),
-			utils.LogAttr("specificBlock", specificBlock),
-			utils.LogAttr("latestBlock", latestBlock),
-			utils.LogAttr("earliestBlockSaved", earliestBlockSaved),
-		)
-	}
-
-	for _, blocksQueueIdx := range wantedBlocksData.IterationIndexes() {
-		blockStore := cs.blocksQueue[blocksQueueIdx]
-		if !wantedBlocksData.IsWanted(blockStore.Block) {
-			return latestBlock, nil, time.Time{}, utils.FormatError("invalid wantedBlocksData Iteration", err, utils.Attribute{Key: "blocksQueueIdx", Value: blocksQueueIdx}, utils.Attribute{Key: "blockStore", Value: blockStore},
-				utils.Attribute{Key: "wantedBlocksData", Value: wantedBlocksData})
-		}
-		requestedHashes = append(requestedHashes, &blockStore)
-	}
-
-	return latestBlock, requestedHashes, cs.latestChangeTime, nil
-}
-
-// blockQueueMu must be locked
-func (cs *ChainTracker) getEarliestBlockUnsafe() BlockStore {
-	return cs.blocksQueue[0]
-}
-
 // blockQueueMu must be locked
 func (cs *ChainTracker) getLatestBlockUnsafe() BlockStore {
 	if len(cs.blocksQueue) == 0 {
 		return BlockStore{Hash: "BAD-HASH"}
 	}
 	return cs.blocksQueue[len(cs.blocksQueue)-1]
-}
-
-func (cs *ChainTracker) GetLatestBlockNum() (int64, time.Time) {
-	cs.blockQueueMu.RLock()
-	defer cs.blockQueueMu.RUnlock()
-	return atomic.LoadInt64(&cs.latestBlockNum), cs.latestChangeTime
 }
 
 func (cs *ChainTracker) GetAtomicLatestBlockNum() int64 {
@@ -288,30 +219,12 @@ func (cs *ChainTracker) advanceHeadOnly(latestBlock int64) {
 // reset, consistency pre-validation skips the lag check until the next poll
 // repopulates the value (validation_consistency.go treats endpointLatestBlock
 // <= 0 as "unknown, do not gate"). May be invoked concurrently with the poll
-// goroutine, so accesses outside this method's own locked region must go
-// through the locked helpers below.
+// goroutine; blockQueueMu is the lock both head writers (replaceBlocksQueue and
+// advanceHeadOnly) hold.
 func (cs *ChainTracker) ResetLatestBlock() {
 	cs.blockQueueMu.Lock()
 	defer cs.blockQueueMu.Unlock()
 	atomic.StoreInt64(&cs.latestBlockNum, 0)
-	cs.latestChangeTime = time.Time{}
-}
-
-// getLatestChangeTime/setLatestChangeTime serialize access to latestChangeTime.
-// The field used to be touched only by the poll goroutine, but ResetLatestBlock
-// and the locked readers in GetLatestBlockData/GetLatestBlockNum make it a
-// concurrent field. All paths outside an already-held blockQueueMu must go
-// through these helpers.
-func (cs *ChainTracker) getLatestChangeTime() time.Time {
-	cs.blockQueueMu.RLock()
-	defer cs.blockQueueMu.RUnlock()
-	return cs.latestChangeTime
-}
-
-func (cs *ChainTracker) setLatestChangeTime(t time.Time) {
-	cs.blockQueueMu.Lock()
-	defer cs.blockQueueMu.Unlock()
-	cs.latestChangeTime = t
 }
 
 // this function fetches all previous blocks from the node starting at the latest provided going backwards blocksToSave blocks
@@ -444,7 +357,7 @@ func (cs *ChainTracker) gotNewBlock(newLatestBlock int64) (gotNewBlock bool) {
 }
 
 // this function is periodically called, it checks if there is a new block or a fork and fetches all necessary previous data in order to fill gaps if any.
-// if a new block or fork is not found, check the emergency mode.
+// a head that went backwards is reported through consistencyCallback.
 //
 // Returns skipped=true when the traffic gate suppressed the whole cycle (no upstream call, no
 // poll-health signal). The caller MUST treat a skip as distinct from a successful poll: a skip
@@ -488,15 +401,6 @@ func (cs *ChainTracker) fetchAllPreviousBlocksIfNecessary(ctx context.Context, f
 
 	newLatestBlock, err := cs.iChainFetcherWrapper.FetchLatestBlockNum(ctx)
 	if err != nil {
-		type wrappedError interface {
-			Unwrap() error
-		}
-		if wrapErr, ok := err.(wrappedError); ok {
-			// Check if the unwrapped error is a *net.OpError
-			if _, ok := wrapErr.Unwrap().(net.Error); ok {
-				cs.notUpdated()
-			}
-		}
 		if cs.fetchErrorCallback != nil {
 			cs.fetchErrorCallback()
 		}
@@ -515,15 +419,8 @@ func (cs *ChainTracker) fetchAllPreviousBlocksIfNecessary(ctx context.Context, f
 				// No hash to report: head-only keeps no block queue.
 				cs.newLatestCallback(prevLatest, newLatestBlock, "")
 			}
-			cs.setLatestChangeTime(time.Now())
 		} else if prevLatest > newLatestBlock && cs.consistencyCallback != nil {
 			cs.consistencyCallback(prevLatest, newLatestBlock)
-		} else if newLatestBlock == prevLatest {
-			// Same head as last cycle — feed the not-updated/emergency detection. The hashed
-			// path reaches this via `else if cs.oldBlockCallback != nil`; the guard is redundant
-			// because notUpdated() returns early on a nil callback, so call it unconditionally
-			// rather than duplicate the check.
-			cs.notUpdated()
 		}
 		return false, nil
 	}
@@ -543,7 +440,6 @@ func (cs *ChainTracker) fetchAllPreviousBlocksIfNecessary(ctx context.Context, f
 			if cs.newLatestCallback != nil {
 				cs.newLatestCallback(prev_latest, newLatestBlock, latestHash) // TODO: this is calling the latest hash only repeatedly, this is not precise, currently not used anywhere except for prints
 			}
-			cs.setLatestChangeTime(time.Now())
 		}
 		if forked {
 			if cs.forkCallback != nil {
@@ -554,26 +450,9 @@ func (cs *ChainTracker) fetchAllPreviousBlocksIfNecessary(ctx context.Context, f
 		if cs.consistencyCallback != nil {
 			cs.consistencyCallback(prev_latest, newLatestBlock)
 		}
-	} else if cs.oldBlockCallback != nil {
-		// if new block is not found we should check emergency mode
-		cs.notUpdated()
 	}
 
 	return false, err
-}
-
-func (cs *ChainTracker) notUpdated() {
-	// oldBlockCallback is optional and is never wired up in normal operation, so
-	// it is usually nil. With no callback there is nothing to notify; skip rather
-	// than dereference a nil func, which segfaults the tracker's poll goroutine.
-	if cs.oldBlockCallback == nil {
-		return
-	}
-	latestBlockTime := cs.getLatestChangeTime()
-	if latestBlockTime.IsZero() {
-		latestBlockTime = cs.startupTime
-	}
-	cs.oldBlockCallback(latestBlockTime)
 }
 
 // nextFetchFails returns the consecutive-poll-failure counter after one poll cycle. It is the ONE
@@ -600,8 +479,6 @@ func nextFetchFails(current uint64, skipped, failed bool) uint64 {
 
 // this function starts the fetching timer periodically checking by polling if updates are necessary
 func (cs *ChainTracker) start(ctx context.Context) error {
-	cs.setLatestChangeTime(time.Time{}) // we will discard the first change time, so this is uninitialized
-
 	err := cs.fetchInitDataWithRetry(ctx)
 	if err != nil {
 		if cs.timer != nil {
@@ -1009,7 +886,6 @@ func (cs *ChainTracker) fetchInitDataWithRetry(ctx context.Context) (err error) 
 				utils.Attribute{Key: "endpoint", Value: cs.endpoint})
 		}
 		cs.advanceHeadOnly(newLatestBlock)
-		cs.setLatestChangeTime(time.Now())
 		cs.lastRealPoll = time.Now() // the init fetch is this tracker's first real poll
 		return nil
 	}
@@ -1103,15 +979,11 @@ func newCustomChainTracker(chainFetcher ChainFetcher, config ChainTrackerConfig)
 		consistencyCallback:     config.ConsistencyCallback,
 		forkCallback:            config.ForkCallback,
 		newLatestCallback:       config.NewLatestCallback,
-		oldBlockCallback:        config.OldBlockCallback,
 		fetchErrorCallback:      config.FetchErrorCallback,
 		blocksToSave:            config.BlocksToSave,
-		chainFetcher:            chainFetcher,
 		latestBlockNum:          0,
 		serverBlockMemory:       config.ServerBlockMemory,
 		blockCheckpointDistance: config.BlocksCheckpointDistance,
-		startupTime:             time.Now(),
-		averageBlockTime:        config.AverageBlockTime,
 		flatPollInterval:        flatPollInterval,
 		headOnly:                config.HeadOnlyTracking,
 		relayTipFresh:           config.RelayTipFresh,

@@ -18,10 +18,9 @@ import (
 // This mirrors production: SVMChainTracker.FetchLatestBlockNum wraps the raw
 // CallContext error returned by WebSocketDirectRPCConnection.SendRequest via
 // FormatWarning, yielding a *wrappedRouterError whose single Unwrap() exposes a
-// net.Error. That is precisely what drives the net.Error branch of
-// fetchAllPreviousBlocksIfNecessary. (HTTP upstreams are shielded because
-// HTTPDirectRPCConnection.SendRequest wraps with fmt.Errorf, so one Unwrap() yields
-// a *fmt.wrapError, not a net.Error.)
+// net.Error — the shape that crashed the tracker in MAG-2219. (HTTP upstreams were
+// shielded because HTTPDirectRPCConnection.SendRequest wraps with fmt.Errorf, so one
+// Unwrap() yields a *fmt.wrapError, not a net.Error.)
 type timeoutChainFetcher struct{}
 
 func (timeoutChainFetcher) FetchLatestBlockNum(ctx context.Context) (int64, error) {
@@ -40,19 +39,15 @@ func (timeoutChainFetcher) CustomMessage(ctx context.Context, path string, data 
 	return nil, nil
 }
 
-// TestFetchAllPreviousBlocksIfNecessary_UpstreamTimeoutIsHandled reproduces MAG-2219.
+// TestFetchAllPreviousBlocksIfNecessary_UpstreamTimeoutIsHandled guards MAG-2219.
 //
-// When a wss upstream's latest-block fetch times out, the error reaching
-// fetchAllPreviousBlocksIfNecessary unwraps to a net.Error, so the net.Error branch
-// calls notUpdated() WITHOUT the `oldBlockCallback != nil` guard that the sibling
-// call has. OldBlockCallback is never assigned anywhere in the codebase, so it is
-// always nil and notUpdated() dereferences a nil func -> SIGSEGV, crash-looping the
-// router.
-//
-// Desired behaviour: an upstream latest-block timeout is handled and surfaced as an
-// error; the tracker keeps running. This test fails today (nil-pointer panic) and
-// passes once the call site is guarded. OldBlockCallback is intentionally left unset
-// to reflect every real deployment.
+// When a wss upstream's latest-block fetch timed out, the error unwrapped to a net.Error,
+// and fetchAllPreviousBlocksIfNecessary answered that shape by calling an optional
+// "old block" callback with no nil guard. Nothing ever set the callback, so the poll
+// goroutine dereferenced a nil func (SIGSEGV) and crash-looped the router. The branch and
+// the callback have since been removed as dead (MAG-4876); this keeps the contract that
+// mattered: an upstream latest-block timeout is a real, failed poll that surfaces its
+// deadline cause, and the tracker does not panic.
 func TestFetchAllPreviousBlocksIfNecessary_UpstreamTimeoutIsHandled(t *testing.T) {
 	config := ChainTrackerConfig{
 		BlocksToSave:          1,
