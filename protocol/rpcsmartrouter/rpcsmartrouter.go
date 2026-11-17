@@ -420,6 +420,9 @@ func (rpsr *RPCSmartRouter) Start(ctx context.Context, options *rpcSmartRouterSt
 		// /debug/cross-validation-events can serve it (MAG-2772). Until this call the recorder is a
 		// nil check on the relay path, so a production router stores nothing.
 		enableCrossValidationEventRing(crossValidationEventRingCapacity)
+		// And the answers each request received, in the order they reached it, for
+		// /debug/relay-answers (MAG-4358).
+		relaycore.EnableRelayAnswerRecording(relaycore.RelayAnswerRingCapacity)
 		var currentOffsetNano atomic.Int64
 		debugMux := buildDebugMux(debugMuxDeps{
 			optimizers: optimizers,
@@ -1812,6 +1815,42 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		}
 		writeDebugRows(w, rows)
 	})
+
+	// GET /debug/relay-answers?request_id=<Lava-Guid> — the answers one request's attempts handed
+	// back, in the order they reached the router (MAG-4358, relaycore/relay_answers.go). One row per
+	// answer, oldest first: which provider, the status it answered with, and the router's verdict
+	// (success / node-error / protocol-error), or "unread" for an answer that arrived after the
+	// router stopped reading for its reply, such as a write's other deliveries. ElapsedMs is the time
+	// from the start of the request's relay processing to the answer. Seq is the order key, as on
+	// /debug/cross-validation-events, so the rows are not sorted. Optional limit keeps the most
+	// recent N rows. 503 when the recorder is not installed, so "nothing was recorded" never reads
+	// as "nothing answered"; X-Relay-Answers-Dropped reports the answers the bounded ring evicted.
+	mux.HandleFunc("/debug/relay-answers", debugMethod(http.MethodGet, func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		limit, _ := strconv.Atoi(q.Get("limit"))
+		answers, dropped, enabled := relaycore.ReadRelayAnswers(q.Get("request_id"), limit)
+		if !enabled {
+			http.Error(w, "relay answer recording is not enabled on this router", http.StatusServiceUnavailable)
+			return
+		}
+		rows := make([]map[string]any, 0, len(answers))
+		for _, answer := range answers {
+			rows = append(rows, map[string]any{
+				"Seq":             answer.Seq,
+				"ArrivedAt":       debugTimeRFC3339(answer.ArrivedAt),
+				"ElapsedMs":       answer.Elapsed.Milliseconds(),
+				"ChainID":         answer.ChainID,
+				"ApiInterface":    answer.ApiInterface,
+				"RequestID":       answer.RequestID,
+				"Method":          answer.Method,
+				"ProviderAddress": answer.ProviderAddress,
+				"StatusCode":      answer.StatusCode,
+				"Outcome":         answer.Outcome,
+			})
+		}
+		w.Header().Set("X-Relay-Answers-Dropped", strconv.FormatUint(dropped, 10))
+		encodeDebugJSON(w, rows, "failed encoding relay answers response")
+	}))
 
 	// GET /debug/probe-loop — per-chain proactive-prober cycle telemetry (MAG-2202 endpoint 4). Flat
 	// array of self-describing records (ChainID + ApiInterface): the configured --probe-loop-interval
