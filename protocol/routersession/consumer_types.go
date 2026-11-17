@@ -972,7 +972,7 @@ func (cswp *ConsumerSessionsWithProvider) GetConsumerSessionInstanceFromEndpoint
 	// MaxSessionsAllowedPerProvider/3 of its sessions had been retired, and the count grew by that
 	// same third on every pool reset. It is gone (FAILOVER-TASKS section 2).
 	//
-	// It could not be kept once the provider block was dropped. Retired sessions are never
+	// It could not be kept once the provider block was dropped. Retired sessions were then never
 	// reclaimed inside an epoch, and the only thing that raised that ceiling was the reset the
 	// block itself triggered — so with the block gone the ceiling was fixed at a third, and an
 	// upstream that reached it was refused every session for the rest of the epoch while answering
