@@ -15,7 +15,6 @@ type ChainTrackerConfig struct {
 	ForkCallback             func(block int64)                                 // a function to be called when a fork is detected
 	NewLatestCallback        func(blockFrom int64, blockTo int64, hash string) // a function to be called when a new block is detected
 	ConsistencyCallback      func(oldBlock int64, block int64)
-	OldBlockCallback         func(latestBlockTime time.Time)
 	FetchErrorCallback       func() // a function to be called when the latest-block fetch fails
 	BlocksToSave             uint64
 	AverageBlockTime         time.Duration // how often to query latest block
@@ -41,8 +40,7 @@ type ChainTrackerConfig struct {
 	// sentinel, so it never calls FetchLatestBlockNum and the tip feed dies with it. That mode is
 	// for chains with no block concept whatsoever; this one is for "has a head, has no hashes".
 	//
-	// GetLatestBlockData returns an empty hash slice in this mode, so data reliability and
-	// finalization proofs must be off for the chain.
+	// No block hash is fetched or stored in this mode.
 	HeadOnlyTracking bool
 
 	// FlatPollInterval is this tracker's cadence (MAG-2159 / Topic B): the dedicated poll runs

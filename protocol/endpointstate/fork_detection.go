@@ -6,9 +6,9 @@ package endpointstate
 // poll it fetches the head's hash to compare against the one it stored, and on a new head
 // it walks backwards filling a block queue. Measured, that is roughly a third of all
 // upstream requests on Solana and two thirds on EVM chains — and nothing in this router
-// consumes the result. The fork callback writes a log line, and the hash-returning
-// GetLatestBlockData has no caller (finalization proofs / data reliability are not wired
-// in this fork).
+// consumes the result. The fork callback writes a log line, and nothing outside the
+// tracker reads the stored hashes (finalization proofs / data reliability are not wired in
+// this fork).
 //
 // So the work is off by default and this flag turns it back on. The latest-block poll is
 // unaffected either way: it is what feeds the endpointtip store, ChainState consensus and

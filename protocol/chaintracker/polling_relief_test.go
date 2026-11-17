@@ -14,7 +14,6 @@ func TestComputePollInterval_FlatCadence(t *testing.T) {
 	const avg = 400 * time.Millisecond
 	flat := avg / 2 // 200ms
 	ct := &ChainTracker{
-		averageBlockTime: avg,
 		flatPollInterval: flat,
 	}
 

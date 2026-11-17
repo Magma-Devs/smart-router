@@ -114,6 +114,7 @@ func (mcf *MockChainFetcher) Shrink(newSize int) {
 	}
 	newHashes := make([]*chaintracker.BlockStore, newSize)
 	copy(newHashes, mcf.blockHashes[currentSize-newSize:])
+	mcf.blockHashes = newHashes
 }
 
 func NewMockChainFetcher(startBlock, blocksToSave int64, callback func()) *MockChainFetcher {
@@ -178,23 +179,7 @@ func TestChainTracker(t *testing.T) {
 				latestBlock := chainTracker.GetAtomicLatestBlockNum()
 				require.Equal(t, currentLatestBlockInMock, latestBlock)
 
-				latestBlock, requestedHashes, _, err := chainTracker.GetLatestBlockData(tt.requestBlockFrom, tt.requestBlockTo, tt.specificBlock)
-				require.GreaterOrEqual(t, latestBlock, int64(0))
-				require.Equal(t, currentLatestBlockInMock, latestBlock)
-				require.NoError(t, err)
-				require.Equal(t, tt.requestBlocks, int64(len(requestedHashes)))
-				if tt.requestBlockFrom != spectypes.NOT_APPLICABLE {
-					fromNum := chaintracker.LatestArgToBlockNum(tt.requestBlockFrom, latestBlock)
-					require.True(t, mockChainFetcher.IsCorrectHash(requestedHashes[0].Hash, fromNum), "incompatible hash %s on block %d", requestedHashes[0].Hash, fromNum)
-				}
-				if tt.specificBlock != spectypes.NOT_APPLICABLE {
-					specificNum := chaintracker.LatestArgToBlockNum(tt.specificBlock, latestBlock)
-					// in this test specific hash is always latest and always last in the requested blocks
-					require.True(t, mockChainFetcher.IsCorrectHash(requestedHashes[len(requestedHashes)-1].Hash, specificNum))
-				}
-				for idx := 0; idx < len(requestedHashes)-1; idx++ {
-					require.True(t, mockChainFetcher.IsCorrectHash(requestedHashes[idx].Hash, requestedHashes[idx].Block))
-				}
+				requireQueueMatchesMock(t, chainTracker, mockChainFetcher, currentLatestBlockInMock, int(tt.fetcherBlocks))
 			}
 		})
 	}
@@ -236,18 +221,7 @@ func TestChainTrackerRangeOnly(t *testing.T) {
 				latestBlock := chainTracker.GetAtomicLatestBlockNum()
 				require.Equal(t, currentLatestBlockInMock, latestBlock)
 
-				latestBlock, requestedHashes, _, err := chainTracker.GetLatestBlockData(tt.requestBlockFrom, tt.requestBlockTo, tt.specificBlock)
-				require.Equal(t, currentLatestBlockInMock, latestBlock)
-				require.NoError(t, err)
-				require.Equal(t, tt.requestBlocks, int64(len(requestedHashes)))
-				if tt.requestBlockFrom != spectypes.NOT_APPLICABLE {
-					fromNum := chaintracker.LatestArgToBlockNum(tt.requestBlockFrom, latestBlock)
-					require.True(t, mockChainFetcher.IsCorrectHash(requestedHashes[0].Hash, fromNum), "incompatible hash %s on block %d", requestedHashes[0].Hash, fromNum)
-				}
-				for idx := 0; idx < len(requestedHashes)-1; idx++ {
-					require.Equal(t, requestedHashes[idx].Block+1, requestedHashes[idx+1].Block)
-					require.True(t, mockChainFetcher.IsCorrectHash(requestedHashes[idx].Hash, requestedHashes[idx].Block))
-				}
+				requireQueueMatchesMock(t, chainTracker, mockChainFetcher, currentLatestBlockInMock, int(tt.fetcherBlocks))
 			}
 		})
 	}
@@ -255,11 +229,7 @@ func TestChainTrackerRangeOnly(t *testing.T) {
 
 func TestChainTrackerCallbacks(t *testing.T) {
 	mockBlocks := int64(100)
-	requestBlocks := 3
 	fetcherBlocks := 10
-	requestBlockFrom := spectypes.LATEST_BLOCK - 6
-	requestBlockTo := spectypes.LATEST_BLOCK - 4
-	specificBlock := spectypes.NOT_APPLICABLE
 	tests := []struct {
 		name        string
 		advancement int64
@@ -340,18 +310,7 @@ func TestChainTrackerCallbacks(t *testing.T) {
 			latestBlock := chainTracker.GetAtomicLatestBlockNum()
 			require.Equal(t, currentLatestBlockInMock, latestBlock)
 
-			latestBlock, requestedHashes, _, err := chainTracker.GetLatestBlockData(requestBlockFrom, requestBlockTo, specificBlock)
-			require.Equal(t, currentLatestBlockInMock, latestBlock)
-			require.NoError(t, err)
-			require.Equal(t, requestBlocks, len(requestedHashes))
-			if requestBlockFrom != spectypes.NOT_APPLICABLE {
-				fromNum := chaintracker.LatestArgToBlockNum(requestBlockFrom, latestBlock)
-				require.True(t, mockChainFetcher.IsCorrectHash(requestedHashes[0].Hash, fromNum), "incompatible hash %s on block %d", requestedHashes[0].Hash, fromNum)
-			}
-			for idx := 0; idx < len(requestedHashes)-1; idx++ {
-				require.Equal(t, requestedHashes[idx].Block+1, requestedHashes[idx+1].Block)
-				require.True(t, mockChainFetcher.IsCorrectHash(requestedHashes[idx].Hash, requestedHashes[idx].Block))
-			}
+			requireQueueMatchesMock(t, chainTracker, mockChainFetcher, currentLatestBlockInMock, fetcherBlocks)
 			if tt.shouldFork {
 				require.True(t, callbackCalledFork.Load())
 			} else {
@@ -434,11 +393,7 @@ func TestChainTrackerPollsAtItsFlatInterval(t *testing.T) {
 
 func TestChainTrackerMaintainMemory(t *testing.T) {
 	mockBlocks := int64(100)
-	requestBlocks := 4
 	fetcherBlocks := 50
-	requestBlockFrom := spectypes.LATEST_BLOCK - 6
-	requestBlockTo := spectypes.LATEST_BLOCK - 4
-	specificBlock := spectypes.LATEST_BLOCK - 30 // needs to be smaller than requestBlockFrom, can't be NOT_APPLICABLE
 	tests := []struct {
 		name        string
 		advancement int64
@@ -478,7 +433,9 @@ func TestChainTrackerMaintainMemory(t *testing.T) {
 				currentLatestBlockInMock = mockChainFetcher.AdvanceBlock()
 			}
 			if tt.shrink {
-				mockChainFetcher.Shrink(50) // do not allow previous block fetches
+				// One block short of the tracker's window: the oldest block it keeps is gone from the
+				// node, so only a tracker that reuses the hashes it already holds still has it.
+				mockChainFetcher.Shrink(fetcherBlocks - 1)
 			}
 			for sleepChunk := 0; sleepChunk < SleepChunks; sleepChunk++ {
 				time.Sleep(SleepTime) // stateTracker polls asynchronously
@@ -490,24 +447,7 @@ func TestChainTrackerMaintainMemory(t *testing.T) {
 			latestBlock := chainTracker.GetAtomicLatestBlockNum()
 			require.Equal(t, currentLatestBlockInMock, latestBlock)
 
-			latestBlock, requestedHashes, _, err := chainTracker.GetLatestBlockData(requestBlockFrom, requestBlockTo, specificBlock)
-			require.Equal(t, currentLatestBlockInMock, latestBlock)
-			require.NoError(t, err)
-			require.Equal(t, requestBlocks, len(requestedHashes))
-			if requestBlockFrom != spectypes.NOT_APPLICABLE {
-				fromNum := chaintracker.LatestArgToBlockNum(requestBlockFrom, latestBlock)
-				// in this test specific is always smaller than requestBlockFrom therefore from starts on index 1
-				require.True(t, mockChainFetcher.IsCorrectHash(requestedHashes[1].Hash, fromNum), "incompatible hash %s on block %d", requestedHashes[1].Hash, fromNum)
-			}
-			if specificBlock != spectypes.NOT_APPLICABLE {
-				specificNum := chaintracker.LatestArgToBlockNum(specificBlock, latestBlock)
-				// in this test specific is always smaller than requestBlockFrom therefore first
-				require.True(t, mockChainFetcher.IsCorrectHash(requestedHashes[0].Hash, specificNum), "latestBlock: %d, blockHashes: %v", latestBlock, requestedHashes)
-			}
-			for idx := 1; idx < len(requestedHashes)-1; idx++ {
-				require.Equal(t, requestedHashes[idx].Block+1, requestedHashes[idx+1].Block, "latestBlock: %d, blockHashes: %v", latestBlock, requestedHashes)
-				require.True(t, mockChainFetcher.IsCorrectHash(requestedHashes[idx].Hash, requestedHashes[idx].Block))
-			}
+			requireQueueMatchesMock(t, chainTracker, mockChainFetcher, currentLatestBlockInMock, fetcherBlocks)
 			require.False(t, callbackCalledFork.Load())
 		}
 	})
@@ -614,9 +554,9 @@ func TestChainTrackerMultipleInstancesNoLeaks(t *testing.T) {
 	// If there were leaks, this test would accumulate resources with each iteration
 }
 
-// TestChainTrackerResetLatestBlock verifies ResetLatestBlock zeroes both the
-// atomic latestBlockNum and the latestChangeTime so consistency pre-validation
-// treats the tracker as "unknown, do not gate" (validation_consistency.go:80).
+// TestChainTrackerResetLatestBlock verifies ResetLatestBlock zeroes the atomic
+// latestBlockNum so consistency pre-validation treats the tracker as "unknown,
+// do not gate" (validation_consistency.go:80).
 //
 // The poll loop is cancelled before Reset: after Reset prev_latest=0 and the
 // next tick would take the gotNewBlock branch in
@@ -658,8 +598,20 @@ func TestChainTrackerResetLatestBlock(t *testing.T) {
 	chainTracker.ResetLatestBlock()
 
 	require.Equal(t, int64(0), chainTracker.GetAtomicLatestBlockNum())
+}
 
-	latestBlock, changeTime := chainTracker.GetLatestBlockNum()
-	require.Equal(t, int64(0), latestBlock)
-	require.True(t, changeTime.IsZero(), "latestChangeTime should be zero after reset, got %v", changeTime)
+// requireQueueMatchesMock asserts the tracker's whole hash queue, the state fork detection reads:
+// the configured length, ending at the mock's head, contiguous, and every hash the mock's current
+// one for its block.
+func requireQueueMatchesMock(t *testing.T, ct chaintracker.IChainTracker, mcf *MockChainFetcher, latest int64, size int) {
+	t.Helper()
+	q := chaintracker.BlocksQueueSnapshot(ct)
+	require.Len(t, q, size, "queue: %v", q)
+	require.Equal(t, latest, q[len(q)-1].Block, "queue: %v", q)
+	for i := range q {
+		if i > 0 {
+			require.Equal(t, q[i-1].Block+1, q[i].Block, "queue: %v", q)
+		}
+		require.True(t, mcf.IsCorrectHash(q[i].Hash, q[i].Block), "incompatible hash %s on block %d", q[i].Hash, q[i].Block)
+	}
 }

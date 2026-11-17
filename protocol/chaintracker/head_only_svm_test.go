@@ -22,7 +22,6 @@ import (
 
 	chaintracker "github.com/magma-Devs/smart-router/protocol/chaintracker"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
-	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/stretchr/testify/require"
 )
@@ -133,9 +132,6 @@ func TestHeadOnlySVM_HeadAdvancesAndIsPublished(t *testing.T) {
 		return tracker.GetAtomicLatestBlockNum() == 300_000_007
 	}, time.Second*3, TimeForPollingMock, "the published head must follow the node")
 
-	block, changeTime := tracker.GetLatestBlockNum()
-	require.Equal(t, int64(300_000_007), block)
-	require.False(t, changeTime.IsZero(), "a head advance must stamp the change time")
 	require.Zero(t, fetcher.hashCalls.Load())
 }
 
@@ -164,25 +160,6 @@ func TestHeadOnlySVM_RecordsPollObservations(t *testing.T) {
 
 	require.Equal(t, fetcher.slot.Load(), fetcher.observedBlock.Load(), "the observed block must be the polled slot")
 	require.Zero(t, fetcher.observedErrors.Load(), "a healthy head-only poll must not be recorded as failed")
-}
-
-// TestHeadOnlySVM_LatestBlockDataHasNoHashes mirrors the generic head-only contract on the SVM
-// path: answer with the head and an empty hash slice rather than erroring.
-func TestHeadOnlySVM_LatestBlockDataHasNoHashes(t *testing.T) {
-	fetcher := &svmHeadOnlyFetcher{}
-	fetcher.slot.Store(300_000_000)
-
-	tracker, err := chaintracker.NewChainTracker(context.Background(), fetcher, svmHeadOnlyConfig(true))
-	require.NoError(t, err)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	require.NoError(t, tracker.StartAndServe(ctx))
-
-	latest, hashes, _, err := tracker.GetLatestBlockData(spectypes.NOT_APPLICABLE, spectypes.NOT_APPLICABLE, spectypes.NOT_APPLICABLE)
-	require.NoError(t, err, "head-only must not treat an empty queue as a fault")
-	require.Equal(t, int64(300_000_000), latest)
-	require.Empty(t, hashes)
 }
 
 // TestHeadOnlySVM_MalformedReplyIsAFailedPoll guards the parse itself: head-only returns before
