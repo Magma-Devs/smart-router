@@ -103,12 +103,13 @@ Invariants the router enforces at run time, for every spec from every source:
   `Lava-Write-Outcome` on 2xx bodies (MAG-5232) and the chain's unknown-write alert (R-L). Not
   inherited; migrated rows never set it.
 - `plain_text`: REST methods whose 2xx plain-text body is an answer (Part V §3.1, R-D6; MAG-3971).
-- `inherit`: `false` inherits no rows, shapes or `plain_text` (Step 1's opt-outs, Appendix B).
-  Doesn't affect api inheritance.
+- `inherit`: `false` inherits no rows (Step 1's opt-outs, Appendix B). The parents' shapes and
+  `plain_text` still apply, so an opted-out chain reads its replies as before; a child drops a
+  shape only by disabling its `id`. Doesn't affect api inheritance.
 - Defaults, as if written: `rows`, `shapes`, `write_rows`, `plain_text` `[]`; `inherit` `true`; per
-  row, `scope` `"both"`, `field` `"text"`, `reason` `"invalid"` on a `C2` row, `write`
-  `"may_have_run"`. A section without rows is valid: `{"schema_version": 1, "inherit": false}`
-  leaves the chain no spec rows.
+  row, `scope` `"both"`, `field` `"text"`, `reason` `"invalid"` on a `C2` row, and `write`
+  `"may_have_run"` on a row whose `scope` isn't `read` (a `read` row has no `write`). A section
+  without rows is valid: `{"schema_version": 1, "inherit": false}` leaves the chain no spec rows.
 - The section is optional; older routers ignore the key, and a spec with no section keeps today's
   behaviour (Q229). A missing section means no local rows; the chain may still inherit. The approval
   covers the complete effective result, empty included.
@@ -127,7 +128,7 @@ Invariants the router enforces at run time, for every spec from every source:
 | `interface` | yes | `jsonrpc`, `tendermintrpc`, `rest`, `graphql` or `grpc`, or a list of them, each one the declaring spec serves: a row written for one interface never reads another's replies (R-B; MAG-5253). |
 | `methods` | no | Api identities (§5.3: verb and route on REST, service/method on gRPC, root field on GraphQL); absent = every api. Required on answer rows, and on a row whose node software documents the reply for some methods only (Stellar `POST /transactions_async`). |
 | `scope` | no | `read`, `write` or `both` (default): `write` rows run only for stateful apis, `read` rows only for the rest. |
-| `answer` | no | `true`: the row reads a 2xx (gRPC OK) answer in the protocol's shape instead of an error record (below). |
+| `answer` | no | `true`: the row reads the reply's answer (§3.1) instead of an error record (below): a 2xx (gRPC OK) reply's, and, for a success row with `at`, a write copy's body under any status (§3.2 step 2; R-L). |
 | `status` | match | The reply's status (§3.1): an HTTP status, or a gRPC status as the rulebook writes it (`"NOT_FOUND"`); never one the status decides (§4.3). |
 | `code` | match | The record's code (§3.1) or, with `at`, the value there; number, string, boolean or null, matched by JSON type and value: `-32005`, `"sdk/32"`, `"tx_bad_seq"`. |
 | `contains` | match | Case-insensitive substring, as `MessageContains`. |
@@ -148,8 +149,13 @@ Every match key a row has must hold. An error row has at least one of `code`, `c
 a row with `interface: "grpc"` only, or one for a bare HTTP 409 (Part I §1), may have `status`
 alone. An answer row has `methods`, and either `at` with `code` or `present`, or nothing more (any
 answer on those methods); it gives either `write: "took_it"` and nothing else (a **success row**,
-R-L's "took it") or `error`, `class: "C3"` and `reason: "not_found"` (a **not-found row** for a
-null answer, R-F). No header matcher.
+R-L's "took it"; one without `at` reads a 2xx only) or `error`, `class: "C3"` and
+`reason: "not_found"` (a **not-found row** for a null answer, R-F). No header matcher.
+
+On GraphQL, `methods`, `path` and an answer row's `at` name fields, never aliases. The router reads
+each occurrence of a root field in the request separately (R-O), with every alias in its selection
+replaced by the field's name: `{ tx: transaction(digest: …) }` answering `{"data": {"tx": null}}`
+is read as `/data/transaction` = null, and an error with path `["tx"]` as path `["transaction"]`.
 
 ### 2.3 Class
 
@@ -207,7 +213,15 @@ interface's standard place (§3.1): the chain list's "where the error sits" and 
 
 - A non-2xx REST body in a declared shape is a well-formed error; any other non-2xx body is bare
   (Part V §3.1).
+- Pointers are RFC 6901. One that doesn't resolve (a missing key, an index out of range, a step
+  into a value that isn't an object or array) or that resolves to null is missing. `when` holds
+  only if its pointer resolves: `equals` when the value matches by JSON type and value, `not` when
+  it doesn't. A shape applies only if `when` holds (where given) and `code`, and `space` where
+  given, resolve to a string or an integer; a `message` that doesn't resolve to a string leaves the
+  interface's standard text.
 - The first shape that applies wins, in inheritance order; the record takes its code and message.
+  A shape that doesn't apply falls through to the next; when none applies, the interface's standard
+  reading decides (§3.1).
 - Today's chain readers become shapes in Step 1: the Cosmos `tx_response` check in `cosmossdk.json`,
   on the broadcast path only (MAG-5254 item 9); Tendermint's broadcast checks in `tendermint.json`,
   `result.code` ≠ 0 on `broadcast_tx_sync` and `broadcast_tx_async` and `result.check_tx.code` ≠ 0
@@ -222,7 +236,7 @@ root files import another).
 
 - Order: the child's rows, then each parent's rows the child didn't replace or disable by `id`, in
   the parents' order; shapes the same way. `plain_text` adds the parents' methods. `write_rows`
-  isn't inherited: each chain sets its own.
+  isn't inherited: each chain sets its own. `"inherit": false` drops the parents' rows only.
 - Resolve and validate the whole graph before any policy acts. Errors: missing parents, cycles,
   duplicate local ids, mixed schemas, incompatible definitions of one inherited id (the child must
   replace or disable it explicitly), a disabling entry naming no inherited id, one name with two
@@ -231,6 +245,8 @@ root files import another).
   `"imports": ["STRK"]` (expanded apis stay byte-identical, checked with
   `ExpandSpecWithDependencies`, `utils/keeper/spec.go:89`). 36 chains would gain rows (Appendix B)
   → `"errors": {"schema_version": 1, "inherit": false}` in Step 1, opened one by one in Step 3.
+  The 25 of them that serve the Cosmos broadcast route and Tendermint RPC keep the
+  `cosmossdk.json` and `tendermint.json` shapes they read today.
 
 ### 2.6 What the chain's list holds, and where
 
@@ -379,8 +395,8 @@ For a reply on chain X, first match wins:
    retry (Part III D10). A connection dropped during the call: no reply, never matched against rows
    (MAG-5130).
 2. **On a write copy, once the chain's write rows ship:** the chain's success and duplicate rows
-   (`write: took_it`) → took it, whatever the status (Part II P1, Part IV P2, Part V P2; R-L). A
-   plain success beats a duplicate.
+   (`write: took_it`) → took it, whatever the status (Part II P1, Part IV P2, Part V P2; R-L); a
+   success row without `at` reads a 2xx only (§2.2). A plain success beats a duplicate.
 3. **The status decides** (router code): HTTP 429 → `C4`; HTTP 401, 402, 403 and gRPC
    UNAUTHENTICATED and PERMISSION_DENIED → `C6`, whatever the body. gRPC RESOURCE_EXHAUSTED: the
    chain's over-limit row, or grpc-go's "received message larger than max" sent by the node → `C2`
@@ -504,9 +520,16 @@ example from the last 7 days with its Lava-Guid (Q229), kept in the PR's private
 in lava-specs, which is public: no documentation or no production example, no row (on a write the
 reply stays may have run). R&D proposes and reviews matchers, classes, reasons and shapes; product
 (Omer) approves each row's `write` and the chain's `write_rows`, and only those (Q229). The
-validator replays the router's write-safety evidence (already-known and slot-already-used answers,
-rate-limit answers, the status refusals) through each chain's effective policy and rejects a policy
-under which any of them is refused it, or a slot-already-used answer is took it (`rule_violation`).
+validator replays the router's write-safety evidence through each chain's effective policy as write
+copies, with its write rows on, and rejects a policy that gives a fixture a verdict outside the
+ones its kind allows (`rule_violation`):
+
+| Evidence | Allowed verdicts |
+|---|---|
+| Status refusal with a refusal body (no success or duplicate answer in it): HTTP 401, 402, 403, 429; gRPC UNAUTHENTICATED, PERMISSION_DENIED, RESOURCE_EXHAUSTED sent by the node | refused it |
+| Already-known answer | took it, may have run |
+| Slot-already-used answer (§5.2 signatures) | may have run |
+| Rate-limit or quota answer inside a 2xx | refused it, may have run |
 
 ### 4.5 Stateful check
 
@@ -727,17 +750,18 @@ none. Three family-table verdicts can't be named (`NODE_RATE_LIMITED`, `NODE_ACC
 `CHAIN_TX_ALREADY_KNOWN` outside a duplicate row): all are in the four XRP rows kept in code.
 Today's Cosmos and Tendermint checks become shapes (§2.4). NEAR's four rows match only once
 MAG-4253's shape reads `error.cause.name`: NEAR stays out of the zero-mismatch evidence until then.
-STRKS imports STRK; the 36 gaining chains get `"inherit": false` (Appendix B). The reader loads rows
-and shapes, evaluates them beside the code, acts on the code. Reader constraints: registry maps are
-init-only and lock-free, `registerError` panics on duplicates (`error_registry.go:602-629`) → a
-chain's own verdicts live in a per-chain policy outside `errorRegistry`; `ClassifyError` is keyed by
-`ChainFamily` (`error_classifier.go:788, 801`) → key by chain policy; router logic compares its
-verdicts by pointer (`svm_block_hash_retry.go:99`, `read_your_writes.go:230`,
-`rpcsmartrouter_server.go:1599-1603`) → a row naming a router-owned verdict resolves to the router's
-own `*LavaError`; `LavaError.Is` and `LavaWrappedError.Is` match by code
-(`error_registry.go:184-187, 662-667`) and code 0 is `UNKNOWN_ERROR`'s (`:589-590, 617`) → a
-chain's own verdict, which has no number, gets an identity of its own, so `errors.Is` never equates
-two of them or one with `UNKNOWN_ERROR`. Metrics:
+STRKS imports STRK; the 36 gaining chains get `"inherit": false` (Appendix B), which keeps their
+parents' shapes: the 25 Cosmos ones still read a failed broadcast inside a 200. The reader loads
+rows and shapes, evaluates them beside the code, acts on the code. Reader constraints: registry
+maps are init-only and lock-free, `registerError` panics on duplicates
+(`error_registry.go:602-629`) → a chain's own verdicts live in a per-chain policy outside
+`errorRegistry`; `ClassifyError` is keyed by `ChainFamily` (`error_classifier.go:788, 801`) → key
+by chain policy; router logic compares its verdicts by pointer (`svm_block_hash_retry.go:99`,
+`read_your_writes.go:230`, `rpcsmartrouter_server.go:1599-1603`) → a row naming a router-owned
+verdict resolves to the router's own `*LavaError`; `LavaError.Is` and `LavaWrappedError.Is` match
+by code (`error_registry.go:184-187, 662-667`) and code 0 is `UNKNOWN_ERROR`'s (`:589-590, 617`) →
+a chain's own verdict, which has no number, gets an identity of its own, so `errors.Is` never
+equates two of them or one with `UNKNOWN_ERROR`. Metrics:
 `smartrouter_spec_error_rows_mismatch_total{chain_id, apiInterface, kind, row_id, code_error, spec_error, scope}`
 with `kind` ∈ {`differ`, `code_only`, `spec_only`} and
 `smartrouter_spec_error_rows_hits_total{chain_id, apiInterface, row_id, scope}`. Expected: zero
@@ -855,9 +879,12 @@ there lands; until then they assert main's order with spec rows in place of the 
   INVALID_ARGUMENT on a write go back as is with no `Lava-Write-Outcome`, an empty or HTML 2xx and a
   bare 5xx get the router's unknown reply, a 401, 402, 403 or 429 refuses the copy; after
   `write_rows`, a success row's or duplicate row's copy took it, also under a 401 or 429 (Part II
-  T14), a `refused_it` row's copy is refused and keeps its class (Horizon 503 `TRY_AGAIN_LATER`:
-  `C5`), a 2xx no success row matches may have run, a generic interface row under a 5xx never sets
-  a verdict (Q210), and a migrated row without `write` may have run.
+  T14), while a success row without `at` never reads a non-2xx (a REST 429 with a JSON body stays
+  refused), a `refused_it` row's copy is refused and keeps its class (Horizon 503
+  `TRY_AGAIN_LATER`: `C5`), a 2xx no success row matches may have run, a generic interface row under
+  a 5xx never sets a verdict (Q210), and a migrated row without `write` may have run. The §4.4
+  replay passes every bundled policy and fails one whose duplicate row matches a 429 fixture's body
+  or whose row says `refused_it` on a slot-already-used answer.
 - Slot-already-used: every signature as a full pair through the stateful path of each interface it
   lists is never refused it; a 2xx body with it goes back as the node sent it, with no
   `Lava-Write-Outcome` (JSON-RPC and Cosmos, Part IV decision 3), and on GraphQL after Sui's write
@@ -874,7 +901,12 @@ there lands; until then they assert main's order with spec rows in place of the 
   or class, reason or write changes fail unless declared and approved.
 - Shapes: per shape, a reply it reads and one it leaves alone, on each method it names; a REST body
   outside every shape is bare; an error a shape finds in a success never ends a write's fan-out as
-  its success.
+  its success; a missing, null or wrong-type `when`, `code` or `space` pointer leaves the shape
+  unapplied and the next one reads the reply; a chain with `"inherit": false` still reads its
+  parents' shapes (DYDX: a broadcast with `tx_response.code` ≠ 0 inside a 200 is a node error).
+- GraphQL aliases: an aliased root field (`tx: transaction(…)` answering null) matches the
+  not-found row, the same field asked twice under two aliases is read twice, and an error's aliased
+  path matches a row's `path`.
 - `field: "detail"`: a string `error.data` is read as its value, an object or array as its compact
   JSON, a null or absent `detail` matches nothing; on gRPC, details rendered from linked or bundled
   types only, an unresolvable one as `{"@type": …}`, the same on every provider; a row with `field`
