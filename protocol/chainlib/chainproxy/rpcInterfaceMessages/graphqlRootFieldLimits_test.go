@@ -40,7 +40,16 @@ func fragmentChain(spreads, length int) string {
 }
 
 func TestParseGraphQLMsgRootFieldLimit(t *testing.T) {
+	// The limit counts every selection as written. The names count each response key once,
+	// because the node runs a repeated field once (MAG-5120).
 	message, err := ParseGraphQLMsg(graphQLBody("{ " + strings.Repeat("chainIdentifier ", MaxGraphQLRootFields) + "}"))
+	require.NoError(t, err)
+	require.Len(t, message.RootFields, 1)
+	aliased := make([]string, MaxGraphQLRootFields)
+	for i := range aliased {
+		aliased[i] = fmt.Sprintf("a%d: chainIdentifier", i)
+	}
+	message, err = ParseGraphQLMsg(graphQLBody("{ " + strings.Join(aliased, " ") + " }"))
 	require.NoError(t, err)
 	require.Len(t, message.RootFields, MaxGraphQLRootFields)
 

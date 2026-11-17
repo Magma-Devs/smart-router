@@ -150,19 +150,28 @@ func TestGraphQLChainParserMultiRootCombinesToTheStrictestApi(t *testing.T) {
 	require.EqualValues(t, 0, api.Category.Stateful)
 }
 
-func TestGraphQLChainParserMutationAmongReadsStaysStateful(t *testing.T) {
+func TestGraphQLChainParserMutationAmongReadsIsRefused(t *testing.T) {
 	chainParser := newGraphQLTestParser(t)
 
-	// The hazard this interface exists to prevent: if a request that hides a transaction
-	// submission among reads resolved to a read's api, the stateful guard would not see the
-	// write and an enabled cross-validation policy would submit it to every provider.
-	chainMessage, err := chainParser.ParseMsg("",
+	// The hazard this interface exists to prevent: a transaction submission hidden among reads.
+	// It used to combine to a stateful api, so the stateful guard saw the write, and the router
+	// then sent the whole document, read included, to every primary. A mutation runs one write
+	// per request, so one with a second root field is refused before any provider is asked, and
+	// the caller is told the write was not sent (MAG-5120, check Q8).
+	_, err := chainParser.ParseMsg("",
 		[]byte(`{"query":"mutation { chainIdentifier executeTransaction(transactionDataBcs: \"x\") { digest } }"}`),
+		graphqlConnectionType, nil, extensionslib.ExtensionInfo{})
+	refusal := rpcInterfaceMessages.GraphQLRefusalFrom(err)
+	require.NotNil(t, refusal, "a mutation with two root fields is refused: %v", err)
+	require.Equal(t, rpcInterfaceMessages.GraphQLRequestRefusedCode, refusal.Code())
+	require.Equal(t, rpcInterfaceMessages.GraphQLWriteOutcomeNotSent, refusal.WriteOutcome())
+
+	// __typename runs nothing, so it may ride beside the write, and the write is still a write.
+	chainMessage, err := chainParser.ParseMsg("",
+		[]byte(`{"query":"mutation { __typename executeTransaction(transactionDataBcs: \"x\") { digest } }"}`),
 		graphqlConnectionType, nil, extensionslib.ExtensionInfo{})
 	require.NoError(t, err)
 	api := chainMessage.GetApi()
-	require.Equal(t, "chainIdentifier&executeTransaction", api.Name)
-	require.EqualValues(t, 110, api.ComputeUnits)
 	require.EqualValues(t, 1, api.Category.Stateful, "a request carrying a mutation must combine to stateful")
 	require.False(t, api.Category.Deterministic, "a request carrying a mutation must not be deterministic")
 }
@@ -417,4 +426,62 @@ func TestGraphQLChainParserBlockParsingFromArguments(t *testing.T) {
 	require.NoError(t, err)
 	variableBlock, _ := viaVariable.RequestedBlock()
 	require.EqualValues(t, 314800000, variableBlock, "a variable-pinned checkpoint must parse to its own block")
+}
+
+// MAG-5120's three reproductions, through the chain parser with lava-specs sui.json: what the
+// router routes, charges and caches a request by is what the node runs.
+func TestGraphQLChainParserReadsTheRequestTheWayTheNodeDoes(t *testing.T) {
+	chainParser, err := NewGraphQLChainParser()
+	require.NoError(t, err)
+	chainParser.SetSpec(loadSuiSpec(t, "SUI"))
+	parse := func(t *testing.T, body string) ChainMessage {
+		t.Helper()
+		chainMessage, err := chainParser.ParseMsg("", []byte(body), graphqlConnectionType, nil, extensionslib.ExtensionInfo{})
+		require.NoError(t, err)
+		return chainMessage
+	}
+
+	t.Run("a field @skip leaves out is not charged or routed", func(t *testing.T) {
+		chainMessage := parse(t, `{"query":"{ checkpoint(sequenceNumber: 1) @skip(if: true) { digest } chainIdentifier }"}`)
+		alone := parse(t, `{"query":"{ chainIdentifier }"}`)
+		require.Equal(t, "chainIdentifier", chainMessage.GetApi().Name)
+		require.Equal(t, alone.GetApi().ComputeUnits, chainMessage.GetApi().ComputeUnits)
+		requested, _ := chainMessage.RequestedBlock()
+		require.NotEqual(t, int64(1), requested, "the skipped checkpoint pin does not decide the block")
+		wantRequested, _ := alone.RequestedBlock()
+		require.Equal(t, wantRequested, requested)
+	})
+
+	t.Run("a field repeated under one response key is charged once", func(t *testing.T) {
+		chainMessage := parse(t, `{"query":"{ epoch { epochId } epoch { startTimestamp } }"}`)
+		alone := parse(t, `{"query":"{ epoch { epochId } }"}`)
+		require.Equal(t, "epoch", chainMessage.GetApi().Name)
+		require.Equal(t, alone.GetApi().ComputeUnits, chainMessage.GetApi().ComputeUnits)
+	})
+
+	t.Run("a variable's declared default pins the checkpoint", func(t *testing.T) {
+		chainMessage := parse(t, `{"query":"query P($n: UInt53 = 5) { checkpoint(sequenceNumber: $n) { digest } }"}`)
+		requested, _ := chainMessage.RequestedBlock()
+		require.Equal(t, int64(5), requested, "read as the node reads it, not as latest")
+	})
+
+	t.Run("a checkpoint written as text is not a pin", func(t *testing.T) {
+		latest, _ := parse(t, `{"query":"{ checkpoint { sequenceNumber } }"}`).RequestedBlock()
+		for _, body := range []string{
+			`{"query":"query P($n: UInt53!) { checkpoint(sequenceNumber: $n) { sequenceNumber } }","variables":{"n":"100"}}`,
+			`{"query":"{ checkpoint(sequenceNumber: \"0x10\") { sequenceNumber } }"}`,
+			`{"query":"{ address(address: \"0x2\", atCheckpoint: \"100\") { address } }"}`,
+		} {
+			requested, _ := parse(t, body).RequestedBlock()
+			require.Equal(t, latest, requested, "read as unpinned, the way the node refuses it: %s", body)
+		}
+		pinned, _ := parse(t, `{"query":"query P($n: UInt53!) { checkpoint(sequenceNumber: $n) { sequenceNumber } }","variables":{"n":100}}`).RequestedBlock()
+		require.Equal(t, int64(100), pinned, "the same request with a number is still pinned")
+	})
+
+	t.Run("a checkpoint above 2^53 in variables is read exactly", func(t *testing.T) {
+		chainMessage := parse(t, `{"query":"query P($n: UInt53!) { checkpoint(sequenceNumber: $n) { digest } }","variables":{"n":9007199254740993}}`)
+		requested, _ := chainMessage.RequestedBlock()
+		require.Equal(t, int64(9007199254740993), requested)
+	})
 }

@@ -78,12 +78,12 @@ func TestParseGraphQLMsgRefusesNestingPastTheLimit(t *testing.T) {
 	// A refusal by the router's own limit, not a document the parser could not read. This row
 	// used to require the "failed parsing graphql query" prefix, which is the misclassification
 	// MAG-4577 names: it reads to the caller as a broken document. Both are refusals now, and they
-	// still say different things: the limit's reply is MAG-4577's, with no code, while a document
+	// still say different things: the limit's reply is REQUEST_REFUSED (MAG-5120), while a document
 	// the parser cannot read is GRAPHQL_PARSE_FAILED (MAG-4351).
 	require.ErrorIs(t, err, ErrGraphQLRequestRefused)
 	require.NotContains(t, err.Error(), "failed parsing graphql query")
 	require.NotNil(t, GraphQLRefusalFrom(err))
-	require.Empty(t, GraphQLRefusalFrom(err).Code())
+	require.Equal(t, GraphQLRequestRefusedCode, GraphQLRefusalFrom(err).Code())
 
 	_, err = ParseGraphQLMsg([]byte(`{"query":"` + nestedSelection(MaxGraphQLQueryDepth) + ` }"}`))
 	require.ErrorContains(t, err, "failed parsing graphql query")
