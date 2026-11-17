@@ -873,9 +873,10 @@ func (apil *chainListenerBase) GetListeningAddress() string {
 // websocket upgrade. Only those listeners may hand an upgrade on the health path
 // past the health handler; see the health route below for why the distinction has
 // to be explicit rather than inferred.
-// routesDelete is true for a listener whose own routes answer a DELETE: GraphQL refuses it with 405
-// and Allow: POST like every method it does not serve (MAG-4524). The other listeners still get the
-// shared 204 below, before any route runs, until their own refusal is built (MAG-5061 item 7).
+// routesDelete is true for a listener whose own routes answer a DELETE (MAG-4524). GraphQL refuses
+// it with 405 and Allow: POST like every method it does not serve. JSON-RPC and Tendermint RPC
+// register no DELETE route, so fiber refuses it with 405 and the same Allow a PUT or a PATCH gets.
+// REST still gets the shared 204 below, before any route runs, until its own refusal is built.
 func createAndSetupBaseAppListener(cmdFlags common.ConsumerCmdFlags, healthCheckPath string, healthReporter HealthReporter, servesWebSocketUpgrades, routesDelete bool) *fiber.App {
 	app := fiber.New(fiber.Config{
 		JSONEncoder: json.Marshal,
