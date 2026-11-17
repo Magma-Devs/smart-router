@@ -2202,6 +2202,10 @@ func (m *MockProtocolMessage) IsBatch() bool {
 	return false
 }
 
+func (m *MockProtocolMessage) HasBlocklessElement() bool {
+	return false
+}
+
 func (m *MockProtocolMessage) GetRPCMessage() rpcInterfaceMessages.GenericMessage {
 	return nil
 }
@@ -3244,6 +3248,8 @@ func (m *cvGuardStateMachine) SetResultsChecker(rc relaycore.ResultsCheckerInf) 
 type cvGuardMetrics struct{}
 
 func (cvGuardMetrics) SetRelayNodeErrorMetric(chainId, apiInterface, providerAddress, method string) {
+}
+func (cvGuardMetrics) SetRelayNodeResultMetric(chainId, apiInterface, providerAddress, method string) {
 }
 func (cvGuardMetrics) GetChainIdAndApiInterface() (string, string) { return "LAVA", "rest" }
 
