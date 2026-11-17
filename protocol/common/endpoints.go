@@ -32,9 +32,15 @@ const (
 	STATEFUL_API_HEADER                             = "lava-stateful-api"
 	STATEFUL_ALL_PROVIDERS_HEADER_NAME              = "lava-fast-tx-participants"
 	REQUESTED_BLOCK_HEADER_NAME                     = "lava-parsed-requested-block"
-	IDENTIFIED_NODE_ERROR_HEADER                    = "lava-identified-node-error"
-	HEDGE_TRIGGERED_HEADER                          = "lava-hedge-triggered"
-	SMART_ROUTER_VERSION_HEADER_NAME                = "Smart-Router-Version"
+	// WRITE_OUTCOME_HEADER_NAME names a GraphQL write's verdict across the copies it was sent to
+	// (MAG-5122): "accepted" on the chain's success row (Sui: effects with SUCCESS or FAILURE) or
+	// "unknown" today; "rejected" and "not_sent" need the chain's refusal rows (MAG-4909, MAG-5121),
+	// and any other reply carries no header. Absent on a read and on every other interface's
+	// write, which this ticket does not change.
+	WRITE_OUTCOME_HEADER_NAME        = "Lava-Write-Outcome"
+	IDENTIFIED_NODE_ERROR_HEADER     = "lava-identified-node-error"
+	HEDGE_TRIGGERED_HEADER           = "lava-hedge-triggered"
+	SMART_ROUTER_VERSION_HEADER_NAME = "Smart-Router-Version"
 	// EXTENSION_UNAVAILABLE_HEADER_NAME lists, comma-separated, the extensions the caller asked for
 	// with lava-extension that no node on this router offers. The request was served WITHOUT them
 	// — e.g. from a non-archive node — so a caller that needs the extension must not trust the

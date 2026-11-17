@@ -147,8 +147,8 @@ func TestPathAdmission_EachGeneratedUrlIsCheckedOnItsOwnPath(t *testing.T) {
 	})
 }
 
-// MAG-4214, the two-url shape dfns TONT runs: a /v2 url failing chain-id costs the
-// /v2 path, and the provider keeps serving /v3 from its healthy url.
+// MAG-4214, the two-url shape a TON testnet provider runs in production: a /v2 url failing
+// chain-id costs the /v2 path, and the provider keeps serving /v3 from its healthy url.
 func TestPathAdmission_AFailedPathKeepsTheProvider(t *testing.T) {
 	parser := tontParser(t)
 	node := newFakeTon(t, "XXXXwrongchainXXXXXXXXXXXXXXXXXXXXXXXXXXXXX=")

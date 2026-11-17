@@ -375,10 +375,19 @@ type mockWSProtocolMessage struct {
 	// is told on teardown (MAG-4278 item 1), so a test that exercises a teardown has to carry
 	// the pairs its chain declares. Nil leaves the collection with none, as before.
 	parseDirectives []*spectypes.ParseDirective
+
+	// stateful marks this message's API a write, the same way a spec's Category.Stateful
+	// does for Substrate's submit-and-watch methods (MAG-5331). False (the default) is an
+	// ordinary read subscription, as every test before this one assumed.
+	stateful bool
 }
 
 func (m *mockWSProtocolMessage) GetApi() *spectypes.Api {
-	return &spectypes.Api{Name: m.method}
+	api := &spectypes.Api{Name: m.method}
+	if m.stateful {
+		api.Category.Stateful = common.CONSISTENCY_SELECT_ALL_PROVIDERS
+	}
+	return api
 }
 
 func (m *mockWSProtocolMessage) GetUnavailableExtensions() []string { return nil }
