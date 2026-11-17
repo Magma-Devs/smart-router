@@ -2641,7 +2641,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 			return err
 		}
 	} else {
-		err = utils.FormatError("no static spec paths configured; smart router requires --static-spec-paths to load chain specs", nil, utils.Attribute{Key: "chainID", Value: chainID})
+		err = utils.FormatError("no spec source configured; smart router requires --"+common.UseStaticSpecFlag+" to load chain specs", nil, utils.Attribute{Key: "chainID", Value: chainID})
 		errCh <- err
 		return err
 	}
