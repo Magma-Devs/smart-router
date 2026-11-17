@@ -57,6 +57,43 @@ func TestHandleGRPCError_NodeOwnDeadlineBeforeTheRoutersStaysANodeError(t *testi
 	require.False(t, errors.Is(err, context.DeadlineExceeded), "the node's deadline is not the router's")
 }
 
+// MAG-4925, second race: a handler that gives up on the call by hand can answer CANCELED instead of
+// DEADLINE_EXCEEDED — the provider simulator's `hang` fault mode does, after holding the call for a
+// fixed 30 s, the router's default attempt deadline. The first fix (DEADLINE_EXCEEDED only) left
+// this one open, so every verify-bug-fix run against the simulator kept finding the original
+// symptom: this status, read in the same gap, is the router's deadline just as much as
+// DEADLINE_EXCEEDED is.
+func TestHandleGRPCError_CanceledEchoedByTheNodeIsTheRoutersTimeout(t *testing.T) {
+	ctx := deadlinePassedCtx{Context: context.Background(), deadline: time.Now().Add(-time.Millisecond)}
+	echoed := status.Error(codes.Canceled, "hang timeout")
+
+	g := &GRPCDirectRPCConnection{}
+	resp, err := g.handleGRPCError(ctx, echoed, nil, nil, true)
+
+	require.Nil(t, resp, "the router's own deadline is not an answer from the node")
+	require.ErrorIs(t, err, context.DeadlineExceeded, "the sentinel every timeout carries")
+	require.ErrorIs(t, err, echoed, "the node's status stays readable for logs")
+	var statusErr *GRPCStatusError
+	require.False(t, errors.As(err, &statusErr), "a timeout is not typed as the node's status")
+}
+
+// The guard on the other side, kept for CANCELED too: a node that answers CANCELED while the
+// router's deadline is still open cancelled its own work. That is its answer, and a node error,
+// not the router's cancellation (ctx.Err() is nil here, unlike the local-cancel branch above).
+func TestHandleGRPCError_NodeOwnCanceledBeforeTheRoutersStaysANodeError(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
+	defer cancel()
+
+	g := &GRPCDirectRPCConnection{}
+	resp, err := g.handleGRPCError(ctx, status.Error(codes.Canceled, "upstream query cancelled"), nil, nil, true)
+
+	require.NotNil(t, resp, "the node answered")
+	require.Equal(t, int(codes.Canceled), resp.StatusCode)
+	var statusErr *GRPCStatusError
+	require.ErrorAs(t, err, &statusErr)
+	require.False(t, errors.Is(err, context.DeadlineExceeded), "the node's own cancel is not the router's timeout")
+}
+
 // Only the deadline status is read against the clock. Another status that arrives at the same
 // instant is the node's answer, arrived late, as a late HTTP reply is on every other transport.
 func TestHandleGRPCError_OtherStatusAfterTheDeadlineStaysANodeError(t *testing.T) {
@@ -92,6 +129,9 @@ func TestRouterDeadlineEchoed(t *testing.T) {
 		{"grpc-go's own local deadline wording", withDeadline, status.Error(codes.DeadlineExceeded, "context deadline exceeded"), deadline, true},
 		{"not a status error", withDeadline, errors.New("deadline exceeded"), deadline.Add(time.Second), false},
 		{"no deadline on the context", context.Background(), echoed, deadline.Add(time.Hour), false},
+		{"CANCELED at the deadline", withDeadline, status.Error(codes.Canceled, "hang timeout"), deadline, true},
+		{"CANCELED after the deadline", withDeadline, status.Error(codes.Canceled, "hang timeout"), deadline.Add(3 * time.Millisecond), true},
+		{"CANCELED before the deadline: the node's own", withDeadline, status.Error(codes.Canceled, "hang timeout"), deadline.Add(-time.Nanosecond), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			require.Equal(t, tc.want, routerDeadlineEchoed(tc.ctx, tc.err, tc.now))

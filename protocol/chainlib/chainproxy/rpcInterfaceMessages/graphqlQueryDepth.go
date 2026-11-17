@@ -43,15 +43,18 @@ func parseGraphQLQuery(query string) (*ast.QueryDocument, error) {
 // string, a block string or a comment is not counted.
 //
 // The count matches the parser's recursion up to the first closing bracket of the wrong kind, and
-// the parser stops at that bracket with a syntax error. A document the lexer cannot read is left to
-// the parser, which stops at the same place with its own message.
+// the parser stops at that bracket with a syntax error. A document the lexer itself cannot read
+// (an unterminated string, a bad escape, a bad number, an invalid character) is refused here with
+// the lexer's OWN message: re-parsing it with gqlparser.ParseQuery to get that message, as this used
+// to do, throws the specific reason away — the parser re-derives only a generic "Unexpected
+// <Invalid>" for the same input, at the same position, with none of the lexer's detail.
 func checkGraphQLQueryDepth(source *ast.Source) error {
 	tokens := lexer.New(source)
 	depth := 0
 	for {
 		token, err := tokens.ReadToken()
 		if err != nil {
-			return nil //nolint:nilerr // the parser stops at the same token and reports it in its own words
+			return refuseUnparsableGraphQLQuery(err)
 		}
 		switch token.Kind {
 		case lexer.EOF:
