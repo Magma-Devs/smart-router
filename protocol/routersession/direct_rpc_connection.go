@@ -2249,14 +2249,15 @@ func NewGRPCStatusError(code uint32, message string, cause error, md map[string]
 // gRPC sends the router's deadline to the node in the grpc-timeout header. A server whose own
 // library enforces that deadline ends the call with a DEADLINE_EXCEEDED status of its own (grpc-go
 // words it "context deadline exceeded"; the provider simulator's Python server, "Deadline
-// Exceeded"). A handler that instead notices the deadline itself and aborts the call by hand can
-// just as well answer CANCELED — the provider simulator's `hang` fault mode does exactly this,
-// which is why the first fix here (DEADLINE_EXCEEDED only) kept failing verify-bug-fix after it
-// merged: every run of the reproduction races against this code, not that one (MAG-4925). Either
-// way the call is ended from two sides at the same instant, by the router's own timer and by the
-// node's status for the same deadline, and grpc-go hands back whichever arrives first. A deadline
-// context reports no error until the runtime has run its timer, so a status that arrived in that
-// gap met a live context and was taken for the node's answer, through the node-error arm of
+// Exceeded"). A handler that instead gives up on the call by hand can just as well answer
+// CANCELED. The provider simulator's `hang` fault mode does: it does not read the deadline, but
+// holds the call for a fixed 30 s, the router's default attempt deadline, then aborts it CANCELED
+// ("hang timeout"). It starts that clock only when the call arrives, so its CANCELED lands at or
+// just after the router's deadline, in the same gap. That is why the first fix here
+// (DEADLINE_EXCEEDED only) kept failing verify-bug-fix after it merged (MAG-4925). Either way the
+// call is ended from two sides at the same instant, by the router's own timer and by the node's
+// status, and grpc-go hands back whichever arrives first. A deadline context reports no error
+// until the runtime has run its timer, so a status that arrived in that gap met a live context and was taken for the node's answer, through the node-error arm of
 // handleGRPCError: nothing counts a node error against the endpoint, and the status went to the
 // caller as the node's reply. Under a burst a few attempts in a hundred took the gap, and a
 // provider that never answered was left on, short of the disable threshold.

@@ -57,11 +57,12 @@ func TestHandleGRPCError_NodeOwnDeadlineBeforeTheRoutersStaysANodeError(t *testi
 	require.False(t, errors.Is(err, context.DeadlineExceeded), "the node's deadline is not the router's")
 }
 
-// MAG-4925, second race: a handler that notices the router's deadline itself and aborts the call
-// by hand can answer CANCELED instead of DEADLINE_EXCEEDED — the provider simulator's `hang` fault
-// mode does exactly this. The first fix (DEADLINE_EXCEEDED only) left this one open, so every
-// verify-bug-fix run against the simulator kept finding the original symptom: this status, read in
-// the same gap, is the router's deadline just as much as DEADLINE_EXCEEDED is.
+// MAG-4925, second race: a handler that gives up on the call by hand can answer CANCELED instead of
+// DEADLINE_EXCEEDED — the provider simulator's `hang` fault mode does, after holding the call for a
+// fixed 30 s, the router's default attempt deadline. The first fix (DEADLINE_EXCEEDED only) left
+// this one open, so every verify-bug-fix run against the simulator kept finding the original
+// symptom: this status, read in the same gap, is the router's deadline just as much as
+// DEADLINE_EXCEEDED is.
 func TestHandleGRPCError_CanceledEchoedByTheNodeIsTheRoutersTimeout(t *testing.T) {
 	ctx := deadlinePassedCtx{Context: context.Background(), deadline: time.Now().Add(-time.Millisecond)}
 	echoed := status.Error(codes.Canceled, "hang timeout")
