@@ -517,6 +517,16 @@ The gRPC sidecar is the exception: its in-memory store cannot enumerate keys by 
 scopes what a router reads and writes, and is not a flush boundary there. Routers that must
 be flush-isolated from each other need separate sidecars, or the RESP backend.
 
+`POST /debug/reset-cache` (MAG-2454) runs the same `Flush` call, alone — the BTC-safe,
+cache-only alternative to `/debug/reset-all` for a test that only needs a clean cache. It
+skips every in-process reset `/debug/reset-all` bundles with it (session-manager state,
+scores, pairing, endpoint health, chain trackers), and the flush itself is the one above:
+same prefix scoping, same read/write endpoint reach, same sidecar full-keyspace caveat. That
+flush empties everything the backend holds for the router, not only replies: under
+`--shared-state` the fleet's sticky-session claims and fleet tracker gate observations go
+with them. Unlike `/debug/reset-all`, it leaves this pod's own sticky pins in place, so the
+pod keeps serving a pinned session from its local pin while the fleet's claim is gone.
+
 ## Precedence and rollback
 
 Switching backends is a configuration change; the RESP cache starts cold (no data migrates).
