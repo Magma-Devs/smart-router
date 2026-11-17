@@ -303,3 +303,16 @@ func TestSequentialOperations(t *testing.T) {
 // 		t.Log("Memory cleanup behavior should be verified based on implementation")
 // 	})
 // }
+
+func TestForgetSessionDropsTheSessionsReportsInEveryEpoch(t *testing.T) {
+	qosManager := NewQoSManager()
+	qosManager.AddFailedRelay(1, 7)
+	qosManager.AddFailedRelay(2, 7)
+	qosManager.AddFailedRelay(2, 8)
+
+	qosManager.ForgetSession(7)
+
+	require.Zero(t, qosManager.GetTotalRelays(1, 7), "the session's report in its own epoch is gone")
+	require.Zero(t, qosManager.GetTotalRelays(2, 7), "and in a later epoch")
+	require.Equal(t, uint64(1), qosManager.GetTotalRelays(2, 8), "another session's report is kept")
+}

@@ -76,6 +76,20 @@ func (scs *SingleConsumerSession) Free(err error) {
 	scs.lock.Unlock()
 }
 
+// isReclaimable reports whether session is permanently dead and safe to drop from its provider's
+// Sessions map (MAG-5063): BlockListed, so TryUseSession will never succeed on it again, and not
+// presently held by some other in-flight attempt. A session whose lock we cannot acquire is left
+// alone — being busy right now says nothing about whether it will be blocklisted once it is
+// free — so this can run on every session a provider holds, not only the one matching the
+// connection a request needs, without disturbing one that is still doing work.
+func (session *SingleConsumerSession) isReclaimable() bool {
+	if !session.lock.TryLock() {
+		return false
+	}
+	defer session.lock.Unlock()
+	return session.BlockListed
+}
+
 func (session *SingleConsumerSession) TryUseSession() (blocked bool, ok bool) {
 	if session.lock.TryLock() {
 		if session.BlockListed { // this session cannot be used.

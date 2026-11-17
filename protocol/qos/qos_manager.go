@@ -29,6 +29,17 @@ func (qosManager *QoSManager) CleanPurgedEpochs(previousEpoch uint64) {
 	}
 }
 
+// ForgetSession drops every report filed for sessionId, under whichever epoch it was filed: a
+// session's failures go under the epoch it was created in, its successes under the current one.
+// For a session that is gone for good, such as a retired one its provider reclaimed (MAG-5063).
+func (qosManager *QoSManager) ForgetSession(sessionId int64) {
+	qosManager.lock.Lock()
+	defer qosManager.lock.Unlock()
+	for _, sessions := range qosManager.qosReports {
+		delete(sessions, sessionId)
+	}
+}
+
 func (qosManager *QoSManager) fetchOrSetSessionFromMap(epoch uint64, sessionId int64) *QoSReport {
 	qosManager.lock.Lock()
 	defer qosManager.lock.Unlock()
