@@ -75,6 +75,17 @@ type graphQLListenerReply struct {
 // serveGraphQLListenerReplies is serveGraphQLListener with the reply's headers too.
 func serveGraphQLListenerReplies(t *testing.T, relay RelaySender) func(body string) graphQLListenerReply {
 	t.Helper()
+	send := sendToGraphQLListener(t, relay)
+	return func(body string) graphQLListenerReply {
+		t.Helper()
+		return send(http.MethodPost, "/", body)
+	}
+}
+
+// sendToGraphQLListener brings up a GraphQL listener over relay and returns a function that sends
+// a request in any method, to any path, and reads back what a caller would see.
+func sendToGraphQLListener(t *testing.T, relay RelaySender) func(method, path, body string) graphQLListenerReply {
+	t.Helper()
 	if !rand.Initialized() {
 		rand.InitRandomSeed()
 	}
@@ -100,9 +111,12 @@ func serveGraphQLListenerReplies(t *testing.T, relay RelaySender) func(body stri
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	t.Cleanup(client.CloseIdleConnections)
-	return func(body string) graphQLListenerReply {
+	return func(method, path, body string) graphQLListenerReply {
 		t.Helper()
-		response, err := client.Post("http://"+addr+"/", "application/json", strings.NewReader(body))
+		request, err := http.NewRequest(method, "http://"+addr+path, strings.NewReader(body))
+		require.NoError(t, err)
+		request.Header.Set("Content-Type", "application/json")
+		response, err := client.Do(request)
 		require.NoError(t, err)
 		defer response.Body.Close()
 		raw, err := io.ReadAll(response.Body)

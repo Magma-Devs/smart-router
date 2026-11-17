@@ -262,7 +262,7 @@ func (apil *RestChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 	// false: rest serves no websockets and registers no GET route, so the next
 	// handler after the health route is the relay catch-all below. Handing an
 	// upgrade on here would turn a health probe into a chain request.
-	app := createAndSetupBaseAppListener(cmdFlags, apil.endpoint.HealthCheckPath, apil.healthReporter, false)
+	app := createAndSetupBaseAppListener(cmdFlags, apil.endpoint.HealthCheckPath, apil.healthReporter, false, false)
 	apil.app = app
 
 	chainID := apil.endpoint.ChainID
