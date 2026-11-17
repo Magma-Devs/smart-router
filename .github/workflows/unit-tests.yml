@@ -65,8 +65,22 @@ jobs:
       # tools/wizard's icon test downloads an SVG from the docs site; OFFLINE
       # skips it so the gate does not depend on the network.
       OFFLINE: "1"
+      # Read by protocol/common's TestEveryLavaSpecHasAChainFamily, which fails
+      # under CI without it.
+      LAVA_SPECS_DIR: ${{ github.workspace }}/.lava-specs
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # lava-specs main, for the test that gives every spec in it a chain
+      # family (MAG-5246): a spec merged there whose chain the router cannot
+      # place in a family fails this check, on every PR, until it gets one.
+      # After the router checkout, which would clean it away; the leading dot
+      # keeps it out of `go list ./...`.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Magma-Devs/lava-specs
+          path: .lava-specs
+          persist-credentials: false
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
