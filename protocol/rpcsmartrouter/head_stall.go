@@ -130,7 +130,9 @@ func runHeadStallStep(
 		// Only endpoints that can answer a relay take part: a ws/wss url is never selected for a
 		// relay (Endpoint.ServesDirectRelays), so counting it as "usable" would let never-empty
 		// keep a websocket url while taking out the provider's only https url — leaving nothing
-		// that can serve. Subscriptions on a stuck wss url are out of scope (MAG-4161).
+		// that can serve. So a wss url is never marked here. New subscriptions judge it by its
+		// provider's relay urls instead (ConsumerSessionManager.URLLendRank, MAG-4161), which
+		// leaves out a wss url that is stuck while its https sibling still moves.
 		if ep.Endpoint.ServesDirectRelays() {
 			unique = append(unique, ep)
 		}

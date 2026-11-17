@@ -42,6 +42,13 @@ func (e *Endpoint) lendRankLocked() int {
 	}
 }
 
+// lendRank is lendRankLocked under e.mu.
+func (e *Endpoint) lendRank() int {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.lendRankLocked()
+}
+
 // IsUsable reports, under e.mu, whether selection may route to this endpoint right now. It differs
 // from IsEnabled, which describes only the event slot: an endpoint can be Enabled and still out of
 // rotation because a state reason (head-stalled) holds.
