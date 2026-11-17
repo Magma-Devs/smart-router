@@ -276,10 +276,11 @@ func (p CrossValidationPolicy) governsRequests() bool {
 	return p.Enabled || p.ForbidCallerCV || p.hasBounds()
 }
 
-// hasBounds reports whether any knob carries a floor or a cap.
+// hasBounds reports whether any knob carries a floor or a cap. A max-participants "primary"/"all" counts:
+// it resolves to a floor (MAG-2783), only later than a number does.
 func (p CrossValidationPolicy) hasBounds() bool {
 	for _, b := range []Bound{p.MaxParticipants, p.AgreementThreshold, p.MinGroups} {
-		if b.Floor != nil || b.Cap != nil {
+		if b.Floor != nil || b.Cap != nil || b.Participants != "" {
 			return true
 		}
 	}

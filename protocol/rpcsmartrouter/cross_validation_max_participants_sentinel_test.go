@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/require"
 )
@@ -164,4 +165,25 @@ func TestCrossValidationPolicyResolver_SetParticipantCounts(t *testing.T) {
 		var r *CrossValidationPolicyResolver
 		require.NotPanics(t, func() { r.SetParticipantCounts(5, 8) })
 	})
+}
+
+// TestPreflightValidateCrossValidationConfig_SentinelPolicyTargetIsChecked: a policy whose only knob is
+// max-participants: primary/all names its target the way max-participants: 3 does, so a chain-id no
+// endpoint serves is refused at startup for it too (MAG-3604, governsRequests). Until SetParticipantCounts
+// runs, such a Bound has neither a floor nor a cap, so it read as a policy with no bounds and was skipped.
+func TestPreflightValidateCrossValidationConfig_SentinelPolicyTargetIsChecked(t *testing.T) {
+	for _, value := range []string{"3", participantsPrimary, participantsAll} {
+		t.Run(value, func(t *testing.T) {
+			v := viper.New()
+			v.SetConfigType("yaml")
+			require.NoError(t, v.ReadConfig(strings.NewReader("cross-validation:\n"+
+				"  policies:\n"+
+				"    - chain-id: ETH1X\n"+
+				"      api-interface: jsonrpc\n"+
+				"      method: eth_getBalance\n"+
+				"      max-participants: "+value+"\n")))
+			err := PreflightValidateCrossValidationConfig(v, []*routersession.RPCEndpoint{{ChainID: "ETH1", ApiInterface: "jsonrpc"}})
+			require.ErrorContains(t, err, "no endpoint serves")
+		})
+	}
 }
