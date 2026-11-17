@@ -4902,7 +4902,7 @@ func skipCacheWriteAfterDegrade(ctx context.Context, relayProcessor *relaycore.R
 // - Response is a node error
 // - Response body is larger than cacheMaxEntryBytes (--cache-max-entry-bytes)
 // - Requested block is NOT_APPLICABLE
-// - Reply is a null for a concrete block at or below the router's tip (nullForBlockAtOrBelowTip)
+// - Reply answers nothing (a null, {}, an error document) for a concrete block at or below the router's tip (noAnswerForBlockAtOrBelowTip)
 // - Requested block is a tag the resolution above leaves negative (EARLIEST/PENDING/SAFE/FINALIZED)
 func (rpcss *RPCSmartRouterServer) tryCacheWrite(
 	ctx context.Context,
@@ -5013,11 +5013,12 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 		return
 	}
 
-	// A null for a block the router knows exists is one lagging node's answer, not the chain's.
-	// Written, it would be replayed to every caller of that block as a gap (MAG-4124). The caller
-	// that drew it still gets it; only the replay is refused.
-	if tip := int64(rpcss.getLatestBlock()); nullForBlockAtOrBelowTip(requestedBlock, tip, relayResult.Reply.Data) {
-		utils.FormatDebug("cache write skipped: a null for a block at or below the tip",
+	// No answer for a block the router knows exists (a JSON-RPC null, a REST {} or error document)
+	// is one node's answer, not the chain's. Written, it would be replayed to every caller of that
+	// block as a gap (MAG-4124, MAG-5307). The caller that drew it still gets it; only the replay is
+	// refused.
+	if tip := int64(rpcss.getLatestBlock()); noAnswerForBlockAtOrBelowTip(requestedBlock, tip, relayResult.Reply.Data) {
+		utils.FormatDebug("cache write skipped: no answer for a block at or below the tip",
 			utils.LogAttr("chainId", chainId),
 			utils.LogAttr("api", apiName),
 			utils.LogAttr("requestedBlock", requestedBlock),
