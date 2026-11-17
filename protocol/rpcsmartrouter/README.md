@@ -169,7 +169,7 @@ cross-validation:
 | --- | --- |
 | `enabled` | `true` mandates CV for this method even with no caller headers. |
 | `forbid-caller-cv` | `true` disables CV for this method: the caller's CV headers are ignored and the method routes by its normal category. Mutually exclusive with `enabled` (rejected at startup if both set); the other knobs are ignored when set. Redundant on a stateful method, which ignores the headers on its own (MAG-3603); such an entry still loads and is harmless. |
-| `max-participants` | How many providers to fan out to. |
+| `max-participants` | How many providers to fan out to — a number, or `primary` (every configured `direct-rpc` upstream) / `all` (also `backup-direct-rpc`); see [CROSS-VALIDATION.md](../../docs/CROSS-VALIDATION.md#max-participants-every-configured-upstream). |
 | `agreement-threshold` | How many identical responses form a quorum (in per-group mode, *within each group*). |
 | `min-groups` | Distinct provider groups the quorum must span (`1` = no diversity requirement). |
 | `per-group-quorum` | Upgrade `min-groups` to per-group quorum (operator-only; requires `min-groups > 1`). |
@@ -196,7 +196,10 @@ groups than its `min-groups`, or fewer providers than its `max-participants`), i
 `ATTENTION` line naming the missing providers and refuses only the requests that policy governs
 until the background retry re-admits them. Two shortfalls are warned about rather than refused:
 a `max-participants` larger than the configured primaries, and an endpoint configured with
-backup providers only, which cross-validation never draws on. The startup line counts every
+backup providers only. Cross-validation never draws on backups for a numeric or `primary`
+`max-participants` — only `max-participants: all` does, topping up a primary-only shortfall
+from the backup tier (MAG-2783); a backup-only endpoint still cannot meet a `primary`-valued
+or numeric policy. The startup line counts every
 verified primary; a request that needs an addon or extension draws only on the primaries serving
 it and can be refused with fewer.
 
@@ -350,6 +353,36 @@ Both answer **503**, never an empty 200, when the recorder is not installed — 
 recorded" and "nothing dissented" are opposite answers. The ring is bounded (4096 events); the
 `X-Cross-Validation-Events-Dropped` response header reports evictions so truncation cannot pass for
 absence.
+
+### Compliance record (always on, not debug-gated)
+
+Unrelated to the debug ring above: every cross-validated request — success or failure, agreement or
+dissent — emits exactly one structured JSON log line, `"cross-validation record"`, into the router's
+normal log output (MAG-2787, part of MAG-2782's Kraken compliance work — RTS (EU) 2024/1774
+Art. 14(1)(a)/23(2)(b), DORA Art. 12(7)). Unlike the debug ring, this is **always on**, independent of
+`--debug-address`, and independent of `--log-level` — it is written through a dedicated fixed-level
+logger specifically so turning the router's verbosity down can never silence compliance evidence. The
+router holds nothing and serves no read API for these records; a separate ticket (MAG-2788) covers
+reading them back from the log pipeline (Loki on S3).
+
+The record carries digests and metadata only, **never** a request or response body. Key fields:
+
+| Field | Meaning |
+| --- | --- |
+| `seq` | process-wide monotonic counter, assigned before the record is queued for writing — a gap in the sequence as seen in the log stream is how a dropped record becomes visible, rather than silent. A request whose stragglers were still in flight is written when they resolve, up to the straggler deadline after its reply, so records are not in `seq` order: a missing `seq` is a drop only once that deadline has passed. It starts again at 1 when the process restarts |
+| `requestId` | the same value returned in the `Lava-Guid` response header |
+| `tenant` | the caller's customer-id/dapp-id header as sent: up to 128 bytes of valid UTF-8, else `other`; `DefaultDappID` when absent. Unlike the `customer` Prometheus label it is not capped in count, so keep it in the line body and never promote it to a Loki label |
+| `agreementThreshold`, `maxParticipants`, `minGroups` | the policy **as resolved for this request**, not whatever the config says when the record is later read |
+| `status`, `failureReason` | `success` or `failed`; the closed failure-reason enum on failure |
+| `servedDigest` | which answer was served — empty on failure, where there was no winner |
+| `pluralitySize`, `pluralityProviders` | on a failed quorum, the largest agreeing group's composition |
+| `endpoints` | every provider queried, each with its outcome (`agreed`/`disagreed`/`node-error`/`protocol-error`/`not-received`) and digest — a digest is only ever meaningful alongside its outcome, since an empty digest means both "answered with empty content" and "never answered" |
+| `lateResolutions` | stragglers that resolved after the reply, with how long that took — empty when nothing was still pending at reply time |
+| `digestAlgorithmVersion` | which canonicalization every digest in the record used |
+
+Writing is asynchronous through a bounded queue: a full queue drops the record rather than blocking
+the relay, and increments `smartrouter_cross_validation_record_dropped_total{spec, apiInterface}` — the
+same drop a reader with no metrics access can still see as a hole in `seq`.
 
 ## Usage
 
