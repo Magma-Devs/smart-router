@@ -70,6 +70,12 @@ whatever the caller sends.
       agreement-threshold: { floor: 2, cap: 3 }  # caller may raise 2 -> 3, and no further
 ```
 
+Under `enabled: true`, a knob written without a floor is floored at its default: 3 for
+`max-participants`, 2 for `agreement-threshold`, 1 for `min-groups` (MAG-2784). So
+`enabled: true` alone still lets a caller ask for more, never for less: a caller sending
+`agreement-threshold: 1` gets 2. A floor written in the policy replaces the default, whether it
+is lower or higher, and a cap below the default still wins.
+
 So the shorthand "a caller may make cross-validation stricter, never weaker" holds only **up
 to the configured cap**. The cap is the one *configured* mechanism by which the router validates
 less strictly than a caller asked, and it is an explicit operator decision — an operator who
