@@ -4652,7 +4652,7 @@ func (rpcss *RPCSmartRouterServer) ensureEndpointChainTracker(
 	if _, exists := rpcss.endpointChainTrackerManager.GetTracker(endpointURL); exists {
 		return
 	}
-	if rpcss.endpointChainTrackerManager.IsUntrackedByDesign(endpointURL) {
+	if rpcss.endpointChainTrackerManager.IsSettledUntracked(endpoint) {
 		return
 	}
 
@@ -4806,8 +4806,9 @@ func (rpcss *RPCSmartRouterServer) reconcileChainTrackers(ctx context.Context, f
 			continue
 		}
 		// Held as not tracked by design (MAG-5349): nothing is missing, so it is not re-tried
-		// and not reported as "had no tracker" on every pass.
-		if rpcss.endpointChainTrackerManager.IsUntrackedByDesign(ep.Endpoint.NetworkAddress) {
+		// and not reported as "had no tracker" on every pass. An endpoint that can read the
+		// head on such a url is not settled: it goes on to get the url its tracker.
+		if rpcss.endpointChainTrackerManager.IsSettledUntracked(ep.Endpoint) {
 			alreadyPresent++
 			continue
 		}

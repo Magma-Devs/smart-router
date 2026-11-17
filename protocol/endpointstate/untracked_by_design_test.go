@@ -194,3 +194,78 @@ func TestIsUntrackedByDesign_NilMonitor(t *testing.T) {
 	var m *EndpointMonitor
 	require.False(t, m.IsUntrackedByDesign("http://anything"))
 }
+
+// Two providers can list one url: one as a base url, the other as a standalone add-on url with
+// no head. The decision is kept per url, so it must follow the endpoint that can read the head,
+// whichever of the two is seen first. Otherwise the base provider loses its block height to the
+// other provider's opt-out.
+func TestUntrackedByDesign_SharedURL_FollowsTheEndpointThatHasAHead(t *testing.T) {
+	const url = "http://shared-node:8545"
+	baseEndpoint := &routersession.Endpoint{NetworkAddress: url, Enabled: true}
+
+	for _, standaloneFirst := range []bool{true, false} {
+		name := "base url seen first"
+		if standaloneFirst {
+			name = "standalone add-on url seen first"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			parser := &headLookupCountingParser{ChainParser: newRealChainParser(t, "ETH1", spectypes.APIInterfaceJsonRPC)}
+			m := newETHMonitor(t, ctx, parser, "ETH1")
+			conn := &mockDirectRPCConnection{url: url}
+			standalone := bundlerEndpoint(url, true)
+
+			if standaloneFirst {
+				tracker, err := m.GetOrCreateTracker("addon-provider", standalone, conn)
+				require.NoError(t, err)
+				require.Nil(t, tracker)
+				require.True(t, m.IsUntrackedByDesign(url), "precondition: alone, it is not tracked")
+				require.True(t, m.IsSettledUntracked(standalone))
+				require.False(t, m.IsSettledUntracked(baseEndpoint), "the base endpoint is not settled: it must still get the url its tracker")
+			}
+
+			tracker, err := m.GetOrCreateTracker("base-provider", baseEndpoint, conn)
+			require.NoError(t, err)
+			require.NotNil(t, tracker, "the url is a base url of another provider: it is tracked")
+
+			// The standalone endpoint, seen after, shares that tracker.
+			again, err := m.GetOrCreateTracker("addon-provider", standalone, conn)
+			require.NoError(t, err)
+			require.Same(t, tracker, again)
+
+			require.False(t, m.IsUntrackedByDesign(url))
+			require.False(t, m.IsSettledUntracked(standalone))
+			require.Equal(t, []string{url}, m.GetAllEndpoints(), "the url is listed once: it is in one of the two maps")
+			state, _, tracked := m.GetTrackerState(url)
+			require.True(t, tracked)
+			require.NotEqual(t, EndpointChainTrackerNotTrackedByDesign, state)
+		})
+	}
+}
+
+// A second standalone endpoint with no head on a url already held as not tracked changes
+// nothing, and each endpoint shape costs one spec lookup however often it is asked.
+func TestUntrackedByDesign_SharedURL_TwoHeadlessEndpointsStayUntracked(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	parser := &headLookupCountingParser{ChainParser: newRealChainParser(t, "ETH1", spectypes.APIInterfaceJsonRPC)}
+	m := newETHMonitor(t, ctx, parser, "ETH1")
+
+	const url = "http://addons-node:8545"
+	conn := &mockDirectRPCConnection{url: url}
+	bundler := bundlerEndpoint(url, true)
+	debug := &routersession.Endpoint{NetworkAddress: url, Enabled: true, Addons: map[string]struct{}{"debug": {}}, StandaloneAddons: true}
+
+	for i := 0; i < 20; i++ {
+		for _, endpoint := range []*routersession.Endpoint{bundler, debug} {
+			tracker, err := m.GetOrCreateTracker("p", endpoint, conn)
+			require.NoError(t, err)
+			require.Nil(t, tracker)
+		}
+	}
+	require.True(t, m.IsUntrackedByDesign(url))
+	require.True(t, m.IsSettledUntracked(bundler))
+	require.True(t, m.IsSettledUntracked(debug))
+	require.Equal(t, int32(2), parser.lookups.Load(), "one lookup per endpoint shape, not per call")
+}

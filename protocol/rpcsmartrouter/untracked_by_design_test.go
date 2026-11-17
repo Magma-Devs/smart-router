@@ -135,9 +135,12 @@ func TestReconcileChainTrackers_UntrackedByDesignURLIsSettledOnce(t *testing.T) 
 
 	// A relay it served is counted on its url series and stays counted. The check that undoes
 	// a write for a REMOVED url must not take this url for one: it has no tracker either.
+	// The counter lives in the process-wide registry, so an earlier run of this test in the same
+	// process has already counted on this series: compare with what was there, not with zero.
+	servedBefore := gatherSeries(t, "rpc_endpoint_url_relays_serviced_total", provider)[fingerprint]
 	f.server.countURLRelayServiced(provider, url)
 	f.server.countURLRelayServiced(provider, url)
-	require.Equal(t, map[string]float64{fingerprint: 2}, gatherSeries(t, "rpc_endpoint_url_relays_serviced_total", provider))
+	require.Equal(t, map[string]float64{fingerprint: servedBefore + 2}, gatherSeries(t, "rpc_endpoint_url_relays_serviced_total", provider))
 	require.Equal(t, map[string]float64{fingerprint: 0}, gatherSeries(t, "rpc_endpoint_url_block_tracking", provider))
 
 	// The relay path asks for the url's tracker on every relay: still none, still settled.
@@ -164,4 +167,67 @@ func TestReconcileChainTrackers_TrackedURLReadsTracked(t *testing.T) {
 	require.Equal(t, 1, created)
 	require.Zero(t, failed)
 	require.Equal(t, map[string]float64{metrics.URLFingerprint(url): 1}, gatherSeries(t, "rpc_endpoint_url_block_tracking", "provider-0"))
+}
+
+// Two providers list one url: "addon-provider" as a standalone `bundler` url with no head,
+// "base-provider" as a base url. The url is tracked for both, on the reconcile pass and on the
+// relay path, whichever endpoint is walked first: the base provider must keep its block height.
+func TestReconcileChainTrackers_URLSharedWithABaseProviderIsTracked(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f := newReconcileFixture(t, ctx)
+	mm := metrics.NewSmartRouterMetricsManager(metrics.SmartRouterMetricsManagerOptions{})
+	require.NotNil(t, mm)
+	f.server.smartRouterEndpointMetrics = mm
+
+	const url = "http://127.0.0.1:1/mag5349-shared"
+	mm.RegisterEndpoint("ETH1", "jsonrpc", url, "addon-provider")
+	mm.RegisterEndpoint("ETH1", "jsonrpc", url, "base-provider")
+
+	standalone := &routersession.Endpoint{
+		NetworkAddress:   url,
+		Enabled:          true,
+		Addons:           map[string]struct{}{"bundler": {}},
+		StandaloneAddons: true,
+	}
+	base := &routersession.Endpoint{NetworkAddress: url, Enabled: true}
+	pairing := map[uint64]*routersession.ConsumerSessionsWithProvider{}
+	for i, p := range []struct {
+		name     string
+		endpoint *routersession.Endpoint
+	}{{"addon-provider", standalone}, {"base-provider", base}} {
+		conn, err := routersession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: url}, 5, "jsonrpc")
+		require.NoError(t, err)
+		p.endpoint.DirectConnections = []routersession.DirectRPCConnection{conn}
+		pairing[uint64(i)] = routersession.NewConsumerSessionWithProvider(p.name, []*routersession.Endpoint{p.endpoint}, 999999, f.epoch, int64(1))
+	}
+	require.NoError(t, f.csm.UpdateAllProviders(f.epoch, pairing, nil))
+
+	// The relay path meets the standalone endpoint first: alone, the url is not tracked.
+	for _, e := range f.csm.GetAllDirectRPCEndpoints() {
+		if e.ProviderAddress == "addon-provider" {
+			f.server.ensureEndpointChainTracker(e.ProviderAddress, e.Endpoint, e.DirectConnection)
+		}
+	}
+	require.True(t, f.monitor.IsUntrackedByDesign(url), "precondition: the standalone endpoint was seen first")
+
+	_, _, failed := f.server.reconcileChainTrackers(ctx, true)
+	require.Zero(t, failed)
+	require.True(t, f.hasTracker(url), "the base provider's endpoint gives the url its tracker")
+	require.False(t, f.monitor.IsUntrackedByDesign(url))
+
+	fingerprint := metrics.URLFingerprint(url)
+	for _, provider := range []string{"addon-provider", "base-provider"} {
+		require.Equal(t, map[string]float64{fingerprint: 1}, gatherSeries(t, "rpc_endpoint_url_block_tracking", provider),
+			"%s: the url reads as tracked", provider)
+	}
+
+	// Settled: a later pass creates nothing and the relay path changes nothing.
+	created, _, failed := f.server.reconcileChainTrackers(ctx, false)
+	require.Zero(t, created)
+	require.Zero(t, failed)
+	for _, e := range f.csm.GetAllDirectRPCEndpoints() {
+		f.server.ensureEndpointChainTracker(e.ProviderAddress, e.Endpoint, e.DirectConnection)
+	}
+	require.True(t, f.hasTracker(url))
 }

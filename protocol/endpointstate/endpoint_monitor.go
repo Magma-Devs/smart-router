@@ -5,6 +5,7 @@ import (
 	"errors"
 	"maps"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -92,7 +93,14 @@ type EndpointMonitor struct {
 	// for the life of the url, so none is created. The entry is what makes the decision
 	// (and its one log line) happen once per url instead of once per relay. Guarded by mu;
 	// a url is in at most one of trackers and untracked.
-	untracked map[string]struct{}
+	//
+	// The key is the url alone, and two providers can list one url. The entry then stands only
+	// while every endpoint on the url has no head: the first one that can read it (a provider
+	// that lists the url as a base url) moves the url to trackers. See GetOrCreateTracker.
+	//
+	// The value is the set of endpoint shapes (headlessShape) already found to have no head on
+	// the url, so a repeated call for the same endpoint costs no spec lookup.
+	untracked map[string]map[string]struct{}
 
 	// Per-endpoint observation records (MAG-2158 / Topic A): the side-effect-free
 	// telemetry the probing layer (Topic D) and the per-chain ChainState (Topic C)
@@ -333,7 +341,7 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 		fetchers:          make(map[string]*EndpointPoller),
 		cancelFuncs:       make(map[string]context.CancelFunc),
 		trackerStates:     make(map[string]EndpointChainTrackerState),
-		untracked:         make(map[string]struct{}),
+		untracked:         make(map[string]map[string]struct{}),
 		trackerLastErrors: make(map[string]string),
 		observations:      make(map[string]EndpointObservation),
 		generations:       make(map[string]uint64),
@@ -448,11 +456,14 @@ func (m *EndpointMonitor) GetOrCreateTracker(
 		m.mu.RUnlock()
 		return tracker, nil
 	}
-	if _, untracked := m.untracked[endpointURL]; untracked {
-		m.mu.RUnlock()
+	// A url held as not tracked stays so only for an endpoint already found to have no head.
+	// Any other endpoint on the url (another provider lists it as a base url) falls through:
+	// if it can read the head, the url gets its tracker.
+	_, settled := m.untracked[endpointURL][headlessShape(endpoint)]
+	m.mu.RUnlock()
+	if settled {
 		return nil, nil
 	}
-	m.mu.RUnlock()
 
 	// Slow path: create new tracker
 	m.mu.Lock()
@@ -462,12 +473,17 @@ func (m *EndpointMonitor) GetOrCreateTracker(
 	if tracker, exists := m.trackers[endpointURL]; exists {
 		return tracker, nil
 	}
-	if _, untracked := m.untracked[endpointURL]; untracked {
+	shapes, untracked := m.untracked[endpointURL]
+	if _, settled := shapes[headlessShape(endpoint)]; settled {
 		return nil, nil
 	}
-
 	if m.hasNoHeadByDesign(endpoint) {
-		m.untracked[endpointURL] = struct{}{}
+		if untracked {
+			// Another endpoint on a url already held as not tracked: same decision, no new line.
+			shapes[headlessShape(endpoint)] = struct{}{}
+			return nil, nil
+		}
+		m.untracked[endpointURL] = map[string]struct{}{headlessShape(endpoint): {}}
 		m.trackerStates[endpointURL] = EndpointChainTrackerNotTrackedByDesign
 		delete(m.trackerLastErrors, endpointURL)
 		utils.FormatInfo("no ChainTracker for endpoint: it serves only add-on collections and none of them declares a way to read the head",
@@ -477,6 +493,19 @@ func (m *EndpointMonitor) GetOrCreateTracker(
 			utils.LogAttr("addons", sortedAddons(endpoint)),
 		)
 		return nil, nil
+	}
+	if untracked {
+		// The url was held as not tracked for an endpoint that serves only add-on collections,
+		// and this endpoint can read the head on the same url: two providers list one url, one
+		// of them as a base url. The decision is per url, so it follows the endpoint that has a
+		// head; otherwise the base provider would lose its block height to the other's opt-out.
+		delete(m.untracked, endpointURL)
+		delete(m.trackerStates, endpointURL)
+		utils.FormatInfo("creating ChainTracker for a url that was held as not tracked: another provider on the same url serves a collection with a head",
+			utils.LogAttr("endpoint", endpointURL),
+			utils.LogAttr("chainID", m.chainID),
+			utils.LogAttr("apiInterface", m.apiInterface),
+		)
 	}
 
 	// Create the chain fetcher
@@ -679,6 +708,35 @@ func (m *EndpointMonitor) IsUntrackedByDesign(endpointURL string) bool {
 	defer m.mu.RUnlock()
 	_, untracked := m.untracked[endpointURL]
 	return untracked
+}
+
+// IsSettledUntracked reports whether a call for this endpoint has nothing to do: its url is
+// held as not tracked by design, and this endpoint is one already found to have no head.
+// False for any other endpoint on such a url — GetOrCreateTracker must still run for it, and
+// gives the url its tracker if the endpoint can read the head (two providers on one url, one
+// of them as a base url).
+func (m *EndpointMonitor) IsSettledUntracked(endpoint *routersession.Endpoint) bool {
+	if m == nil || endpoint == nil {
+		return false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	_, settled := m.untracked[endpoint.NetworkAddress][headlessShape(endpoint)]
+	return settled
+}
+
+// headlessShape is what hasNoHeadByDesign's answer depends on, beside the url: whether the
+// endpoint serves the base collection, its add-ons and its internal path. Two endpoints on one
+// url with the same shape get the same answer.
+func headlessShape(endpoint *routersession.Endpoint) string {
+	if endpoint == nil {
+		return ""
+	}
+	base := "addons-only"
+	if endpoint.ServesBaseCollection() {
+		base = "base"
+	}
+	return base + "|" + strings.Join(sortedAddons(endpoint), ",") + "|" + endpoint.InternalPath
 }
 
 func (m *EndpointMonitor) startTrackerWithRetry(tracker chaintracker.IChainTracker, trackerCtx context.Context, endpointURL string) {
@@ -1129,7 +1187,7 @@ func (m *EndpointMonitor) Stop() {
 	m.cancelFuncs = make(map[string]context.CancelFunc)
 	m.trackerStates = make(map[string]EndpointChainTrackerState)
 	m.trackerLastErrors = make(map[string]string)
-	m.untracked = make(map[string]struct{})
+	m.untracked = make(map[string]map[string]struct{})
 
 	// Mark stopped and clear observation state. stopped is sticky: recordPollObservation
 	// and RecordRelayObservation both bail when it is set, so an in-flight poll that
