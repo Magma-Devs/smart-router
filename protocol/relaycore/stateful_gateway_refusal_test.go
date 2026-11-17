@@ -11,7 +11,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 )
@@ -21,7 +21,7 @@ import (
 // whether it is a node error left to the message's CheckResponseError.
 func sendRestReply(relayProcessor *RelayProcessor, provider string, delay time.Duration, status int, body string) {
 	time.Sleep(delay)
-	relayProcessor.GetUsedProviders().RemoveUsed(provider, lavasession.NewRouterKey(nil), nil)
+	relayProcessor.GetUsedProviders().RemoveUsed(provider, routersession.NewRouterKey(nil), nil)
 	relayProcessor.SetResponse(&RelayResponse{
 		RelayResult: common.RelayResult{
 			Request: &pairingtypes.RelayRequest{
@@ -51,13 +51,13 @@ func newStatefulRestProcessor(t *testing.T) *RelayProcessor {
 	chainMsg, err := chainParser.ParseMsg("/cosmos/tx/v1beta1/txs", []byte("data"), http.MethodPost, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 	require.NoError(t, err)
 	protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "", "")
-	usedProviders := lavasession.NewUsedProviders(nil)
+	usedProviders := routersession.NewUsedProviders(nil)
 	relayProcessor := NewRelayProcessor(ctx, nil, RelayProcessorMetrics, RelayProcessorMetrics, newMockRelayStateMachineWithSelection(protocolMessage, usedProviders, Stateful))
 
 	lockCtx, cancel := context.WithTimeout(ctx, 10*time.Millisecond)
 	defer cancel()
 	require.Nil(t, usedProviders.TryLockSelection(lockCtx))
-	usedProviders.AddUsed(lavasession.ConsumerSessionsMap{"gateway@test": &lavasession.SessionInfo{}, "node@test": &lavasession.SessionInfo{}}, nil)
+	usedProviders.AddUsed(routersession.ConsumerSessionsMap{"gateway@test": &routersession.SessionInfo{}, "node@test": &routersession.SessionInfo{}}, nil)
 	return relayProcessor
 }
 
@@ -124,13 +124,13 @@ func newStatefulGraphQLProcessor(t *testing.T) *RelayProcessor {
 	chainMsg, err := chainParser.ParseMsg("", mutation, http.MethodPost, nil, extensionslib.ExtensionInfo{})
 	require.NoError(t, err)
 	protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "", "")
-	usedProviders := lavasession.NewUsedProviders(nil)
+	usedProviders := routersession.NewUsedProviders(nil)
 	relayProcessor := NewRelayProcessor(ctx, nil, RelayProcessorMetrics, RelayProcessorMetrics, newMockRelayStateMachineWithSelection(protocolMessage, usedProviders, Stateful))
 
 	lockCtx, cancel := context.WithTimeout(ctx, 10*time.Millisecond)
 	defer cancel()
 	require.Nil(t, usedProviders.TryLockSelection(lockCtx))
-	usedProviders.AddUsed(lavasession.ConsumerSessionsMap{"gateway@test": &lavasession.SessionInfo{}, "node@test": &lavasession.SessionInfo{}}, nil)
+	usedProviders.AddUsed(routersession.ConsumerSessionsMap{"gateway@test": &routersession.SessionInfo{}, "node@test": &routersession.SessionInfo{}}, nil)
 	return relayProcessor
 }
 

@@ -38,10 +38,10 @@ func TestErrorMetrics_EndToEnd(t *testing.T) {
 	defer common.SetErrorMetricsCallback(nil) // cleanup
 
 	// Simulate errors from the relay pipeline
-	common.LogCodedError("node error", nil, common.LavaErrorChainNonceTooLow, "ETH1", -32000, "nonce too low")
-	common.LogCodedError("node error", nil, common.LavaErrorChainNonceTooLow, "ETH1", -32000, "nonce too low")
-	common.LogCodedError("timeout", nil, common.LavaErrorConnectionTimeout, "SOLANA", 0, "")
-	common.LogCodedError("rate limit", nil, common.LavaErrorNodeRateLimited, "ETH1", 429, "")
+	common.LogCodedError("node error", nil, common.RouterErrorChainNonceTooLow, "ETH1", -32000, "nonce too low")
+	common.LogCodedError("node error", nil, common.RouterErrorChainNonceTooLow, "ETH1", -32000, "nonce too low")
+	common.LogCodedError("timeout", nil, common.RouterErrorConnectionTimeout, "SOLANA", 0, "")
+	common.LogCodedError("rate limit", nil, common.RouterErrorNodeRateLimited, "ETH1", 429, "")
 
 	// Gather and verify
 	families, err := reg.Gather()

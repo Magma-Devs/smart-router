@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/dgraph-io/ristretto/v2"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/stretchr/testify/require"
 )
 
@@ -27,8 +27,8 @@ func (m *svmMockChainFetcher) FetchBlockHashByNum(ctx context.Context, blockNum 
 	return "", nil
 }
 
-func (m *svmMockChainFetcher) FetchEndpoint() lavasession.RPCProviderEndpoint {
-	return lavasession.RPCProviderEndpoint{}
+func (m *svmMockChainFetcher) FetchEndpoint() routersession.RPCProviderEndpoint {
+	return routersession.RPCProviderEndpoint{}
 }
 
 // svmMockDataFetcher stubs IChainTrackerDataFetcher; the slot-vs-block-height

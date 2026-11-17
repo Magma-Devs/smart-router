@@ -11,10 +11,10 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavaprotocol"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
+	"github.com/magma-Devs/smart-router/protocol/relayprotocol"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils/rand"
 	"github.com/stretchr/testify/require"
@@ -53,7 +53,7 @@ func TestSendRelayToEndpoint_ThresholdGuardReleasesGatheredSessions(t *testing.T
 	const restPath = "/cosmos/base/tendermint/v1beta1/blocks/latest"
 	chainMessage, err := chainParser.ParseMsg(restPath, nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 	require.NoError(t, err)
-	relayData := lavaprotocol.NewRelayData(ctx, http.MethodGet, restPath, nil, 0, spectypes.LATEST_BLOCK,
+	relayData := relayprotocol.NewRelayData(ctx, http.MethodGet, restPath, nil, 0, spectypes.LATEST_BLOCK,
 		"rest", chainMessage.GetRPCMessage().GetHeaders(), chainlib.GetAddon(chainMessage),
 		common.GetExtensionNames(chainMessage.GetExtensions()))
 	protocolMsg := chainlib.NewProtocolMessage(chainMessage, nil, relayData, "test", "1.2.3.4")
@@ -66,34 +66,34 @@ func TestSendRelayToEndpoint_ThresholdGuardReleasesGatheredSessions(t *testing.T
 		_, _ = w.Write([]byte(`{"block":{"header":{"height":"200"}}}`))
 	}))
 	defer upstream.Close()
-	directConn, err := lavasession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: upstream.URL}, 5, "")
+	directConn, err := routersession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: upstream.URL}, 5, "")
 	require.NoError(t, err)
 
-	const providerAddress = "lava@only-provider"
-	provider := &lavasession.ConsumerSessionsWithProvider{
-		PublicLavaAddress: providerAddress,
-		Endpoints: []*lavasession.Endpoint{{
+	const providerAddress = "provider@only-provider"
+	provider := &routersession.ConsumerSessionsWithProvider{
+		PublicAddress: providerAddress,
+		Endpoints: []*routersession.Endpoint{{
 			NetworkAddress:    upstream.URL,
 			Enabled:           true,
-			Connections:       []*lavasession.EndpointConnection{},
-			DirectConnections: []lavasession.DirectRPCConnection{directConn},
+			Connections:       []*routersession.EndpointConnection{},
+			DirectConnections: []routersession.DirectRPCConnection{directConn},
 		}},
-		Sessions:        map[int64]*lavasession.SingleConsumerSession{},
+		Sessions:        map[int64]*routersession.SingleConsumerSession{},
 		MaxComputeUnits: 200,
 		PairingEpoch:    1,
 	}
-	rpcEndpoint := &lavasession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "rest"}
+	rpcEndpoint := &routersession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "rest"}
 	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "LAVA")
-	sessionManager := lavasession.NewConsumerSessionManager(
+	sessionManager := routersession.NewConsumerSessionManager(
 		rpcEndpoint, optimizer, nil, "test-router",
-		lavasession.NewActiveSubscriptionProvidersStorage())
+		routersession.NewActiveSubscriptionProvidersStorage())
 	require.NoError(t, sessionManager.UpdateAllProviders(1,
-		map[uint64]*lavasession.ConsumerSessionsWithProvider{0: provider}, nil))
+		map[uint64]*routersession.ConsumerSessionsWithProvider{0: provider}, nil))
 
 	// The caller wants a quorum of three. GetSessions fills one, returns it with a nil error, and
 	// the guard fires on 1 < 3.
 	cvParams := &common.CrossValidationParams{MaxParticipants: 3, AgreementThreshold: 3}
-	usedProviders := lavasession.NewUsedProviders(nil)
+	usedProviders := routersession.NewUsedProviders(nil)
 	sm := &cvGuardStateMachine{usedProviders: usedProviders, cvParams: cvParams, protocolMessage: protocolMsg}
 	metricsStub := cvGuardMetrics{}
 	relayProcessor := relaycore.NewRelayProcessor(
@@ -112,7 +112,7 @@ func TestSendRelayToEndpoint_ThresholdGuardReleasesGatheredSessions(t *testing.T
 		relaycore.GetEmptyRelayState(protocolMsg), relayProcessor, nil, nil)
 
 	require.Error(t, sendErr)
-	require.Truef(t, errors.Is(sendErr, lavasession.PairingListEmptyError),
+	require.Truef(t, errors.Is(sendErr, routersession.PairingListEmptyError),
 		"the error must wrap PairingListEmptyError so the relay policy stops the state machine instead of retrying with one provider; got: %v", sendErr)
 	require.Equal(t, common.CrossValidationReasonInsufficientCapacity, relayProcessor.GetCrossValidationFailFastReason())
 
@@ -164,8 +164,8 @@ func TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesASessionlessEntr
 	}
 	require.NoError(t, err)
 
-	usedProviders := lavasession.NewUsedProviders(nil)
-	sessions := lavasession.ConsumerSessionsMap{"lava@sessionless": &lavasession.SessionInfo{}}
+	usedProviders := routersession.NewUsedProviders(nil)
+	sessions := routersession.ConsumerSessionsMap{"provider@sessionless": &routersession.SessionInfo{}}
 	usedProviders.AddUsed(sessions, nil)
 	require.Equal(t, 1, usedProviders.CurrentlyUsed(), "setup: AddUsed must register the entry")
 
@@ -178,7 +178,7 @@ func TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesASessionlessEntr
 	// No chain state, so the consistency filter skips validation and passes the entry through:
 	// the guard fires on 1 < 2 with it among the survivors.
 	rpcss := &RPCSmartRouterServer{
-		listenEndpoint:    &lavasession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "rest"},
+		listenEndpoint:    &routersession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "rest"},
 		chainParser:       chainParser,
 		consistencyConfig: relaycore.DefaultConsistencyValidationConfig(),
 	}
@@ -191,7 +191,7 @@ func TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesASessionlessEntr
 	}
 
 	sendErr := rpcss.sendRelayToDirectEndpoints(ctx, sessions, protocolMsg, relayProcessor, nil, nil, common.CacheLookupReport{})
-	require.Truef(t, errors.Is(sendErr, lavasession.PairingListEmptyError),
+	require.Truef(t, errors.Is(sendErr, routersession.PairingListEmptyError),
 		"setup: the post-filter guard must have fired; got: %v", sendErr)
 	require.Equal(t, 0, usedProviders.CurrentlyUsed(), "the entry without a session leaked into CurrentlyUsed")
 	require.Equal(t, 0, usedProviders.SessionsLatestBatch(), "the entry without a session leaked into SessionsLatestBatch")
@@ -213,25 +213,25 @@ func TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesADegradedSession
 	}
 	require.NoError(t, err)
 
-	const providerAddress = "lava@degraded"
+	const providerAddress = "provider@degraded"
 	const reservedCu = uint64(10)
-	endpoint := &lavasession.Endpoint{NetworkAddress: "http://degraded:8545"}
-	parent := &lavasession.ConsumerSessionsWithProvider{
-		PublicLavaAddress: providerAddress,
-		Endpoints:         []*lavasession.Endpoint{endpoint},
-		UsedComputeUnits:  reservedCu,
+	endpoint := &routersession.Endpoint{NetworkAddress: "http://degraded:8545"}
+	parent := &routersession.ConsumerSessionsWithProvider{
+		PublicAddress:    providerAddress,
+		Endpoints:        []*routersession.Endpoint{endpoint},
+		UsedComputeUnits: reservedCu,
 	}
-	session := &lavasession.SingleConsumerSession{
+	session := &routersession.SingleConsumerSession{
 		Parent:     parent,
-		Connection: &lavasession.DirectRPCSessionConnection{Endpoint: endpoint},
+		Connection: &routersession.DirectRPCSessionConnection{Endpoint: endpoint},
 	}
 	_, ok := session.TryUseSession()
 	require.True(t, ok, "setup: failed to lock session")
 
 	// What GetSessions does for a degraded request: the session is keyed without the extension.
-	usedProviders := lavasession.NewUsedProviders(nil)
-	require.NoError(t, session.SetUsageForSession(reservedCu, nil, usedProviders, lavasession.NewRouterKey(nil)))
-	sessions := lavasession.ConsumerSessionsMap{providerAddress: &lavasession.SessionInfo{Session: session}}
+	usedProviders := routersession.NewUsedProviders(nil)
+	require.NoError(t, session.SetUsageForSession(reservedCu, nil, usedProviders, routersession.NewRouterKey(nil)))
+	sessions := routersession.ConsumerSessionsMap{providerAddress: &routersession.SessionInfo{Session: session}}
 	usedProviders.AddUsed(sessions, nil)
 	require.Equal(t, 1, usedProviders.CurrentlyUsed(), "setup: AddUsed must register the session")
 
@@ -241,7 +241,7 @@ func TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesADegradedSession
 	relayProcessor := relaycore.NewRelayProcessor(ctx, cvParams, metricsStub, metricsStub, sm)
 
 	rpcss := &RPCSmartRouterServer{
-		listenEndpoint:    &lavasession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "rest"},
+		listenEndpoint:    &routersession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "rest"},
 		chainParser:       chainParser,
 		consistencyConfig: relaycore.DefaultConsistencyValidationConfig(),
 	}
@@ -255,7 +255,7 @@ func TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesADegradedSession
 	}
 
 	sendErr := rpcss.sendRelayToDirectEndpoints(ctx, sessions, protocolMsg, relayProcessor, nil, nil, common.CacheLookupReport{})
-	require.Truef(t, errors.Is(sendErr, lavasession.PairingListEmptyError),
+	require.Truef(t, errors.Is(sendErr, routersession.PairingListEmptyError),
 		"setup: the post-filter guard must have fired; got: %v", sendErr)
 	require.Equal(t, 0, usedProviders.CurrentlyUsed(), "the degraded session leaked into CurrentlyUsed")
 	require.Equal(t, 0, usedProviders.SessionsLatestBatch(),

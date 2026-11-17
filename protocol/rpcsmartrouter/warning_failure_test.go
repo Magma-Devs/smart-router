@@ -6,8 +6,8 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	commonlib "github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/stretchr/testify/require"
 )
 
@@ -18,7 +18,7 @@ import (
 func TestValidateProviderCollections_AWarningIsPublishedAndSwitchesNothingOff(t *testing.T) {
 	up := newFakeUpstreams(t)
 	parser := liveParser(t, "SOLANA", true)
-	provider := staticProvider("SOLANA", commonlib.NodeUrl{Url: up.httpURL("/n/" + upSolana)})
+	provider := staticProvider("SOLANA", commonlib.NodeUrl{Url: up.httpURL("/n/" + upSolana)}, commonlib.NodeUrl{Url: up.wsURL("/n/" + upSolana)})
 
 	admission, err := validateProviderCollections(t.Context(), provider, parser, 20*time.Second)
 	require.NoError(t, err)
@@ -40,8 +40,8 @@ func TestValidateProviderCollections_AWarningIsPublishedAndSwitchesNothingOff(t 
 	const spec = "VERIFYWARNING"
 	const chainKey = spec + "jsonrpc" // RPCEndpoint.Key()
 	inputs := &chainReverifyInputs{
-		configuredStatic: []*lavasession.RPCStaticProviderEndpoint{provider},
-		refusedFor: func(p *lavasession.RPCStaticProviderEndpoint) []metrics.ProviderVerificationFailure {
+		configuredStatic: []*routersession.RPCStaticProviderEndpoint{provider},
+		refusedFor: func(p *routersession.RPCStaticProviderEndpoint) []metrics.ProviderVerificationFailure {
 			return refusalsOf(parser, p, admission)
 		},
 	}

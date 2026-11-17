@@ -12,7 +12,7 @@ import (
 )
 
 // testLogSink is this test binary's one zerolog sink, installed in TestMain before any
-// test runs. lavalog writes through the global logger, and a RESP cache's health probe
+// test runs. utils/log writes through the global logger, and a RESP cache's health probe
 // keeps logging from its own goroutine for as long as the cache lives, so a helper that
 // swapped the global logger per capture raced every probe still running: the swap and
 // restore against the probe's reads of the logger, and the probe's writes against the
@@ -54,7 +54,7 @@ func (s *testLogSink) detach() {
 	s.capture = nil
 }
 
-// captureLog collects what lavalog writes while fn runs. A probe that outlives fn may
+// captureLog collects what utils/log writes while fn runs. A probe that outlives fn may
 // still log afterwards; that goes back to stderr, never into a buffer being read.
 func captureLog(t *testing.T, fn func()) string {
 	t.Helper()

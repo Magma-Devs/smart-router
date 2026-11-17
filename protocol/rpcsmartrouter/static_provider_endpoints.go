@@ -1,18 +1,18 @@
 package rpcsmartrouter
 
 import (
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/spf13/viper"
 )
 
 // ParseStaticProviderEndpoints parses static provider configuration into extended endpoint types.
-func ParseStaticProviderEndpoints(viperEndpoints *viper.Viper, endpointsConfigName string) (endpoints []*lavasession.RPCStaticProviderEndpoint, err error) {
+func ParseStaticProviderEndpoints(viperEndpoints *viper.Viper, endpointsConfigName string) (endpoints []*routersession.RPCStaticProviderEndpoint, err error) {
 	err = viperEndpoints.UnmarshalKey(endpointsConfigName, &endpoints)
 	if err != nil {
 		// The key, not the settings: they hold every node-url and auth header in the file, and
 		// none of them is registered for redaction yet (MAG-4863).
-		utils.LavaFormatFatal("could not unmarshal extended endpoints", err, utils.Attribute{Key: "config_key", Value: endpointsConfigName})
+		utils.FormatFatal("could not unmarshal extended endpoints", err, utils.Attribute{Key: "config_key", Value: endpointsConfigName})
 	}
 	// Before anything can log or relay through them: from here on every secret the node-urls
 	// carry is withheld from log lines and client replies by value (MAG-4863).
@@ -24,7 +24,7 @@ func ParseStaticProviderEndpoints(viperEndpoints *viper.Viper, endpointsConfigNa
 	for _, endpoint := range endpoints {
 		// Validate that the provider name is not empty
 		if err := endpoint.Validate(); err != nil {
-			return nil, utils.LavaFormatError("invalid provider configuration", err,
+			return nil, utils.FormatError("invalid provider configuration", err,
 				utils.Attribute{Key: "chainID", Value: endpoint.ChainID},
 				utils.Attribute{Key: "apiInterface", Value: endpoint.ApiInterface})
 		}

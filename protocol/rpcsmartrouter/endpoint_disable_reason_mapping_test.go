@@ -11,41 +11,41 @@ import (
 	"testing"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
 
 // The reason recorded on a disable is only worth having if it is right, and nothing else pins the
-// mapping — the behavioural tests in lavasession pass a reason in and assert it comes back out, so
+// mapping — the behavioural tests in routersession pass a reason in and assert it comes back out, so
 // they would agree with any mapping at all, including an inverted one.
 func TestEndpointDisableReasonFor_MapsRegistryCategory(t *testing.T) {
 	t.Run("internal means the request never got an answer", func(t *testing.T) {
-		require.Equal(t, lavasession.EndpointDisableUnreachable,
-			endpointDisableReasonFor(common.LavaErrorConnectionRefused))
-		require.Equal(t, lavasession.EndpointDisableUnreachable,
-			endpointDisableReasonFor(common.LavaErrorConnectionTimeout))
+		require.Equal(t, routersession.EndpointDisableUnreachable,
+			endpointDisableReasonFor(common.RouterErrorConnectionRefused))
+		require.Equal(t, routersession.EndpointDisableUnreachable,
+			endpointDisableReasonFor(common.RouterErrorConnectionTimeout))
 	})
 
 	t.Run("external means the node answered and the answer was its own failure", func(t *testing.T) {
-		require.Equal(t, common.CategoryExternal, common.LavaErrorNodeInternalError.Category,
+		require.Equal(t, common.CategoryExternal, common.RouterErrorNodeInternalError.Category,
 			"precondition: this fixture must be the External case")
-		require.Equal(t, lavasession.EndpointDisableNodeError,
-			endpointDisableReasonFor(common.LavaErrorNodeInternalError))
+		require.Equal(t, routersession.EndpointDisableNodeError,
+			endpointDisableReasonFor(common.RouterErrorNodeInternalError))
 	})
 
 	t.Run("nil is a bug, and must be visibly wrong rather than empty", func(t *testing.T) {
-		require.Equal(t, lavasession.EndpointDisableUnspecified, endpointDisableReasonFor(nil))
+		require.Equal(t, routersession.EndpointDisableUnspecified, endpointDisableReasonFor(nil))
 	})
 }
 
 // classifyThroughRelayPath mirrors what the disable site actually runs
 // (rpcsmartrouter_server.go: classified = ClassifyError(DetectConnectionError(err), ...)), so this
-// table measures the reason a real fault produces rather than the reason a hand-built LavaError does.
-func classifyThroughRelayPath(err error, transport common.TransportType) *common.LavaError {
+// table measures the reason a real fault produces rather than the reason a hand-built RouterError does.
+func classifyThroughRelayPath(err error, transport common.TransportType) *common.RouterError {
 	errorCode := 0
-	var httpErr *lavasession.HTTPStatusError
+	var httpErr *routersession.HTTPStatusError
 	if errors.As(err, &httpErr) {
 		errorCode = httpErr.StatusCode
 	}
@@ -60,7 +60,7 @@ func classifyThroughRelayPath(err error, transport common.TransportType) *common
 // moment the classifier is fixed, which is the prompt to update the expectations.
 //
 // Cause: common.DetectConnectionError had no branch for *net.DNSError, x509 errors or io.EOF, and
-// the string-fallback table had no matching row, so those faults classified as LavaErrorUnknown —
+// the string-fallback table had no matching row, so those faults classified as RouterErrorUnknown —
 // which is CategoryExternal, and every External maps to node-error. DNS and EOF were fixed in the
 // shared classifier under MAG-4242 (their rows below now assert "unreachable"); the x509 rows are
 // still known-wrong, because no registry code describes a certificate fault yet.
@@ -70,56 +70,56 @@ func TestEndpointDisableReasonFor_RealTransportFaults(t *testing.T) {
 		name       string
 		err        error
 		transport  common.TransportType
-		want       lavasession.EndpointDisableReason
-		knownWrong lavasession.EndpointDisableReason // non-empty = what it SHOULD be once MAG-3563 lands
+		want       routersession.EndpointDisableReason
+		knownWrong routersession.EndpointDisableReason // non-empty = what it SHOULD be once MAG-3563 lands
 	}{
 		{
 			name: "connection refused", err: &net.OpError{Op: "dial", Net: "tcp", Err: &refused},
-			transport: common.TransportJsonRPC, want: lavasession.EndpointDisableUnreachable,
+			transport: common.TransportJsonRPC, want: routersession.EndpointDisableUnreachable,
 		},
 		{
 			name: "context deadline exceeded", err: context.DeadlineExceeded,
-			transport: common.TransportJsonRPC, want: lavasession.EndpointDisableUnreachable,
+			transport: common.TransportJsonRPC, want: routersession.EndpointDisableUnreachable,
 		},
 		{
 			name: "connection reset (string fallback)", err: errors.New("read tcp: connection reset by peer"),
-			transport: common.TransportJsonRPC, want: lavasession.EndpointDisableUnreachable,
+			transport: common.TransportJsonRPC, want: routersession.EndpointDisableUnreachable,
 		},
 		{
-			name: "node answered 500", err: &lavasession.HTTPStatusError{StatusCode: 500, Status: "500"},
-			transport: common.TransportJsonRPC, want: lavasession.EndpointDisableNodeError,
+			name: "node answered 500", err: &routersession.HTTPStatusError{StatusCode: 500, Status: "500"},
+			transport: common.TransportJsonRPC, want: routersession.EndpointDisableNodeError,
 		},
 		// ---- KNOWN-WRONG below: all of these are infrastructure faults, none reached the node ----
 		{
 			name:      "DNS: no such host",
 			err:       &net.OpError{Op: "dial", Net: "tcp", Err: &net.DNSError{Err: "no such host", Name: "rpc.example", IsNotFound: true}},
-			transport: common.TransportJsonRPC, want: lavasession.EndpointDisableUnreachable,
+			transport: common.TransportJsonRPC, want: routersession.EndpointDisableUnreachable,
 		},
 		{
-			name: "TLS: unknown authority", knownWrong: lavasession.EndpointDisableUnreachable,
+			name: "TLS: unknown authority", knownWrong: routersession.EndpointDisableUnreachable,
 			err:       &net.OpError{Op: "dial", Net: "tcp", Err: x509.UnknownAuthorityError{}},
-			transport: common.TransportJsonRPC, want: lavasession.EndpointDisableNodeError,
+			transport: common.TransportJsonRPC, want: routersession.EndpointDisableNodeError,
 		},
 		{
-			name: "TLS: certificate expired", knownWrong: lavasession.EndpointDisableUnreachable,
+			name: "TLS: certificate expired", knownWrong: routersession.EndpointDisableUnreachable,
 			err:       &net.OpError{Op: "dial", Net: "tcp", Err: x509.CertificateInvalidError{Reason: x509.Expired}},
-			transport: common.TransportJsonRPC, want: lavasession.EndpointDisableNodeError,
+			transport: common.TransportJsonRPC, want: routersession.EndpointDisableNodeError,
 		},
 		{
 			name:      "io.EOF",
 			err:       io.EOF,
-			transport: common.TransportJsonRPC, want: lavasession.EndpointDisableUnreachable,
+			transport: common.TransportJsonRPC, want: routersession.EndpointDisableUnreachable,
 		},
 		// ---- gRPC: a status the router's own client made for a call no node saw (MAG-4355) ----
 		{
 			name:      "gRPC: refused dial",
 			err:       &common.GRPCCallUndeliveredError{Err: status.Error(codes.Unavailable, `connection error: desc = "transport: Error while dialing: dial tcp 127.0.0.1:9090: connect: connection refused"`)},
-			transport: common.TransportGRPC, want: lavasession.EndpointDisableUnreachable,
+			transport: common.TransportGRPC, want: routersession.EndpointDisableUnreachable,
 		},
 		{
 			name:      "gRPC: failed TLS handshake",
 			err:       &common.GRPCCallUndeliveredError{Err: status.Error(codes.Unavailable, `connection error: desc = "transport: authentication handshake failed: tls: failed to verify certificate"`)},
-			transport: common.TransportGRPC, want: lavasession.EndpointDisableUnreachable,
+			transport: common.TransportGRPC, want: routersession.EndpointDisableUnreachable,
 		},
 	}
 
@@ -157,7 +157,7 @@ func TestEndpointDisableReason_FiveHundredAgreesAcrossTransports(t *testing.T) {
 		t.Run(http.StatusText(statusCode), func(t *testing.T) {
 			// Site 1's route: the sender wrapped the status into an error.
 			viaJSONRPC := endpointDisableReasonFor(classifyThroughRelayPath(
-				&lavasession.HTTPStatusError{StatusCode: statusCode, Status: http.StatusText(statusCode)},
+				&routersession.HTTPStatusError{StatusCode: statusCode, Status: http.StatusText(statusCode)},
 				common.TransportJsonRPC))
 
 			// Site 2's route: (result, nil) with StatusCode set, classified from the status alone.
@@ -165,7 +165,7 @@ func TestEndpointDisableReason_FiveHundredAgreesAcrossTransports(t *testing.T) {
 			viaREST := endpointDisableReasonFor(
 				common.ClassifyError(nil, common.ChainFamilyEVM, common.TransportREST, statusCode, ""))
 
-			require.Equal(t, lavasession.EndpointDisableNodeError, viaJSONRPC,
+			require.Equal(t, routersession.EndpointDisableNodeError, viaJSONRPC,
 				"a 5xx means the node answered and the answer was its own failure")
 			require.Equal(t, viaJSONRPC, viaREST,
 				"one upstream incident, one reason — the label must describe the fault, not the transport")
@@ -178,7 +178,7 @@ func TestEndpointDisableReason_FiveHundredAgreesAcrossTransports(t *testing.T) {
 // here because the enclosing status branch matches `>= 500 || == 429`, so the whole carve-out lives
 // in classifyHTTPStatus and nothing else pinned it.
 func TestClassifyHTTPStatus_RateLimitDoesNotDisable(t *testing.T) {
-	statusVerdict := func(code int) *common.LavaError {
+	statusVerdict := func(code int) *common.RouterError {
 		return common.ClassifyError(nil, common.ChainFamilyUnknown, common.TransportREST, code, "")
 	}
 	shouldMarkUnhealthy, needsBackoff := classifyHTTPStatus(http.StatusTooManyRequests, statusVerdict(http.StatusTooManyRequests))

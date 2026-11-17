@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
@@ -38,7 +38,7 @@ func newEthChainFetcherWithRouterErr(t *testing.T, routerErr error) *ChainFetche
 	require.NoError(t, err)
 	cp.SetSpec(spec)
 	return &ChainFetcher{
-		endpoint:    &lavasession.RPCProviderEndpoint{ChainID: "ETH1", ApiInterface: spectypes.APIInterfaceJsonRPC},
+		endpoint:    &routersession.RPCProviderEndpoint{ChainID: "ETH1", ApiInterface: spectypes.APIInterfaceJsonRPC},
 		chainRouter: erringChainRouter{err: routerErr},
 		chainParser: cp,
 	}
@@ -46,16 +46,16 @@ func newEthChainFetcherWithRouterErr(t *testing.T, routerErr error) *ChainFetche
 
 // rateLimited429 builds the error shape the HTTP-family proxies produce for an upstream
 // 429: HandleStatusError's sentinel enriched by WithRetryAfter, wrapped once by the
-// proxy's LavaFormatWarning.
+// proxy's FormatWarning.
 func rateLimited429(retryAfterSeconds string) error {
 	h := http.Header{}
 	if retryAfterSeconds != "" {
 		h.Set("Retry-After", retryAfterSeconds)
 	}
-	return utils.LavaFormatWarning("Received invalid status code", common.WithRetryAfter(common.StatusCodeError429, h, time.Now()))
+	return utils.FormatWarning("Received invalid status code", common.WithRetryAfter(common.StatusCodeError429, h, time.Now()))
 }
 
-// The latest-block fetch used to pass the send error as a LavaFormatDebug attribute,
+// The latest-block fetch used to pass the send error as a FormatDebug attribute,
 // which returns a plain fmt.Errorf with no Unwrap — severing errors.Is and RetryAfterFrom
 // for every consumer (startup verification, epoch re-verification, the ChainTracker).
 func TestChainFetcher_FetchLatestBlockNum_PreservesRateLimitCause(t *testing.T) {

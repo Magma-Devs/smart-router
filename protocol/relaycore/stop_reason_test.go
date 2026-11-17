@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 )
 
 // SendParsedRelay reads the reason off the processor for the final line and prints whatever it
@@ -55,18 +55,18 @@ func TestStateMachine_StopReasonOrPrefersTheRecordedReason(t *testing.T) {
 // harmless while an attempt died at its window, because "cannot start more" and "the request is
 // over" were the same instant; separating those two clocks is what made it a bug.
 func TestStateMachine_StopReasonIsHeldWhileRelaysAreInFlight(t *testing.T) {
-	inFlight := func(addresses ...string) *lavasession.UsedProviders {
-		usedProviders := lavasession.NewUsedProviders(nil)
-		sessions := lavasession.ConsumerSessionsMap{}
+	inFlight := func(addresses ...string) *routersession.UsedProviders {
+		usedProviders := routersession.NewUsedProviders(nil)
+		sessions := routersession.ConsumerSessionsMap{}
 		for _, address := range addresses {
-			sessions[address] = &lavasession.SessionInfo{}
+			sessions[address] = &routersession.SessionInfo{}
 		}
 		usedProviders.AddUsed(sessions, nil)
 		return usedProviders
 	}
 
 	t.Run("nothing in flight: filed immediately, as before", func(t *testing.T) {
-		sm := &UnifiedRelayStateMachine{usedProviders: lavasession.NewUsedProviders(nil)}
+		sm := &UnifiedRelayStateMachine{usedProviders: routersession.NewUsedProviders(nil)}
 		sm.recordStopReason("MaxRetriesReached")
 		if got := sm.getStopReason(); got != "MaxRetriesReached" {
 			t.Fatalf("a settled request stops for the reason it was given: got %q", got)
@@ -77,7 +77,7 @@ func TestStateMachine_StopReasonIsHeldWhileRelaysAreInFlight(t *testing.T) {
 	})
 
 	t.Run("still in flight: held back, so the timeout can name the request", func(t *testing.T) {
-		sm := &UnifiedRelayStateMachine{usedProviders: inFlight("lava@a")}
+		sm := &UnifiedRelayStateMachine{usedProviders: inFlight("provider@a")}
 		sm.recordStopReason("ErrorToleranceExceeded")
 
 		if got := sm.getStopReason(); got != "" {
@@ -91,7 +91,7 @@ func TestStateMachine_StopReasonIsHeldWhileRelaysAreInFlight(t *testing.T) {
 	})
 
 	t.Run("a caller hanging up is still not a timeout", func(t *testing.T) {
-		sm := &UnifiedRelayStateMachine{usedProviders: inFlight("lava@a")}
+		sm := &UnifiedRelayStateMachine{usedProviders: inFlight("provider@a")}
 		sm.recordStopReason("AllProvidersExhausted")
 		if got := sm.endOfRoadReason(context.Canceled); got != StopReasonCallerGone {
 			t.Fatalf("holding the reason back must not turn a client disconnect into a blameable timeout: got %q", got)
@@ -99,12 +99,12 @@ func TestStateMachine_StopReasonIsHeldWhileRelaysAreInFlight(t *testing.T) {
 	})
 
 	t.Run("held reason is promoted once the last relay reports", func(t *testing.T) {
-		usedProviders := inFlight("lava@a")
+		usedProviders := inFlight("provider@a")
 		sm := &UnifiedRelayStateMachine{usedProviders: usedProviders}
 		sm.recordStopReason("ErrorToleranceExceeded")
 
 		// The relay answers, so the request ends on the return condition rather than the budget.
-		usedProviders.RemoveUsed("lava@a", lavasession.NewRouterKey(nil), nil)
+		usedProviders.RemoveUsed("provider@a", routersession.NewRouterKey(nil), nil)
 
 		if got := sm.settleStopReason(); got != "ErrorToleranceExceeded" {
 			t.Fatalf("held is not dropped — with nothing in flight this is the honest reason, and a blank field is what the reason exists to prevent: got %q", got)
@@ -115,7 +115,7 @@ func TestStateMachine_StopReasonIsHeldWhileRelaysAreInFlight(t *testing.T) {
 	})
 
 	t.Run("settle prefers a reason that was already filed", func(t *testing.T) {
-		sm := &UnifiedRelayStateMachine{usedProviders: lavasession.NewUsedProviders(nil)}
+		sm := &UnifiedRelayStateMachine{usedProviders: routersession.NewUsedProviders(nil)}
 		sm.setStopReason("Success")
 		sm.pendingStopReason = "ErrorToleranceExceeded"
 		if got := sm.settleStopReason(); got != "Success" {

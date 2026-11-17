@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainstate"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/stretchr/testify/require"
 )
 
@@ -25,7 +25,7 @@ func newAdoptTestServer(t *testing.T, sharedState bool, seed int64) *RPCSmartRou
 		t.Fatalf("seed SetLatestBlock(%d) did not take", seed)
 	}
 	return &RPCSmartRouterServer{
-		listenEndpoint: &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		listenEndpoint: &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 		chainState:     cs,
 		sharedState:    sharedState,
 	}
@@ -71,7 +71,7 @@ func TestAdoptSharedStateTip(t *testing.T) {
 
 	t.Run("nil chain state does not panic", func(t *testing.T) {
 		rpcss := &RPCSmartRouterServer{
-			listenEndpoint: &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+			listenEndpoint: &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 			sharedState:    true,
 		}
 		require.NotPanics(t, func() { rpcss.adoptSharedStateTip(ctx, 5000, 1) })
@@ -94,7 +94,7 @@ func TestAdoptSharedStateTip(t *testing.T) {
 			TTL:              10 * time.Second,
 		}, clock)
 		rpcss := &RPCSmartRouterServer{
-			listenEndpoint: &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+			listenEndpoint: &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 			chainState:     cs,
 			sharedState:    true,
 		}
@@ -137,7 +137,7 @@ func TestAdoptSharedStateTip_StaleTipTakesLowerPeerValue(t *testing.T) {
 		t.Fatal("seed SetLatestBlock(2000) did not take")
 	}
 	rpcss := &RPCSmartRouterServer{
-		listenEndpoint: &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		listenEndpoint: &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 		chainState:     cs,
 		sharedState:    true,
 	}
@@ -182,7 +182,7 @@ func TestAdoptSharedStateTip_EchoOfOwnTipIsNotAConfirmation(t *testing.T) {
 		t.Fatalf("seed SetLatestBlock(%d) did not take", frozen)
 	}
 	rpcss := &RPCSmartRouterServer{
-		listenEndpoint: &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "rest"},
+		listenEndpoint: &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "rest"},
 		chainState:     cs,
 		sharedState:    true,
 	}

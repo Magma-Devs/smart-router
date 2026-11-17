@@ -10,9 +10,9 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	specutils "github.com/magma-Devs/smart-router/utils/keeper"
 	"github.com/magma-Devs/smart-router/utils/rand"
@@ -74,18 +74,18 @@ func TestRESTListener_PutAndPatchBodiesReachTheNode(t *testing.T) {
 			})
 			parser.SetSpec(spec)
 
-			conn, err := lavasession.NewDirectRPCConnection(ctx, endpoint.NodeUrls[0], 5, spectypes.APIInterfaceRest)
+			conn, err := routersession.NewDirectRPCConnection(ctx, endpoint.NodeUrls[0], 5, spectypes.APIInterfaceRest)
 			require.NoError(t, err)
 			defer conn.Close()
-			provider := lavasession.NewConsumerSessionWithProvider("rest-upstream", []*lavasession.Endpoint{{
+			provider := routersession.NewConsumerSessionWithProvider("rest-upstream", []*routersession.Endpoint{{
 				NetworkAddress: endpoint.NodeUrls[0].Url, Enabled: true,
-				DirectConnections: []lavasession.DirectRPCConnection{conn},
+				DirectConnections: []routersession.DirectRPCConnection{conn},
 			}}, 100000, 1, 1)
 			provider.StaticProvider = true
 			sessionManager, rpcEndpoint := createTestSessionManager("LAVA", spectypes.APIInterfaceRest)
 			rpcEndpoint.NetworkAddress = "127.0.0.1:0"
 			require.NoError(t, sessionManager.UpdateAllProviders(1,
-				map[uint64]*lavasession.ConsumerSessionsWithProvider{0: provider}, nil))
+				map[uint64]*routersession.ConsumerSessionsWithProvider{0: provider}, nil))
 			logs, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
 			require.NoError(t, err)
 			server := &RPCSmartRouterServer{

@@ -6,7 +6,7 @@ import (
 
 	"github.com/golang/mock/gomock"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 )
@@ -49,7 +49,7 @@ func TestValidateProbesHeadWithTheUrlsOwnCollections(t *testing.T) {
 			parser.EXPECT().SeparateAddonsExtensions(gomock.Any(), gomock.Any()).
 				DoAndReturn(func(_ context.Context, supported []string) ([]string, []string, error) { return supported, nil, nil }).
 				AnyTimes()
-			endpoint := &lavasession.RPCProviderEndpoint{
+			endpoint := &routersession.RPCProviderEndpoint{
 				ChainID:      "ACA",
 				ApiInterface: spectypes.APIInterfaceJsonRPC,
 				NodeUrls: []common.NodeUrl{{
@@ -98,7 +98,7 @@ func TestFetchLatestBlockNumKeepsBaseCollectionSemantics(t *testing.T) {
 		Return(nil, nil, false)
 
 	fetcher := &ChainFetcher{
-		endpoint:    &lavasession.RPCProviderEndpoint{ChainID: "ACA", ApiInterface: spectypes.APIInterfaceJsonRPC},
+		endpoint:    &routersession.RPCProviderEndpoint{ChainID: "ACA", ApiInterface: spectypes.APIInterfaceJsonRPC},
 		chainParser: parser,
 	}
 

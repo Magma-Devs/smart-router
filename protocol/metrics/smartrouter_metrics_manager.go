@@ -84,6 +84,7 @@ type SmartRouterMetricsManager struct {
 	crossValidationMismatchTotalMetric              *prometheus.CounterVec // smartrouter_cross_validation_mismatch_total {spec, apiInterface, method, group, finality} — bounded alerting surface
 	crossValidationFailuresTotalMetric              *prometheus.CounterVec // smartrouter_cross_validation_failures_total {spec, apiInterface, method, reason} — bounded by the CrossValidationReason* enum
 	crossValidationStragglerTotalMetric             *prometheus.CounterVec // smartrouter_cross_validation_straggler_total {spec, apiInterface, method, outcome} — bounded by the CrossValidationStragglerOutcome* enum
+	crossValidationRecordDroppedTotalMetric         *prometheus.CounterVec // smartrouter_cross_validation_record_dropped_total {spec, apiInterface} — the async compliance-record write queue was full; the same gap is independently visible as a hole in the record Seq sequence itself (MAG-2787)
 
 	// Incident group metrics
 	incidentNodeErrorsTotalMetric     *prometheus.CounterVec   // smartrouter_node_errors_total         {spec, apiInterface, provider_address, method}
@@ -209,7 +210,7 @@ type SmartRouterMetricsManagerOptions struct {
 // NewSmartRouterMetricsManager creates a new SmartRouterMetricsManager instance
 func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *SmartRouterMetricsManager {
 	if options.NetworkAddress == DisabledFlagOption {
-		utils.LavaFormatWarning("prometheus endpoint inactive, option is disabled", nil)
+		utils.FormatWarning("prometheus endpoint inactive, option is disabled", nil)
 		return nil
 	}
 
@@ -498,6 +499,15 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		Name: "smartrouter_cross_validation_straggler_total",
 		Help: "Cross-validation straggler resolutions (responses that arrived after the quorum early-exit reply), by outcome (agreed, disagreed, node-error, protocol-error, not-received). Bounded — the outcome set is a closed enum.",
 	}, []string{"spec", "apiInterface", "method", "outcome"}))
+	// The structured compliance record (MAG-2787) is written off an async, bounded queue so a slow or
+	// unavailable log pipeline can never fail a relay. A full queue drops the record rather than
+	// blocking; this counter makes that drop visible without needing to notice a gap in the record's
+	// own Seq sequence. Deliberately unlabeled by method: it is a fact about the write pipeline's
+	// capacity, not about any one request.
+	m.crossValidationRecordDroppedTotalMetric = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "smartrouter_cross_validation_record_dropped_total",
+		Help: "Structured cross-validation compliance records (MAG-2787) dropped because the async write queue was full. Any non-zero value means the Seq sequence in the log stream has a gap.",
+	}, []string{"spec", "apiInterface"}))
 
 	// =========================================================================
 	// Incident group metrics
@@ -617,11 +627,11 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	}, csmStateLabels))
 	m.providerVerificationFailed = registerOrReuse(prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "smartrouter_provider_verification_failed",
-		Help: "While a configured provider is failing a verification: the unix time in seconds the failure started, labelled with the check it fails. A provider that moves to another check in the same scope and service keeps its start. scope=provider: the provider is out of the pairing (failed at boot, or demoted by the epoch re-verifier). scope=service: the provider still serves but lost one add-on or extension (service) to that check. scope=url: the provider still serves but one of its node urls was refused, whole (no service) or for one service another url still serves. scope=none: a check the spec gives severity Warning is failing, and nothing was switched off. severity: Fail when the failure takes a url or the provider out, PartialFail when it switches off only that service, Warning when it switches off nothing. The series exists only while the failure lasts. check is the spec verification's name, or latest-block, unsupported-addon, connect, config, not-run, rate-limited, unknown. A failing provider, service or url is retried from --verification-retry-delay (30s), doubling to --verification-retry-max-delay (15m), and from 2s doubling to 3m while its chain is dark; a Warning check is re-checked every 15m epoch. Size alert windows above 15m.",
+		Help: "While a configured provider is failing a verification: the unix time in seconds the failure started, labelled with the check it fails. A provider that moves to another check in the same scope and service keeps its start. scope=provider: the provider is out of the pairing (failed at boot, or demoted by the epoch re-verifier). scope=service: the provider still serves but lost one add-on or extension (service) to that check; service=websocket: it serves no subscriptions, every ws(s) url refused or none configured (check missing-url). scope=url: the provider still serves but one of its node urls was refused, whole (no service) or for one service another url still serves; a refused ws(s) url is service=websocket. scope=none: a check the spec gives severity Warning is failing, and nothing was switched off. severity: Fail when the failure takes an http(s) url or the provider out, PartialFail when it switches off only that service (a ws(s) url carries only the websocket), Warning when it switches off nothing. The series exists only while the failure lasts. check is the spec verification's name, or latest-block, unsupported-addon, connect, config, missing-url, not-run, rate-limited, unknown. A failing provider, service or url (not missing-url, which only a config change fixes) is retried from --verification-retry-delay (30s), doubling to --verification-retry-max-delay (15m), and from 2s doubling to 3m while its chain is dark; a Warning check is re-checked every 15m epoch. Size alert windows above 15m.",
 	}, verificationFailureLabels))
 	m.verificationCheckFailures = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_provider_verification_check_failures_total",
-		Help: "Failed verification check runs, one per run that failed. Labels as smartrouter_provider_verification_failed: scope=provider when the failure costs the whole provider, scope=service when it costs one add-on or extension (service), scope=url when it costs one node url, scope=none when it costs nothing (severity Warning). A failing provider, service or url is re-run on its retry backoff (30s doubling to 15m, by default) and on every 15m epoch, so each failure appears at that cadence. A rate-limited run is inconclusive and not counted.",
+		Help: "Failed verification check runs, one per run that failed. Labels as smartrouter_provider_verification_failed: scope=provider when the failure costs the whole provider, scope=service when it costs one add-on or extension (service), scope=url when it costs one node url, scope=none when it costs nothing (severity Warning). A failing provider, service or url is re-run on its retry backoff (30s doubling to 15m, by default) and on every 15m epoch, so each failure appears at that cadence. A rate-limited run is inconclusive and not counted, and a missing websocket url (check missing-url) ran nothing.",
 	}, verificationFailureLabels))
 
 	// =========================================================================
@@ -741,9 +751,9 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		mux := m.metricsMux(prometheus.DefaultRegisterer, prometheus.DefaultGatherer)
 
 		go func() {
-			utils.LavaFormatInfo("prometheus endpoint listening", utils.Attribute{Key: "Listen Address", Value: options.NetworkAddress})
+			utils.FormatInfo("prometheus endpoint listening", utils.Attribute{Key: "Listen Address", Value: options.NetworkAddress})
 			if err := http.ListenAndServe(options.NetworkAddress, mux); err != nil {
-				utils.LavaFormatError("metrics endpoint failed", err, utils.Attribute{Key: "Listen Address", Value: options.NetworkAddress})
+				utils.FormatError("metrics endpoint failed", err, utils.Attribute{Key: "Listen Address", Value: options.NetworkAddress})
 			}
 		}()
 	}
@@ -1624,6 +1634,16 @@ func (m *SmartRouterMetricsManager) SetCrossValidationStragglerMetric(chainId, a
 	incCounter(m.crossValidationStragglerTotalMetric, chainId, apiInterface, m.normalizeMethodLabel(chainId, method), outcome)
 }
 
+// SetCrossValidationRecordDroppedMetric records one structured compliance record (MAG-2787) lost
+// because the async write queue was full at emission time. Unlabeled by method/outcome: a drop is a
+// write-pipeline capacity fact, and the record's own Seq sequence already carries which request it was.
+func (m *SmartRouterMetricsManager) SetCrossValidationRecordDroppedMetric(chainId, apiInterface string) {
+	if m == nil {
+		return
+	}
+	incCounter(m.crossValidationRecordDroppedTotalMetric, chainId, apiInterface)
+}
+
 func (m *SmartRouterMetricsManager) UpdateHealthCheckStatus(status bool) {
 	m.UpdateOverallHealthStatus(status)
 }
@@ -2025,7 +2045,7 @@ func (m *SmartRouterMetricsManager) StartSelectionStatsUpdater(ctx context.Conte
 		return
 	}
 	if updateInterval <= 0 {
-		utils.LavaFormatWarning("StartSelectionStatsUpdater: invalid updateInterval, selection stats will not be reported", nil,
+		utils.FormatWarning("StartSelectionStatsUpdater: invalid updateInterval, selection stats will not be reported", nil,
 			utils.LogAttr("updateInterval", updateInterval))
 		return
 	}

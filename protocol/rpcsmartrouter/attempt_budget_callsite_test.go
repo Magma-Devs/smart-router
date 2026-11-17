@@ -10,18 +10,18 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavaprotocol"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
 	"github.com/magma-Devs/smart-router/protocol/qos"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
+	"github.com/magma-Devs/smart-router/protocol/relayprotocol"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 )
 
 // Stateless stub, so the dispatch path under test is the ordinary one, not cross-validation.
 type budgetCallSiteStateMachine struct {
-	usedProviders   *lavasession.UsedProviders
+	usedProviders   *routersession.UsedProviders
 	protocolMessage chainlib.ProtocolMessage
 }
 
@@ -40,7 +40,7 @@ func (m *budgetCallSiteStateMachine) GetCrossValidationParams() *common.CrossVal
 	return nil
 }
 
-func (m *budgetCallSiteStateMachine) GetUsedProviders() *lavasession.UsedProviders {
+func (m *budgetCallSiteStateMachine) GetUsedProviders() *routersession.UsedProviders {
 	return m.usedProviders
 }
 func (m *budgetCallSiteStateMachine) SetResultsChecker(rc relaycore.ResultsCheckerInf) {}
@@ -83,7 +83,7 @@ func TestSendRelayToDirectEndpoints_PassesTheBudgetNotTheWindow(t *testing.T) {
 	const restPath = "/cosmos/base/tendermint/v1beta1/blocks/latest"
 	chainMessage, err := chainParser.ParseMsg(restPath, nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 	require.NoError(t, err)
-	relayData := lavaprotocol.NewRelayData(ctx, http.MethodGet, restPath, nil, 0, spectypes.LATEST_BLOCK,
+	relayData := relayprotocol.NewRelayData(ctx, http.MethodGet, restPath, nil, 0, spectypes.LATEST_BLOCK,
 		"rest", chainMessage.GetRPCMessage().GetHeaders(), chainlib.GetAddon(chainMessage),
 		common.GetExtensionNames(chainMessage.GetExtensions()))
 	protocolMsg := chainlib.NewProtocolMessage(chainMessage, nil, relayData, "test", "1.2.3.4")
@@ -95,16 +95,16 @@ func TestSendRelayToDirectEndpoints_PassesTheBudgetNotTheWindow(t *testing.T) {
 	require.Greater(t, gotBudget, upstreamDelay,
 		"setup: the upstream must be faster than the budget, or nothing could succeed either way")
 
-	endpoint := &lavasession.Endpoint{NetworkAddress: upstream.URL}
-	directConn, err := lavasession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: upstream.URL}, 5, "")
+	endpoint := &routersession.Endpoint{NetworkAddress: upstream.URL}
+	directConn, err := routersession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: upstream.URL}, 5, "")
 	require.NoError(t, err)
 
-	session := &lavasession.SingleConsumerSession{
-		Parent: &lavasession.ConsumerSessionsWithProvider{
-			PublicLavaAddress: "lava@slow-but-working",
-			Endpoints:         []*lavasession.Endpoint{endpoint},
+	session := &routersession.SingleConsumerSession{
+		Parent: &routersession.ConsumerSessionsWithProvider{
+			PublicAddress: "provider@slow-but-working",
+			Endpoints:     []*routersession.Endpoint{endpoint},
 		},
-		Connection: &lavasession.DirectRPCSessionConnection{
+		Connection: &routersession.DirectRPCSessionConnection{
 			DirectConnection: directConn,
 			EndpointAddress:  upstream.URL,
 			Endpoint:         endpoint,
@@ -114,25 +114,25 @@ func TestSendRelayToDirectEndpoints_PassesTheBudgetNotTheWindow(t *testing.T) {
 	_, ok := session.TryUseSession()
 	require.True(t, ok, "setup: failed to lock session")
 
-	usedProviders := lavasession.NewUsedProviders(nil)
-	sessionsMap := lavasession.ConsumerSessionsMap{"lava@slow-but-working": &lavasession.SessionInfo{Session: session}}
+	usedProviders := routersession.NewUsedProviders(nil)
+	sessionsMap := routersession.ConsumerSessionsMap{"provider@slow-but-working": &routersession.SessionInfo{Session: session}}
 	usedProviders.AddUsed(sessionsMap, nil)
-	require.NoError(t, session.SetUsageForSession(0, nil, usedProviders, lavasession.NewRouterKey(nil)))
+	require.NoError(t, session.SetUsageForSession(0, nil, usedProviders, routersession.NewRouterKey(nil)))
 
 	sm := &budgetCallSiteStateMachine{usedProviders: usedProviders, protocolMessage: protocolMsg}
 	metricsStub := cvGuardMetrics{}
 	relayProcessor := relaycore.NewRelayProcessor(
 		ctx, nil, metricsStub, metricsStub, sm)
 
-	rpcEndpoint := &lavasession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "rest"}
+	rpcEndpoint := &routersession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "rest"}
 	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "LAVA")
 	rpcss := &RPCSmartRouterServer{
 		listenEndpoint:    rpcEndpoint,
 		chainParser:       chainParser,
 		consistencyConfig: relaycore.DefaultConsistencyValidationConfig(),
-		sessionManager: lavasession.NewConsumerSessionManager(
+		sessionManager: routersession.NewConsumerSessionManager(
 			rpcEndpoint, optimizer, nil, "test-router",
-			lavasession.NewActiveSubscriptionProvidersStorage()),
+			routersession.NewActiveSubscriptionProvidersStorage()),
 	}
 
 	// Bounds a hung test only; must not be what ends the relay.

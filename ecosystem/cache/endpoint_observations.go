@@ -59,13 +59,13 @@ func (s *RelayerCacheServer) SetEndpointObservation(ctx context.Context, req *re
 	applied, err := s.engine().PublishEndpointObservation(ctx, req.ChainId, req.ApiInterface, req.EndpointId, req.PodId, req.Block,
 		time.Duration(req.TtlMs)*time.Millisecond)
 	if err != nil {
-		return nil, utils.LavaFormatError("invalid endpoint observation set", err,
+		return nil, utils.FormatError("invalid endpoint observation set", err,
 			utils.LogAttr("chainId", req.ChainId),
 			utils.LogAttr("apiInterface", req.ApiInterface),
 			utils.LogAttr("block", req.Block),
 		)
 	}
-	utils.LavaFormatTrace("endpoint observation set",
+	utils.FormatTrace("endpoint observation set",
 		utils.LogAttr("chainId", req.ChainId),
 		utils.LogAttr("apiInterface", req.ApiInterface),
 		utils.LogAttr("block", req.Block),

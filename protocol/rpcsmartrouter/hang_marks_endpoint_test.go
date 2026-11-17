@@ -45,7 +45,7 @@ func TestEndpointCancellationIsExempt(t *testing.T) {
 // And the end-to-end consequence at the health decision: the same classified error must reach
 // opposite verdicts depending on that one condition.
 func TestEndpointHealth_HangCountsButCancellationDoesNot(t *testing.T) {
-	cancelled := common.LavaErrorContextCanceled
+	cancelled := common.RouterErrorContextCanceled
 
 	raceLoser, _ := classifyEndpointHealth(cancelled, endpointCancellationIsExempt(true, func() bool { return false }))
 	require.False(t, raceLoser, "a race loser must not be marked unhealthy")

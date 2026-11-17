@@ -25,7 +25,7 @@ func TestJSONRPC_RateLimitBodyIsRateLimited(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got := ClassifyError(nil, ChainFamilyEVM, TransportJsonRPC, tc.code, tc.message)
-			require.Same(t, LavaErrorNodeRateLimited, got)
+			require.Same(t, RouterErrorNodeRateLimited, got)
 			require.True(t, got.SubCategory.IsRateLimit())
 			require.True(t, got.Retryable)
 		})
@@ -37,9 +37,9 @@ func TestJSONRPC_RateLimitBodyIsRateLimited(t *testing.T) {
 // the message, and a -32000 body with neither the code nor the phrase keeps its generic
 // server-error verdict. A chain family with no table of its own reads the same generic row.
 func TestJSONRPC_RateLimitBodyRowsStayNarrow(t *testing.T) {
-	require.Same(t, LavaErrorNodeLimitExceeded, ClassifyError(nil, ChainFamilyEVM, TransportJsonRPC, -32005, "Limit exceeded"))
-	require.Same(t, LavaErrorNodeSolanaUnhealthy, ClassifyError(nil, ChainFamilySolana, TransportJsonRPC, -32005, "Node is behind by 100 slots"))
-	require.Same(t, LavaErrorNodeInternalError, ClassifyError(nil, ChainFamilyEVM, TransportJsonRPC, -32603, "Too Many Requests"))
-	require.Same(t, LavaErrorNodeServerError, ClassifyError(nil, ChainFamilyEVM, TransportJsonRPC, -32000, "request limit reached"))
-	require.Same(t, LavaErrorNodeRateLimited, ClassifyError(nil, ChainFamilyUnknown, TransportJsonRPC, 429, "Too Many Requests"))
+	require.Same(t, RouterErrorNodeLimitExceeded, ClassifyError(nil, ChainFamilyEVM, TransportJsonRPC, -32005, "Limit exceeded"))
+	require.Same(t, RouterErrorNodeSolanaUnhealthy, ClassifyError(nil, ChainFamilySolana, TransportJsonRPC, -32005, "Node is behind by 100 slots"))
+	require.Same(t, RouterErrorNodeInternalError, ClassifyError(nil, ChainFamilyEVM, TransportJsonRPC, -32603, "Too Many Requests"))
+	require.Same(t, RouterErrorNodeServerError, ClassifyError(nil, ChainFamilyEVM, TransportJsonRPC, -32000, "request limit reached"))
+	require.Same(t, RouterErrorNodeRateLimited, ClassifyError(nil, ChainFamilyUnknown, TransportJsonRPC, 429, "Too Many Requests"))
 }

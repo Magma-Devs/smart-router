@@ -45,7 +45,7 @@ func (f *Fetcher) fetchFromRepo(ctx context.Context, host repoHost, info *RepoIn
 		return specs, nil
 	}
 
-	utils.LavaFormatWarning(host.name+" "+host.archive+" fetch failed, falling back to "+host.listingAPI, tarballErr,
+	utils.FormatWarning(host.name+" "+host.archive+" fetch failed, falling back to "+host.listingAPI, tarballErr,
 		utils.LogAttr("repo", info.ProjectPath))
 
 	specs, apiErr := f.fetchFromRepoAPI(ctx, host, info)
@@ -60,14 +60,14 @@ func (f *Fetcher) fetchFromRepo(ctx context.Context, host repoHost, info *RepoIn
 func (f *Fetcher) fetchFromRepoAPI(ctx context.Context, host repoHost, info *RepoInfo) (map[string]types.Spec, error) {
 	apiURL := host.listingURL(info)
 
-	utils.LavaFormatInfo("Fetching spec file list from "+host.name,
+	utils.FormatInfo("Fetching spec file list from "+host.name,
 		utils.LogAttr("api_url", apiURL))
 
 	if f.config.Token != "" {
-		utils.LavaFormatInfo("Using "+host.name+" token authentication",
+		utils.FormatInfo("Using "+host.name+" token authentication",
 			utils.LogAttr("token_prefix", f.config.Token[:min(4, len(f.config.Token))]))
 	} else {
-		utils.LavaFormatInfo("Using unauthenticated "+host.name+" access", host.anonymous)
+		utils.FormatInfo("Using unauthenticated "+host.name+" access", host.anonymous)
 	}
 
 	// Fetch the directory listing
@@ -94,7 +94,7 @@ func (f *Fetcher) fetchFromRepoAPI(ctx context.Context, host repoHost, info *Rep
 		return nil, fmt.Errorf("no .json spec files found in repository")
 	}
 
-	utils.LavaFormatInfo("Found spec files to fetch",
+	utils.FormatInfo("Found spec files to fetch",
 		utils.LogAttr("file_count", len(fileURLs)))
 
 	// Fetch all spec files in parallel

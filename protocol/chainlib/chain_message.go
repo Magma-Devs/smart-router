@@ -102,7 +102,7 @@ func (pm *baseChainMessageContainer) GetRawRequestHash() ([]byte, error) {
 // not necessary for base chain message.
 func (bcnc *baseChainMessageContainer) CheckResponseError(data []byte, httpStatusCode int) (hasError bool, errorMessage string) {
 	if bcnc.resultErrorParsingMethod == nil {
-		utils.LavaFormatError("tried calling resultErrorParsingMethod when it is not set", nil)
+		utils.FormatError("tried calling resultErrorParsingMethod when it is not set", nil)
 		return false, ""
 	}
 	return bcnc.resultErrorParsingMethod(data, httpStatusCode)
@@ -168,7 +168,7 @@ func (bcnc *baseChainMessageContainer) UpdateLatestBlockInMessage(latestBlock in
 }
 
 func (bcnc *baseChainMessageContainer) GetExtensions() []*spectypes.Extension {
-	utils.LavaFormatTrace("[Archive Debug] GetExtensions called", utils.LogAttr("extensions", len(bcnc.extensions)))
+	utils.FormatTrace("[Archive Debug] GetExtensions called", utils.LogAttr("extensions", len(bcnc.extensions)))
 	return bcnc.extensions
 }
 
@@ -188,7 +188,7 @@ func (bcnc *baseChainMessageContainer) addRouterExtensions(extensionNames []stri
 // adds the following extensions. callerRequested says whether the caller asked for them; only
 // then is one that no node offers recorded as unavailable.
 func (bcnc *baseChainMessageContainer) addExtensions(extensionNames []string, extensionParser *extensionslib.ExtensionParser, callerRequested bool) {
-	utils.LavaFormatTrace("[Archive Debug] OverrideExtensions called", utils.LogAttr("extensionNames", extensionNames), utils.LogAttr("existingExtensions", len(bcnc.extensions)))
+	utils.FormatTrace("[Archive Debug] OverrideExtensions called", utils.LogAttr("extensionNames", extensionNames), utils.LogAttr("existingExtensions", len(bcnc.extensions)))
 	existingExtensions := map[string]struct{}{}
 	for _, extension := range bcnc.extensions {
 		existingExtensions[extension.Name] = struct{}{}
@@ -207,12 +207,12 @@ func (bcnc *baseChainMessageContainer) addExtensions(extensionNames []string, ex
 				InternalPath:   bcnc.apiCollection.CollectionData.InternalPath,
 				Addon:          bcnc.apiCollection.CollectionData.AddOn,
 			}
-			utils.LavaFormatTrace("[Archive Debug] Looking for extension", utils.LogAttr("extensionKey", extensionKey), utils.LogAttr("configuredExtensions", extensionParser.GetConfiguredExtensions()))
+			utils.FormatTrace("[Archive Debug] Looking for extension", utils.LogAttr("extensionKey", extensionKey), utils.LogAttr("configuredExtensions", extensionParser.GetConfiguredExtensions()))
 			extension := extensionParser.GetExtension(extensionKey)
 			if extension != nil {
 				bcnc.extensions = append(bcnc.extensions, extension)
 				bcnc.updateCUForApi(extension)
-				utils.LavaFormatTrace("[Archive Debug] Extension added", utils.LogAttr("extensionName", extensionName), utils.LogAttr("totalExtensions", len(bcnc.extensions)))
+				utils.FormatTrace("[Archive Debug] Extension added", utils.LogAttr("extensionName", extensionName), utils.LogAttr("totalExtensions", len(bcnc.extensions)))
 			} else {
 				if callerRequested {
 					// Readers of this list keep the name past the request (the warn-once register's
@@ -222,13 +222,13 @@ func (bcnc *baseChainMessageContainer) addExtensions(extensionNames []string, ex
 					// through would have the next keep-alive request rewrite the name in place.
 					bcnc.unavailableExtensions = append(bcnc.unavailableExtensions, strings.Clone(extensionName))
 				}
-				utils.LavaFormatTrace("[Archive Debug] Extension not found", utils.LogAttr("extensionName", extensionName), utils.LogAttr("extensionKey", extensionKey))
+				utils.FormatTrace("[Archive Debug] Extension not found", utils.LogAttr("extensionName", extensionName), utils.LogAttr("extensionKey", extensionKey))
 			}
 		} else {
-			utils.LavaFormatTrace("[Archive Debug] Extension already exists", utils.LogAttr("extensionName", extensionName))
+			utils.FormatTrace("[Archive Debug] Extension already exists", utils.LogAttr("extensionName", extensionName))
 		}
 	}
-	utils.LavaFormatTrace("[Archive Debug] OverrideExtensions completed", utils.LogAttr("finalExtensions", len(bcnc.extensions)))
+	utils.FormatTrace("[Archive Debug] OverrideExtensions completed", utils.LogAttr("finalExtensions", len(bcnc.extensions)))
 }
 
 // GetUnavailableExtensions returns the extensions the caller requested that no node on this

@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 )
@@ -184,7 +184,7 @@ func TestWorstCaseGapBetweenPolls_BoundsTheGapsUnderTheTrafficGate(t *testing.T)
 			}
 			m := NewEndpointMonitor(ctx, cfg)
 			t.Cleanup(m.Stop)
-			_, err := m.GetOrCreateTracker("", &lavasession.Endpoint{NetworkAddress: url, Enabled: true}, &mockDirectRPCConnection{url: url})
+			_, err := m.GetOrCreateTracker("", &routersession.Endpoint{NetworkAddress: url, Enabled: true}, &mockDirectRPCConnection{url: url})
 			require.NoError(t, err)
 			gen, ok := m.ObservationGeneration(url)
 			require.True(t, ok)

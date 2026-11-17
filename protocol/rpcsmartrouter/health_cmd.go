@@ -13,7 +13,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	commonlib "github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/magma-Devs/smart-router/protocol/statetracker"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
@@ -171,13 +171,13 @@ running directory, ./config, then ` + defaultNodeHome + `.`,
 			// a row error rather than a fatal one — consistent with how this command reports endpoint faults.
 			cvConfig, err := ParseCrossValidationConfig(viper.GetViper())
 			if err != nil {
-				return emitFatal(utils.LavaFormatError("invalid cross-validation configuration", err))
+				return emitFatal(utils.FormatError("invalid cross-validation configuration", err))
 			}
 			if opts.cvResolver, err = NewCrossValidationPolicyResolver(cvConfig); err != nil {
-				return emitFatal(utils.LavaFormatError("invalid cross-validation configuration", err))
+				return emitFatal(utils.FormatError("invalid cross-validation configuration", err))
 			}
 			if err := validatePolicyEndpoints(cvConfig, endpointsForProviders(providers)); err != nil {
-				return emitFatal(utils.LavaFormatError("invalid cross-validation configuration", err))
+				return emitFatal(utils.FormatError("invalid cross-validation configuration", err))
 			}
 
 			results := runHealthProbes(context.Background(), providers, opts)
@@ -201,16 +201,16 @@ running directory, ./config, then ` + defaultNodeHome + `.`,
 
 // endpointsForProviders reduces the probe targets to the distinct (chain-id, api-interface) pairs the
 // cross-validation preflight matches policies against — the same identity a request's policy lookup uses.
-func endpointsForProviders(providers []healthProvider) []*lavasession.RPCEndpoint {
+func endpointsForProviders(providers []healthProvider) []*routersession.RPCEndpoint {
 	seen := map[string]struct{}{}
-	var endpoints []*lavasession.RPCEndpoint
+	var endpoints []*routersession.RPCEndpoint
 	for _, p := range providers {
 		key := p.chainID + "\x00" + p.apiInterface
 		if _, dup := seen[key]; dup {
 			continue
 		}
 		seen[key] = struct{}{}
-		endpoints = append(endpoints, &lavasession.RPCEndpoint{ChainID: p.chainID, ApiInterface: p.apiInterface})
+		endpoints = append(endpoints, &routersession.RPCEndpoint{ChainID: p.chainID, ApiInterface: p.apiInterface})
 	}
 	return endpoints
 }
@@ -221,13 +221,13 @@ func collectHealthProviders(args []string, includeBackup bool, inlineAuth common
 	if len(args) > 1 {
 		viperEndpoints, err := commonlib.ParseEndpointArgs(args, Yaml_config_properties, commonlib.EndpointsConfigName)
 		if err != nil {
-			return nil, utils.LavaFormatError("invalid inline endpoints", err)
+			return nil, utils.FormatError("invalid inline endpoints", err)
 		}
 		viper.Reset()
 		viper.MergeConfigMap(viperEndpoints.AllSettings())
 		rpcEndpoints, err := ParseEndpoints(viper.GetViper())
 		if err != nil || len(rpcEndpoints) == 0 {
-			return nil, utils.LavaFormatError("invalid inline endpoints definition", err)
+			return nil, utils.FormatError("invalid inline endpoints definition", err)
 		}
 		providers := make([]healthProvider, 0, len(rpcEndpoints))
 		for _, ep := range rpcEndpoints {
@@ -252,17 +252,17 @@ func collectHealthProviders(args []string, includeBackup bool, inlineAuth common
 		// This command is what an operator reaches for when a config will not boot, so a
 		// config it cannot even find has to say where it looked, in the terms they used.
 		if isConfigNotFound(err) {
-			return nil, utils.LavaFormatError(configNotFoundMessage(configTarget, configIsFile), err,
+			return nil, utils.FormatError(configNotFoundMessage(configTarget, configIsFile), err,
 				configLocationAttributes(configTarget, configIsFile)...)
 		}
-		return nil, utils.LavaFormatError("failed reading config file", err, utils.Attribute{Key: "config", Value: configTarget})
+		return nil, utils.FormatError("failed reading config file", err, utils.Attribute{Key: "config", Value: configTarget})
 	}
 
 	keys := []string{commonlib.DirectRPCConfigName}
 	if includeBackup {
 		keys = append(keys, commonlib.BackupDirectRPCConfigName)
 	}
-	lists := make([][]*lavasession.RPCStaticProviderEndpoint, 0, len(keys))
+	lists := make([][]*routersession.RPCStaticProviderEndpoint, 0, len(keys))
 	for _, key := range keys {
 		if !viper.IsSet(key) {
 			continue
@@ -278,8 +278,8 @@ func collectHealthProviders(args []string, includeBackup bool, inlineAuth common
 	// exactly what an operator reaches for to work out why a config will not boot — so it reports
 	// the collision and probes anyway, rather than refusing the config like the router does. The
 	// rows are still told apart by their `url`, which is what identifies the broken node.
-	if err := lavasession.ValidateUniqueProviderNames(lists...); err != nil {
-		utils.LavaFormatWarning("the router will REFUSE TO START on this config — probing it anyway", err)
+	if err := routersession.ValidateUniqueProviderNames(lists...); err != nil {
+		utils.FormatWarning("the router will REFUSE TO START on this config — probing it anyway", err)
 	}
 
 	var providers []healthProvider
@@ -406,7 +406,7 @@ func probeProvider(ctx context.Context, provider healthProvider, opts healthOpti
 	// This parser is the provider's alone, so the flag can be set on it directly.
 	chainParser.SetSkipWebsocketVerification(opts.skipWebsocket)
 
-	rpcEndpoint := lavasession.RPCEndpoint{ChainID: provider.chainID, ApiInterface: provider.apiInterface}
+	rpcEndpoint := routersession.RPCEndpoint{ChainID: provider.chainID, ApiInterface: provider.apiInterface}
 	if err := statetracker.RegisterForSpecUpdatesOrSetStaticSpecsWithToken(ctx, chainParser, opts.staticSpecPaths, rpcEndpoint, opts.githubToken, opts.gitlabToken); err != nil {
 		return rowsFromError(fmt.Errorf("load spec: %w", err))
 	}
@@ -421,7 +421,7 @@ func probeProvider(ctx context.Context, provider healthProvider, opts healthOpti
 
 	// The urls the router dials, generated per-path ones included, so health reports
 	// each one on its own path's checks, as admission judges it (MAG-4214).
-	endpoint := &lavasession.RPCProviderEndpoint{
+	endpoint := &routersession.RPCProviderEndpoint{
 		ChainID:      provider.chainID,
 		ApiInterface: provider.apiInterface,
 		NodeUrls:     dialedNodeUrls(provider.nodeUrls, chainParser, provider.apiInterface),
@@ -443,6 +443,17 @@ func probeProvider(ctx context.Context, provider healthProvider, opts healthOpti
 	if excluded == nil {
 		excluded = admissionErr
 	}
+	// A provider serves no subscriptions with no ws(s) url on a chain that subscribes, and
+	// with ws(s) urls the router refuses every one of: the metric publishes both as the
+	// websocket service (refusalsOf, websocketLeft), so each admitted row says so too.
+	// validations are by position in the dialed list, so that is the list it reads.
+	noSubscriptions := ""
+	switch {
+	case chainlib.MissingWebsocket(endpoint.NodeUrls, chainParser):
+		noSubscriptions = noWebsocketReason
+	case everyWebsocketRefused(endpoint.NodeUrls, validations):
+		noSubscriptions = noWebsocketAdmittedReason
+	}
 
 	rows := make([]healthEndpointResult, 0, len(endpoint.NodeUrls))
 	for i, url := range endpoint.NodeUrls {
@@ -450,9 +461,48 @@ func probeProvider(ctx context.Context, provider healthProvider, opts healthOpti
 		row.SpecValid = true
 		applyValidation(&row, validations[i])
 		row.Router = routerVerdict(validations[i], excluded)
+		if noSubscriptions != "" {
+			row.Router = row.Router.withoutSubscriptions(noSubscriptions)
+		}
 		rows = append(rows, row)
 	}
 	return rows
+}
+
+// noWebsocketReason is what an admitted row adds when its provider has no ws(s) url on
+// a chain that subscribes: the router serves it without subscriptions (MAG-3950).
+const noWebsocketReason = "no ws(s) node url: serves no subscriptions"
+
+// noWebsocketAdmittedReason is what an admitted row adds when the router refuses every
+// ws(s) url of its provider, a dead socket for one: it serves no subscriptions either.
+const noWebsocketAdmittedReason = "no ws(s) node url admitted: serves no subscriptions"
+
+// everyWebsocketRefused reports whether a provider has a ws(s) url and the router
+// refuses each one it has, as websocketLeft reads the admission. urls is the list the
+// validations are by position in: the dialed one (MAG-4214).
+func everyWebsocketRefused(urls []commonlib.NodeUrl, validations []chainlib.NodeURLValidation) bool {
+	sockets := 0
+	for i, url := range urls {
+		if !chainlib.IsWebSocketURL(url.Url) {
+			continue
+		}
+		sockets++
+		if i >= len(validations) || !validations[i].Refused {
+			return false
+		}
+	}
+	return sockets > 0
+}
+
+func (v healthRouterVerdict) withoutSubscriptions(reason string) healthRouterVerdict {
+	if v.Verdict != routerAdmitted {
+		return v
+	}
+	if v.Reason != "" {
+		v.Reason += "; "
+	}
+	v.Reason += reason
+	return v
 }
 
 // applyValidation folds one node url's results into its row: every verification, the

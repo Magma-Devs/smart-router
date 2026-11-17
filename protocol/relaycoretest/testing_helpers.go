@@ -8,8 +8,8 @@ import (
 	"github.com/goccy/go-json"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 )
 
@@ -43,7 +43,7 @@ func SendSuccessRespJsonRpc(relayProcessor *relaycore.RelayProcessor, provider s
 		Result:  resultBody,
 	}
 	resBytes, _ := json.Marshal(res)
-	relayProcessor.GetUsedProviders().RemoveUsed(provider, lavasession.NewRouterKey(nil), nil)
+	relayProcessor.GetUsedProviders().RemoveUsed(provider, routersession.NewRouterKey(nil), nil)
 	response := &relaycore.RelayResponse{
 		RelayResult: common.RelayResult{
 			Request: &pairingtypes.RelayRequest{
@@ -62,7 +62,7 @@ func SendSuccessRespJsonRpc(relayProcessor *relaycore.RelayProcessor, provider s
 // SendSuccessResp sends a successful response to the relay processor
 func SendSuccessResp(relayProcessor *relaycore.RelayProcessor, provider string, delay time.Duration) {
 	time.Sleep(delay)
-	relayProcessor.GetUsedProviders().RemoveUsed(provider, lavasession.NewRouterKey(nil), nil)
+	relayProcessor.GetUsedProviders().RemoveUsed(provider, routersession.NewRouterKey(nil), nil)
 	response := &relaycore.RelayResponse{
 		RelayResult: common.RelayResult{
 			Request: &pairingtypes.RelayRequest{
@@ -81,7 +81,7 @@ func SendSuccessResp(relayProcessor *relaycore.RelayProcessor, provider string, 
 // SendProtocolError sends a protocol error response to the relay processor
 func SendProtocolError(relayProcessor *relaycore.RelayProcessor, provider string, delay time.Duration, err error) {
 	time.Sleep(delay)
-	relayProcessor.GetUsedProviders().RemoveUsed(provider, lavasession.NewRouterKey(nil), err)
+	relayProcessor.GetUsedProviders().RemoveUsed(provider, routersession.NewRouterKey(nil), err)
 	response := &relaycore.RelayResponse{
 		RelayResult: common.RelayResult{
 			Request: &pairingtypes.RelayRequest{
@@ -100,7 +100,7 @@ func SendProtocolError(relayProcessor *relaycore.RelayProcessor, provider string
 // SendNodeError sends a node error response to the relay processor
 func SendNodeError(relayProcessor *relaycore.RelayProcessor, provider string, delay time.Duration) {
 	time.Sleep(delay)
-	relayProcessor.GetUsedProviders().RemoveUsed(provider, lavasession.NewRouterKey(nil), nil)
+	relayProcessor.GetUsedProviders().RemoveUsed(provider, routersession.NewRouterKey(nil), nil)
 	response := &relaycore.RelayResponse{
 		RelayResult: common.RelayResult{
 			Request: &pairingtypes.RelayRequest{
@@ -127,7 +127,7 @@ func SendNodeErrorJsonRpc(relayProcessor *relaycore.RelayProcessor, provider str
 	}
 	resBytes, _ := json.Marshal(res)
 
-	relayProcessor.GetUsedProviders().RemoveUsed(provider, lavasession.NewRouterKey(nil), nil)
+	relayProcessor.GetUsedProviders().RemoveUsed(provider, routersession.NewRouterKey(nil), nil)
 	response := &relaycore.RelayResponse{
 		RelayResult: common.RelayResult{
 			Request: &pairingtypes.RelayRequest{

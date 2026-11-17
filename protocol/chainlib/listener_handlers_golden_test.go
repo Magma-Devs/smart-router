@@ -19,8 +19,8 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils/rand"
@@ -192,7 +192,7 @@ func serveGoldenListener(t *testing.T, ctx context.Context, apiInterface string,
 	t.Helper()
 	logger, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
 	require.NoError(t, err)
-	endpoint := &lavasession.RPCEndpoint{NetworkAddress: "127.0.0.1:0", ChainID: "LAV1", ApiInterface: apiInterface, HealthCheckPath: common.DEFAULT_HEALTH_PATH}
+	endpoint := &routersession.RPCEndpoint{NetworkAddress: "127.0.0.1:0", ChainID: "LAV1", ApiInterface: apiInterface, HealthCheckPath: common.DEFAULT_HEALTH_PATH}
 	var listener ChainListener
 	switch apiInterface {
 	case spectypes.APIInterfaceJsonRPC:

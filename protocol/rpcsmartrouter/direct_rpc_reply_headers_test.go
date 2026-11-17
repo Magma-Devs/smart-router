@@ -9,7 +9,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 )
@@ -41,7 +41,7 @@ func vendorHeaders(w http.ResponseWriter) {
 
 func newTestDirectSender(t *testing.T, upstream *httptest.Server) *DirectRPCRelaySender {
 	t.Helper()
-	directConn, err := lavasession.NewDirectRPCConnection(context.Background(), common.NodeUrl{Url: upstream.URL}, 5, "")
+	directConn, err := routersession.NewDirectRPCConnection(context.Background(), common.NodeUrl{Url: upstream.URL}, 5, "")
 	require.NoError(t, err)
 	return &DirectRPCRelaySender{directConnection: directConn, endpointName: "test-endpoint"}
 }

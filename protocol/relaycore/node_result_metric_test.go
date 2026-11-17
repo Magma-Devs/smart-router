@@ -10,7 +10,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 )
@@ -50,7 +50,7 @@ func (m *answerMetrics) counts() (nodeErrors, results []string) {
 // processor took the response in (its results tally), so a case that meters nothing is not passing
 // only because the response never arrived.
 func TestRelayProcessor_MetersAReadAnsweredWithAResult(t *testing.T) {
-	const provider = "lava@test1"
+	const provider = "provider@test1"
 	nodeErrorBody := []byte(`{"message":"invalid argument 0: hex string has length 3","code":400}`)
 	type tally struct{ success, nodeErrors, protocolErrors int }
 
@@ -124,7 +124,7 @@ func TestRelayProcessor_MetersAReadAnsweredWithAResult(t *testing.T) {
 			chainMsg, err := chainParser.ParseMsg("/cosmos/base/tendermint/v1beta1/blocks/17", nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 			require.NoError(t, err)
 			protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "", "")
-			usedProviders := lavasession.NewUsedProviders(nil)
+			usedProviders := routersession.NewUsedProviders(nil)
 			if tc.healthCheck {
 				usedProviders.MarkRouterHealthCheck()
 			}
@@ -136,7 +136,7 @@ func TestRelayProcessor_MetersAReadAnsweredWithAResult(t *testing.T) {
 			lockCtx, cancel := context.WithTimeout(ctx, 10*time.Millisecond)
 			defer cancel()
 			require.Nil(t, usedProviders.TryLockSelection(lockCtx))
-			usedProviders.AddUsed(lavasession.ConsumerSessionsMap{provider: &lavasession.SessionInfo{}}, nil)
+			usedProviders.AddUsed(routersession.ConsumerSessionsMap{provider: &routersession.SessionInfo{}}, nil)
 
 			// Responses are handled while WaitForResults runs, so the metrics are read after it returns.
 			go tc.send(relayProcessor)

@@ -1,6 +1,7 @@
 package rpcsmartrouter
 
 import (
+	"fmt"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -9,7 +10,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	commonlib "github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/holdoff"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/stretchr/testify/require"
 )
 
@@ -76,10 +77,10 @@ func TestValidateProviderCollections_DeadSocketCostsOnlyTheSocket(t *testing.T) 
 	require.NoError(t, err)
 	require.True(t, admission.URLRefused(1))
 
-	admissionFor := func(*lavasession.RPCStaticProviderEndpoint) chainlib.ProviderAdmission { return admission }
-	require.Empty(t, collectEndpoints(wsSubscriptions, []*lavasession.RPCStaticProviderEndpoint{provider}, admissionFor, ""),
+	admissionFor := func(*routersession.RPCStaticProviderEndpoint) chainlib.ProviderAdmission { return admission }
+	require.Empty(t, collectEndpoints(wsSubscriptions, []*routersession.RPCStaticProviderEndpoint{provider}, admissionFor, ""),
 		"a refused socket gets no subscription")
-	require.Len(t, collectEndpoints(wsSubscriptions, []*lavasession.RPCStaticProviderEndpoint{provider}, nil, ""), 1,
+	require.Len(t, collectEndpoints(wsSubscriptions, []*routersession.RPCStaticProviderEndpoint{provider}, nil, ""), 1,
 		"configured-ness is not admission")
 	require.Equal(t, []commonlib.NodeUrl{provider.NodeUrls[0]}, admittedNodeUrls(provider, provider.NodeUrls, admission))
 }
@@ -153,19 +154,37 @@ func TestValidateProviderCollections_NoUrlLeft(t *testing.T) {
 	require.True(t, isRateLimitFailure(err), "no url on the path verified and one was only throttled: inconclusive, %v", err)
 }
 
-// The router refuses these shapes before dialing anything.
+// The router refuses a provider with no http url before dialing anything.
 func TestValidateProviderCollections_ShapeRefusals(t *testing.T) {
 	up := newFakeUpstreams(t)
 	_, err := validateProviderCollections(t.Context(), staticProvider("ETH1",
 		commonlib.NodeUrl{Url: up.wsURL("/k/" + upArchive)},
 	), liveParser(t, "ETH1", true), 20*time.Second)
 	require.ErrorContains(t, err, "HTTP/HTTPS is mandatory")
+	require.Empty(t, up.methods("ws", "/k/"+upArchive), "a refused shape dials nothing")
+}
 
-	_, err = validateProviderCollections(t.Context(), staticProvider("ETH1",
-		commonlib.NodeUrl{Url: up.httpURL("/l/" + upArchive)},
-	), liveParser(t, "ETH1", false), 20*time.Second)
-	require.ErrorContains(t, err, "websocket is not provided")
-	require.Empty(t, up.methods("http", "/l/"+upArchive), "a refused shape dials nothing")
+// A provider with no websocket url on a chain that subscribes serves over http
+// without subscriptions (MAG-3950). It used to be refused unless the router ran with
+// --skip-websocket-verification, which the helm chart sets on every router. Its http
+// url still runs every base check: a wrong chain takes it out, with the flag or not.
+func TestValidateProviderCollections_NoWebsocketURLServesOverHTTP(t *testing.T) {
+	up := newFakeUpstreams(t)
+	for _, skipWebsocket := range []bool{false, true} {
+		parser := liveParser(t, "ETH1", skipWebsocket)
+		path := fmt.Sprintf("/nows-%t/", skipWebsocket)
+		provider := staticProvider("ETH1", commonlib.NodeUrl{Url: up.httpURL(path + upArchive)})
+		admission, err := validateProviderCollections(t.Context(), provider, parser, 20*time.Second)
+		require.NoError(t, err, "skip-websocket-verification=%t", skipWebsocket)
+		require.False(t, admission.Any())
+		require.Contains(t, up.methods("http", path+upArchive), "eth_chainId", "the http url was verified, not waved through")
+		require.True(t, chainlib.MissingWebsocket(provider.NodeUrls, parser), "the flag does not hide the missing url")
+
+		_, err = validateProviderCollections(t.Context(), staticProvider("ETH1",
+			commonlib.NodeUrl{Url: up.httpURL(path + upPolygon)},
+		), parser, 20*time.Second)
+		require.Equal(t, "chain-id", chainlib.FailedCheck(err), "skip-websocket-verification=%t: %v", skipWebsocket, err)
+	}
 }
 
 // An addon and an extension on one url verify together, each check charged to its own.
@@ -229,7 +248,8 @@ func TestAdmittedNodeUrls_KeepsOrderAndIdentityWhenNothingIsRefused(t *testing.T
 }
 
 // An epoch pass that met a rate limit on one url keeps the provider paired as it was,
-// leaves the url's standing alone, and holds the provider off.
+// leaves the url's standing alone, and holds that url off — the one that answered 429,
+// not the provider's first url (MAG-4733).
 func TestApplyReverification_ARateLimitedUrlBacksOffAndChangesNothing(t *testing.T) {
 	up := newFakeUpstreams(t)
 	provider := staticProvider("ETH1",
@@ -240,22 +260,59 @@ func TestApplyReverification_ARateLimitedUrlBacksOffAndChangesNothing(t *testing
 	holdoffs := holdoff.NewRegistry()
 	inputs := &chainReverifyInputs{
 		chainParser:                liveParser(t, "ETH1", true),
-		rpcEndpoint:                &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		rpcEndpoint:                &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 		convertProvidersToSessions: fakeConvert,
-		configuredStatic:           []*lavasession.RPCStaticProviderEndpoint{provider},
+		configuredStatic:           []*routersession.RPCStaticProviderEndpoint{provider},
 		recordAdmission:            admissions.record,
 		recordReverifiedAdmission:  admissions.recordReverified,
 		admissionFor:               admissions.admissionFor,
 		rateLimitHoldoff:           holdoffs,
 	}
-	active := map[uint64]*lavasession.ConsumerSessionsWithProvider{0: makeSession(provider.Name)}
+	active := map[uint64]*routersession.ConsumerSessionsWithProvider{0: makeSession(provider.Name)}
 
 	next, demoted, promoted := applyReverification(t.Context(), inputs, active, reverifyTierStatic, 100)
 	require.Contains(t, collectNames(next), provider.Name)
 	require.Empty(t, demoted)
 	require.Empty(t, promoted, "nothing moved, so nothing is rebuilt")
 	require.False(t, admissions.admissionFor(provider).Any())
-	require.True(t, holdoffs.HeldOff(provider.Name, holdoffURLKey(provider)), "the vendor's limit is honoured on the next pass")
+	archive, throttled := provider.NodeUrls[0].Url, provider.NodeUrls[1].Url
+	require.True(t, holdoffs.HeldOff(holdoff.ProviderKey("ETH1", "jsonrpc", provider.Name), throttled), "the vendor's limit is honoured on the url that answered 429")
+	require.False(t, holdoffs.HeldOff(holdoff.ProviderKey("ETH1", "jsonrpc", provider.Name), archive), "the first url answered, so relays keep going to it")
+	_, held := holdoffs.ProviderReadyAt(holdoff.ProviderKey("ETH1", "jsonrpc", provider.Name), []string{archive, throttled})
+	require.False(t, held, "relay selection still has the archive url")
+}
+
+// A provider whose first url is its websocket door: the re-verifier's 429 from the https url
+// is held on that url. Keyed by the first url it landed on the websocket url, which relay
+// selection never counts, and held nothing for relays (MAG-4733).
+func TestApplyReverification_ARateLimitBehindAWebsocketFirstUrlHoldsTheRelayUrl(t *testing.T) {
+	up := newFakeUpstreams(t)
+	provider := staticProvider("ETH1",
+		commonlib.NodeUrl{Url: up.wsURL("/w/" + upSubOnly)},
+		commonlib.NodeUrl{Url: up.httpURL("/w/" + upThrottled)},
+		commonlib.NodeUrl{Url: up.httpURL("/w2/" + upArchive)},
+	)
+	admissions := newAdmissionRegistry()
+	holdoffs := holdoff.NewRegistry()
+	inputs := &chainReverifyInputs{
+		chainParser:                liveParser(t, "ETH1", true),
+		rpcEndpoint:                &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		convertProvidersToSessions: fakeConvert,
+		configuredStatic:           []*routersession.RPCStaticProviderEndpoint{provider},
+		recordAdmission:            admissions.record,
+		recordReverifiedAdmission:  admissions.recordReverified,
+		admissionFor:               admissions.admissionFor,
+		rateLimitHoldoff:           holdoffs,
+	}
+	active := map[uint64]*routersession.ConsumerSessionsWithProvider{0: makeSession(provider.Name)}
+
+	next, demoted, _ := applyReverification(t.Context(), inputs, active, reverifyTierStatic, 100)
+	require.Contains(t, collectNames(next), provider.Name)
+	require.Empty(t, demoted)
+	socket, throttled, archive := provider.NodeUrls[0].Url, provider.NodeUrls[1].Url, provider.NodeUrls[2].Url
+	require.True(t, holdoffs.HeldOff(holdoff.ProviderKey("ETH1", "jsonrpc", provider.Name), throttled), "the https url that answered 429 is held")
+	require.False(t, holdoffs.HeldOff(holdoff.ProviderKey("ETH1", "jsonrpc", provider.Name), socket))
+	require.False(t, holdoffs.HeldOff(holdoff.ProviderKey("ETH1", "jsonrpc", provider.Name), archive))
 }
 
 // A 429 on one add-on's own check (here trace_block, a premium method with its own limit)
@@ -272,21 +329,21 @@ func TestApplyReverification_AnAddonsOwnRateLimitHoldsNothing(t *testing.T) {
 	holdoffs := holdoff.NewRegistry()
 	inputs := &chainReverifyInputs{
 		chainParser:                liveParser(t, "ETH1", true),
-		rpcEndpoint:                &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		rpcEndpoint:                &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 		convertProvidersToSessions: fakeConvert,
-		configuredStatic:           []*lavasession.RPCStaticProviderEndpoint{provider},
+		configuredStatic:           []*routersession.RPCStaticProviderEndpoint{provider},
 		recordAdmission:            admissions.record,
 		recordReverifiedAdmission:  admissions.recordReverified,
 		admissionFor:               admissions.admissionFor,
 		rateLimitHoldoff:           holdoffs,
 	}
-	active := map[uint64]*lavasession.ConsumerSessionsWithProvider{0: makeSession(provider.Name)}
+	active := map[uint64]*routersession.ConsumerSessionsWithProvider{0: makeSession(provider.Name)}
 
 	next, demoted, _ := applyReverification(t.Context(), inputs, active, reverifyTierStatic, 100)
 	require.Contains(t, collectNames(next), provider.Name)
 	require.Empty(t, demoted)
 	require.Contains(t, up.methods("http", "/q/"+upTraceRate), "trace_block", "the add-on's check was asked, or this test proves nothing")
-	_, held := holdoffs.ProviderReadyAt(provider.Name)
+	_, held := holdoffs.ProviderReadyAt(holdoff.ProviderKey("ETH1", "jsonrpc", provider.Name), holdoffURLKeys(provider, nil))
 	require.False(t, held, "relay selection still serves the provider")
 	services, keep := admissions.admissionFor(provider).AdmittedServices(provider.NodeUrls[1])
 	require.True(t, keep)
@@ -301,13 +358,13 @@ func TestRevalidateTier_RecordsTheAdmission(t *testing.T) {
 		commonlib.NodeUrl{Url: up.httpURL("/q/" + upArchive)},
 		commonlib.NodeUrl{Url: up.httpURL("/q/" + upDead)},
 	)
-	rpcEndpoint := &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"}
+	rpcEndpoint := &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"}
 	admissions := newAdmissionRegistry()
 	rpsr := &RPCSmartRouter{reverifyInputs: map[string]*chainReverifyInputs{
 		rpcEndpoint.Key(): {recordAdmission: admissions.record},
 	}}
 
-	recovered, stillFailed := rpsr.revalidateTier(t.Context(), []*lavasession.RPCStaticProviderEndpoint{provider},
+	recovered, stillFailed := rpsr.revalidateTier(t.Context(), []*routersession.RPCStaticProviderEndpoint{provider},
 		liveParser(t, "ETH1", true), rpcEndpoint, reverifyTierStatic, nil, true)
 	require.Len(t, recovered, 1)
 	require.Empty(t, stillFailed)
@@ -327,15 +384,15 @@ func TestApplyReverification_TheUrlGraceIsForAPairedProvider(t *testing.T) {
 		admissions := newAdmissionRegistry()
 		inputs := &chainReverifyInputs{
 			chainParser:                liveParser(t, "ETH1", true),
-			rpcEndpoint:                &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+			rpcEndpoint:                &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 			convertProvidersToSessions: fakeConvert,
-			configuredStatic:           []*lavasession.RPCStaticProviderEndpoint{provider},
+			configuredStatic:           []*routersession.RPCStaticProviderEndpoint{provider},
 			recordAdmission:            admissions.record,
 			recordReverifiedAdmission:  admissions.recordReverified,
 			admissionFor:               admissions.admissionFor,
 			rateLimitHoldoff:           holdoff.NewRegistry(),
 		}
-		active := map[uint64]*lavasession.ConsumerSessionsWithProvider{}
+		active := map[uint64]*routersession.ConsumerSessionsWithProvider{}
 		if paired {
 			active[0] = makeSession(provider.Name)
 		}

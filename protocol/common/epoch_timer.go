@@ -99,7 +99,7 @@ func (et *EpochTimer) Start(ctx context.Context) {
 	timeUntilNext := et.GetTimeUntilNextEpoch()
 	nextEpochTime := time.Now().Add(timeUntilNext)
 
-	utils.LavaFormatInfo("EpochTimer starting",
+	utils.FormatInfo("EpochTimer starting",
 		utils.LogAttr("epochDuration", et.epochDuration),
 		utils.LogAttr("epochZeroTime", et.epochZeroTime.Format("2006-01-02 15:04:05 MST")),
 		utils.LogAttr("currentTime", time.Now().Format("15:04:05 MST")),
@@ -125,7 +125,7 @@ func (et *EpochTimer) scheduleNextUpdate(ctx context.Context) {
 	currentEpoch := et.CalculateCurrentEpoch()
 	nextEpochTime := et.GetEpochBoundaryTime(currentEpoch + 1)
 
-	utils.LavaFormatDebug("EpochTimer: Scheduling next update",
+	utils.FormatDebug("EpochTimer: Scheduling next update",
 		utils.LogAttr("currentEpoch", currentEpoch),
 		utils.LogAttr("timeUntilNext", timeUntilNext),
 		utils.LogAttr("nextEpochTime", nextEpochTime.Format("15:04:05 MST")),
@@ -158,7 +158,7 @@ func (et *EpochTimer) onEpochBoundary(ctx context.Context) {
 	actualTime := time.Now()
 	drift := actualTime.Sub(boundaryTime)
 
-	utils.LavaFormatInfo("EpochTimer: Epoch boundary crossed",
+	utils.FormatInfo("EpochTimer: Epoch boundary crossed",
 		utils.LogAttr("newEpoch", newEpoch),
 		utils.LogAttr("expectedTime", boundaryTime.Format("15:04:05.000 MST")),
 		utils.LogAttr("actualTime", actualTime.Format("15:04:05.000 MST")),
@@ -178,7 +178,7 @@ func (et *EpochTimer) notifyCallbacks(epoch uint64) {
 	callbacks := append([]func(uint64){}, et.callbacks...)
 	et.lock.RUnlock()
 
-	utils.LavaFormatDebug("EpochTimer: Notifying callbacks",
+	utils.FormatDebug("EpochTimer: Notifying callbacks",
 		utils.LogAttr("epoch", epoch),
 		utils.LogAttr("numCallbacks", len(callbacks)),
 	)
@@ -188,7 +188,7 @@ func (et *EpochTimer) notifyCallbacks(epoch uint64) {
 		go func(cb func(uint64), index int) {
 			defer func() {
 				if r := recover(); r != nil {
-					utils.LavaFormatError("Panic in epoch callback", nil,
+					utils.FormatError("Panic in epoch callback", nil,
 						utils.LogAttr("panic", r),
 						utils.LogAttr("epoch", epoch),
 						utils.LogAttr("callbackIndex", index),
@@ -210,5 +210,5 @@ func (et *EpochTimer) Stop() {
 
 	close(et.stopChan)
 
-	utils.LavaFormatInfo("EpochTimer stopped")
+	utils.FormatInfo("EpochTimer stopped")
 }

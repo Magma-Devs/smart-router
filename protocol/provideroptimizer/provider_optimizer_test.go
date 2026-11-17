@@ -37,7 +37,7 @@ type providersGenerator struct {
 func (pg *providersGenerator) setupProvidersForTest(count int) *providersGenerator {
 	pg.providersAddresses = make([]string, count)
 	for i := range pg.providersAddresses {
-		pg.providersAddresses[i] = "lava@test_" + strconv.Itoa(i)
+		pg.providersAddresses[i] = "provider@test_" + strconv.Itoa(i)
 	}
 	return pg
 }
@@ -59,7 +59,7 @@ func (po *ProviderOptimizer) readSyncFloor(provider string) uint64 {
 // -race -count to actually hit the interleaving.
 func TestProviderOptimizer_SyncBlockNeverDecreasesUnderConcurrency(t *testing.T) {
 	po := setupProviderOptimizer(1)
-	const provider = "lava@sync_race"
+	const provider = "provider@sync_race"
 	freshRef := func(block uint64) SyncReference {
 		return SyncReference{ConsensusConfigured: true, Block: block, Time: po.now(), Fresh: true}
 	}
@@ -113,7 +113,7 @@ func TestProviderOptimizerProviderDataSetGet(t *testing.T) {
 		address := providerAddress + strconv.Itoa(i)
 		set := providerOptimizer.providersStorage.Set(address, providerData, 1)
 		if set == false {
-			utils.LavaFormatWarning("set in cache dropped", nil)
+			utils.FormatWarning("set in cache dropped", nil)
 		}
 	}
 	time.Sleep(4 * time.Millisecond)
@@ -838,7 +838,7 @@ func TestProviderOptimizerChoiceSimulationBasedOnLatency(t *testing.T) {
 	// Use more iterations to reduce statistical variance
 	iterations := 5000
 	res := runChooseManyTimesAndReturnResults(t, providerOptimizer, providersGen.providersAddresses, nil, iterations, cu, requestBlock)
-	utils.LavaFormatInfo("res", utils.LogAttr("res", res))
+	utils.FormatInfo("res", utils.LogAttr("res", res))
 
 	// With weighted selection and equal availability, latency differences should result in
 	// provider 0 (best latency) getting more selections than provider 2 (worst latency)
@@ -903,7 +903,7 @@ func TestProviderOptimizerChoiceSimulationBasedOnSync(t *testing.T) {
 	iterations := 2000 // Increased iterations for more stable results
 	res := runChooseManyTimesAndReturnResults(t, providerOptimizer, providersGen.providersAddresses, nil, iterations, cu, spectypes.LATEST_BLOCK)
 
-	utils.LavaFormatInfo("res", utils.LogAttr("res", res))
+	utils.FormatInfo("res", utils.LogAttr("res", res))
 
 	// With weighted selection and sync weight at 20%, provider 0 (best sync) should clearly
 	// get more selections than the others, but the difference between provider 1 and 2 may be small
@@ -1153,7 +1153,7 @@ func TestProviderOptimizerBlockAvailabilityIntegration(t *testing.T) {
 // future-dated cache entries so fresh real-time writes are accepted immediately.
 func TestProviderOptimizer_ResetState_AllowsRealTimeSamplesAfterClockReset(t *testing.T) {
 	po := setupProviderOptimizer(1)
-	addr := "lava@test_reset"
+	addr := "provider@test_reset"
 	cu := uint64(10)
 	syncBlock := uint64(1000)
 

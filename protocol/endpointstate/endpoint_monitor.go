@@ -14,8 +14,9 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chaintracker"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/endpointtip"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/holdoff"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/magma-Devs/smart-router/utils/backoff"
@@ -354,7 +355,7 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 	// client relay, so a rollout never boots straight into paused polls.
 	manager.lastClientRelayNanos.Store(time.Now().UnixNano())
 	if idleAfter > 0 {
-		utils.LavaFormatInfo("chain tracker idle mode enabled: polls pause after a quiet window and resume on the next client relay",
+		utils.FormatInfo("chain tracker idle mode enabled: polls pause after a quiet window and resume on the next client relay",
 			utils.LogAttr("chainID", config.ChainID),
 			utils.LogAttr("apiInterface", config.ApiInterface),
 			utils.LogAttr("idleAfter", idleAfter),
@@ -370,7 +371,7 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 	// appears when the answer is "off" leaves them with nothing to read when it is "on", and
 	// the spec reason can override the flag on some chains of a multichain process but not
 	// others. The reason attribute distinguishes the two ways it can be off.
-	utils.LavaFormatInfo("block-hash polling (fork detection) resolved",
+	utils.FormatInfo("block-hash polling (fork detection) resolved",
 		utils.LogAttr("chainID", config.ChainID),
 		utils.LogAttr("apiInterface", config.ApiInterface),
 		utils.LogAttr("enabled", !manager.hashPolling.HeadOnly()),
@@ -378,7 +379,7 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 	)
 
 	if manager.peerObservations != nil {
-		utils.LavaFormatInfo("fleet tracker gate enabled: borrowing peer poll observations from the cache backend",
+		utils.FormatInfo("fleet tracker gate enabled: borrowing peer poll observations from the cache backend",
 			utils.LogAttr("chainID", config.ChainID),
 			utils.LogAttr("apiInterface", config.ApiInterface),
 			utils.LogAttr("podID", manager.podID),
@@ -395,7 +396,7 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 	// arrived" — and the failure mode this knob actually has is a value that silently reverts
 	// (out of range, or truncated to the unset sentinel by an older binary). The resolved
 	// interval, not the requested divisor, is the thing worth stating.
-	utils.LavaFormatInfo("per-endpoint chain tracker poll cadence resolved",
+	utils.FormatInfo("per-endpoint chain tracker poll cadence resolved",
 		utils.LogAttr("chainID", config.ChainID),
 		utils.LogAttr("apiInterface", config.ApiInterface),
 		utils.LogAttr("averageBlockTime", avgBlockTime),
@@ -418,8 +419,8 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 // provider in hand pass "" and the tracker reads the url key alone (MAG-4165).
 func (m *EndpointMonitor) GetOrCreateTracker(
 	providerName string,
-	endpoint *lavasession.Endpoint,
-	directConnection lavasession.DirectRPCConnection,
+	endpoint *routersession.Endpoint,
+	directConnection routersession.DirectRPCConnection,
 ) (chaintracker.IChainTracker, error) {
 	endpointURL := endpoint.NetworkAddress
 
@@ -501,7 +502,7 @@ func (m *EndpointMonitor) GetOrCreateTracker(
 		FlatPollInterval: m.flatPollInterval,
 		// Rate-limit hold-off keys: the relay path's provider name (read only) and this url,
 		// which the tracker's own 429s are recorded under (MAG-4165).
-		RateLimitProvider: providerName,
+		RateLimitProvider: holdoff.ProviderKey(m.chainID, m.apiInterface, providerName),
 		RateLimitURL:      endpointURL,
 		// Traffic gate (Topic B): the dedicated poll skips its ENTIRE cycle when a fresh
 		// relay-harvested tip already covers the endpoint. The gate lives on the ChainTracker
@@ -583,7 +584,7 @@ func (m *EndpointMonitor) GetOrCreateTracker(
 		m.obsMu.Lock()
 		delete(m.generations, endpointURL)
 		m.obsMu.Unlock()
-		return nil, utils.LavaFormatError("failed to create ChainTracker for endpoint", err,
+		return nil, utils.FormatError("failed to create ChainTracker for endpoint", err,
 			utils.LogAttr("endpoint", endpointURL),
 			utils.LogAttr("chainID", m.chainID),
 		)
@@ -600,7 +601,7 @@ func (m *EndpointMonitor) GetOrCreateTracker(
 	// until the endpoint recovers or this tracker is removed/stopped.
 	go m.startTrackerWithRetry(tracker, trackerCtx, endpointURL)
 
-	utils.LavaFormatInfo("created ChainTracker for endpoint",
+	utils.FormatInfo("created ChainTracker for endpoint",
 		utils.LogAttr("endpoint", endpointURL),
 		utils.LogAttr("chainID", m.chainID),
 		utils.LogAttr("avgBlockTime", m.averageBlockTime),
@@ -628,7 +629,7 @@ func (m *EndpointMonitor) startTrackerWithRetry(tracker chaintracker.IChainTrack
 
 		retryDelay := m.trackerStartRetryDelayAfter(attempt, err)
 		m.setTrackerState(endpointURL, EndpointChainTrackerRetryingStart, err)
-		utils.LavaFormatWarning("ChainTracker startup failed; retrying", err,
+		utils.FormatWarning("ChainTracker startup failed; retrying", err,
 			utils.LogAttr("endpoint", endpointURL),
 			utils.LogAttr("chainID", m.chainID),
 			utils.LogAttr("attempt", attempt+1),
@@ -890,7 +891,7 @@ func (m *EndpointMonitor) PollNow(ctx context.Context, endpointURL string) (obse
 	// naming the tracker's lifecycle state when no poll can be vouched for.
 	ran, pollErr := m.triggerPoll(ctx, endpointURL, false)
 	if errors.Is(pollErr, errNoTrackerForEndpoint) {
-		return EndpointObservation{}, false, utils.LavaFormatError("poll-now: no ChainTracker for endpoint", nil,
+		return EndpointObservation{}, false, utils.FormatError("poll-now: no ChainTracker for endpoint", nil,
 			utils.LogAttr("endpoint", endpointURL),
 			utils.LogAttr("chainID", m.chainID),
 		)
@@ -914,7 +915,7 @@ func (m *EndpointMonitor) PollNow(ctx context.Context, endpointURL string) (obse
 			// tracker, the budget was too short for this upstream.
 			message = "poll-now: a poll is running but its result was not awaited; the record below predates it"
 		}
-		return observation, false, utils.LavaFormatError(message, pollErr,
+		return observation, false, utils.FormatError(message, pollErr,
 			utils.LogAttr("endpoint", endpointURL),
 			utils.LogAttr("chainID", m.chainID),
 			utils.LogAttr("trackerState", string(state)),
@@ -958,7 +959,7 @@ func (m *EndpointMonitor) RemoveTracker(endpointURL string) {
 	// stale entry in the process-global map.
 	endpointtip.Default().Remove(m.tipKey(endpointURL))
 
-	utils.LavaFormatInfo("stopped and removed ChainTracker for endpoint",
+	utils.FormatInfo("stopped and removed ChainTracker for endpoint",
 		utils.LogAttr("endpoint", endpointURL),
 		utils.LogAttr("chainID", m.chainID),
 	)
@@ -1057,7 +1058,7 @@ func (m *EndpointMonitor) Stop() {
 	m.lastPublished = make(map[string]time.Time)
 	m.obsMu.Unlock()
 
-	utils.LavaFormatInfo("stopped EndpointMonitor",
+	utils.FormatInfo("stopped EndpointMonitor",
 		utils.LogAttr("chainID", m.chainID),
 		utils.LogAttr("trackersStopped", trackerCount),
 	)

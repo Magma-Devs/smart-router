@@ -100,6 +100,10 @@ func (apil *chainListenerBase) relayHTTP(spec httpRelaySpec) fiber.Handler {
 				if status, body, loggedReply, ok := spec.refusal(err, msgSeed); ok {
 					apil.logger.LogRequestAndResponse(spec.logModule, true, req.logMethod, req.logPath, req.loggedBody, loggedReply, msgSeed, time.Since(startTime), err)
 					fiberCtx.Status(status)
+					// A refusal is made before any provider is asked, so no relay ran to put the
+					// request's headers on it. The request id goes on here, the one the body's guid
+					// and the router's log lines carry (MAG-4351).
+					fiberCtx.Set(common.GUID_HEADER_NAME, msgSeed)
 					return addHeadersAndSendBytes(fiberCtx, reply.GetMetadata(), body)
 				}
 			}
@@ -149,7 +153,7 @@ func receivedAttrs(ctx context.Context, guid uint64, attrs ...utils.Attribute) [
 // logReceivedWithSeedAfterDapp writes the received line the REST POST and GraphQL handlers share.
 func logReceivedWithSeedAfterDapp(message string) func(context.Context, uint64, string, string, httpRelayRequest, []pairingtypes.Metadata) {
 	return func(ctx context.Context, guid uint64, msgSeed, dappID string, req httpRelayRequest, headers []pairingtypes.Metadata) {
-		utils.LavaFormatInfo(message, receivedAttrs(ctx, guid,
+		utils.FormatInfo(message, receivedAttrs(ctx, guid,
 			utils.LogAttr("path", req.path),
 			utils.LogAttr("dappID", dappID),
 			utils.LogAttr("msgSeed", msgSeed),
@@ -253,8 +257,8 @@ func (wsl *wsListenerBase) websocketRoutes(ctx context.Context, app *fiber.App, 
 			rateLimit = 0
 		}
 
-		utils.LavaFormatDebug(name+" websocket opened", utils.LogAttr("consumerIp", websocketConn.LocalAddr().String()))
-		defer utils.LavaFormatDebug(name+" websocket closed", utils.LogAttr("consumerIp", websocketConn.LocalAddr().String()))
+		utils.FormatDebug(name+" websocket opened", utils.LogAttr("consumerIp", websocketConn.LocalAddr().String()))
+		defer utils.FormatDebug(name+" websocket closed", utils.LogAttr("consumerIp", websocketConn.LocalAddr().String()))
 
 		consumerWebsocketManager := NewConsumerWebsocketManager(ConsumerWebsocketManagerOptions{
 			WebsocketConn:          websocketConn,

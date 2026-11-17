@@ -3,7 +3,7 @@ package endpointstate
 import (
 	"testing"
 
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/stretchr/testify/require"
 )
 
@@ -17,7 +17,7 @@ import (
 // configuration problem anyone could see.
 func TestCollectionAddonsIsSortedAndStable(t *testing.T) {
 	poller := &EndpointPoller{
-		endpoint: &lavasession.Endpoint{
+		endpoint: &routersession.Endpoint{
 			Addons: map[string]struct{}{
 				"evm":     {},
 				"archive": {},
@@ -34,7 +34,7 @@ func TestCollectionAddonsIsSortedAndStable(t *testing.T) {
 
 func TestCollectionAddonsEmptyCases(t *testing.T) {
 	t.Run("no addons", func(t *testing.T) {
-		poller := &EndpointPoller{endpoint: &lavasession.Endpoint{}}
+		poller := &EndpointPoller{endpoint: &routersession.Endpoint{}}
 		require.Nil(t, poller.collectionAddons(),
 			"an empty set must resolve to the base collection, not to no collection")
 	})

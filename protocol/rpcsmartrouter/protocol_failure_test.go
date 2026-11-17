@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/stretchr/testify/require"
 )
 
@@ -40,10 +40,10 @@ func TestIsProtocolFailure(t *testing.T) {
 		{"REST body cut off mid-read", rest, wire(fmt.Errorf("failed reading response: %w", io.ErrUnexpectedEOF)), false, notExpired, false, true},
 		{"attempt timed out", jsonrpc, wire(fmt.Errorf("http request failed: %w", context.DeadlineExceeded)), false, notExpired, false, true},
 		{"body is not valid JSON", jsonrpc, wire(errors.New("malformed JSON-RPC response: body is not valid JSON")), false, notExpired, false, true},
-		{"a JSON-RPC 503 is an answer", jsonrpc, wire(&lavasession.HTTPStatusError{StatusCode: 503, Status: "503"}), false, notExpired, false, false},
-		{"a JSON-RPC 501 is an answer", jsonrpc, wire(&lavasession.HTTPStatusError{StatusCode: 501, Status: "501"}), false, notExpired, false, false},
+		{"a JSON-RPC 503 is an answer", jsonrpc, wire(&routersession.HTTPStatusError{StatusCode: 503, Status: "503"}), false, notExpired, false, false},
+		{"a JSON-RPC 501 is an answer", jsonrpc, wire(&routersession.HTTPStatusError{StatusCode: 501, Status: "501"}), false, notExpired, false, false},
 		{"refused before dialling", jsonrpc, fmt.Errorf("failed to build REST URL: %w", errors.New("bad path")), false, notExpired, false, false},
-		{"an HTTP request the client could not build, though the sender wraps it", jsonrpc, wire(fmt.Errorf("%w: %w", lavasession.ErrBuildHTTPRequest, errors.New("invalid method"))), false, notExpired, false, false},
+		{"an HTTP request the client could not build, though the sender wraps it", jsonrpc, wire(fmt.Errorf("%w: %w", routersession.ErrBuildHTTPRequest, errors.New("invalid method"))), false, notExpired, false, false},
 		{"race loser or client hang-up", jsonrpc, wire(context.Canceled), true, notExpired, false, false},
 		{"hang past the request budget", jsonrpc, wire(context.Canceled), true, expired, false, true},
 		{"no error", jsonrpc, nil, false, notExpired, false, false},
@@ -55,7 +55,7 @@ func TestIsProtocolFailure(t *testing.T) {
 		// inside its window it stays exempt (the "race loser or client hang-up" row above).
 		{"a race loser still silent when its window ran out", jsonrpc, wire(context.Canceled), true, notExpired, true, true},
 		{"a timed-out attempt past its window counts as it always did", jsonrpc, wire(fmt.Errorf("http request failed: %w", context.DeadlineExceeded)), false, notExpired, true, true},
-		{"past its window, a JSON-RPC 503 is still an answer", jsonrpc, wire(&lavasession.HTTPStatusError{StatusCode: 503, Status: "503"}), false, notExpired, true, false},
+		{"past its window, a JSON-RPC 503 is still an answer", jsonrpc, wire(&routersession.HTTPStatusError{StatusCode: 503, Status: "503"}), false, notExpired, true, false},
 		{"past its window, gRPC is still out", grpc, grpcWire(context.Canceled), true, notExpired, true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

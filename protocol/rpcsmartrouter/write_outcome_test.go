@@ -78,28 +78,28 @@ func TestUnknownWriteOutcome(t *testing.T) {
 // an honest "unclear" into a false "failed", or the reverse, on the requests that matter most.
 func TestMayHaveReachedNodeClassification(t *testing.T) {
 	for _, tc := range []struct {
-		err  *common.LavaError
+		err  *common.RouterError
 		want bool
 	}{
 		// The request may already have been on the wire when this failure surfaced.
-		{common.LavaErrorConnectionTimeout, true},
-		{common.LavaErrorConnectionReset, true},
-		{common.LavaErrorConnectionClosed, true},
-		{common.LavaErrorContextDeadline, true},
+		{common.RouterErrorConnectionTimeout, true},
+		{common.RouterErrorConnectionReset, true},
+		{common.RouterErrorConnectionClosed, true},
+		{common.RouterErrorContextDeadline, true},
 		// A cancellation says when we stopped waiting, never how far the request got — cancelling a
 		// context does not recall a relay already sent. A race loser is excluded by the successes>0
 		// check instead, not by pretending the request never left.
-		{common.LavaErrorContextCanceled, true},
+		{common.RouterErrorContextCanceled, true},
 		// The proxy is reporting that ITS upstream did not answer in time, having already forwarded
 		// the request: the deadline case one hop further out.
-		{common.LavaErrorNodeGatewayTimeout, true},
-		{common.LavaErrorNodeBadGateway, true},
+		{common.RouterErrorNodeGatewayTimeout, true},
+		{common.RouterErrorNodeBadGateway, true},
 
 		// Connect-phase failures do prove the request never left this process.
-		{common.LavaErrorConnectionRefused, false},
-		{common.LavaErrorDNSFailure, false},
-		{common.LavaErrorTLSMismatch, false},
-		{common.LavaErrorNetworkUnreachable, false},
+		{common.RouterErrorConnectionRefused, false},
+		{common.RouterErrorDNSFailure, false},
+		{common.RouterErrorTLSMismatch, false},
+		{common.RouterErrorNetworkUnreachable, false},
 	} {
 		t.Run(tc.err.Name, func(t *testing.T) {
 			assert.Equal(t, tc.want, tc.err.MayHaveReachedNode)

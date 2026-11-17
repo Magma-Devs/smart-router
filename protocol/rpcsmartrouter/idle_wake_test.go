@@ -16,8 +16,8 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/endpointstate"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils/rand"
@@ -101,7 +101,7 @@ func TestAwaitWakeIfIdle_CapBoundsTheWait(t *testing.T) {
 	rpcss := &RPCSmartRouterServer{endpointChainTrackerManager: m}
 
 	conn := &fakeDirectConn{err: errors.New("upstream down")}
-	_, err := m.GetOrCreateTracker("", &lavasession.Endpoint{NetworkAddress: "http://fake:8545", Enabled: true}, conn)
+	_, err := m.GetOrCreateTracker("", &routersession.Endpoint{NetworkAddress: "http://fake:8545", Enabled: true}, conn)
 	require.NoError(t, err)
 
 	wakeAt := time.Now().Add(2 * endpointstate.MinIdleAfter)
@@ -119,7 +119,7 @@ func TestAwaitWakeIfIdle_RespectsRequestContext(t *testing.T) {
 	defer cancel()
 	m := idleWakeMonitor(t, ctx, true)
 	rpcss := &RPCSmartRouterServer{endpointChainTrackerManager: m}
-	_, err := m.GetOrCreateTracker("", &lavasession.Endpoint{NetworkAddress: "http://fake:8545", Enabled: true}, &fakeDirectConn{err: errors.New("upstream down")})
+	_, err := m.GetOrCreateTracker("", &routersession.Endpoint{NetworkAddress: "http://fake:8545", Enabled: true}, &fakeDirectConn{err: errors.New("upstream down")})
 	require.NoError(t, err)
 
 	reqCtx, cancelReq := context.WithCancel(ctx)
@@ -159,7 +159,7 @@ func TestDirectiveHeaders_StripTheInternalProbeMark(t *testing.T) {
 		{Name: "Smartrouter-Internal-Probe", Value: "true"},
 		{Name: "content-type", Value: "application/json"},
 	}
-	forwarded, directives := rpcss.LavaDirectiveHeaders(in)
+	forwarded, directives := rpcss.DirectiveHeaders(in)
 	require.Equal(t, []pairingtypes.Metadata{{Name: "content-type", Value: "application/json"}}, forwarded)
 	require.Contains(t, directives, common.INTERNAL_PROBE_HEADER_NAME)
 }
@@ -183,7 +183,7 @@ func TestPublishChainIdle_ReportsTheCurrentState(t *testing.T) {
 	rpcss := &RPCSmartRouterServer{
 		smartRouterEndpointMetrics:  mm,
 		endpointChainTrackerManager: monitor,
-		listenEndpoint:              &lavasession.RPCEndpoint{ChainID: "IDLEPUB", ApiInterface: "jsonrpc"},
+		listenEndpoint:              &routersession.RPCEndpoint{ChainID: "IDLEPUB", ApiInterface: "jsonrpc"},
 	}
 
 	now := time.Now()
@@ -210,7 +210,7 @@ func TestPublishChainIdle_NothingWhileIdleModeIsOff(t *testing.T) {
 	rpcss := &RPCSmartRouterServer{
 		smartRouterEndpointMetrics:  mm,
 		endpointChainTrackerManager: monitor,
-		listenEndpoint:              &lavasession.RPCEndpoint{ChainID: "IDLEOFF", ApiInterface: "jsonrpc"},
+		listenEndpoint:              &routersession.RPCEndpoint{ChainID: "IDLEOFF", ApiInterface: "jsonrpc"},
 	}
 	rpcss.publishChainIdle(time.Now().Add(time.Hour))
 	_, found := findChainIdleGauge(t, "IDLEOFF")
@@ -307,7 +307,7 @@ func TestProbeCycle_HeadStallWaitsForTheWakeBurst(t *testing.T) {
 	stalledURL := func(url string) bool {
 		for _, e := range f.csm.GetAllDirectRPCEndpoints() {
 			if e.Endpoint.NetworkAddress == url {
-				_, held := e.Endpoint.StateReason(lavasession.EndpointDisableHeadStalled)
+				_, held := e.Endpoint.StateReason(routersession.EndpointDisableHeadStalled)
 				return held
 			}
 		}
