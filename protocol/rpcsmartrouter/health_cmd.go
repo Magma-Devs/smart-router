@@ -14,7 +14,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	commonlib "github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
-	"github.com/magma-Devs/smart-router/protocol/statetracker"
+	"github.com/magma-Devs/smart-router/protocol/staticspec"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/spf13/cobra"
@@ -407,7 +407,7 @@ func probeProvider(ctx context.Context, provider healthProvider, opts healthOpti
 	chainParser.SetSkipWebsocketVerification(opts.skipWebsocket)
 
 	rpcEndpoint := routersession.RPCEndpoint{ChainID: provider.chainID, ApiInterface: provider.apiInterface}
-	if err := statetracker.RegisterForSpecUpdatesOrSetStaticSpecsWithToken(ctx, chainParser, opts.staticSpecPaths, rpcEndpoint, opts.githubToken, opts.gitlabToken); err != nil {
+	if err := staticspec.Load(ctx, chainParser, opts.staticSpecPaths, rpcEndpoint, opts.githubToken, opts.gitlabToken); err != nil {
 		return rowsFromError(fmt.Errorf("load spec: %w", err))
 	}
 

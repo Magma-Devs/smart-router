@@ -1,4 +1,4 @@
-package statetracker
+package staticspec
 
 import (
 	"context"
@@ -47,7 +47,7 @@ func expandCommaSeparatedPaths(specPaths []string) []string {
 	return expanded
 }
 
-// RegisterForSpecUpdatesOrSetStaticSpecsWithToken loads specs from multiple sources and aggregates them.
+// Load sets chainParser's spec to rpcEndpoint's chain, loaded from specPaths and aggregated.
 // Sources are processed in order; later sources override earlier ones for the same chain ID.
 //
 // It supports:
@@ -62,7 +62,7 @@ func expandCommaSeparatedPaths(specPaths []string) []string {
 //
 // For remote repositories, the appropriate token (githubToken or gitlabToken) is used for authentication.
 // smart-router loads specs statically; empty specPaths is an error (there is no live blockchain fallback).
-func RegisterForSpecUpdatesOrSetStaticSpecsWithToken(ctx context.Context, chainParser chainlib.ChainParser, specPaths []string, rpcEndpoint routersession.RPCEndpoint, githubToken string, gitlabToken string) error {
+func Load(ctx context.Context, chainParser chainlib.ChainParser, specPaths []string, rpcEndpoint routersession.RPCEndpoint, githubToken string, gitlabToken string) error {
 	if len(specPaths) == 0 {
 		return utils.FormatError("no spec paths provided", nil,
 			utils.LogAttr("chain_id", rpcEndpoint.ChainID))

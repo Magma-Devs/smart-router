@@ -43,7 +43,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
-	"github.com/magma-Devs/smart-router/protocol/statetracker"
+	"github.com/magma-Devs/smart-router/protocol/staticspec"
 	"github.com/magma-Devs/smart-router/protocol/tracing"
 	epochstoragetypes "github.com/magma-Devs/smart-router/types/epoch"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
@@ -2634,7 +2634,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	// Smart router queries spec once during initialization (no ongoing updates)
 	if len(options.cmdFlags.StaticSpecPaths) > 0 {
 		// Load spec from static file/directory/URL sources
-		err = statetracker.RegisterForSpecUpdatesOrSetStaticSpecsWithToken(ctx, chainParser, options.cmdFlags.StaticSpecPaths, *rpcEndpoint, options.cmdFlags.GitHubToken, options.cmdFlags.GitLabToken)
+		err = staticspec.Load(ctx, chainParser, options.cmdFlags.StaticSpecPaths, *rpcEndpoint, options.cmdFlags.GitHubToken, options.cmdFlags.GitLabToken)
 		if err != nil {
 			err = utils.FormatError("failed loading static spec", err, utils.Attribute{Key: "endpoint", Value: rpcEndpoint})
 			errCh <- err
