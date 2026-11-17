@@ -1101,7 +1101,7 @@ func TestCreateAndSetupBaseAppListener_HandlesLargeHeaders(t *testing.T) {
 		CDNCacheDuration: "86400",
 	}
 
-	app := createAndSetupBaseAppListener(cmdFlags, "/health", alwaysHealthyReporter{}, false)
+	app := createAndSetupBaseAppListener(cmdFlags, "/health", alwaysHealthyReporter{}, false, false)
 	app.Get("/", func(c *fiber.Ctx) error {
 		return c.SendString("ok")
 	})
