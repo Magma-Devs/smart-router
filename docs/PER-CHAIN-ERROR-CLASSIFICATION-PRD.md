@@ -8,7 +8,7 @@ log to 16 Nov, the Reference page, and Parts II to V v1.0 final (References); wh
 the rulebook differ, the rulebook wins. The full reasoning and revision history are in this file's
 git history (`861d71a2`).
 
-**Decisions that depart from the ticket** (MAG-4910 to be updated):
+**Decisions that depart from the ticket** (MAG-4910 updated 17 Nov 2026):
 
 - Must-have 1 (spec versioning: tags, change log, source pinning, source metric) is out of scope.
   Routers load whatever source they're given; a release is tied only to its bundled commit.
@@ -967,7 +967,6 @@ description names the rule (`stateful`).
 
 | Decision | Needed before |
 |---|---|
-| Update MAG-4910 for the four departures | approval is recorded |
 | Rulebook lines that contradict Part I §1 or the 16 Nov change log, for the rulebook owner: R-E's example "the chain row beats the 429" (Part I), Part IV and Part V check P3 (an over-limit row before a 429, or before 401 to 403), Part I's "bare 400 on REST: the copy is refused" and "gRPC 3: rejected" tests and Q200, Q210(b), Part III §1 and §3.1 (a chain row changing 7, 16 or 8), Part III T13 (code 32 not parked). This spec follows Part I §1 and the change log | the rulebook's next edit |
 | XRP `noPermission`/`forbidden` (today `NODE_ACCESS_DENIED`): the rulebook's `C6` is status-only, so the XRP chapter gives it a class (§5.5) | XRP's rows move to `ripple.json` |
 | Retry by class on JSON-RPC and Tendermint (§3.3; main lets the status decide, MAG-5248 item 5) | a spec relies on a `C2` row under a JSON-RPC 5xx |
