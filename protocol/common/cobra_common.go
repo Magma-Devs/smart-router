@@ -33,6 +33,10 @@ const (
 	// relays), so the probe tightens to this cadence until the chain is healthy again.
 	RelayHealthUnhealthyIntervalFlag = "relays-health-unhealthy-interval"
 	SharedStateFlag                  = "shared-state"
+	// DisableRelayCacheFlag keeps relay replies out of the cache backend: none is read from it and
+	// none is written to it. The backend still carries the shared state that has a channel of its
+	// own: the sticky-session claims and the tracker's poll observations.
+	DisableRelayCacheFlag = "disable-relay-cache"
 	// SetRelayRetryLimitFlag controls the maximum number of retry attempts on relay errors
 	// (both node errors and protocol errors) for consumers and smart routers.
 	SetRelayRetryLimitFlag = "set-relay-retry-limit"
@@ -201,6 +205,7 @@ type ConsumerCmdFlags struct {
 	ResponseCompression               string        // "gzip" (default), "brotli", or "off" — controls client-facing response compression
 	ShutdownGracePeriod               time.Duration // graceful shutdown deadline; passed to chain listeners and upstream cleanup
 	ReadYourWritesWindow              time.Duration // how long a write's sender and hash stay pinned to the upstream that accepted it; 0 = off
+	DisableRelayCache                 bool          // no relay reply is read from a cache tier or written to one; the backend carries shared state only
 }
 
 // default rolling logs behavior (if enabled) will store 3 files each 100MB for up to 1 day every time.

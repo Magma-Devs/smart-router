@@ -10,6 +10,7 @@ nginx (round-robin)  ->  router-a | router-b | router-c  ->  node-a..node-d
 docker/sticky-test/run.sh                          # run it
 KEEP=1 docker/sticky-test/run.sh                   # leave the stack up
 STICKY_SHARED_STATE=false docker/sticky-test/run.sh # negative control: MUST fail
+STICKY_DISABLE_RELAY_CACHE=true docker/sticky-test/run.sh # relay caching off: MUST still pass
 ```
 
 Exit codes: `0` pass, `1` an assertion failed, `2` the harness itself is untrustworthy.
@@ -48,6 +49,15 @@ Related traps the harness already handles:
 `STICKY_SHARED_STATE=false` turns the feature off. The sticky phase must then FAIL. Measured
 with it off: one session id served by two upstreams, and 9 of 12 sessions split across
 upstreams — the reported customer bug. A harness that passes either way measures nothing.
+
+## Relay caching off
+
+`STICKY_DISABLE_RELAY_CACHE=true` starts every replica with `--disable-relay-cache`. No relay
+reply is read from the cache-be pod or written to it, and the sticky phase still passes: the
+claims travel over an RPC pair of their own. With `KEEP=1`, `GET /debug/cache-state` on each
+replica reads `"relay_cache_disabled": true` beside a configured, reachable primary, and the
+cache-be pod reports `cache_current_size 0` and no `cache_total_hits` or `cache_total_misses`
+series at all.
 
 ## Reading the metrics
 

@@ -382,11 +382,12 @@ curl -s http://127.0.0.1:6161/debug/cache-state | jq
     "secondary": {"configured": false, "engine": "", "address": "", "reachable": null,
                   "reachable_checked_at": "", "reachable_detail": "", "when_unreachable": "", "lifetimes": null,
                   "breaker": null}
-  }
+  },
+  "relay_cache_disabled": false
 }
 ```
 
-Five things are easy to misread:
+Six things are easy to misread:
 
 - **`address` is the tier's configuration summary, not one address.** For a RESP tier it
   carries the write addresses, `read=` when reads are split, `topology=` as **resolved** (an
@@ -414,6 +415,11 @@ Five things are easy to misread:
   assert a value no deployment uses. Where they are reported, they are the policy's base
   values: the effective non-finalized TTL is `max(averageBlockTime/8, non_finalized_seconds)`
   per chain, so that field is a floor.
+
+- **`relay_cache_disabled` overrides what the tiers suggest.** With `--disable-relay-cache` the
+  primary still reads `configured` and `reachable`, because it carries shared state, while no
+  relay reply is read from it or written to it. See
+  [Shared state without a relay cache](#shared-state-without-a-relay-cache).
 
 Reading this endpoint never touches the backend. That is deliberate rather than incidental:
 the obvious liveness accessor on the `cache-be` client dials on demand, so a monitoring scrape
@@ -504,6 +510,35 @@ router's own outlier guard is still shared, for as long as the router itself bel
 On a primary-cache hit, `Provider-Latest-Block` is read from the stored reply, so it carries
 the writing router's bounded value rather than the node's raw claim at write time: for a
 node that was ahead of that router's tip, the header reads the tip.
+
+## Shared state without a relay cache
+
+A router can keep relay replies out of the backend and still share state through it. This
+applies to either backend, `resp-cache` or `cache-be`:
+
+```bash
+smart-router rpcsmartrouter config.yml --cache-be cache:20100 --shared-state --disable-relay-cache
+```
+
+With `--disable-relay-cache` the relay path asks no cache tier and writes to none: every
+request goes to a node, no reply leaves the router for the backend, the cache counters
+(`smartrouter_cache_requests_total` and its siblings) stay flat, and `Lava-Cache-Outcome`
+reads `off` for both tiers. What `--shared-state` shares over a channel of its own keeps
+working:
+
+| Shared | With `--disable-relay-cache` |
+| --- | --- |
+| Sticky-session claims | Yes |
+| Tracker poll observations (the fleet tracker gate) | Yes |
+| Chain tip | A block a peer polled reaches this replica with that poll's observation |
+| Seen-block exchange on every relay | No. It rides on the relay's own cache lookup and write |
+
+So replicas agree on the chain tip at the tracker's poll cadence rather than relay by relay.
+A block one replica learned from a relay reaches the others with their next poll.
+
+The flag is refused together with a secondary cache, which only serves cached replies. Set
+without `--shared-state` it leaves the backend connected and unused, and the router says so
+at startup.
 
 ## Flush semantics
 
