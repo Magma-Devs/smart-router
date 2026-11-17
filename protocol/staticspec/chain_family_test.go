@@ -1,4 +1,4 @@
-package statetracker
+package staticspec
 
 import (
 	"context"
@@ -33,7 +33,7 @@ func TestStaticSpecLoadGivesANewChainItsParentsFamily(t *testing.T) {
 
 	chainParser, err := chainlib.NewChainParser(spectypes.APIInterfaceJsonRPC)
 	require.NoError(t, err)
-	err = RegisterForSpecUpdatesOrSetStaticSpecsWithToken(
+	err = Load(
 		context.Background(),
 		chainParser,
 		[]string{"../../specs/", dir},

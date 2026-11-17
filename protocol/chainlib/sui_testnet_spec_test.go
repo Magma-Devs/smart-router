@@ -173,8 +173,8 @@ func TestSuiTestnetGraphQLChainIDCheckAdmitsOnlyATestnetNode(t *testing.T) {
 }
 
 // loadSuiSpec loads one spec from the fixture the way the router loads a static spec source
-// (statetracker.RegisterForSpecUpdatesOrSetStaticSpecsWithToken): every spec in the file, then the
-// requested one expanded with what it imports. Each call decodes the file again, so two specs loaded
+// (staticspec.Load): every spec in the file, then the requested one expanded with what it
+// imports. Each call decodes the file again, so two specs loaded
 // here share no collection or api that could make a comparison pass by itself.
 func loadSuiSpec(t *testing.T, index string) spectypes.Spec {
 	t.Helper()

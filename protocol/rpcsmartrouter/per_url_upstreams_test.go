@@ -17,7 +17,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlibtest/fixture"
 	commonlib "github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
-	"github.com/magma-Devs/smart-router/protocol/statetracker"
+	"github.com/magma-Devs/smart-router/protocol/staticspec"
 	"github.com/stretchr/testify/require"
 )
 
@@ -294,7 +294,7 @@ func liveParser(t *testing.T, chainID string, skipWebsocket bool) chainlib.Chain
 	require.NoError(t, err)
 	parser.SetSkipWebsocketVerification(skipWebsocket)
 	endpoint := routersession.RPCEndpoint{ChainID: chainID, ApiInterface: "jsonrpc"}
-	require.NoError(t, statetracker.RegisterForSpecUpdatesOrSetStaticSpecsWithToken(t.Context(), parser, []string{"../../specs/"}, endpoint, "", ""))
+	require.NoError(t, staticspec.Load(t.Context(), parser, []string{"../../specs/"}, endpoint, "", ""))
 	return parser
 }
 
