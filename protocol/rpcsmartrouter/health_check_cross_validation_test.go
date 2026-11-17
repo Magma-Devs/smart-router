@@ -7,6 +7,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
+	"github.com/magma-Devs/smart-router/protocol/chainlibtest"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
@@ -75,7 +76,7 @@ func TestInternalRelayIgnoresCrossValidationPolicy(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
 			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
-			chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, tc.specID, tc.specAPI, handler, nil, "../../", nil)
+			chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, tc.specID, tc.specAPI, handler, nil, "../../", nil)
 			if closeServer != nil {
 				defer closeServer()
 			}

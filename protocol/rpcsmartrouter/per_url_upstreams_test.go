@@ -14,6 +14,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
+	"github.com/magma-Devs/smart-router/protocol/chainlibtest/fixture"
 	commonlib "github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/magma-Devs/smart-router/protocol/statetracker"
@@ -94,7 +95,7 @@ type fakeUpstreams struct {
 func newFakeUpstreams(t *testing.T) *fakeUpstreams {
 	t.Helper()
 	// Connectors these tests dial log from their own goroutines as they shut down.
-	chainlib.UseMockLogLevel()
+	fixture.UseMockLogLevel()
 	u := &fakeUpstreams{seen: map[string][]string{}}
 	u.http = httptest.NewServer(http.HandlerFunc(u.serveHTTP))
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}

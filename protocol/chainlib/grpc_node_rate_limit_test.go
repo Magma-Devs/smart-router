@@ -16,6 +16,7 @@ import (
 	"google.golang.org/protobuf/types/dynamicpb"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
+	"github.com/magma-Devs/smart-router/protocol/chainlibtest/fixture"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
@@ -54,7 +55,7 @@ func TestGrpcChainProxy_RateLimitWaitIsReadFromHeaderOrTrailer(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			UseMockLogLevel()
+			fixture.UseMockLogLevel()
 			ctx, cancel := context.WithCancel(context.Background())
 			t.Cleanup(cancel)
 
@@ -67,7 +68,7 @@ func TestGrpcChainProxy_RateLimitWaitIsReadFromHeaderOrTrailer(t *testing.T) {
 			lis, err := net.Listen("tcp", "127.0.0.1:0")
 			require.NoError(t, err)
 			srv := grpc.NewServer()
-			srv.RegisterService(&mockGRPCServiceDesc, rateLimitingBlockService{header: tc.header, trailer: tc.trailer})
+			srv.RegisterService(&fixture.BlockServiceDesc, rateLimitingBlockService{header: tc.header, trailer: tc.trailer})
 			reflection.Register(srv)
 			go func() { _ = srv.Serve(lis) }()
 			t.Cleanup(srv.Stop)

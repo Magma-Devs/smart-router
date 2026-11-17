@@ -8,6 +8,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
+	"github.com/magma-Devs/smart-router/protocol/chainlibtest/fixture"
 	"github.com/magma-Devs/smart-router/protocol/common"
 )
 
@@ -31,7 +32,7 @@ func TestJsonRPCParser_XRPLSubmitRejection(t *testing.T) {
 		t.Run(tc.index, func(t *testing.T) {
 			apip, err := NewJrpcChainParser()
 			require.NoError(t, err)
-			apip.SetSpec(CreateMockXRPLSpec(tc.index))
+			apip.SetSpec(fixture.CreateMockXRPLSpec(tc.index))
 
 			chainMessage, err := apip.ParseMsg("", []byte(`{"method":"submit","params":[{"tx_blob":"1200002280000000"}]}`), http.MethodPost, nil, extensionslib.ExtensionInfo{})
 			require.NoError(t, err)
@@ -57,10 +58,10 @@ func TestJsonRPCParser_ChainFamilyResolvedPerSpec(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, common.ChainFamilyUnknown, apip.chainFamily())
 
-	apip.SetSpec(CreateMockXRPLSpec("XRPT"))
+	apip.SetSpec(fixture.CreateMockXRPLSpec("XRPT"))
 	require.Equal(t, common.ChainFamilyXRP, apip.chainFamily())
 
-	apip.SetSpec(CreateMockXRPLSpec("ETH1"))
+	apip.SetSpec(fixture.CreateMockXRPLSpec("ETH1"))
 	require.Equal(t, common.ChainFamilyEVM, apip.chainFamily(), "a spec update re-resolves the family")
 }
 
@@ -87,7 +88,7 @@ func TestJsonRPCParser_XRPLBatchedSubmitRefused(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			apip, err := NewJrpcChainParser()
 			require.NoError(t, err)
-			apip.SetSpec(CreateMockXRPLSpec(tc.index))
+			apip.SetSpec(fixture.CreateMockXRPLSpec(tc.index))
 
 			_, err = apip.ParseMsg("", []byte(tc.body), http.MethodPost, nil, extensionslib.ExtensionInfo{})
 			if tc.wantRefused {

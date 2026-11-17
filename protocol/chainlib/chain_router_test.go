@@ -18,6 +18,7 @@ import (
 	"github.com/gofiber/websocket/v2"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
+	"github.com/magma-Devs/smart-router/protocol/chainlibtest/fixture"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
 	epochstoragetypes "github.com/magma-Devs/smart-router/types/epoch"
@@ -54,7 +55,7 @@ func testChainRouterWithWebSocketInSpec(t *testing.T, wsEnabled bool) {
 	addonsOptions := []string{"-addon-", "-addon2-"}
 	extensionsOptions := []string{"-test-", "-test2-", "-test3-"}
 
-	spec := CreateMockSpec()
+	spec := fixture.CreateMockSpec()
 	spec.ApiCollections = []*spectypes.ApiCollection{
 		{
 			Enabled: wsEnabled,
@@ -423,7 +424,7 @@ func TestSkipWebsocketVerificationIsPerParser(t *testing.T) {
 		parser, err := NewChainParser(spectypes.APIInterfaceJsonRPC)
 		require.NoError(t, err)
 
-		spec := CreateMockSpec()
+		spec := fixture.CreateMockSpec()
 		spec.ApiCollections = []*spectypes.ApiCollection{{
 			Enabled:        true,
 			CollectionData: spectypes.CollectionData{ApiInterface: spectypes.APIInterfaceJsonRPC},
@@ -438,7 +439,7 @@ func TestSkipWebsocketVerificationIsPerParser(t *testing.T) {
 
 	httpOnlyEndpoint := func() *routersession.RPCProviderEndpoint {
 		return &routersession.RPCProviderEndpoint{
-			ChainID:      CreateMockSpec().Index,
+			ChainID:      fixture.CreateMockSpec().Index,
 			ApiInterface: spectypes.APIInterfaceJsonRPC,
 			NodeUrls:     []common.NodeUrl{{Url: listenerAddressHttp}},
 		}
@@ -513,7 +514,7 @@ func TestChainRouterWithMethodRoutes(t *testing.T) {
 	addonsOptions := []string{"-addon-", "-addon2-"}
 	extensionsOptions := []string{"-test-", "-test2-", "-test3-"}
 
-	spec := CreateMockSpec()
+	spec := fixture.CreateMockSpec()
 	spec.ApiCollections = []*spectypes.ApiCollection{
 		{
 			Enabled: true,
@@ -1972,7 +1973,7 @@ func TestChainRouterWithInternalPaths(t *testing.T) {
 			chainParser, err := NewChainParser(play.apiInterface)
 			require.NoError(t, err)
 
-			spec := CreateMockSpec()
+			spec := fixture.CreateMockSpec()
 			spec.ApiCollections = play.specApiCollections
 			chainParser.SetSpec(spec)
 

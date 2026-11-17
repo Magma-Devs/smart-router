@@ -10,6 +10,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/grpcproxy/dyncodec"
+	"github.com/magma-Devs/smart-router/protocol/chainlibtest"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
@@ -77,7 +78,7 @@ func TestRevalidateTier_DoesNotRebindLiveGrpcParser(t *testing.T) {
 	// i.e. the parser arrives already bound the way boot leaves it in production.
 	// The router it returns is the SERVING router, the one live relays would use.
 	noop := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
-	chainParser, servingRouter, _, closeServer, endpoint, err := chainlib.CreateChainLibMocks(
+	chainParser, servingRouter, _, closeServer, endpoint, err := chainlibtest.CreateChainLibMocks(
 		ctx, "GRPCTEST", spectypes.APIInterfaceGrpc, noop, nil, "../../", nil)
 	require.NoError(t, err)
 	t.Cleanup(func() {

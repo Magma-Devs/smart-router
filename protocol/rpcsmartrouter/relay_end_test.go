@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
+	"github.com/magma-Devs/smart-router/protocol/chainlibtest"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/endpointtip"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
@@ -586,7 +587,7 @@ func TestRelayEnd_CosmosTxOutcome(t *testing.T) {
 func TestRelayEnd_TendermintTxRefused(t *testing.T) {
 	rand.InitRandomSeed()
 	noop := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
-	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(context.Background(), "LAVA", spectypes.APIInterfaceTendermintRPC, noop, nil, "../../", nil)
+	chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(context.Background(), "LAVA", spectypes.APIInterfaceTendermintRPC, noop, nil, "../../", nil)
 	if closeServer != nil {
 		t.Cleanup(closeServer)
 	}
@@ -607,7 +608,7 @@ func TestRelayEnd_TendermintTxRefused(t *testing.T) {
 func TestRelayEnd_RestWriteMethodKeepsItsPath(t *testing.T) {
 	rand.InitRandomSeed()
 	noop := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
-	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(context.Background(), "COSMOSHUB", spectypes.APIInterfaceRest, noop, nil, "../../", nil)
+	chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(context.Background(), "COSMOSHUB", spectypes.APIInterfaceRest, noop, nil, "../../", nil)
 	if closeServer != nil {
 		t.Cleanup(closeServer)
 	}
@@ -861,7 +862,7 @@ func TestRelayEnd_MethodNeverStartsWithASlash(t *testing.T) {
 func TestRelayEnd_UnlistedRestPathIsWithheld(t *testing.T) {
 	rand.InitRandomSeed()
 	noop := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
-	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(context.Background(), "COSMOSHUB", spectypes.APIInterfaceRest, noop, nil, "../../", nil)
+	chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(context.Background(), "COSMOSHUB", spectypes.APIInterfaceRest, noop, nil, "../../", nil)
 	if closeServer != nil {
 		t.Cleanup(closeServer)
 	}
@@ -892,7 +893,7 @@ func TestRelayEnd_NamedByURL(t *testing.T) {
 func TestRelayEnd_TendermintUnlistedMethod(t *testing.T) {
 	rand.InitRandomSeed()
 	noop := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
-	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(context.Background(), "LAVA", spectypes.APIInterfaceTendermintRPC, noop, nil, "../../", nil)
+	chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(context.Background(), "LAVA", spectypes.APIInterfaceTendermintRPC, noop, nil, "../../", nil)
 	if closeServer != nil {
 		t.Cleanup(closeServer)
 	}

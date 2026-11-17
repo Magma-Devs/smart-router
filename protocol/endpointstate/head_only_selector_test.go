@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/golang/mock/gomock"
-	"github.com/magma-Devs/smart-router/protocol/chainlib"
+	"github.com/magma-Devs/smart-router/protocol/chainlibtest"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 )
@@ -70,7 +70,7 @@ func TestSpecRequiresHeadOnly_Selector(t *testing.T) {
 			ctrl := gomock.NewController(t)
 			defer ctrl.Finish()
 
-			parser := chainlib.NewMockChainParser(ctrl)
+			parser := chainlibtest.NewMockChainParser(ctrl)
 			parser.EXPECT().GetParsingByTag(spectypes.FUNCTION_TAG_GET_BLOCKNUM).
 				Return(tc.latest, nil, tc.latestPresent).AnyTimes()
 			parser.EXPECT().GetParsingByTag(spectypes.FUNCTION_TAG_GET_BLOCK_BY_NUM).
@@ -128,7 +128,7 @@ func TestResolveHashPolling(t *testing.T) {
 			ctrl := gomock.NewController(t)
 			defer ctrl.Finish()
 
-			parser := chainlib.NewMockChainParser(ctrl)
+			parser := chainlibtest.NewMockChainParser(ctrl)
 			parser.EXPECT().GetParsingByTag(spectypes.FUNCTION_TAG_GET_BLOCKNUM).
 				Return(directive, nil, true).AnyTimes()
 			// Absent GET_BLOCK_BY_NUM is what makes a chain unable to hash.
@@ -157,7 +157,7 @@ func TestNewEndpointMonitor_ForkDetectionFlagReachesTrackers(t *testing.T) {
 		t.Cleanup(ctrl.Finish)
 
 		directive := &spectypes.ParseDirective{}
-		parser := chainlib.NewMockChainParser(ctrl)
+		parser := chainlibtest.NewMockChainParser(ctrl)
 		// A normal chain: both tags present, so the spec never forces head-only and the flag
 		// is the only thing deciding.
 		parser.EXPECT().GetParsingByTag(spectypes.FUNCTION_TAG_GET_BLOCKNUM).

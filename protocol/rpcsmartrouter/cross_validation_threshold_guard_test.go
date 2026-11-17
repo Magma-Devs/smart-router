@@ -10,6 +10,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
+	"github.com/magma-Devs/smart-router/protocol/chainlibtest"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
@@ -43,7 +44,7 @@ func TestSendRelayToEndpoint_ThresholdGuardReleasesGatheredSessions(t *testing.T
 	noopHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(
+	chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(
 		ctx, "LAVA", spectypes.APIInterfaceRest, noopHandler, nil, "../../", nil)
 	if closeServer != nil {
 		defer closeServer()
@@ -157,7 +158,7 @@ func TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesASessionlessEntr
 	noopHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(
+	chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(
 		ctx, "LAVA", spectypes.APIInterfaceRest, noopHandler, nil, "../../", nil)
 	if closeServer != nil {
 		defer closeServer()
@@ -206,7 +207,7 @@ func TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesADegradedSession
 	noopHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(
+	chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(
 		ctx, "LAVA", spectypes.APIInterfaceRest, noopHandler, nil, "../../", nil)
 	if closeServer != nil {
 		defer closeServer()

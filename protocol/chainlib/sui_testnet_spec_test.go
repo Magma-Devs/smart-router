@@ -15,6 +15,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/magma-Devs/smart-router/protocol/chainlibtest/fixture"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
@@ -130,7 +131,7 @@ func TestSuiTestnetChainIDCheckExpectsTheTestnetChainID(t *testing.T) {
 // The two cases differ in the chain id alone. The testnet case passing shows that the request and the
 // parsing work, so the refusal in the mainnet case is the value.
 func TestSuiTestnetGraphQLChainIDCheckAdmitsOnlyATestnetNode(t *testing.T) {
-	UseMockLogLevel()
+	fixture.UseMockLogLevel()
 	for _, tc := range []struct {
 		name    string
 		chainID string
