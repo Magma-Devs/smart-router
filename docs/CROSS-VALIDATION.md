@@ -109,7 +109,10 @@ both effects independently, not a backup that counts toward the group spread.
 Resolution happens once the router knows the endpoint's real provider counts (after dialing,
 before serving), so the two strings behave exactly like the equivalent number from then on —
 the same `insufficient-capacity` / `insufficient-groups` guards apply, and a request can still
-be refused if a primary is down and nothing backfilled the shortfall.
+be refused if a primary is down and nothing backfilled the shortfall. For `all`, the
+`insufficient-capacity` guard counts the backups that can serve the request (not blocked, and
+serving its addon and extensions) beside the primaries; for `primary` and a number it counts the
+primaries alone.
 
 ## Worked examples
 

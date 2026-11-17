@@ -110,6 +110,10 @@ type CrossValidationConfig struct {
 type CrossValidationPolicyResolver struct {
 	policies  map[string]CrossValidationPolicy // keyed by policyKey(chain, api, method)
 	positions map[string]int                   // same keys: the policy's index in the configured list
+	// backups is the backup-tier count SetParticipantCounts resolved max-participants: all against
+	// (allCount - primaryCount), so the startup prediction counts the same backups that policy's count
+	// includes (MAG-2783). 0 until SetParticipantCounts runs.
+	backups int
 }
 
 // policyKeySeparator joins the three identifiers in a policy key. NUL is used because it cannot appear in a
@@ -172,6 +176,7 @@ func (r *CrossValidationPolicyResolver) SetParticipantCounts(primaryCount, allCo
 	if r == nil {
 		return
 	}
+	r.backups = max(allCount-primaryCount, 0)
 	for key, p := range r.policies {
 		switch p.MaxParticipants.Participants {
 		case participantsPrimary:
@@ -190,6 +195,14 @@ func (r *CrossValidationPolicyResolver) SetParticipantCounts(primaryCount, allCo
 		// resolveKnob/Resolve/the capacity guards only ever read Floor/Cap, so leaving it behind
 		// changes nothing for them.
 	}
+}
+
+// participantBackups returns the backup count SetParticipantCounts recorded, 0 for a nil resolver.
+func (r *CrossValidationPolicyResolver) participantBackups() int {
+	if r == nil {
+		return 0
+	}
+	return r.backups
 }
 
 // PreflightValidateCrossValidationConfig runs the context-free half of cross-validation config

@@ -661,7 +661,11 @@ func validateCrossValidationFleet(resolver *CrossValidationPolicyResolver, chain
 		utils.LogAttr("configuredGroupSizes", configuredSizes),
 		utils.LogAttr("configuredGroupAssignments", configured))
 	requiredProviders, requiredGroups := crossValidationShortfall(resolver, chainID, apiInterface, verifiedSizes)
-	backupOnly := len(configured) == 0 && len(resolver.headerlessParams(chainID, apiInterface)) > 0
+	// With no configured primary, only a max-participants: all policy can be met: it is the one whose
+	// fan-out reaches the backup tier (MAG-2783), and crossValidationShortfall already judged its count.
+	backupOnly := len(configured) == 0 && slices.ContainsFunc(resolver.headerlessParams(chainID, apiInterface), func(params common.CrossValidationParams) bool {
+		return !params.IncludeBackups
+	})
 	if requiredProviders == 0 && requiredGroups == 0 && !backupOnly {
 		return nil, nil //nolint:nilnil // nil means there is no shortfall to report for this endpoint; the error is for a malformed layout
 	}
@@ -734,9 +738,10 @@ func (a *crossValidationFleetAdvisory) log() {
 }
 
 // crossValidationShortfall predicts what the request-time guard (validateCrossValidationCapacity) will do
-// with a request that sends no cross-validation headers when the candidates are the given primaries. It
-// returns the largest max-participants and the largest min-groups among the enabled policies it would refuse
-// for that reason, each 0 when none. Groups are judged by crossValidationGroupShortfall, the guards' own test.
+// with a request that sends no cross-validation headers when the candidates are the given primaries, plus,
+// for a max-participants: all policy, the backups SetParticipantCounts counted. It returns the largest
+// max-participants and the largest min-groups among the enabled policies it would refuse for that reason,
+// each 0 when none. Groups are judged by crossValidationGroupShortfall, the guards' own test.
 //
 // The prediction is for a request of the base collection. groupSizes counts every primary, while the guard
 // counts only the candidates that support the request's addon and extensions
@@ -748,7 +753,12 @@ func crossValidationShortfall(resolver *CrossValidationPolicyResolver, chainID, 
 		providers += size
 	}
 	for _, params := range resolver.headerlessParams(chainID, apiInterface) {
-		if params.MaxParticipants > providers {
+		candidates := providers
+		if params.IncludeBackups {
+			// max-participants: all counts the backups as well, the way the request-time guard does (MAG-2783).
+			candidates += resolver.participantBackups()
+		}
+		if params.MaxParticipants > candidates {
 			requiredProviders = max(requiredProviders, params.MaxParticipants)
 		}
 		if _, reason := crossValidationGroupShortfall(groupSizes, &params); reason != "" {
@@ -950,6 +960,11 @@ func (rpcss *RPCSmartRouterServer) validateCrossValidationCapacity(ctx context.C
 		return "", nil
 	}
 	candidateProviders, candidateGroups := rpcss.sessionManager.ProviderAndGroupCountsForRequest(addon, extensions, ctx)
+	if params.IncludeBackups {
+		// max-participants: all (MAG-2783) fans out to the backup tier too, so a backup that can serve the
+		// request is a candidate as well. It adds no group: backups carry no group label.
+		candidateProviders += rpcss.sessionManager.BackupCountForRequest(addon, extensions, ctx)
+	}
 	if params.MaxParticipants > candidateProviders {
 		return common.CrossValidationReasonInsufficientCapacity, utils.FormatError("requested cross-validation maxParticipants exceeds available candidate endpoints",
 			routersession.PairingListEmptyError,

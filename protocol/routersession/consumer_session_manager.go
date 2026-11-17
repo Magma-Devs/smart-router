@@ -407,6 +407,17 @@ func (csm *ConsumerSessionManager) BackupProviderCount() int {
 	return len(csm.backupProviders)
 }
 
+// BackupCountForRequest returns how many backup providers the backup selector could pick for the
+// request's addon + extensions right now: the backups not blocked this epoch that support them. The
+// request-time cross-validation capacity guard adds it to the primaries for max-participants: all
+// (MAG-2783), the one policy whose fan-out reaches the backup tier, so the guard and the selection
+// count the same candidates.
+func (csm *ConsumerSessionManager) BackupCountForRequest(addon string, extensions []string, ctx context.Context) int {
+	csm.lock.RLock()
+	defer csm.lock.RUnlock()
+	return len(csm.eligibleBackupAddresses(addon, extensions, nil, ctx))
+}
+
 // ProviderAndGroupCountsForRequest returns the number of providers and the number of distinct group
 // labels among the providers that actually support the request's addon + extensions — i.e. the concrete
 // candidate set, not all valid providers. Used by the per-request cross-validation capacity check so a
@@ -2879,6 +2890,29 @@ func (csm *ConsumerSessionManager) tryGetConsumerSessionWithProviderFromBlockedP
 	return nil, utils.FormatError(csm.rpcEndpoint.ChainID+" could not get a provider address from blocked provider list", PairingListEmptyError, utils.LogAttr("csm.currentlyBlockedProviderAddresses", csm.currentlyBlockedProviderAddresses), utils.LogAttr("addons", addon), utils.LogAttr("extensions", extensions), utils.LogAttr("ignoredProviders", ignoredProviders.providers), utils.LogAttr("GUID", ctx))
 }
 
+// eligibleBackupAddresses returns the backup providers a request may be served by: not in ignored
+// (already tried or picked for this request; nil ignores none), not blocked this epoch for repeated
+// failures, and supporting the request's addon and extensions (simplified validation for emergency
+// scenarios). Assumes csm.lock is held. The backup selector picks from this list and
+// BackupCountForRequest counts it, so the cross-validation capacity guard can never count a backup
+// the selector would not pick.
+func (csm *ConsumerSessionManager) eligibleBackupAddresses(addon string, extensions []string, ignored map[string]struct{}, ctx context.Context) []string {
+	addresses := []string{}
+	for providerAddress, consumerSessionsWithProvider := range csm.backupProviders {
+		if _, exists := ignored[providerAddress]; exists {
+			continue
+		}
+		if _, blocked := csm.blockedBackupProviders[providerAddress]; blocked {
+			continue
+		}
+		if !consumerSessionsWithProvider.IsSupportingAddon(addon) || !consumerSessionsWithProvider.IsSupportingExtensions(extensions, ctx) {
+			continue
+		}
+		addresses = append(addresses, providerAddress)
+	}
+	return addresses
+}
+
 // getValidConsumerSessionsWithProviderFromBackupProviderList retrieves up to wantedCount valid
 // backup provider sessions: emergency fallback (wantedCount 1) when no regular providers are
 // available at all, or a cross-validation "all" fan-out's top-up (wantedCount > 1, MAG-2783) when
@@ -2908,25 +2942,7 @@ func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProviderFromBacku
 	}
 
 	// Get valid backup provider addresses that support the required addon and extensions
-	backupProviderAddresses := []string{}
-	for providerAddress, consumerSessionsWithProvider := range csm.backupProviders {
-		// Skip if provider is in ignored list (already tried or failed this request)
-		if _, exists := ignoredProviders.providers[providerAddress]; exists {
-			continue
-		}
-
-		// Skip if provider is blocked this epoch due to repeated failures
-		if _, blocked := csm.blockedBackupProviders[providerAddress]; blocked {
-			continue
-		}
-
-		// Validate backup provider supports required addons and extensions (simplified validation for emergency scenarios)
-		if !consumerSessionsWithProvider.IsSupportingAddon(addon) || !consumerSessionsWithProvider.IsSupportingExtensions(extensions, ctx) {
-			continue
-		}
-
-		backupProviderAddresses = append(backupProviderAddresses, providerAddress)
-	}
+	backupProviderAddresses := csm.eligibleBackupAddresses(addon, extensions, ignoredProviders.providers, ctx)
 
 	if len(backupProviderAddresses) == 0 {
 		utils.FormatInfo("[BackupProviders] No eligible backup providers after filtering (all ignored or addon mismatch)",
