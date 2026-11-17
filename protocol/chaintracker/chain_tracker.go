@@ -833,11 +833,11 @@ func HealthyPollInterval(flatPollInterval time.Duration) time.Duration {
 	return exponentialBackoff(flatPollInterval, 0)
 }
 
-// computePollInterval is the interval the next dedicated poll waits.
+// pollCadence is the interval the next dedicated poll waits, before the rate-limit floor.
 //
 // A flat tracker's cadence is FIXED: flatPollInterval (avgBlockTime/divisor) capped at
 // BACKOFF_MAX_TIME (HealthyPollInterval), stretched only by exponentialBackoff on consecutive
-// failures and floored by a standing rate-limit hold-off.
+// failures.
 //
 // The legacy adaptive tiers that used to live here are gone (MAG-4398). They scheduled from a
 // block-gap sweep and were reachable only with flatPollInterval == 0, which no caller leaves:
@@ -845,14 +845,8 @@ func HealthyPollInterval(flatPollInterval time.Duration) time.Duration {
 // once used the tiers went with MAG-2160 / Topic C, and the sweep had no test left after
 // PR #522 removed its only one.
 //
-// The interval is floored with a standing rate-limit hold-off: it is when the next poll can happen.
-// The timer itself runs at pollCadence and re-reads the hold-off on each wake (see updateTimer).
-func (cs *ChainTracker) computePollInterval(fetchFails uint64) time.Duration {
-	return cs.floorWithRetryAfter(cs.pollCadence(fetchFails))
-}
-
-// pollCadence is computePollInterval without the rate-limit floor: the cadence and the failure
-// backoff alone.
+// updateTimer publishes this floored by a standing rate-limit hold-off, which is when the next
+// poll can happen; the timer itself runs at the cadence and re-reads the hold-off on each wake.
 func (cs *ChainTracker) pollCadence(fetchFails uint64) time.Duration {
 	return exponentialBackoff(cs.flatPollInterval, fetchFails)
 }

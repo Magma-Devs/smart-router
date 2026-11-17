@@ -53,16 +53,6 @@ func LoadProtoset(path string) (grpcurl.DescriptorSource, error) {
 	return entry.source, entry.err
 }
 
-// ResetProtosetCacheForTest drops every memoized protoset. Tests that write a
-// descriptor set to a temp path and expect it to be re-read must call this;
-// production never does.
-func ResetProtosetCacheForTest() {
-	protosetCache.Range(func(key, _ any) bool {
-		protosetCache.Delete(key)
-		return true
-	})
-}
-
 // compositeDescriptorSource resolves symbols against a protoset first and falls
 // back to server reflection. This is "hybrid" mode.
 //

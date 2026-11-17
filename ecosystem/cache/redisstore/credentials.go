@@ -416,23 +416,6 @@ func (p *StreamingProvider) noteSourceRecovered() {
 	}
 }
 
-// subscriberCount reports live subscriptions (observability/tests): those
-// whose connection is still reachable. It prunes as it counts.
-func (p *StreamingProvider) subscriberCount() int {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return len(p.liveListenersLocked())
-}
-
-// registrySize is the raw number of records held, collected or not, with no
-// pruning: what a test reads to check that production's own housekeeping,
-// not the counting helper, keeps the registry bounded.
-func (p *StreamingProvider) registrySize() int {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return len(p.listeners)
-}
-
 // watchCredentials polls Refresh until stop closes — the rotation driver for
 // file-backed sources. done is closed on the way out, after the last tick
 // has returned, for Store.Close to wait on.

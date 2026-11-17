@@ -3804,3 +3804,13 @@ func TestCacheTierHeaders(t *testing.T) {
 		require.Equal(t, common.CacheTierNone, tierOf(metadata).Value)
 	})
 }
+
+// filterEndpointsByConsistency is filterEndpointsByConsistencyWithLag without each failed endpoint's lag.
+func (rpcss *RPCSmartRouterServer) filterEndpointsByConsistency(
+	ctx context.Context,
+	sessions routersession.ConsumerSessionsMap,
+	protocolMessage chainlib.ProtocolMessage,
+) (validSessions routersession.ConsumerSessionsMap, failedSessions routersession.ConsumerSessionsMap, filterErr error) {
+	validSessions, failedSessions, _, filterErr = rpcss.filterEndpointsByConsistencyWithLag(ctx, sessions, protocolMessage)
+	return validSessions, failedSessions, filterErr
+}

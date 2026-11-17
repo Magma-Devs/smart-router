@@ -4195,21 +4195,6 @@ func retryIntervalFor(dark bool) time.Duration {
 	return VerificationRetryDelay
 }
 
-// chainIsDark reports whether the chain has no provider registered in either
-// tier. Reads the live session maps rather than the boot-time verdict so the
-// answer tracks recoveries and demotions.
-//
-// This is registration, not reachability: a chain whose registered providers are
-// all failing relays is not "dark" here. Those providers never entered the failed
-// lists this loop walks — the CSM's blocking and the epoch reverification own that
-// case — so treating them as dark would only make this loop spin without work.
-func (rpsr *RPCSmartRouter) chainIsDark(sessionManagerKey string) bool {
-	rpsr.mu.Lock()
-	defer rpsr.mu.Unlock()
-	return len(rpsr.providerSessions[sessionManagerKey]) == 0 &&
-		len(rpsr.backupProviderSessions[sessionManagerKey]) == 0
-}
-
 // pushPairingLocked makes static and backup the chain's live pairing: it stores them,
 // republishes the serving-tier gauge and the subscription managers' endpoint tiers
 // from them, and hands them to the session manager. Callers must already hold rpsr.mu.

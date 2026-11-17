@@ -195,9 +195,3 @@ func (w OpWindow) Annotate(err error) error {
 	}
 	return errors.Join(err, ErrEndpointUnreachable, cause)
 }
-
-// unreachable reports whether the endpoint faulted during this window. For
-// tests; the relay path wants Annotate, which carries the reason out too.
-func (w OpWindow) unreachable() bool {
-	return w.endpoint != nil && w.endpoint.faultSince(w.since) != nil
-}

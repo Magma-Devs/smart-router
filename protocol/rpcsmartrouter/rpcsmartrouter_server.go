@@ -1468,8 +1468,9 @@ var (
 	errUnclearWriteNoAnswer = &unclearWriteError{reason: "a request to a node ended without an answer"}
 )
 
-// writeOutcomeIsUnknown reports whether a failed request was a write whose outcome we do not know.
-// unclearWriteOutcomeFor is the same verdict with its reason.
+// unclearWriteOutcomeFor reports whether a failed request was a write whose outcome we do not know:
+// nil when the outcome is known, otherwise the unclearWriteError that names why it is not (see
+// unclearWriteReason).
 //
 // The rule is silence: nothing succeeded, and some endpoint we asked did not answer at all — it may
 // be holding the transaction. A hung endpoint records no error, so any rule inspecting only the
@@ -1485,12 +1486,6 @@ var (
 //
 // Evaluated here rather than in the results manager because a failed request reaches the client
 // through either of two branches in SendParsedRelay; deciding once keeps that invisible.
-func writeOutcomeIsUnknown(protocolMessage chainlib.ProtocolMessage, relayProcessor *relaycore.RelayProcessor) bool {
-	return unclearWriteOutcomeFor(protocolMessage, relayProcessor) != nil
-}
-
-// unclearWriteOutcomeFor is writeOutcomeIsUnknown with the reason: nil when the outcome is known,
-// otherwise the unclearWriteError that names why it is not (see unclearWriteReason).
 func unclearWriteOutcomeFor(protocolMessage chainlib.ProtocolMessage, relayProcessor *relaycore.RelayProcessor) *unclearWriteError {
 	if chainlib.GetStateful(protocolMessage) != common.CONSISTENCY_SELECT_ALL_PROVIDERS {
 		return nil
@@ -1990,7 +1985,7 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 	// error inside an HTTP 200 while a sibling was still silent and may have broadcast. That request
 	// was reported to the client as the node's error, and counted as a SUCCESS in analytics.
 	//
-	// Safe to hoist: writeOutcomeIsUnknown returns false unless this is a stateful relay with no
+	// Safe to hoist: unclearWriteOutcomeFor returns nil unless this is a stateful relay with no
 	// successes, so a served write and every read are unaffected.
 	if unclear := unknownWrite(); unclear != nil {
 		if analytics != nil {
@@ -2951,7 +2946,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 	// The helper releases each session under the key it was taken with, not one derived from the
 	// request's extensions: a request that degrades to a regular provider takes its sessions under
 	// the plain key, and a release under the request's key would leave the provider in the dispatch
-	// history that Lava-Retries (MAG-3762) and writeOutcomeIsUnknown read.
+	// history that Lava-Retries (MAG-3762) and unclearWriteOutcomeFor read.
 	usedProviders := relayProcessor.GetUsedProviders()
 	if len(failedSessions) > 0 {
 		utils.FormatDebug("discarding stale sessions before relay dispatch",
@@ -3530,16 +3525,6 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 	)
 
 	return nil
-}
-
-// filterEndpointsByConsistency is filterEndpointsByConsistencyWithLag without each failed endpoint's lag.
-func (rpcss *RPCSmartRouterServer) filterEndpointsByConsistency(
-	ctx context.Context,
-	sessions routersession.ConsumerSessionsMap,
-	protocolMessage chainlib.ProtocolMessage,
-) (validSessions routersession.ConsumerSessionsMap, failedSessions routersession.ConsumerSessionsMap, filterErr error) {
-	validSessions, failedSessions, _, filterErr = rpcss.filterEndpointsByConsistencyWithLag(ctx, sessions, protocolMessage)
-	return validSessions, failedSessions, filterErr
 }
 
 // consistencyLag is how far behind the chain tip an endpoint that failed the consistency check was,
