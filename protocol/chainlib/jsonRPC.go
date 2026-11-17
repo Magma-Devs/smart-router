@@ -345,7 +345,6 @@ func (apip *JsonRPCChainParser) ChainBlockStats() (allowedBlockLagForQosSync int
 type JsonRPCChainListener struct {
 	chainListenerBase
 	wsListenerBase
-	app *fiber.App // captured during Serve so Shutdown can drain HTTP
 }
 
 // NewJrpcChainListener creates a new instance of JsonRPCChainListener
@@ -376,7 +375,6 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 	// true: this listener registers a GET catch-all that upgrades, so the health
 	// route may hand an upgrade on its own path past the health handler.
 	app := createAndSetupBaseAppListener(cmdFlags, apil.endpoint.HealthCheckPath, apil.healthReporter, true)
-	apil.app = app
 
 	// ConnectionType POST: ParseMsg needs it to find the subscription method in the spec.
 	wsUpgradeMiddleware, websocketCallbackWithDappID := apil.websocketRoutes(ctx, app, &apil.chainListenerBase, cmdFlags, "jsonrpc", fiber.MethodPost)
@@ -632,5 +630,5 @@ func (apil *JsonRPCChainListener) Shutdown(ctx context.Context) error {
 	if apil == nil {
 		return nil
 	}
-	return drainHTTPThenWS(ctx, apil.app, &apil.wsWG, "JSONRPC")
+	return drainHTTPThenWS(ctx, &apil.gate, &apil.wsWG, "JSONRPC")
 }

@@ -318,7 +318,6 @@ func (apip *GraphQLChainParser) ChainBlockStats() (allowedBlockLagForQosSync int
 
 type GraphQLChainListener struct {
 	chainListenerBase
-	app *fiber.App // captured during Serve so Shutdown can drain HTTP
 }
 
 // NewGraphQLChainListener creates a new instance of GraphQLChainListener
@@ -346,7 +345,6 @@ func (apil *GraphQLChainListener) Serve(ctx context.Context, cmdFlags common.Con
 	// upgrade on here would turn a health probe into a chain request. GraphQL subscriptions
 	// would need their own transport; gRPC carries streaming on this chain.
 	app := createAndSetupBaseAppListener(cmdFlags, apil.endpoint.HealthCheckPath, apil.healthReporter, false)
-	apil.app = app
 
 	handlerPost := apil.relayHTTP(httpRelaySpec{
 		testMode:    common.IsTestMode(ctx),
@@ -418,10 +416,10 @@ func (apil *GraphQLChainListener) Serve(ctx context.Context, cmdFlags common.Con
 // Shutdown drains in-flight HTTP requests and closes the listener.
 // GraphQL has no client-facing WebSockets, so no 1001 close frames are needed.
 func (apil *GraphQLChainListener) Shutdown(ctx context.Context) error {
-	if apil == nil || apil.app == nil {
+	if apil == nil {
 		return nil
 	}
-	return apil.app.ShutdownWithContext(ctx)
+	return apil.gate.close(ctx)
 }
 
 type GraphQLChainProxy struct {

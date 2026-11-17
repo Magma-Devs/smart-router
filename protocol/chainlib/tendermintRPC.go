@@ -316,7 +316,6 @@ func (apip *TendermintChainParser) ChainBlockStats() (allowedBlockLagForQosSync 
 type TendermintRpcChainListener struct {
 	chainListenerBase
 	wsListenerBase
-	app *fiber.App // captured during Serve so Shutdown can drain HTTP
 }
 
 // NewTendermintRpcChainListener creates a new instance of TendermintRpcChainListener
@@ -348,7 +347,6 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 	// true: this listener registers a GET catch-all that upgrades, so the health
 	// route may hand an upgrade on its own path past the health handler.
 	app := createAndSetupBaseAppListener(cmdFlags, apil.endpoint.HealthCheckPath, apil.healthReporter, true)
-	apil.app = app
 
 	// ConnectionType "": ParseMsg looks a Tendermint subscription method up without one.
 	wsUpgradeMiddleware, websocketCallbackWithDappID := apil.websocketRoutes(ctx, app, &apil.chainListenerBase, cmdFlags, "tendermintrpc", "")
@@ -567,5 +565,5 @@ func (apil *TendermintRpcChainListener) Shutdown(ctx context.Context) error {
 	if apil == nil {
 		return nil
 	}
-	return drainHTTPThenWS(ctx, apil.app, &apil.wsWG, "TendermintRPC")
+	return drainHTTPThenWS(ctx, &apil.gate, &apil.wsWG, "TendermintRPC")
 }
