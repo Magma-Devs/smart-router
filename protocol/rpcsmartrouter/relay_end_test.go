@@ -225,6 +225,13 @@ func newRelayEndServerWithBackups(t *testing.T, chainID, apiInterface string, ch
 	if len(primaries) > 0 || len(backups) > 0 {
 		require.NoError(t, csm.UpdateAllProviders(1, tier(primaries), tier(backups)))
 	}
+	// As the router does at boot: every configured name, so a pin can be told apart from a name
+	// the router does not have (MAG-3800).
+	configured := []string{}
+	for _, node := range append(append([]relayEndNode{}, primaries...), backups...) {
+		configured = append(configured, node.name)
+	}
+	csm.SetConfiguredProviderNames(configured)
 	logs, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
 	require.NoError(t, err)
 	return &RPCSmartRouterServer{

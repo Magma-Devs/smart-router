@@ -21,6 +21,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
 
@@ -162,7 +163,8 @@ func TestGrpcChainListener_ASelectedProviderThatIsNotConfiguredIsInvalidArgument
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var reply []byte
-	err = conn.Invoke(ctx, "/"+unaryApiName, []byte("{}"), &reply, grpc.ForceCodec(grpcproxy.RawBytesCodec{}), grpc.WaitForReady(true))
+	var trailer metadata.MD
+	err = conn.Invoke(ctx, "/"+unaryApiName, []byte("{}"), &reply, grpc.ForceCodec(grpcproxy.RawBytesCodec{}), grpc.WaitForReady(true), grpc.Trailer(&trailer))
 
 	require.Error(t, err)
 	st, ok := status.FromError(err)
@@ -172,4 +174,5 @@ func TestGrpcChainListener_ASelectedProviderThatIsNotConfiguredIsInvalidArgument
 	for _, name := range configuredProviderNames {
 		require.NotContains(t, st.Message(), name)
 	}
+	require.NotEmpty(t, trailer.Get(common.GUID_HEADER_NAME), "the refusal carries the request id, as a served call does")
 }

@@ -139,6 +139,11 @@ type ConsumerSessionManager struct {
 	// backup providers - emergency fallback providers when no regular providers are available
 	backupProviders map[string]*ConsumerSessionsWithProvider // key == provider address
 
+	// configuredProviderNames is every provider name the router's config gives this chain and
+	// interface, primary and backup, whether or not it passed verification
+	// (SetConfiguredProviderNames). nil until set.
+	configuredProviderNames []string
+
 	// blocked backup providers - backup providers blocked this epoch due to failures.
 	// Separate from currentlyBlockedProviderAddresses because backup providers are not in validAddresses.
 	blockedBackupProviders map[string]struct{}
@@ -2295,13 +2300,32 @@ func (csm *ConsumerSessionManager) providerByAddress(address string) *ConsumerSe
 	return csm.backupProviders[address]
 }
 
+// SetConfiguredProviderNames records every provider name the router's config gives this chain and
+// interface, primary and backup, healthy or not. csm.pairing and csm.backupProviders hold only the
+// providers that passed verification, so they cannot tell a name that is not configured at all
+// from a configured provider that is out of rotation (MAG-3800).
+func (csm *ConsumerSessionManager) SetConfiguredProviderNames(names []string) {
+	csm.lock.Lock()
+	defer csm.lock.Unlock()
+	csm.configuredProviderNames = append([]string{}, names...)
+}
+
 // selectedProviderConfigured reports whether name, a lava-select-provider value, names a provider
-// this router is configured with: a primary or a backup, blocked or not, in any letter case, the
-// way resolveSelectedProviderAddress matches it. It takes the read lock itself, so the caller must
-// not hold csm.lock.
+// this router is configured with: a primary or a backup, in rotation or not, in any letter case, the
+// way resolveSelectedProviderAddress matches it. With no configured list recorded, every name
+// counts as configured: an unknown answer must not tell a caller their provider does not exist in
+// the middle of an outage. It takes the read lock itself, so the caller must not hold csm.lock.
 func (csm *ConsumerSessionManager) selectedProviderConfigured(name string) bool {
 	csm.lock.RLock()
 	defer csm.lock.RUnlock()
+	if csm.configuredProviderNames == nil {
+		return true
+	}
+	for _, configured := range csm.configuredProviderNames {
+		if strings.EqualFold(configured, name) {
+			return true
+		}
+	}
 	for address := range csm.pairing {
 		if strings.EqualFold(address, name) {
 			return true

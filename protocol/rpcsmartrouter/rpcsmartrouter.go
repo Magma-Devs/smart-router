@@ -2766,6 +2766,14 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	// Create active subscription provider storage for each unique chain
 	activeSubscriptionProvidersStorage := routersession.NewActiveSubscriptionProvidersStorage()
 	sessionManager := routersession.NewConsumerSessionManager(rpcEndpoint, optimizer, smartRouterMetricsManager, smartRouterIdentifier, activeSubscriptionProvidersStorage)
+	// Every configured name, verified or not, so a lava-select-provider name that a provider out of
+	// rotation carries is not answered as not configured (MAG-3800). The session manager's own
+	// lists hold the verified providers only.
+	configuredNames := make([]string, 0, len(relevantStaticProviderList)+len(relevantBackupProviderList))
+	for _, provider := range slices.Concat(relevantStaticProviderList, relevantBackupProviderList) {
+		configuredNames = append(configuredNames, provider.Name)
+	}
+	sessionManager.SetConfiguredProviderNames(configuredNames)
 	// Cross-pod sticky sessions. Gated on --shared-state, the same operator signal the chain-tip
 	// and tracker-gate sharing use: "this chain runs on several replicas behind one cache". A
 	// single-replica router needs no registry, and its absence leaves stickiness pod-local.

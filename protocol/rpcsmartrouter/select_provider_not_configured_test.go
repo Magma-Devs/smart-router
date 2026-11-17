@@ -77,4 +77,11 @@ func TestSelectProvider_ANameTheRouterDoesNotHaveIsRefusedWith400(t *testing.T) 
 	resp, body = send(t, "node-a")
 	require.Equal(t, http.StatusOK, resp.StatusCode, "%s", body)
 	require.JSONEq(t, relayEndBalance, string(body))
+
+	// A configured provider out of rotation (it failed verification, so it is in the config but not
+	// in the pairing) is not the caller's mistake: it keeps today's server-side reply.
+	server.sessionManager.SetConfiguredProviderNames([]string{"node-a", "node-b"})
+	resp, body = send(t, "node-b")
+	require.Equal(t, http.StatusInternalServerError, resp.StatusCode, "%s", body)
+	require.NotContains(t, string(body), "Selected provider is not configured")
 }
