@@ -12,7 +12,7 @@ import (
 
 	"github.com/jhump/protoreflect/desc"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/magma-Devs/smart-router/utils"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
@@ -81,7 +81,7 @@ func (l grpcChannelLiveness) dialOptions() []grpc.DialOption {
 // channel closing is no longer a reason to abandon it.
 type grpcEndpointDescriptors struct {
 	cache    *common.SafeSyncMap[string, *desc.MethodDescriptor]
-	resolver *lavasession.GRPCDescriptorResolver
+	resolver *routersession.GRPCDescriptorResolver
 	endLife  context.CancelFunc
 
 	// channels is every open channel of the endpoint, in dial order: the ones a lookup may
@@ -104,7 +104,7 @@ func newGRPCEndpointDescriptors(
 	cache := &common.SafeSyncMap[string, *desc.MethodDescriptor]{}
 	return &grpcEndpointDescriptors{
 		cache:    cache,
-		resolver: lavasession.NewGRPCDescriptorResolver(lifetime, &nodeUrl.GrpcConfig, nodeUrl.Url, cache, borrow),
+		resolver: routersession.NewGRPCDescriptorResolver(lifetime, &nodeUrl.GrpcConfig, nodeUrl.Url, cache, borrow),
 		endLife:  endLife,
 	}
 }
@@ -192,14 +192,14 @@ func NewUpstreamGRPCStreamConnection(ctx context.Context, nodeUrl *common.NodeUr
 // lendChannel hands out this connection's one channel; there is nothing to give back, so
 // the release is a no-op. The pool's borrowAnyChannel calls it, trying each channel of
 // the endpoint in turn. A closed connection answers with
-// lavasession.ErrGRPCConnectionClosed, the error the unary connection's borrow gives,
+// routersession.ErrGRPCConnectionClosed, the error the unary connection's borrow gives,
 // which the resolver passes through as it is instead of logging a failed lookup.
 func (c *UpstreamGRPCStreamConnection) lendChannel(context.Context) (*grpc.ClientConn, func(), error) {
 	c.lock.RLock()
 	conn := c.conn
 	c.lock.RUnlock()
 	if conn == nil || c.closed.Load() {
-		return nil, nil, lavasession.ErrGRPCConnectionClosed
+		return nil, nil, routersession.ErrGRPCConnectionClosed
 	}
 	return conn, func() {}, nil
 }
@@ -288,7 +288,7 @@ func (c *UpstreamGRPCStreamConnection) connect(ctx context.Context, timeout time
 	c.conn = grpcConn
 	c.healthy.Store(true)
 
-	utils.LavaFormatDebug("gRPC streaming connection established",
+	utils.FormatDebug("gRPC streaming connection established",
 		utils.LogAttr("endpoint", c.sanitizedURL),
 	)
 
@@ -328,7 +328,7 @@ func (c *UpstreamGRPCStreamConnection) Close() error {
 	if c.conn != nil {
 		err := c.conn.Close()
 		c.conn = nil
-		utils.LavaFormatDebug("gRPC streaming connection closed",
+		utils.FormatDebug("gRPC streaming connection closed",
 			utils.LogAttr("endpoint", c.sanitizedURL),
 		)
 		return err
@@ -380,7 +380,7 @@ func (c *UpstreamGRPCStreamConnection) GetMethodDescriptor(
 	if c.descriptors == nil {
 		// Only reachable from a connection built as a bare literal in a test; the pool
 		// always hands its own. An error rather than a panic, naming the cause.
-		return nil, utils.LavaFormatError("gRPC connection has no descriptor resolver", nil,
+		return nil, utils.FormatError("gRPC connection has no descriptor resolver", nil,
 			utils.LogAttr("endpoint", c.sanitizedURL),
 			utils.LogAttr("service", service),
 			utils.LogAttr("method", methodName))
@@ -442,7 +442,7 @@ func NewUpstreamGRPCPool(nodeUrl *common.NodeUrl) *UpstreamGRPCPool {
 // channel the caller already held was up.
 func (p *UpstreamGRPCPool) borrowAnyChannel(ctx context.Context) (*grpc.ClientConn, func(), error) {
 	if p.closed.Load() {
-		return nil, nil, lavasession.ErrGRPCConnectionClosed
+		return nil, nil, routersession.ErrGRPCConnectionClosed
 	}
 
 	conns := p.descriptors.openChannels()
@@ -461,7 +461,7 @@ func (p *UpstreamGRPCPool) borrowAnyChannel(ctx context.Context) (*grpc.ClientCo
 		}
 	}
 
-	return nil, nil, lavasession.ErrGRPCConnectionClosed
+	return nil, nil, routersession.ErrGRPCConnectionClosed
 }
 
 // NewUpstreamGRPCPoolWithConfig creates a pool with custom configuration

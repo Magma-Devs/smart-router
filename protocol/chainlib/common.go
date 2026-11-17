@@ -19,8 +19,8 @@ import (
 	"github.com/gofiber/websocket/v2"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	common "github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
@@ -120,9 +120,9 @@ func traceAttrs(ctx context.Context, attrs ...utils.Attribute) []utils.Attribute
 
 // requireNodeUrl refuses a provider endpoint configured with no node url; every chain proxy
 // talks to its endpoint's first one.
-func requireNodeUrl(rpcProviderEndpoint lavasession.RPCProviderEndpoint) error {
+func requireNodeUrl(rpcProviderEndpoint routersession.RPCProviderEndpoint) error {
 	if len(rpcProviderEndpoint.NodeUrls) == 0 {
-		return utils.LavaFormatError("rpcProviderEndpoint.NodeUrl list is empty missing node url", nil, utils.Attribute{Key: "chainID", Value: rpcProviderEndpoint.ChainID}, utils.Attribute{Key: "ApiInterface", Value: rpcProviderEndpoint.ApiInterface})
+		return utils.FormatError("rpcProviderEndpoint.NodeUrl list is empty missing node url", nil, utils.Attribute{Key: "chainID", Value: rpcProviderEndpoint.ChainID}, utils.Attribute{Key: "ApiInterface", Value: rpcProviderEndpoint.ApiInterface})
 	}
 	return nil
 }
@@ -222,7 +222,7 @@ func drainHTTPThenWS(ctx context.Context, app *fiber.App, wg *sync.WaitGroup, na
 	select {
 	case <-done:
 	case <-ctx.Done():
-		utils.LavaFormatWarning(name+": WS goroutines did not finish within shutdown grace period", nil)
+		utils.FormatWarning(name+": WS goroutines did not finish within shutdown grace period", nil)
 	}
 	return httpErr
 }
@@ -404,15 +404,6 @@ const graphQLRefusalStatus = fiber.StatusBadRequest
 // The router's own error field (`router_error` in the rulebook) is not written yet: its name waits
 // on one naming decision for every interface, and GraphQL follows it in MAG-4911.
 func convertToGraphQLError(message, code, guid string) []byte {
-	type graphQLErrorEntry struct {
-		Message    string            `json:"message"`
-		Extensions map[string]string `json:"extensions,omitempty"`
-	}
-	body := struct {
-		Errors []graphQLErrorEntry `json:"errors"`
-	}{
-		Errors: []graphQLErrorEntry{{Message: message}},
-	}
 	extensions := map[string]string{}
 	if code != "" {
 		extensions["code"] = code
@@ -420,8 +411,44 @@ func convertToGraphQLError(message, code, guid string) []byte {
 	if guid != "" {
 		extensions["guid"] = guid
 	}
+	return graphQLErrorDocument(message, extensions)
+}
+
+// ConvertToGraphQLWriteOutcomeError returns the router's own GraphQL error document for a write
+// whose outcome it answers as unknown (MAG-5122): the same shape convertToGraphQLError uses — no
+// `data` key (subtask 1's router reply shape) — with write_outcome, and tx_hash when the digest is
+// known, added to `extensions` beside guid. A client reads the verdict from the field GraphQL
+// reserves for structured error metadata rather than parsing the message text.
+//
+// Exported: the GraphQL wire shape belongs to this package, and rpcsmartrouter builds this body
+// for the one write-outcome case it answers with a client-error-free status (MAG-5122).
+func ConvertToGraphQLWriteOutcomeError(message, guid, writeOutcome, txHash string) []byte {
+	extensions := map[string]string{"write_outcome": writeOutcome}
+	if guid != "" {
+		extensions["guid"] = guid
+	}
+	if txHash != "" {
+		extensions["tx_hash"] = txHash
+	}
+	return graphQLErrorDocument(message, extensions)
+}
+
+// graphQLErrorDocument is the one-error GraphQL response body convertToGraphQLError and
+// ConvertToGraphQLWriteOutcomeError share: no `data` key, one entry in `errors`, extensions
+// omitted when empty.
+func graphQLErrorDocument(message string, extensions map[string]string) []byte {
+	type graphQLErrorEntry struct {
+		Message    string            `json:"message"`
+		Extensions map[string]string `json:"extensions,omitempty"`
+	}
+	entry := graphQLErrorEntry{Message: message}
 	if len(extensions) > 0 {
-		body.Errors[0].Extensions = extensions
+		entry.Extensions = extensions
+	}
+	body := struct {
+		Errors []graphQLErrorEntry `json:"errors"`
+	}{
+		Errors: []graphQLErrorEntry{entry},
 	}
 	jsonResponse, err := json.Marshal(body)
 	if err != nil {
@@ -502,7 +529,7 @@ func convertToJsonRpcError(rawErrorMsg string, requestBody []byte) []byte {
 	if guid != "" {
 		data["guid"] = guid
 	}
-	// The inner error message from LavaFormatError already embeds provider
+	// The inner error message from FormatError already embeds provider
 	// context (selectedProvider, validProviders, addon, extensions, GUID) in
 	// its appended attribute block. Surface it under data.error so the full
 	// context is preserved for debugging without brittle substring parsing.
@@ -540,13 +567,13 @@ func ListenWithRetry(ctx context.Context, app *fiber.App, address string, chosen
 	for {
 		ln, err := net.Listen("tcp", address)
 		if err != nil {
-			utils.LavaFormatError("net.Listen(tcp, address)", err, utils.LogAttr("address", address))
+			utils.FormatError("net.Listen(tcp, address)", err, utils.LogAttr("address", address))
 		} else {
 			chosenAddrCh.Send(ln.Addr().String())
 
 			err = app.Listener(ln)
 			if err != nil {
-				utils.LavaFormatError("app.Listen(listenAddr)", err)
+				utils.FormatError("app.Listen(listenAddr)", err)
 			}
 		}
 
@@ -567,9 +594,9 @@ func GetListenerWithRetryGrpc(protocol, addr string) net.Listener {
 		if err == nil {
 			return lis
 		}
-		utils.LavaFormatError("failure setting up listener, net.Listen(protocol, addr)", err, utils.Attribute{Key: "listenAddr", Value: addr})
+		utils.FormatError("failure setting up listener, net.Listen(protocol, addr)", err, utils.Attribute{Key: "listenAddr", Value: addr})
 		time.Sleep(RetryListeningInterval * time.Second)
-		utils.LavaFormatWarning("Attempting connection retry", nil)
+		utils.FormatWarning("Attempting connection retry", nil)
 	}
 }
 
@@ -778,7 +805,7 @@ func applyResponseCompression(app *fiber.App, mode string) {
 		app.Use(compress.New(compress.Config{Level: compress.LevelBestSpeed}))
 	default: // "gzip", "", or anything else
 		if normalized != common.ResponseCompressionGzip && normalized != "" {
-			utils.LavaFormatWarning("unknown response-compression mode, falling back to gzip",
+			utils.FormatWarning("unknown response-compression mode, falling back to gzip",
 				nil, utils.LogAttr("mode", mode))
 		}
 		app.Use(stripBrotliAcceptEncoding)
@@ -826,7 +853,7 @@ func stripBrotliAcceptEncoding(c *fiber.Ctx) error {
 // chainListenerBase holds what every chain listener is built with, and the address it
 // listens on once Serve has bound it.
 type chainListenerBase struct {
-	endpoint         *lavasession.RPCEndpoint
+	endpoint         *routersession.RPCEndpoint
 	relaySender      RelaySender
 	healthReporter   HealthReporter
 	logger           *metrics.RPCConsumerLogs

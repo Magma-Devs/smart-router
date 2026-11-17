@@ -19,7 +19,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	epochstoragetypes "github.com/magma-Devs/smart-router/types/epoch"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
@@ -153,8 +153,8 @@ func testChainRouterWithWebSocketInSpec(t *testing.T, wsEnabled bool) {
 		},
 	}
 	chainParser.SetSpec(spec)
-	endpoint := &lavasession.RPCProviderEndpoint{
-		NetworkAddress: lavasession.NetworkAddressData{},
+	endpoint := &routersession.RPCProviderEndpoint{
+		NetworkAddress: routersession.NetworkAddressData{},
 		ChainID:        spec.Index,
 		ApiInterface:   apiInterface,
 		NodeUrls:       []common.NodeUrl{},
@@ -411,11 +411,12 @@ func testChainRouterWithWebSocketInSpec(t *testing.T, wsEnabled bool) {
 // `smartrouter health` flipped per endpoint while probing endpoints concurrently. Two
 // endpoints wanting opposite answers raced, and whichever wrote last decided for both —
 // so healthy legs reported red. The flag now lives on the parser and health builds one
-// parser per endpoint, so concurrent routers must each get the answer they asked for.
+// parser per endpoint, so concurrent routers must each keep the answer they asked for.
 //
-// The endpoint is deliberately http-only against a subscribe-capable spec: that is the
-// exact shape that trips enforcement, and the shape the existing ws tests never reach
-// because they always pair an http URL with a ws URL.
+// That branch is gone (MAG-3950): a provider with no ws url serves over http, and
+// verification publishes its missing url instead. So both routers accept the http-only
+// endpoint against a subscribe-capable spec, and what the test still pins is that
+// neither parser's flag leaks into the other or into the process default.
 func TestSkipWebsocketVerificationIsPerParser(t *testing.T) {
 	newSubscribeParser := func(skip bool) ChainParser {
 		t.Helper()
@@ -435,8 +436,8 @@ func TestSkipWebsocketVerificationIsPerParser(t *testing.T) {
 		return parser
 	}
 
-	httpOnlyEndpoint := func() *lavasession.RPCProviderEndpoint {
-		return &lavasession.RPCProviderEndpoint{
+	httpOnlyEndpoint := func() *routersession.RPCProviderEndpoint {
+		return &routersession.RPCProviderEndpoint{
 			ChainID:      CreateMockSpec().Index,
 			ApiInterface: spectypes.APIInterfaceJsonRPC,
 			NodeUrls:     []common.NodeUrl{{Url: listenerAddressHttp}},
@@ -460,8 +461,8 @@ func TestSkipWebsocketVerificationIsPerParser(t *testing.T) {
 	}()
 	wg.Wait()
 
-	require.NoError(t, skipErr, "a parser that opted out of ws verification must accept an http-only endpoint")
-	require.Error(t, enforceErr, "a parser that did not opt out must still refuse an http-only endpoint for a subscribe-capable spec")
+	require.NoError(t, skipErr, "a parser that opted out of ws verification accepts an http-only endpoint")
+	require.NoError(t, enforceErr, "so does one that did not: a router serves a provider with no ws url over http")
 
 	// Neither router run may have leaked into the other parser or into the process default.
 	require.True(t, skipping.SkipWebsocketVerification())
@@ -470,7 +471,7 @@ func TestSkipWebsocketVerificationIsPerParser(t *testing.T) {
 }
 
 type chainProxyMock struct {
-	endpoint lavasession.RPCProviderEndpoint
+	endpoint routersession.RPCProviderEndpoint
 }
 
 func (m *chainProxyMock) GetChainProxyInformation() (common.NodeUrl, string) {
@@ -592,8 +593,8 @@ func TestChainRouterWithMethodRoutes(t *testing.T) {
 		},
 	}
 	chainParser.SetSpec(spec)
-	endpoint := &lavasession.RPCProviderEndpoint{
-		NetworkAddress: lavasession.NetworkAddressData{},
+	endpoint := &routersession.RPCProviderEndpoint{
+		NetworkAddress: routersession.NetworkAddressData{},
 		ChainID:        spec.Index,
 		ApiInterface:   apiInterface,
 		NodeUrls:       []common.NodeUrl{},
@@ -833,7 +834,7 @@ func TestChainRouterWithMethodRoutes(t *testing.T) {
 			success: false,
 		},
 	}
-	mockProxyConstructor := func(_ context.Context, _ uint, endp lavasession.RPCProviderEndpoint, _ ChainParser) (ChainProxy, error) {
+	mockProxyConstructor := func(_ context.Context, _ uint, endp routersession.RPCProviderEndpoint, _ ChainParser) (ChainProxy, error) {
 		mockChainProxy := &chainProxyMock{endpoint: endp}
 		return mockChainProxy, nil
 	}
@@ -942,18 +943,18 @@ func TestMain(m *testing.M) {
 		_, err := rpcclient.DialContext(ctx, listenerAddressHttp, nil)
 		_, err2 := rpcclient.DialContext(ctx, listenerAddressWs, nil)
 		if err2 != nil {
-			utils.LavaFormatDebug("waiting for grpc server to launch")
+			utils.FormatDebug("waiting for grpc server to launch")
 			continue
 		}
 		if err != nil {
-			utils.LavaFormatDebug("waiting for grpc server to launch")
+			utils.FormatDebug("waiting for grpc server to launch")
 			continue
 		}
 		cancel()
 		break
 	}
 
-	utils.LavaFormatDebug("listening on", utils.LogAttr("address", listenerAddressHttp))
+	utils.FormatDebug("listening on", utils.LogAttr("address", listenerAddressHttp))
 
 	// Start running tests.
 	code := m.Run()
@@ -1975,8 +1976,8 @@ func TestChainRouterWithInternalPaths(t *testing.T) {
 			spec.ApiCollections = play.specApiCollections
 			chainParser.SetSpec(spec)
 
-			endpoint := lavasession.RPCProviderEndpoint{
-				NetworkAddress: lavasession.NetworkAddressData{},
+			endpoint := routersession.RPCProviderEndpoint{
+				NetworkAddress: routersession.NetworkAddressData{},
 				ChainID:        spec.Index,
 				ApiInterface:   play.apiInterface,
 				NodeUrls:       play.nodeUrls,

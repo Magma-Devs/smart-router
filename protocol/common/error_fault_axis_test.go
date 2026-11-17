@@ -151,8 +151,8 @@ var faultAxisTable = []faultAxisCase{
 func TestFaultAxis_RegistryContract(t *testing.T) {
 	for _, tc := range faultAxisTable {
 		t.Run(tc.name, func(t *testing.T) {
-			le := getLavaError(tc.code)
-			require.NotEqual(t, LavaErrorUnknown, le, "code %d is not registered", tc.code)
+			le := getRouterError(tc.code)
+			require.NotEqual(t, RouterErrorUnknown, le, "code %d is not registered", tc.code)
 			require.Equal(t, tc.name, le.Name, "code %d changed name — this is an operator contract", tc.code)
 			require.Equal(t, tc.sub, le.SubCategory,
 				"%s fault axis moved. If deliberate, update this table and say why in the commit. %s", tc.name, tc.why)
@@ -168,7 +168,7 @@ func TestFaultAxis_RegistryContract(t *testing.T) {
 // of the Retryable flag — and stopping the retry would break the full-node-primary /
 // archive-backup routing that 2002 is the trigger for.
 func TestFaultAxis_CapabilityStillRetries(t *testing.T) {
-	le := getLavaError(LavaErrorNodeMethodNotSupported.Code)
+	le := getRouterError(RouterErrorNodeMethodNotSupported.Code)
 	require.True(t, le.Retryable, "2002 must stay retryable")
 	require.True(t, le.SubCategory.IsNodeCapability(), "and must carry the capability label")
 	require.False(t, le.SubCategory.IsUnsupportedMethod(),

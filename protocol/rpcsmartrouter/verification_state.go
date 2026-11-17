@@ -5,20 +5,36 @@ import (
 	"strings"
 	"time"
 
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/magma-Devs/smart-router/utils"
 )
 
 // trackFailures records what one provider is failing now, each failure with the time it
 // started (metrics.VerificationFailuresSince), and logs every change (MAG-3950): one line
-// when a check starts failing, an error, or a warning for a Warning check, and one when
-// it passes again. A check that takes another's place in the same scope and service, a
-// provider out of the pairing that now fails chain-id where it failed connect, is one
-// line, naming the check it replaced. Callers hold RPCSmartRouter.mu.
+// when a check starts failing, an error, or a warning for a Warning check and for a
+// missing websocket url, which the config sets and no retry can fix (decided on #602),
+// and one when it passes again. A check that takes another's place in the same scope and
+// service, a provider out of the pairing that now fails chain-id where it failed connect,
+// is one line, naming the check it replaced.
+//
+// A provider out of the pairing fails at scope provider alone: its caller lists only the
+// check that took it out. Nothing checks what else it failed while it is out, so that
+// does not pass: it is held, with no line, and when the provider is back each held
+// failure goes on with its start, or passes again then (review of #602: a provider with
+// no ws url logged its missing url passing at each demote). Callers hold
+// RPCSmartRouter.mu.
 func (inputs *chainReverifyInputs) trackFailures(tier reverifyTier, name string, failures []metrics.ProviderVerificationFailure, now time.Time) []metrics.TimedVerificationFailure {
 	key := retryKey(tier, name)
 	previous := inputs.failing[key]
+	out := slices.ContainsFunc(failures, func(f metrics.ProviderVerificationFailure) bool {
+		return f.Scope == metrics.VerificationScopeProvider
+	})
+	if held := inputs.heldWhileOut[key]; !out && len(held) > 0 {
+		previous = append(slices.Clone(previous), held...)
+		delete(inputs.heldWhileOut, key)
+	}
 	next := metrics.VerificationFailuresSince(previous, failures, now)
 	if inputs.failing == nil {
 		inputs.failing = map[string][]metrics.TimedVerificationFailure{}
@@ -27,6 +43,20 @@ func (inputs *chainReverifyInputs) trackFailures(tier reverifyTier, name string,
 		delete(inputs.failing, key)
 	} else {
 		inputs.failing[key] = next
+	}
+	if out {
+		held := inputs.heldWhileOut[key]
+		for _, f := range previous {
+			if f.Scope != metrics.VerificationScopeProvider && !failingIn(held, f) {
+				held = append(held, f)
+			}
+		}
+		if len(held) > 0 {
+			if inputs.heldWhileOut == nil {
+				inputs.heldWhileOut = map[string][]metrics.TimedVerificationFailure{}
+			}
+			inputs.heldWhileOut[key] = held
+		}
 	}
 
 	attrs := func(f metrics.TimedVerificationFailure) []utils.Attribute {
@@ -50,20 +80,23 @@ func (inputs *chainReverifyInputs) trackFailures(tier reverifyTier, name string,
 		if replaced, ok := takesThePlaceOf(f, previous, next); ok {
 			line = append(line, utils.LogAttr("previousCheck", replaced.Check))
 		}
-		if f.Severity == metrics.VerificationSeverityWarning {
-			utils.LavaFormatWarning("verification check failing", nil, line...)
+		if f.Severity == metrics.VerificationSeverityWarning || f.Check == chainlib.CheckMissingURL {
+			utils.FormatWarning("verification check failing", nil, line...)
 		} else {
-			utils.LavaFormatError("verification check failing", nil, line...)
+			utils.FormatError("verification check failing", nil, line...)
 		}
 	}
 	for _, f := range previous {
 		if failingIn(next, f) {
 			continue
 		}
+		if out && f.Scope != metrics.VerificationScopeProvider {
+			continue // held until the provider is back
+		}
 		if _, ok := takesThePlaceOf(f, next, previous); ok {
 			continue // logged as the check that replaced it
 		}
-		utils.LavaFormatInfo("verification check passes again", append(attrs(f), utils.LogAttr("failedFor", now.Sub(f.Since).Round(time.Second).String()))...)
+		utils.FormatInfo("verification check passes again", append(attrs(f), utils.LogAttr("failedFor", now.Sub(f.Since).Round(time.Second).String()))...)
 	}
 	return next
 }
@@ -153,7 +186,7 @@ func (rpsr *RPCSmartRouter) verificationDebugState() map[string]any {
 		chain := verificationDebugChain{Chain: inputs.rpcEndpoint.ChainID, ApiInterface: inputs.rpcEndpoint.ApiInterface, Providers: []verificationDebugProvider{}}
 		for _, tier := range []struct {
 			tier     reverifyTier
-			sessions map[uint64]*lavasession.ConsumerSessionsWithProvider
+			sessions map[uint64]*routersession.ConsumerSessionsWithProvider
 		}{
 			{reverifyTierStatic, rpsr.providerSessions[chainKey]},
 			{reverifyTierBackup, rpsr.backupProviderSessions[chainKey]},

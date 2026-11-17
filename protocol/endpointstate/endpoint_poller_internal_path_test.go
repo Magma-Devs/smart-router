@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 )
@@ -15,7 +15,7 @@ import (
 func newTONTPoller(t *testing.T, conn *recordingConnection, internalPath string) *EndpointPoller {
 	t.Helper()
 	return NewEndpointPoller(
-		&lavasession.Endpoint{NetworkAddress: conn.url, InternalPath: internalPath, Enabled: true},
+		&routersession.Endpoint{NetworkAddress: conn.url, InternalPath: internalPath, Enabled: true},
 		conn,
 		newRealChainParser(t, "TONT", spectypes.APIInterfaceRest, "../chainlib/testdata"),
 		"TONT",

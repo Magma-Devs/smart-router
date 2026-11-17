@@ -8,8 +8,8 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavaprotocol"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/relayprotocol"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils/rand"
@@ -26,7 +26,7 @@ const (
 )
 
 // sendSteeredRequest sends steeringTestRequest through SendParsedRelay with the caller's directive
-// headers, as the listener hands them over once LavaDirectiveHeaders has taken them out of the
+// headers, as the listener hands them over once DirectiveHeaders has taken them out of the
 // request's metadata.
 func sendSteeredRequest(t *testing.T, chainParser chainlib.ChainParser, server *RPCSmartRouterServer, directives map[string]string) *common.RelayResult {
 	t.Helper()
@@ -34,7 +34,7 @@ func sendSteeredRequest(t *testing.T, chainParser chainlib.ChainParser, server *
 	body := []byte(steeringTestRequest)
 	chainMessage := parseRefusalTestRequestBody(t, chainParser, body)
 	reqBlock, _ := chainMessage.RequestedBlock()
-	relayData := lavaprotocol.NewRelayData(ctx, http.MethodPost, "", body, 0, reqBlock, spectypes.APIInterfaceJsonRPC,
+	relayData := relayprotocol.NewRelayData(ctx, http.MethodPost, "", body, 0, reqBlock, spectypes.APIInterfaceJsonRPC,
 		chainMessage.GetRPCMessage().GetHeaders(), chainlib.GetAddon(chainMessage), common.GetExtensionNames(chainMessage.GetExtensions()))
 	protocolMessage := chainlib.NewProtocolMessage(chainMessage, directives, relayData, "dapp", "1.2.3.4")
 

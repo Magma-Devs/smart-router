@@ -15,10 +15,10 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/performance"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	"github.com/magma-Devs/smart-router/utils/rand"
 	"github.com/stretchr/testify/assert"
@@ -37,11 +37,11 @@ import (
 func bootArchiveBackupEndpoint(t *testing.T, primaryURL, backupURL string, backupAddons []string, cache performance.CacheBackend) *RPCSmartRouterServer {
 	t.Helper()
 	return bootETH1Endpoint(t,
-		[]*lavasession.RPCStaticProviderEndpoint{{
+		[]*routersession.RPCStaticProviderEndpoint{{
 			Name: "primary-1", ChainID: "ETH1", ApiInterface: "jsonrpc",
 			NodeUrls: []common.NodeUrl{{Url: primaryURL}},
 		}},
-		[]*lavasession.RPCStaticProviderEndpoint{{
+		[]*routersession.RPCStaticProviderEndpoint{{
 			Name: "backup-1", ChainID: "ETH1", ApiInterface: "jsonrpc",
 			NodeUrls: []common.NodeUrl{{Url: backupURL, Addons: backupAddons}},
 		}},
@@ -50,7 +50,7 @@ func bootArchiveBackupEndpoint(t *testing.T, primaryURL, backupURL string, backu
 
 // bootETH1Endpoint runs the real CreateSmartRouterEndpoint for ETH1 JSON-RPC with primaries and
 // backups, behind cache when it is not nil, and returns the server once it listens.
-func bootETH1Endpoint(t *testing.T, primaries, backups []*lavasession.RPCStaticProviderEndpoint, cache performance.CacheBackend) *RPCSmartRouterServer {
+func bootETH1Endpoint(t *testing.T, primaries, backups []*routersession.RPCStaticProviderEndpoint, cache performance.CacheBackend) *RPCSmartRouterServer {
 	t.Helper()
 	if !rand.Initialized() {
 		rand.InitRandomSeed()
@@ -64,12 +64,12 @@ func bootETH1Endpoint(t *testing.T, primaries, backups []*lavasession.RPCStaticP
 	t.Cleanup(cancel)
 	rpsr := createTestRPCSmartRouter()
 	rpsr.reverifyInputs = make(map[string]*chainReverifyInputs)
-	endpoint := &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc", NetworkAddress: "127.0.0.1:0"}
+	endpoint := &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc", NetworkAddress: "127.0.0.1:0"}
 	metricsManager := metrics.NewSmartRouterMetricsManager(metrics.SmartRouterMetricsManagerOptions{})
 	logs, err := metrics.NewRPCConsumerLogs(metricsManager, nil, nil)
 	require.NoError(t, err)
 	options := &rpcSmartRouterStartOptions{
-		rpcEndpoints:        []*lavasession.RPCEndpoint{endpoint},
+		rpcEndpoints:        []*routersession.RPCEndpoint{endpoint},
 		cache:               cache,
 		strategy:            provideroptimizer.StrategyBalanced,
 		cmdFlags:            common.ConsumerCmdFlags{StaticSpecPaths: []string{"../../specs/ethereum.json"}},
@@ -79,7 +79,7 @@ func bootETH1Endpoint(t *testing.T, primaries, backups []*lavasession.RPCStaticP
 	err = rpsr.CreateSmartRouterEndpoint(ctx, endpoint, make(chan error, 1), &common.SafeSyncMap[string, *provideroptimizer.ProviderOptimizer]{},
 		map[string]*sync.Mutex{"ETH1": {}}, options, "test-router", logs, nil, metricsManager, nil)
 	require.NoError(t, err)
-	server := rpsr.rpcServers[(&lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"}).Key()]
+	server := rpsr.rpcServers[(&routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"}).Key()]
 	require.NotNil(t, server)
 	require.Eventually(t, func() bool { return server.GetListeningAddress() != "" }, 5*time.Second, 10*time.Millisecond)
 	return server
@@ -282,13 +282,13 @@ func TestArchiveDegradedCrossValidationWinnerIsNotCached(t *testing.T) {
 		primaryCache, _ := startCacheServerForTest(t)
 		cache := &writeRecordingCache{CacheBackend: primaryCache}
 		u := newFakeUpstreams(t)
-		primary := func(name, path string, addons ...string) *lavasession.RPCStaticProviderEndpoint {
-			return &lavasession.RPCStaticProviderEndpoint{
+		primary := func(name, path string, addons ...string) *routersession.RPCStaticProviderEndpoint {
+			return &routersession.RPCStaticProviderEndpoint{
 				Name: name, ChainID: "ETH1", ApiInterface: "jsonrpc",
 				NodeUrls: []common.NodeUrl{{Url: u.httpURL(path), Addons: addons}},
 			}
 		}
-		server := bootETH1Endpoint(t, []*lavasession.RPCStaticProviderEndpoint{
+		server := bootETH1Endpoint(t, []*routersession.RPCStaticProviderEndpoint{
 			primary("archive-1", "/archive-1/"+upArchive, archive),
 			primary("archive-2", "/archive-2/"+upArchive, archive),
 			primary("pruned-1", "/pruned-1/"+upPruned),

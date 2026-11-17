@@ -13,11 +13,11 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/endpointtip"
-	"github.com/magma-Devs/smart-router/protocol/lavaprotocol"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
 	"github.com/magma-Devs/smart-router/protocol/qos"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
+	"github.com/magma-Devs/smart-router/protocol/relayprotocol"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 )
@@ -121,20 +121,20 @@ func TestDataScopeAnswerScoresSyncOnly(t *testing.T) {
 			body := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_getBalance","params":["0x0000000000000000000000000000000000000000","0x10"]}`)
 			chainMsg, err := chainParser.ParseMsg("", body, http.MethodPost, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 			require.NoError(t, err)
-			relayData := lavaprotocol.NewRelayData(ctx, http.MethodPost, "", body, 0, 16, "jsonrpc",
+			relayData := relayprotocol.NewRelayData(ctx, http.MethodPost, "", body, 0, 16, "jsonrpc",
 				chainMsg.GetRPCMessage().GetHeaders(), chainlib.GetAddon(chainMsg), common.GetExtensionNames(chainMsg.GetExtensions()))
 			protocolMsg := chainlib.NewProtocolMessage(chainMsg, nil, relayData, "test", "1.2.3.4")
 
-			const provider = "lava@behind"
-			endpoint := &lavasession.Endpoint{NetworkAddress: upstream.URL}
-			directConn, err := lavasession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: upstream.URL}, 5, "")
+			const provider = "provider@behind"
+			endpoint := &routersession.Endpoint{NetworkAddress: upstream.URL}
+			directConn, err := routersession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: upstream.URL}, 5, "")
 			require.NoError(t, err)
-			session := &lavasession.SingleConsumerSession{
-				Parent: &lavasession.ConsumerSessionsWithProvider{
-					PublicLavaAddress: provider,
-					Endpoints:         []*lavasession.Endpoint{endpoint},
+			session := &routersession.SingleConsumerSession{
+				Parent: &routersession.ConsumerSessionsWithProvider{
+					PublicAddress: provider,
+					Endpoints:     []*routersession.Endpoint{endpoint},
 				},
-				Connection: &lavasession.DirectRPCSessionConnection{
+				Connection: &routersession.DirectRPCSessionConnection{
 					DirectConnection: directConn,
 					EndpointAddress:  upstream.URL,
 					Endpoint:         endpoint,
@@ -145,21 +145,21 @@ func TestDataScopeAnswerScoresSyncOnly(t *testing.T) {
 			require.True(t, ok, "setup: failed to lock session")
 			session.ConsecutiveErrors = []error{errors.New("an earlier failure")}
 
-			usedProviders := lavasession.NewUsedProviders(nil)
-			sessions := lavasession.ConsumerSessionsMap{provider: &lavasession.SessionInfo{Session: session}}
+			usedProviders := routersession.NewUsedProviders(nil)
+			sessions := routersession.ConsumerSessionsMap{provider: &routersession.SessionInfo{Session: session}}
 			usedProviders.AddUsed(sessions, nil)
-			require.NoError(t, session.SetUsageForSession(0, nil, usedProviders, lavasession.NewRouterKey(nil)))
+			require.NoError(t, session.SetUsageForSession(0, nil, usedProviders, routersession.NewRouterKey(nil)))
 
 			spy := &scoringSpyOptimizer{
 				ProviderOptimizer: provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "ETH1"),
 			}
-			rpcEndpoint := &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"}
+			rpcEndpoint := &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"}
 			rpcss := &RPCSmartRouterServer{
 				listenEndpoint:    rpcEndpoint,
 				chainParser:       chainParser,
 				consistencyConfig: relaycore.DefaultConsistencyValidationConfig(),
-				sessionManager: lavasession.NewConsumerSessionManager(rpcEndpoint, spy, nil, "test-router",
-					lavasession.NewActiveSubscriptionProvidersStorage()),
+				sessionManager: routersession.NewConsumerSessionManager(rpcEndpoint, spy, nil, "test-router",
+					routersession.NewActiveSubscriptionProvidersStorage()),
 			}
 
 			sm := &budgetCallSiteStateMachine{usedProviders: usedProviders, protocolMessage: protocolMsg}

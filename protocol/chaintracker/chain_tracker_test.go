@@ -11,7 +11,7 @@ import (
 	"time"
 
 	chaintracker "github.com/magma-Devs/smart-router/protocol/chaintracker"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 	rand "github.com/magma-Devs/smart-router/utils/rand"
@@ -37,8 +37,8 @@ type MockChainFetcher struct {
 	callBack    func()
 }
 
-func (mcf *MockChainFetcher) FetchEndpoint() lavasession.RPCProviderEndpoint {
-	return lavasession.RPCProviderEndpoint{}
+func (mcf *MockChainFetcher) FetchEndpoint() routersession.RPCProviderEndpoint {
+	return routersession.RPCProviderEndpoint{}
 }
 
 func (mcf *MockChainFetcher) FetchLatestBlockNum(ctx context.Context) (int64, error) {
@@ -62,7 +62,7 @@ func (mcf *MockChainFetcher) FetchBlockHashByNum(ctx context.Context, blockNum i
 }
 
 func (mcf *MockChainFetcher) FetchChainID(ctx context.Context) (string, string, error) {
-	return "", "", utils.LavaFormatError("FetchChainID not supported for lava chain fetcher", nil)
+	return "", "", utils.FormatError("FetchChainID not supported for lava chain fetcher", nil)
 }
 
 func (mcf *MockChainFetcher) hashKey(latestBlock int64) string {
@@ -102,7 +102,7 @@ func (mcf *MockChainFetcher) Fork(fork string) {
 }
 
 func (mcf *MockChainFetcher) CustomMessage(ctx context.Context, path string, data []byte, connectionType string, apiName string) ([]byte, error) {
-	return nil, utils.LavaFormatError("Not Implemented CustomMessage for MockChainFetcher", nil)
+	return nil, utils.FormatError("Not Implemented CustomMessage for MockChainFetcher", nil)
 }
 
 func (mcf *MockChainFetcher) Shrink(newSize int) {
@@ -132,7 +132,7 @@ func TestMain(m *testing.M) {
 	// Run the actual tests
 	exitCode := m.Run()
 	if exitCode != 0 {
-		utils.LavaFormatDebug("failed tests seed", utils.Attribute{Key: "seed", Value: seed})
+		utils.FormatDebug("failed tests seed", utils.Attribute{Key: "seed", Value: seed})
 	}
 	os.Exit(exitCode)
 }
@@ -156,7 +156,7 @@ func TestChainTracker(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			utils.LavaFormatInfo(startedTestStr + tt.name)
+			utils.FormatInfo(startedTestStr + tt.name)
 			mockChainFetcher := NewMockChainFetcher(1000, tt.mockBlocks, nil)
 			currentLatestBlockInMock := mockChainFetcher.AdvanceBlock()
 
@@ -291,7 +291,7 @@ func TestChainTrackerCallbacks(t *testing.T) {
 	// used to identify if the fork callback was called
 	var callbackCalledFork atomic.Bool
 	forkCallback := func(arg int64) {
-		utils.LavaFormatDebug("fork callback called")
+		utils.FormatDebug("fork callback called")
 		callbackCalledFork.Store(true)
 	}
 	// used to identify if the newLatest callback was called
@@ -301,7 +301,7 @@ func TestChainTrackerCallbacks(t *testing.T) {
 		callbackCalledNewLatest.Store(true)
 		blocksInRange := blockTo - blockFrom
 		totalProcessed := callbackBlocksProcessed.Add(blocksInRange)
-		utils.LavaFormatDebug("newBlockCallback called",
+		utils.FormatDebug("newBlockCallback called",
 			utils.LogAttr("blockFrom", blockFrom),
 			utils.LogAttr("blockTo", blockTo),
 			utils.LogAttr("blocksInRange", blocksInRange),
@@ -316,7 +316,7 @@ func TestChainTrackerCallbacks(t *testing.T) {
 	t.Run("one long test", func(t *testing.T) {
 		for _, tt := range tests {
 			totalAdvancement += int(tt.advancement)
-			utils.LavaFormatInfo(startedTestStr + tt.name)
+			utils.FormatInfo(startedTestStr + tt.name)
 			callbackCalledFork.Store(false)
 			callbackCalledNewLatest.Store(false)
 			// The fork goes in before the blocks. A poll that has seen new blocks compares one
@@ -463,7 +463,7 @@ func TestChainTrackerMaintainMemory(t *testing.T) {
 	// used to identify if the fork callback was called; it runs on the tracker's poll goroutine
 	var callbackCalledFork atomic.Bool
 	forkCallback := func(arg int64) {
-		utils.LavaFormatDebug("fork callback called")
+		utils.FormatDebug("fork callback called")
 		callbackCalledFork.Store(true)
 	}
 	chainTrackerConfig := chaintracker.ChainTrackerConfig{BlocksToSave: uint64(fetcherBlocks), AverageBlockTime: TimeForPollingMock, ServerBlockMemory: uint64(mockBlocks), ForkCallback: forkCallback, ParseDirectiveEnabled: true}
@@ -472,7 +472,7 @@ func TestChainTrackerMaintainMemory(t *testing.T) {
 	chainTracker.StartAndServe(context.Background())
 	t.Run("one long test", func(t *testing.T) {
 		for _, tt := range tests {
-			utils.LavaFormatInfo(startedTestStr + tt.name)
+			utils.FormatInfo(startedTestStr + tt.name)
 			callbackCalledFork.Store(false)
 			for i := 0; i < int(tt.advancement); i++ {
 				currentLatestBlockInMock = mockChainFetcher.AdvanceBlock()

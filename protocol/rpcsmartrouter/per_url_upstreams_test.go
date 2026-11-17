@@ -15,7 +15,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	commonlib "github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/magma-Devs/smart-router/protocol/statetracker"
 	"github.com/stretchr/testify/require"
 )
@@ -34,6 +34,7 @@ const (
 	upSolana    = "sol"       // Solana node without the token-owner index
 	upTraceRate = "tracerate" // full ETH1 node whose trace_ methods answer 429: a premium method's own limit
 	upDebug     = "debug"     // full ETH1 node that serves the debug add-on too
+	upPolygon   = "polygon"   // ETH1-shaped node of another chain: eth_chainId answers 0x89
 	// pruned ETH1 node that serves the debug add-on: fails only the archive check
 	upPrunedDebug = "pruneddebug"
 	// ETH1 node that answers another chain's id: fails chain-id
@@ -260,7 +261,7 @@ func reply(p string, request map[string]any) map[string]any {
 		if p == upSlowChain {
 			time.Sleep(10 * time.Second)
 		}
-		if p == upWrongChain || p == upPrunedWrongChain {
+		if p == upPolygon || p == upWrongChain || p == upPrunedWrongChain {
 			return result("0x89")
 		}
 		return result("0x1")
@@ -291,11 +292,11 @@ func liveParser(t *testing.T, chainID string, skipWebsocket bool) chainlib.Chain
 	parser, err := chainlib.NewChainParser("jsonrpc")
 	require.NoError(t, err)
 	parser.SetSkipWebsocketVerification(skipWebsocket)
-	endpoint := lavasession.RPCEndpoint{ChainID: chainID, ApiInterface: "jsonrpc"}
+	endpoint := routersession.RPCEndpoint{ChainID: chainID, ApiInterface: "jsonrpc"}
 	require.NoError(t, statetracker.RegisterForSpecUpdatesOrSetStaticSpecsWithToken(t.Context(), parser, []string{"../../specs/"}, endpoint, "", ""))
 	return parser
 }
 
-func staticProvider(chainID string, urls ...commonlib.NodeUrl) *lavasession.RPCStaticProviderEndpoint {
-	return &lavasession.RPCStaticProviderEndpoint{Name: "p", ChainID: chainID, ApiInterface: "jsonrpc", NodeUrls: urls}
+func staticProvider(chainID string, urls ...commonlib.NodeUrl) *routersession.RPCStaticProviderEndpoint {
+	return &routersession.RPCStaticProviderEndpoint{Name: "p", ChainID: chainID, ApiInterface: "jsonrpc", NodeUrls: urls}
 }

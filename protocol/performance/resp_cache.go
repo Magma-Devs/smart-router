@@ -438,7 +438,7 @@ func (cache *RespCache) closeBreaker(breaker *respCacheBreaker, now time.Time) b
 	}
 	breaker.consecutiveFailures.Store(0)
 	cache.setBreakerGauge(breaker, 0)
-	utils.LavaFormatInfo(cache.name + " " + breaker.subject + " reachable again; " + breaker.skips + " resume")
+	utils.FormatInfo(cache.name + " " + breaker.subject + " reachable again; " + breaker.skips + " resume")
 	return true
 }
 
@@ -459,7 +459,7 @@ func (cache *RespCache) noteOperation(breaker *respCacheBreaker, err error) {
 	if failures < respCacheBreakerThreshold || !cache.openBreaker(breaker) {
 		return
 	}
-	utils.LavaFormatWarning(cache.name+" "+breaker.subject+" failed consecutive operations; "+breaker.skips+" are skipped until a health probe succeeds", nil,
+	utils.FormatWarning(cache.name+" "+breaker.subject+" failed consecutive operations; "+breaker.skips+" are skipped until a health probe succeeds", nil,
 		utils.Attribute{Key: "failures", Value: failures},
 		utils.Attribute{Key: "detail", Value: safeProbeDetail(err)},
 	)
@@ -576,7 +576,7 @@ func logUnavailable(name, message string, results []redisstore.ProbeResult) {
 	if kind == probeFailureAuth {
 		message = name + " backend rejected the configured credentials; relays degrade to cache misses until the credentials are corrected"
 	}
-	utils.LavaFormatWarning(message, nil,
+	utils.FormatWarning(message, nil,
 		utils.Attribute{Key: "failure", Value: kind},
 		utils.Attribute{Key: "detail", Value: probeDetail(results)},
 	)

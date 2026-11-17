@@ -68,7 +68,7 @@ func (bcp *BaseChainProxy) doHTTP(ctx context.Context, req *http.Request, nodeHe
 
 	if err := bcp.HandleStatusError(res.StatusCode, disableErrorHandling); err != nil {
 		err = common.WithRetryAfter(err, res.Header, time.Now())
-		return nil, utils.LavaFormatWarning("Received invalid status code", err,
+		return nil, utils.FormatWarning("Received invalid status code", err,
 			utils.Attribute{Key: "Status Code", Value: res.StatusCode},
 			utils.Attribute{Key: "chainID", Value: bcp.ChainID},
 			utils.Attribute{Key: "apiName", Value: apiName},
@@ -128,7 +128,7 @@ func (cp *JrpcChainProxy) callNodeRPC(ctx context.Context, chainMessage ChainMes
 	}
 	// here we are getting an error for every code that is not 200-300
 	if errors.Is(nodeErr, common.StatusCodeError504) || errors.Is(nodeErr, common.StatusCodeError429) || errors.Is(nodeErr, common.StatusCodeErrorStrict) {
-		return nil, utils.LavaFormatWarning("Received invalid status code", nodeErr, utils.Attribute{Key: "chainID", Value: cp.BaseChainProxy.ChainID}, utils.Attribute{Key: "apiName", Value: chainMessage.GetApi().Name})
+		return nil, utils.FormatWarning("Received invalid status code", nodeErr, utils.Attribute{Key: "chainID", Value: cp.BaseChainProxy.ChainID}, utils.Attribute{Key: "apiName", Value: chainMessage.GetApi().Name})
 	}
 	// Validate if the error is related to the connection to the node or it is a valid error
 	// in case the error is valid (e.g. bad input parameters) the error will return in the form of a valid error reply
@@ -137,7 +137,7 @@ func (cp *JrpcChainProxy) callNodeRPC(ctx context.Context, chainMessage ChainMes
 	}
 	// try to parse node error as json message
 	if rpcMessage = TryRecoverNodeErrorFromClientError(nodeErr); rpcMessage == nil {
-		utils.LavaFormatDebug("got error from node", append([]utils.Attribute{utils.LogAttr("GUID", ctx), utils.LogAttr("nodeErr", nodeErr)}, unrecoveredAttrs...)...)
+		utils.FormatDebug("got error from node", append([]utils.Attribute{utils.LogAttr("GUID", ctx), utils.LogAttr("nodeErr", nodeErr)}, unrecoveredAttrs...)...)
 		return nil, nodeErr
 	}
 	return rpcMessage, nil

@@ -11,12 +11,12 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavaprotocol"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
 	"github.com/magma-Devs/smart-router/protocol/qos"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	"github.com/magma-Devs/smart-router/protocol/relaycoretest"
+	"github.com/magma-Devs/smart-router/protocol/relayprotocol"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
@@ -69,7 +69,7 @@ func startQuietGroupRequest(t *testing.T, budget, window time.Duration, nodeGrou
 	}}})
 	require.NoError(t, err)
 
-	usedProviders := lavasession.NewUsedProviders(nil)
+	usedProviders := routersession.NewUsedProviders(nil)
 	stateMachine, err := NewSmartRouterRelayStateMachineWithPolicy(ctx, usedProviders,
 		&quietGroupSender{budget: budget, window: window}, protocolMessage, nil, false, resolver, "ETH1", "jsonrpc")
 	require.NoError(t, err)
@@ -82,10 +82,10 @@ func startQuietGroupRequest(t *testing.T, budget, window time.Duration, nodeGrou
 	first := <-relayTaskChannel
 	require.False(t, first.IsDone())
 	require.Equal(t, len(nodeGroups), first.NumOfProviders)
-	sessions := lavasession.ConsumerSessionsMap{}
+	sessions := routersession.ConsumerSessionsMap{}
 	queried := make([]string, 0, len(nodeGroups))
 	for node := range nodeGroups {
-		sessions[node] = &lavasession.SessionInfo{}
+		sessions[node] = &routersession.SessionInfo{}
 		queried = append(queried, node)
 	}
 	usedProviders.AddUsed(sessions, nil)
@@ -271,13 +271,13 @@ func TestSendRelayToDirectEndpoints_RecordsTheCrossValidationGroupLayout(t *test
 			require.NoError(t, err)
 			chainMessage, err := chainParser.ParseMsg(restPath, nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 			require.NoError(t, err)
-			relayData := lavaprotocol.NewRelayData(ctx, http.MethodGet, restPath, nil, 0, spectypes.LATEST_BLOCK,
+			relayData := relayprotocol.NewRelayData(ctx, http.MethodGet, restPath, nil, 0, spectypes.LATEST_BLOCK,
 				"rest", chainMessage.GetRPCMessage().GetHeaders(), chainlib.GetAddon(chainMessage),
 				common.GetExtensionNames(chainMessage.GetExtensions()))
 			protocolMsg := chainlib.NewProtocolMessage(chainMessage, nil, relayData, "test", "1.2.3.4")
 
-			usedProviders := lavasession.NewUsedProviders(nil)
-			sessionsMap := lavasession.ConsumerSessionsMap{}
+			usedProviders := routersession.NewUsedProviders(nil)
+			sessionsMap := routersession.ConsumerSessionsMap{}
 			// Each session gets its own id, as GetSessions gives every real session a random one. The
 			// session manager keys QoS reports by (epoch, session id), so with every id left at zero
 			// node-1 and node-2, answering together, would share one report, and -race flags the
@@ -290,17 +290,17 @@ func TestSendRelayToDirectEndpoints_RecordsTheCrossValidationGroupLayout(t *test
 				"node-2": {answering.URL, "group-1", 2},
 				"node-3": {hanging.URL, "group-2", 3},
 			} {
-				endpoint := &lavasession.Endpoint{NetworkAddress: upstream.url}
-				directConn, err := lavasession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: upstream.url}, 5, "")
+				endpoint := &routersession.Endpoint{NetworkAddress: upstream.url}
+				directConn, err := routersession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: upstream.url}, 5, "")
 				require.NoError(t, err)
-				session := &lavasession.SingleConsumerSession{
+				session := &routersession.SingleConsumerSession{
 					SessionId: upstream.sessionID,
-					Parent: &lavasession.ConsumerSessionsWithProvider{
-						PublicLavaAddress: node,
-						Endpoints:         []*lavasession.Endpoint{endpoint},
-						GroupLabel:        upstream.group,
+					Parent: &routersession.ConsumerSessionsWithProvider{
+						PublicAddress: node,
+						Endpoints:     []*routersession.Endpoint{endpoint},
+						GroupLabel:    upstream.group,
 					},
-					Connection: &lavasession.DirectRPCSessionConnection{
+					Connection: &routersession.DirectRPCSessionConnection{
 						DirectConnection: directConn,
 						EndpointAddress:  upstream.url,
 						Endpoint:         endpoint,
@@ -309,11 +309,11 @@ func TestSendRelayToDirectEndpoints_RecordsTheCrossValidationGroupLayout(t *test
 				}
 				_, ok := session.TryUseSession()
 				require.True(t, ok, "setup: failed to lock session")
-				sessionsMap[node] = &lavasession.SessionInfo{Session: session}
+				sessionsMap[node] = &routersession.SessionInfo{Session: session}
 			}
 			usedProviders.AddUsed(sessionsMap, nil)
 			for _, sessionInfo := range sessionsMap {
-				require.NoError(t, sessionInfo.Session.SetUsageForSession(0, nil, usedProviders, lavasession.NewRouterKey(nil)))
+				require.NoError(t, sessionInfo.Session.SetUsageForSession(0, nil, usedProviders, routersession.NewRouterKey(nil)))
 			}
 
 			cvParams := &common.CrossValidationParams{MaxParticipants: 3, AgreementThreshold: 2, MinGroups: 2}
@@ -324,15 +324,15 @@ func TestSendRelayToDirectEndpoints_RecordsTheCrossValidationGroupLayout(t *test
 			metricsStub := cvGuardMetrics{}
 			relayProcessor := relaycore.NewRelayProcessor(ctx, cvParams, metricsStub, metricsStub, sm)
 
-			rpcEndpoint := &lavasession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "rest"}
+			rpcEndpoint := &routersession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "rest"}
 			optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "LAVA")
 			rpcss := &RPCSmartRouterServer{
 				listenEndpoint:    rpcEndpoint,
 				chainParser:       chainParser,
 				consistencyConfig: relaycore.DefaultConsistencyValidationConfig(),
-				sessionManager: lavasession.NewConsumerSessionManager(
+				sessionManager: routersession.NewConsumerSessionManager(
 					rpcEndpoint, optimizer, nil, "test-router",
-					lavasession.NewActiveSubscriptionProvidersStorage()),
+					routersession.NewActiveSubscriptionProvidersStorage()),
 				crossValidationGroupSizes: tc.groupSizes,
 			}
 			callCtx, cancel := context.WithTimeout(ctx, 20*time.Second)

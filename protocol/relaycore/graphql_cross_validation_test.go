@@ -11,7 +11,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
@@ -153,11 +153,11 @@ func TestGraphQLCrossValidationBuckets(t *testing.T) {
 			protocolMessage := chainlib.NewProtocolMessage(chainMessage, nil, nil, "", "")
 
 			// Registering the whole batch keeps the processor reading past the first reply.
-			providers := lavasession.ConsumerSessionsMap{}
+			providers := routersession.ConsumerSessionsMap{}
 			for i := range test.replies {
-				providers[fmt.Sprintf("provider%d", i+1)] = &lavasession.SessionInfo{}
+				providers[fmt.Sprintf("provider%d", i+1)] = &routersession.SessionInfo{}
 			}
-			usedProviders := lavasession.NewUsedProviders(nil)
+			usedProviders := routersession.NewUsedProviders(nil)
 			usedProviders.AddUsed(providers, nil)
 			relayProcessor := NewRelayProcessor(ctx,
 				&common.CrossValidationParams{AgreementThreshold: test.threshold, MaxParticipants: len(test.replies)},

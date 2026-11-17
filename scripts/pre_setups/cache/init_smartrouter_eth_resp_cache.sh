@@ -10,10 +10,11 @@
 #                       --resp-cache-addresses 127.0.0.1:63790
 #
 # That config declares PublicNode and dRPC, each with an HTTP *and* a WS leg,
-# because the ETH1 spec requires a websocket leg per provider — an HTTP-only
-# provider is excluded at verification and drags overall-health to 503. The
-# lane therefore does NOT pass --skip-websocket-verification: bypassing the
-# gate would mask exactly the fixture property this lane exists to prove.
+# so both serve ETH1's subscriptions. Since MAG-3950 an HTTP-only provider is
+# not excluded at verification: it serves without subscriptions and publishes
+# the websocket's missing-url, so overall-health no longer catches a missing WS
+# leg. The lane does NOT pass --skip-websocket-verification, so each WS leg
+# still runs the spec's checks over its socket instead of only being dialed.
 #
 # The example config points resp-cache at the compose service name
 # ("valkey:6379"); the --resp-cache-addresses flag overrides it to this lane's
@@ -176,8 +177,8 @@ echo "[Setup] starting smart router (:${ROUTER_PORT}) with $CONFIG_REL"
 echo "        --resp-cache-addresses 127.0.0.1:${VALKEY_PORT} (overrides the config's compose address)"
 # NOTE: the config path must be RELATIVE to the project root — the router's
 # config loader resolves the argument against its search paths.
-# No --skip-websocket-verification: the example config supplies a WS leg per
-# provider and this lane must prove that.
+# No --skip-websocket-verification: each WS leg the example config supplies
+# runs the spec's checks over its socket (see the header).
 #
 # --relays-health-interval: cadence of the periodic health sweep. Readiness is
 # fail-closed only until endpoint setup verifies a provider, so the lane's

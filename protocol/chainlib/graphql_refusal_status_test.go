@@ -14,8 +14,8 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
@@ -82,7 +82,7 @@ func serveGraphQLListenerReplies(t *testing.T, relay RelaySender) func(body stri
 	t.Cleanup(cancel)
 	logger, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
 	require.NoError(t, err)
-	listener := NewGraphQLChainListener(ctx, &lavasession.RPCEndpoint{
+	listener := NewGraphQLChainListener(ctx, &routersession.RPCEndpoint{
 		NetworkAddress:  "127.0.0.1:0",
 		ChainID:         "SUI",
 		ApiInterface:    spectypes.APIInterfaceGraphQL,
@@ -348,7 +348,7 @@ func TestGraphQLListener_RefusalLogsTheBodyCutUnlessDebugRelays(t *testing.T) {
 	}
 	body, err := json.Marshal(map[string]string{"query": "{ " + strings.Join(fields, " ") + " }"})
 	require.NoError(t, err)
-	newGraphQL := func(ctx context.Context, endpoint *lavasession.RPCEndpoint, relay RelaySender, logger *metrics.RPCConsumerLogs) ChainListener {
+	newGraphQL := func(ctx context.Context, endpoint *routersession.RPCEndpoint, relay RelaySender, logger *metrics.RPCConsumerLogs) ChainListener {
 		return NewGraphQLChainListener(ctx, endpoint, relay, alwaysHealthyReporter{}, logger)
 	}
 

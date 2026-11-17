@@ -87,7 +87,7 @@ linters:
         linters:
           - dupl
         text: "(upstream_selector|provider_optimizer)\\.go"
-      - path: protocol/lavasession/consumer_session_manager\.go
+      - path: protocol/routersession/consumer_session_manager\.go
         linters:
           - dupl
         text: "consumer_session_manager\\.go"

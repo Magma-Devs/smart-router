@@ -10,7 +10,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	commonlib "github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/holdoff"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/magma-Devs/smart-router/utils/rand"
 	"github.com/stretchr/testify/require"
 )
@@ -20,12 +20,12 @@ import (
 type pairedRetryRig struct {
 	rpsr       *RPCSmartRouter
 	chainKey   string
-	endpoint   *lavasession.RPCEndpoint
+	endpoint   *routersession.RPCEndpoint
 	inputs     *chainReverifyInputs
 	admissions *admissionRegistry
 }
 
-func newPairedRetryRig(t *testing.T, providers ...*lavasession.RPCStaticProviderEndpoint) *pairedRetryRig {
+func newPairedRetryRig(t *testing.T, providers ...*routersession.RPCStaticProviderEndpoint) *pairedRetryRig {
 	t.Helper()
 	rand.InitRandomSeed()
 	rpsr := createTestRPCSmartRouter()
@@ -48,7 +48,7 @@ func newPairedRetryRig(t *testing.T, providers ...*lavasession.RPCStaticProvider
 	}
 	inputs.retries.jitter = func() float64 { return 0 }
 	rpsr.reverifyInputs = map[string]*chainReverifyInputs{chainKey: inputs}
-	sessions := map[uint64]*lavasession.ConsumerSessionsWithProvider{}
+	sessions := map[uint64]*routersession.ConsumerSessionsWithProvider{}
 	for i, p := range providers {
 		admission, err := validateProviderCollections(t.Context(), p, parser, 20*time.Second)
 		require.NoError(t, err, p.Name)
@@ -61,7 +61,7 @@ func newPairedRetryRig(t *testing.T, providers ...*lavasession.RPCStaticProvider
 	return &pairedRetryRig{rpsr: rpsr, chainKey: chainKey, endpoint: endpoint, inputs: inputs, admissions: admissions}
 }
 
-func (r *pairedRetryRig) session(t *testing.T, name string) *lavasession.ConsumerSessionsWithProvider {
+func (r *pairedRetryRig) session(t *testing.T, name string) *routersession.ConsumerSessionsWithProvider {
 	t.Helper()
 	r.rpsr.mu.Lock()
 	defer r.rpsr.mu.Unlock()
@@ -161,7 +161,7 @@ func TestVerificationRetries_ADemoteStreakAdvancesOnRetries(t *testing.T) {
 	chainKey := endpoint.Key()
 	rpsr.sessionManagers[chainKey] = sm
 	providers := bootTestProviders("primary", "flaky")
-	rpsr.providerSessions[chainKey] = map[uint64]*lavasession.ConsumerSessionsWithProvider{
+	rpsr.providerSessions[chainKey] = map[uint64]*routersession.ConsumerSessionsWithProvider{
 		0: createTestProviderSession("primary", 1),
 		1: createTestProviderSession("flaky", 1),
 	}
@@ -171,7 +171,7 @@ func TestVerificationRetries_ADemoteStreakAdvancesOnRetries(t *testing.T) {
 		rpcEndpoint:                endpoint,
 		convertProvidersToSessions: fakeConvertSessions(2),
 		configuredStatic:           providers,
-		validateFn: func(_ context.Context, p *lavasession.RPCStaticProviderEndpoint) error {
+		validateFn: func(_ context.Context, p *routersession.RPCStaticProviderEndpoint) error {
 			if p.Name == "flaky" && down.Load() {
 				return errors.New("unreachable")
 			}
@@ -181,7 +181,7 @@ func TestVerificationRetries_ADemoteStreakAdvancesOnRetries(t *testing.T) {
 		rateLimitHoldoff: holdoff.NewRegistry(),
 	}
 	rpsr.reverifyInputs = map[string]*chainReverifyInputs{chainKey: inputs}
-	restore := swapBootValidate(func(context.Context, *lavasession.RPCStaticProviderEndpoint) error {
+	restore := swapBootValidate(func(context.Context, *routersession.RPCStaticProviderEndpoint) error {
 		if down.Load() {
 			return errors.New("unreachable")
 		}
@@ -214,7 +214,7 @@ func TestDecideReverification_DropsAProbeAnotherPassOvertook(t *testing.T) {
 	providers := bootTestProviders("flaky")
 	inputs := &chainReverifyInputs{rpcEndpoint: bootTestEndpoint(), configuredStatic: providers}
 	inputs.appliedVerdict(reverifyTierStatic, "flaky", time.Now(), nil)
-	fresh := map[uint64]*lavasession.ConsumerSessionsWithProvider{0: createTestProviderSession("flaky", 1)}
+	fresh := map[uint64]*routersession.ConsumerSessionsWithProvider{0: createTestProviderSession("flaky", 1)}
 
 	next, demoted, promoted := decideReverification(inputs, fresh, reverifyTierStatic, 1,
 		[]reverifyProbe{{provider: providers[0], err: errors.New("down"), started: time.Now().Add(-time.Second)}}, true)
@@ -248,7 +248,7 @@ func TestApplyReverification_RecordsWhenItsVerdictsWereProbed(t *testing.T) {
 		configuredStatic:           providers,
 		convertProvidersToSessions: fakeConvertSessions(1),
 		rateLimitHoldoff:           holdoff.NewRegistry(),
-		validateFn: func(_ context.Context, p *lavasession.RPCStaticProviderEndpoint) error {
+		validateFn: func(_ context.Context, p *routersession.RPCStaticProviderEndpoint) error {
 			switch p.Name {
 			case "down":
 				return errors.New("unreachable")
@@ -290,7 +290,7 @@ func TestVerificationRetries_AProviderReadmittedDegradedStaysScheduled(t *testin
 		chainParser:                parser,
 		rpcEndpoint:                endpoint,
 		convertProvidersToSessions: fakeConvertSessions(0),
-		configuredStatic:           []*lavasession.RPCStaticProviderEndpoint{provider, steady},
+		configuredStatic:           []*routersession.RPCStaticProviderEndpoint{provider, steady},
 		recordAdmission:            admissions.record,
 		recordReverifiedAdmission:  admissions.recordReverified,
 		admissionFor:               admissions.admissionFor,
@@ -302,11 +302,11 @@ func TestVerificationRetries_AProviderReadmittedDegradedStaysScheduled(t *testin
 	rpsr.reverifyInputs = map[string]*chainReverifyInputs{chainKey: inputs}
 	_, err := validateProviderCollections(t.Context(), provider, parser, 20*time.Second)
 	require.Error(t, err, "both urls dead: out at boot")
-	rpsr.failedStaticProviders[chainKey] = []*lavasession.RPCStaticProviderEndpoint{provider}
+	rpsr.failedStaticProviders[chainKey] = []*routersession.RPCStaticProviderEndpoint{provider}
 	// As boot does: the checks the pass that refused it failed are on the schedule.
 	inputs.noteFailure(reverifyTierStatic, provider.Name, err)
 	inputs.rescheduleFailed(reverifyTierStatic, provider, nil, chainlib.ProviderAdmission{}, err, true)
-	rpsr.providerSessions[chainKey] = map[uint64]*lavasession.ConsumerSessionsWithProvider{0: makeReverifySession(steady.Name, 0)}
+	rpsr.providerSessions[chainKey] = map[uint64]*routersession.ConsumerSessionsWithProvider{0: makeReverifySession(steady.Name, 0)}
 
 	up.become(urlA, upArchive)
 	runRetryLoopWithParser(t, rpsr, chainKey, parser, endpoint, fakeConvertSessions(0))
@@ -409,7 +409,7 @@ func TestVerificationRetries_AProviderOutOfThePairingRetriesOnlyWhatRefusedIt(t 
 		chainParser:                parser,
 		rpcEndpoint:                endpoint,
 		convertProvidersToSessions: fakeConvertSessions(0),
-		configuredStatic:           []*lavasession.RPCStaticProviderEndpoint{provider, steady},
+		configuredStatic:           []*routersession.RPCStaticProviderEndpoint{provider, steady},
 		recordAdmission:            admissions.record,
 		recordReverifiedAdmission:  admissions.recordReverified,
 		admissionFor:               admissions.admissionFor,
@@ -421,12 +421,12 @@ func TestVerificationRetries_AProviderOutOfThePairingRetriesOnlyWhatRefusedIt(t 
 	rpsr.reverifyInputs = map[string]*chainReverifyInputs{chainKey: inputs}
 	_, err := validateProviderCollections(t.Context(), provider, parser, 20*time.Second)
 	require.Error(t, err, "the wrong chain id refuses its only url: out at boot")
-	rpsr.failedStaticProviders[chainKey] = []*lavasession.RPCStaticProviderEndpoint{provider}
+	rpsr.failedStaticProviders[chainKey] = []*routersession.RPCStaticProviderEndpoint{provider}
 	inputs.noteFailure(reverifyTierStatic, provider.Name, err)
 	inputs.rescheduleFailed(reverifyTierStatic, provider, nil, chainlib.ProviderAdmission{}, err, true)
 	chainID := chainlib.CheckID{Name: "chain-id"}
 	require.Equal(t, []chainlib.CheckID{chainID}, inputs.retries.checksOf(reverifyTierStatic, provider.Name))
-	rpsr.providerSessions[chainKey] = map[uint64]*lavasession.ConsumerSessionsWithProvider{0: makeReverifySession(steady.Name, 0)}
+	rpsr.providerSessions[chainKey] = map[uint64]*routersession.ConsumerSessionsWithProvider{0: makeReverifySession(steady.Name, 0)}
 	booted := len(up.methods("http", path))
 
 	runRetryLoopWithParser(t, rpsr, chainKey, parser, endpoint, fakeConvertSessions(0))
@@ -448,8 +448,8 @@ func TestVerificationRetries_AProviderOutOfThePairingRetriesOnlyWhatRefusedIt(t 
 
 // retryOnly runs one retry of a provider for exactly these checks, as the loop does when
 // they are due.
-func (r *pairedRetryRig) retryOnly(provider *lavasession.RPCStaticProviderEndpoint, checks ...chainlib.CheckID) {
-	r.rpsr.retryPaired(context.Background(), r.chainKey, []*lavasession.RPCStaticProviderEndpoint{provider}, nil,
+func (r *pairedRetryRig) retryOnly(provider *routersession.RPCStaticProviderEndpoint, checks ...chainlib.CheckID) {
+	r.rpsr.retryPaired(context.Background(), r.chainKey, []*routersession.RPCStaticProviderEndpoint{provider}, nil,
 		dueChecks{reverifyTierStatic: {provider.Name: checks}})
 }
 
@@ -506,4 +506,87 @@ func TestVerificationRetries_TheDemoteGraceAdvancesOnlyOnItsOwnCheck(t *testing.
 
 	rig.retryOnly(provider, chainlib.CheckID{Name: "chain-id"})
 	require.Nil(t, rig.session(t, provider.Name), "the retry of chain-id demotes it")
+}
+
+// A check that one url of a provider fails and another passes is retried at the url that
+// failed it: the url that passed keeps its verdict and is asked nothing (MAG-4505 finding
+// 16). When the failing url passes too, the check leaves the schedule.
+func TestVerificationRetries_ACheckIsRetriedOnlyAtTheUrlThatFailedIt(t *testing.T) {
+	up := newFakeUpstreams(t)
+	const pruned, full = "/pu/a/node", "/pu/b/" + upArchive
+	up.become(pruned, upPruned)
+	provider := staticProvider("ETH1",
+		commonlib.NodeUrl{Url: up.httpURL(pruned), Addons: []string{"archive"}},
+		commonlib.NodeUrl{Url: up.httpURL(full), Addons: []string{"archive"}},
+	)
+	rig := newPairedRetryRig(t, provider)
+	archive := chainlib.CheckID{Name: "pruning", Extension: "archive"}
+	require.Equal(t, []chainlib.CheckID{archive}, rig.inputs.retries.checksOf(reverifyTierStatic, provider.Name),
+		"boot found archive failing at one url")
+	askedPruned, askedFull := len(up.methods("http", pruned)), len(up.methods("http", full))
+
+	rig.retryOnly(provider, archive)
+	require.Greater(t, len(up.methods("http", pruned)), askedPruned, "the url that failed the check is asked it again")
+	require.Len(t, up.methods("http", full), askedFull, "the url that passed it keeps its verdict and is asked nothing")
+	require.Equal(t, []chainlib.CheckID{archive}, rig.inputs.retries.checksOf(reverifyTierStatic, provider.Name),
+		"still failing at the pruned url")
+
+	up.become(pruned, upArchive)
+	rig.retryOnly(provider, archive)
+	require.Empty(t, rig.inputs.retries.checksOf(reverifyTierStatic, provider.Name),
+		"the url that failed the check passes it now, and the check leaves the schedule")
+	require.Len(t, up.methods("http", full), askedFull, "the url that passed it is still asked nothing")
+	require.NotNil(t, rig.session(t, provider.Name), "the provider serves throughout")
+}
+
+// A check that is due while every url of the provider passed it in the kept pass runs at
+// every url: the pass that made it due is not the kept one, as when a rate limit kept a
+// later pass from answering and left nothing recorded (MAG-4505 C5).
+func TestVerificationRetries_ADueCheckThatEveryUrlPassedRunsAtEveryUrl(t *testing.T) {
+	up := newFakeUpstreams(t)
+	const a, b = "/pe/a/" + upArchive, "/pe/b/" + upArchive
+	provider := staticProvider("ETH1", commonlib.NodeUrl{Url: up.httpURL(a)}, commonlib.NodeUrl{Url: up.httpURL(b)})
+	rig := newPairedRetryRig(t, provider)
+	require.False(t, rig.pending(), "every url passed at boot")
+	askedA, askedB := count(up.methods("http", a), "eth_chainId"), count(up.methods("http", b), "eth_chainId")
+
+	rig.retryOnly(provider, chainlib.CheckID{Name: "chain-id"})
+	require.Greater(t, count(up.methods("http", a), "eth_chainId"), askedA, "the due check runs at the first url")
+	require.Greater(t, count(up.methods("http", b), "eth_chainId"), askedB, "and at the second")
+}
+
+// A url held off after a rate limit is left out of a pass (MAG-4733), and what the pass
+// leaves to retry for it is its own dial, as for a url that could not be dialed: not the
+// whole pass, which would ask the sibling that passed everything its checks again. While
+// the hold-off lasts the retry asks nothing; once it ends, the retry verifies the held url
+// alone, and the provider leaves the schedule.
+func TestVerificationRetries_AHeldOffUrlIsRetriedAloneOnceItsHoldOffEnds(t *testing.T) {
+	up := newFakeUpstreams(t)
+	const a, b = "/ho/a/" + upArchive, "/ho/b/" + upArchive
+	provider := staticProvider("ETH1", commonlib.NodeUrl{Url: up.httpURL(a)}, commonlib.NodeUrl{Url: up.httpURL(b)})
+	rig := newPairedRetryRig(t, provider)
+	require.False(t, rig.pending(), "every url passed at boot")
+	key := holdoff.ProviderKey("ETH1", "jsonrpc", provider.Name)
+	rig.inputs.rateLimitHoldoff.RecordRateLimit(key, provider.NodeUrls[0].Url, 30*time.Second)
+	askedA, askedB := count(up.methods("http", a), "eth_chainId"), count(up.methods("http", b), "eth_chainId")
+
+	rig.rpsr.updateEpoch(context.Background(), rig.rpsr.epochTimer.GetCurrentEpoch())
+	require.Equal(t, askedA, count(up.methods("http", a), "eth_chainId"), "the epoch pass leaves the held url out")
+	require.Greater(t, count(up.methods("http", b), "eth_chainId"), askedB, "and verifies its sibling")
+	connect := chainlib.CheckID{Name: chainlib.CheckConnect}
+	require.Equal(t, []chainlib.CheckID{connect}, rig.inputs.retries.checksOf(reverifyTierStatic, provider.Name),
+		"the held url is retried alone, not the whole pass")
+	require.NotNil(t, rig.session(t, provider.Name), "the provider serves on its sibling")
+	askedB = count(up.methods("http", b), "eth_chainId")
+
+	rig.retryOnly(provider, connect)
+	require.Equal(t, askedA, count(up.methods("http", a), "eth_chainId"), "still held: the retry asks the url nothing")
+	require.Equal(t, askedB, count(up.methods("http", b), "eth_chainId"), "and its sibling nothing either")
+	require.Equal(t, []chainlib.CheckID{connect}, rig.inputs.retries.checksOf(reverifyTierStatic, provider.Name), "still on the schedule")
+
+	rig.inputs.rateLimitHoldoff.RecordAnswer(key, provider.NodeUrls[0].Url)
+	rig.retryOnly(provider, connect)
+	require.Greater(t, count(up.methods("http", a), "eth_chainId"), askedA, "the hold-off is over: the retry verifies the held url")
+	require.Equal(t, askedB, count(up.methods("http", b), "eth_chainId"), "its sibling keeps its verdicts and is asked nothing")
+	require.False(t, rig.pending(), "the url passes, and the provider leaves the schedule")
 }

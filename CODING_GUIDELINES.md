@@ -34,7 +34,7 @@ This document is an extension to [CONTRIBUTING](./CONTRIBUTING.md) and provides 
   or query, so a raw `NodeUrl.Url` must never reach a log, an error returned to a
   client, a metric label or a span attribute. `utils.RedactURL` (and
   `NodeUrl.UrlStr()`, which uses it) is the display form; `utils.RedactSecrets`
-  strips urls out of arbitrary text such as a `*url.Error` message. `LavaFormatLog`
+  strips urls out of arbitrary text such as a `*url.Error` message. `FormatLog`
   applies it to every message and attribute, so ordinary logging is already safe —
   what needs care is any path that formats a url without going through it.
 * Request headers are credentials too — `auth-config.auth-headers` outbound, the
@@ -43,6 +43,11 @@ This document is an extension to [CONTRIBUTING](./CONTRIBUTING.md) and provides 
   relay metadata. These fail closed: header names are always shown, values only
   for a small allow-list of transport headers, because auth header names are
   operator-configured and no deny-list can enumerate them.
+
+* Customer identities and customer-specific usage figures belong in private Jira
+  evidence. Public source, comments, fixtures, documentation, commit messages and
+  pull request discussions use neutral examples and reserved example domains.
+  Preserve the technical failure and Jira reference without identifying the tenant.
 
 ### Documentation
 

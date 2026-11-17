@@ -9,8 +9,8 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/chainstate"
 	"github.com/magma-Devs/smart-router/protocol/endpointstate"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	rand "github.com/magma-Devs/smart-router/utils/rand"
@@ -51,7 +51,7 @@ func TestGetLatestBlock_ColdStartAndStale(t *testing.T) {
 	}, clk.now)
 
 	rpcss := &RPCSmartRouterServer{
-		listenEndpoint: &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		listenEndpoint: &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 		chainState:     cs,
 	}
 
@@ -75,7 +75,7 @@ func TestGetLatestBlock_ColdStartAndStale(t *testing.T) {
 // TestGetLatestBlock_NilChainState is the defensive path: with no ChainState wired, getLatestBlock
 // reports unknown (0). The bootstrap atomic that used to answer here is retired (T3).
 func TestGetLatestBlock_NilChainState(t *testing.T) {
-	rpcss := &RPCSmartRouterServer{listenEndpoint: &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"}}
+	rpcss := &RPCSmartRouterServer{listenEndpoint: &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"}}
 	require.Equal(t, uint64(0), rpcss.getLatestBlock(), "no chainState → unknown")
 }
 
@@ -92,7 +92,7 @@ func TestGetLatestBlockAllowStale_ServesStaleAndHeals(t *testing.T) {
 		TTL:              10 * time.Second,
 	}, clk.now)
 	rpcss := &RPCSmartRouterServer{
-		listenEndpoint: &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		listenEndpoint: &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 		chainState:     cs,
 	}
 
@@ -132,7 +132,7 @@ func TestGetLatestBlock_GatedTipForFinalization(t *testing.T) {
 	}, clk.now)
 
 	rpcss := &RPCSmartRouterServer{
-		listenEndpoint: &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		listenEndpoint: &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 		chainState:     cs,
 	}
 
@@ -166,7 +166,7 @@ func TestGetLatestBlock_GatedTipForFinalization(t *testing.T) {
 		TTL:              10 * time.Second,
 	}, clkSnap.now)
 	rpcssSnap := &RPCSmartRouterServer{
-		listenEndpoint: &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		listenEndpoint: &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 		chainState:     csSnap,
 	}
 	csSnap.SetLatestBlock(1200) // accepted raw: first observation, no reference to reject against
@@ -197,7 +197,7 @@ func TestRecomputeChainStateConsensus_EmptySnapshotClearsBaseline(t *testing.T) 
 	m := newHarvestMonitor(t)
 	cs := chainstate.New("ETH1", chainstate.DefaultConfig(200*time.Millisecond))
 	rpcss := &RPCSmartRouterServer{
-		listenEndpoint:              &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		listenEndpoint:              &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 		endpointChainTrackerManager: m,
 		chainState:                  cs,
 	}
@@ -239,14 +239,14 @@ func TestRecomputeChainStateConsensus_PopulatedSnapshotSetsBaseline(t *testing.T
 
 	cs := chainstate.New("ETH1", chainstate.DefaultConfig(200*time.Millisecond))
 	rpcss := &RPCSmartRouterServer{
-		listenEndpoint:              &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		listenEndpoint:              &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 		endpointChainTrackerManager: m,
 		chainState:                  cs,
 	}
 
 	// Two endpoints report the same tip via relay harvest → a strict majority.
 	for _, url := range []string{"http://a:8545", "http://b:8545"} {
-		ep := &lavasession.Endpoint{NetworkAddress: url, Enabled: true}
+		ep := &routersession.Endpoint{NetworkAddress: url, Enabled: true}
 		_, err := m.GetOrCreateTracker("", ep, nil)
 		require.NoError(t, err)
 		gen, ok := m.ObservationGeneration(url)
@@ -283,14 +283,14 @@ func TestSiteB_ObservationFresherThanTrackerAtomic(t *testing.T) {
 	t.Cleanup(m.Stop)
 
 	url := "http://ep:8545"
-	ep := &lavasession.Endpoint{NetworkAddress: url, Enabled: true}
+	ep := &routersession.Endpoint{NetworkAddress: url, Enabled: true}
 	_, err := m.GetOrCreateTracker("", ep, nil) // tracker exists, but its poll atomic stays 0 (nil conn)
 	require.NoError(t, err)
 	gen, ok := m.ObservationGeneration(url)
 	require.True(t, ok)
 
 	rpcss := &RPCSmartRouterServer{
-		listenEndpoint:              &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		listenEndpoint:              &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 		endpointChainTrackerManager: m,
 	}
 	rpcss.recordRelayBlockObservation(ep, gen, 4242)
@@ -329,7 +329,7 @@ func TestCacheServedReply_DoesNotMoveTip(t *testing.T) {
 
 	cs := chainstate.New("ETH1", chainstate.DefaultConfig(200*time.Millisecond))
 	rpcss := &RPCSmartRouterServer{
-		listenEndpoint: &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		listenEndpoint: &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 		chainState:     cs,
 	}
 	require.Equal(t, int64(0), cs.GetLatestBlockAllowStale(), "fresh tip starts at 0")
@@ -391,7 +391,7 @@ func TestHarvest_ArchiveRoutingTipGuardedByChainState(t *testing.T) {
 	t.Cleanup(m.Stop)
 
 	rpcss := &RPCSmartRouterServer{
-		listenEndpoint:              &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		listenEndpoint:              &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 		chainParser:                 parser,
 		endpointChainTrackerManager: m,
 		chainState:                  cs,
@@ -399,7 +399,7 @@ func TestHarvest_ArchiveRoutingTipGuardedByChainState(t *testing.T) {
 	}
 
 	url := "http://ep:8545"
-	ep := &lavasession.Endpoint{NetworkAddress: url, Enabled: true}
+	ep := &routersession.Endpoint{NetworkAddress: url, Enabled: true}
 	_, err := m.GetOrCreateTracker("", ep, nil)
 	require.NoError(t, err)
 	gen, ok := m.ObservationGeneration(url)
@@ -551,7 +551,7 @@ func TestEndpointSyncGap_NoBaselinePodFallsBackToObservedTip(t *testing.T) {
 	t.Cleanup(m.Stop)
 
 	rpcss := &RPCSmartRouterServer{
-		listenEndpoint:              &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		listenEndpoint:              &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 		chainParser:                 parser,
 		endpointChainTrackerManager: m,
 		chainState:                  cs,
@@ -560,7 +560,7 @@ func TestEndpointSyncGap_NoBaselinePodFallsBackToObservedTip(t *testing.T) {
 	leaderURL, laggardURL := "http://leader:8545", "http://laggard:8545"
 	cm := &mockChainMessage{api: &spectypes.Api{Name: "eth_blockNumber"}, requestedBlock: spectypes.LATEST_BLOCK}
 	for _, url := range []string{leaderURL, laggardURL} {
-		ep := &lavasession.Endpoint{NetworkAddress: url, Enabled: true}
+		ep := &routersession.Endpoint{NetworkAddress: url, Enabled: true}
 		_, err := m.GetOrCreateTracker("", ep, nil)
 		require.NoError(t, err)
 		gen, ok := m.ObservationGeneration(url)
@@ -569,7 +569,7 @@ func TestEndpointSyncGap_NoBaselinePodFallsBackToObservedTip(t *testing.T) {
 		if url == laggardURL {
 			block = 900 // 100 behind → beyond BucketWidth, destroys the 2-node majority by itself
 		}
-		rpcss.harvestAndUpdateTipFromRelay(&lavasession.Endpoint{NetworkAddress: url, Enabled: true}, cm, &pairingtypes.RelayReply{LatestBlock: block}, gen, url)
+		rpcss.harvestAndUpdateTipFromRelay(&routersession.Endpoint{NetworkAddress: url, Enabled: true}, cm, &pairingtypes.RelayReply{LatestBlock: block}, gen, url)
 	}
 
 	// The two nodes are 100 apart → no strict-majority cluster forms.
@@ -681,7 +681,7 @@ func TestOnTipObservation_GaugeAdvancesUnderPollOnlyTraffic(t *testing.T) {
 	rpcss := &RPCSmartRouterServer{
 		chainState:                 cs,
 		smartRouterEndpointMetrics: mm,
-		listenEndpoint:             &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		listenEndpoint:             &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 	}
 
 	// Two consecutive poll observations — no relay anywhere in this test — must move the gauge.
@@ -740,7 +740,7 @@ func TestChainBlockRegression_CountedAndGaugeFollows(t *testing.T) {
 	mm := metrics.NewSmartRouterMetricsManager(metrics.SmartRouterMetricsManagerOptions{})
 	rpcss := &RPCSmartRouterServer{
 		smartRouterEndpointMetrics: mm,
-		listenEndpoint:             &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		listenEndpoint:             &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 	}
 	rpcss.chainState = rpcss.newChainState(12 * time.Second)
 

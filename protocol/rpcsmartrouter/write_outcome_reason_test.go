@@ -21,10 +21,10 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	relaycoretest "github.com/magma-Devs/smart-router/protocol/relaycoretest"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/magma-Devs/smart-router/utils/rand"
@@ -102,7 +102,7 @@ func sendRESTWriteThroughListener(t *testing.T, upstreams []restWriteUpstream) r
 			release()
 		}
 	}()
-	providers := map[uint64]*lavasession.ConsumerSessionsWithProvider{}
+	providers := map[uint64]*routersession.ConsumerSessionsWithProvider{}
 	for index, upstream := range upstreams {
 		nodeURL := endpoint.NodeUrls[0]
 		if index > 0 {
@@ -115,21 +115,21 @@ func sendRESTWriteThroughListener(t *testing.T, upstreams []restWriteUpstream) r
 			// relay with this upstream silent.
 			nodeURL.Timeout = 2 * time.Second
 		}
-		conn, err := lavasession.NewDirectRPCConnection(ctx, nodeURL, 5, spectypes.APIInterfaceRest)
+		conn, err := routersession.NewDirectRPCConnection(ctx, nodeURL, 5, spectypes.APIInterfaceRest)
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = conn.Close() })
 		if upstream.hang {
 			release := make(chan struct{})
 			releases = append(releases, sync.OnceFunc(func() { close(release) }))
-			doer, ok := conn.(lavasession.HTTPDirectRPCDoer)
+			doer, ok := conn.(routersession.HTTPDirectRPCDoer)
 			require.True(t, ok)
 			conn = &heldCancelledRESTConnection{HTTPDirectRPCDoer: doer, cancelled: make(chan struct{}), release: release}
 		}
-		providerEndpoint := &lavasession.Endpoint{
+		providerEndpoint := &routersession.Endpoint{
 			NetworkAddress: nodeURL.Url, Enabled: true,
-			DirectConnections: []lavasession.DirectRPCConnection{conn},
+			DirectConnections: []routersession.DirectRPCConnection{conn},
 		}
-		provider := lavasession.NewConsumerSessionWithProvider(upstream.name, []*lavasession.Endpoint{providerEndpoint}, 100000, 1, 1)
+		provider := routersession.NewConsumerSessionWithProvider(upstream.name, []*routersession.Endpoint{providerEndpoint}, 100000, 1, 1)
 		provider.StaticProvider = true
 		providers[uint64(index)] = provider
 	}
@@ -317,7 +317,7 @@ func TestUnclearWriteOutcomeFor_ReasonFollowsTheFailure(t *testing.T) {
 	unclassified := errors.New("zork")
 	type failure struct {
 		err  error
-		code *common.LavaError
+		code *common.RouterError
 	}
 	for _, tc := range []struct {
 		name       string
@@ -327,25 +327,25 @@ func TestUnclearWriteOutcomeFor_ReasonFollowsTheFailure(t *testing.T) {
 	}{
 		// A dial that timed out never sent the transaction, and it reads exactly like a response
 		// that timed out, so neither may be called an answer lost after sending.
-		{name: "a dial that timed out", failures: []failure{{dialTimeout, common.LavaErrorConnectionTimeout}}, wantReason: noNodeResponded},
-		{name: "the attempt's own deadline", failures: []failure{{context.DeadlineExceeded, common.LavaErrorContextDeadline}}, wantReason: noNodeResponded},
+		{name: "a dial that timed out", failures: []failure{{dialTimeout, common.RouterErrorConnectionTimeout}}, wantReason: noNodeResponded},
+		{name: "the attempt's own deadline", failures: []failure{{context.DeadlineExceeded, common.RouterErrorContextDeadline}}, wantReason: noNodeResponded},
 		{
 			name: "cancelled because the budget ran out", stop: relaycore.StopReasonProcessingTimeout,
-			failures: []failure{{context.Canceled, common.LavaErrorContextCanceled}}, wantReason: noNodeResponded,
+			failures: []failure{{context.Canceled, common.RouterErrorContextCanceled}}, wantReason: noNodeResponded,
 		},
-		{name: "a connection reset", failures: []failure{{reset, common.LavaErrorConnectionReset}}, wantReason: answerLost},
-		{name: "an EOF", failures: []failure{{io.EOF, common.LavaErrorConnectionClosed}}, wantReason: answerLost},
+		{name: "a connection reset", failures: []failure{{reset, common.RouterErrorConnectionReset}}, wantReason: answerLost},
+		{name: "an EOF", failures: []failure{{io.EOF, common.RouterErrorConnectionClosed}}, wantReason: answerLost},
 		{
 			name:       "a reset beside a timeout: the timeout wins",
-			failures:   []failure{{reset, common.LavaErrorConnectionReset}, {dialTimeout, common.LavaErrorConnectionTimeout}},
+			failures:   []failure{{reset, common.RouterErrorConnectionReset}, {dialTimeout, common.RouterErrorConnectionTimeout}},
 			wantReason: notEveryNode,
 		},
 		// Neither a timeout nor a broken connection: the reason claims neither.
-		{name: "cancelled with budget left", failures: []failure{{context.Canceled, common.LavaErrorContextCanceled}}, wantReason: noAnswer},
-		{name: "an error nothing classifies", failures: []failure{{unclassified, common.LavaErrorUnknown}}, wantReason: noAnswer},
+		{name: "cancelled with budget left", failures: []failure{{context.Canceled, common.RouterErrorContextCanceled}}, wantReason: noAnswer},
+		{name: "an error nothing classifies", failures: []failure{{unclassified, common.RouterErrorUnknown}}, wantReason: noAnswer},
 		{
 			name:       "an unclassified error beside a reset: the lost answer wins",
-			failures:   []failure{{unclassified, common.LavaErrorUnknown}, {reset, common.LavaErrorConnectionReset}},
+			failures:   []failure{{unclassified, common.RouterErrorUnknown}, {reset, common.RouterErrorConnectionReset}},
 			wantReason: answerLost,
 		},
 	} {
@@ -355,7 +355,7 @@ func TestUnclearWriteOutcomeFor_ReasonFollowsTheFailure(t *testing.T) {
 			if tc.stop != "" {
 				processor.SetStopReason(tc.stop)
 			}
-			provider := func(i int) string { return "lava@" + string(rune('a'+i)) }
+			provider := func(i int) string { return "provider@" + string(rune('a'+i)) }
 			for i, f := range tc.failures {
 				relaycoretest.SendProtocolError(processor, provider(i), 0, f.err)
 			}
@@ -363,9 +363,9 @@ func TestUnclearWriteOutcomeFor_ReasonFollowsTheFailure(t *testing.T) {
 
 			_, _, protocolErrors := processor.GetResultsData()
 			require.Len(t, protocolErrors, len(tc.failures))
-			classified := map[string]*common.LavaError{}
+			classified := map[string]*common.RouterError{}
 			for _, protocolError := range protocolErrors {
-				classified[protocolError.ProviderInfo.ProviderAddress] = protocolError.LavaError
+				classified[protocolError.ProviderInfo.ProviderAddress] = protocolError.RouterError
 			}
 			for i, f := range tc.failures {
 				require.Same(t, f.code, classified[provider(i)], "%v must be classified as %s", f.err, f.code.Name)
@@ -413,27 +413,27 @@ func TestWriteCutOffs_Classification(t *testing.T) {
 	plain := errors.New("upstream failure")
 	for _, tc := range []struct {
 		name         string
-		lavaError    *common.LavaError
+		routerError  *common.RouterError
 		err          error
 		ranOutOfRoad bool
 		relayEnd     string
 		want         writeCutOffs
 	}{
-		{name: "connection timeout", lavaError: common.LavaErrorConnectionTimeout, err: plain, relayEnd: attemptOutcomeTimeout, want: writeCutOffs{timedOut: 1}},
-		{name: "context deadline", lavaError: common.LavaErrorContextDeadline, err: plain, relayEnd: attemptOutcomeTimeout, want: writeCutOffs{timedOut: 1}},
-		{name: "a raw deadline", lavaError: common.LavaErrorUnknown, err: context.DeadlineExceeded, relayEnd: attemptOutcomeTimeout, want: writeCutOffs{timedOut: 1}},
-		{name: "no response before the race cutoff", lavaError: common.LavaErrorNoResponseTimeout, err: plain, relayEnd: attemptOutcomeTimeout, want: writeCutOffs{timedOut: 1}},
-		{name: "cancelled by the budget", lavaError: common.LavaErrorContextCanceled, err: context.Canceled, ranOutOfRoad: true, relayEnd: attemptOutcomeTimeout, want: writeCutOffs{timedOut: 1}},
-		{name: "cancelled with budget left", lavaError: common.LavaErrorContextCanceled, err: context.Canceled, relayEnd: attemptOutcomeCancelled},
-		{name: "gateway timeout", lavaError: common.LavaErrorNodeGatewayTimeout, err: plain, relayEnd: attemptOutcomeTransportError, want: writeCutOffs{timedOut: 1}},
-		{name: "connection reset", lavaError: common.LavaErrorConnectionReset, err: plain, relayEnd: attemptOutcomeTransportError, want: writeCutOffs{lost: 1}},
-		{name: "EOF", lavaError: common.LavaErrorConnectionClosed, err: plain, relayEnd: attemptOutcomeTransportError, want: writeCutOffs{lost: 1}},
-		{name: "bad gateway", lavaError: common.LavaErrorNodeBadGateway, err: plain, relayEnd: attemptOutcomeTransportError, want: writeCutOffs{lost: 1}},
-		{name: "unclassified", lavaError: common.LavaErrorUnknown, err: plain, relayEnd: attemptOutcomeTransportError},
-		{name: "connection refused", lavaError: common.LavaErrorConnectionRefused, err: plain, relayEnd: attemptOutcomeTransportError},
+		{name: "connection timeout", routerError: common.RouterErrorConnectionTimeout, err: plain, relayEnd: attemptOutcomeTimeout, want: writeCutOffs{timedOut: 1}},
+		{name: "context deadline", routerError: common.RouterErrorContextDeadline, err: plain, relayEnd: attemptOutcomeTimeout, want: writeCutOffs{timedOut: 1}},
+		{name: "a raw deadline", routerError: common.RouterErrorUnknown, err: context.DeadlineExceeded, relayEnd: attemptOutcomeTimeout, want: writeCutOffs{timedOut: 1}},
+		{name: "no response before the race cutoff", routerError: common.RouterErrorNoResponseTimeout, err: plain, relayEnd: attemptOutcomeTimeout, want: writeCutOffs{timedOut: 1}},
+		{name: "cancelled by the budget", routerError: common.RouterErrorContextCanceled, err: context.Canceled, ranOutOfRoad: true, relayEnd: attemptOutcomeTimeout, want: writeCutOffs{timedOut: 1}},
+		{name: "cancelled with budget left", routerError: common.RouterErrorContextCanceled, err: context.Canceled, relayEnd: attemptOutcomeCancelled},
+		{name: "gateway timeout", routerError: common.RouterErrorNodeGatewayTimeout, err: plain, relayEnd: attemptOutcomeTransportError, want: writeCutOffs{timedOut: 1}},
+		{name: "connection reset", routerError: common.RouterErrorConnectionReset, err: plain, relayEnd: attemptOutcomeTransportError, want: writeCutOffs{lost: 1}},
+		{name: "EOF", routerError: common.RouterErrorConnectionClosed, err: plain, relayEnd: attemptOutcomeTransportError, want: writeCutOffs{lost: 1}},
+		{name: "bad gateway", routerError: common.RouterErrorNodeBadGateway, err: plain, relayEnd: attemptOutcomeTransportError, want: writeCutOffs{lost: 1}},
+		{name: "unclassified", routerError: common.RouterErrorUnknown, err: plain, relayEnd: attemptOutcomeTransportError},
+		{name: "connection refused", routerError: common.RouterErrorConnectionRefused, err: plain, relayEnd: attemptOutcomeTransportError},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			protocolError := relaycore.RelayError{Err: tc.err, LavaError: tc.lavaError}
+			protocolError := relaycore.RelayError{Err: tc.err, RouterError: tc.routerError}
 			require.Equal(t, tc.relayEnd, protocolErrorOutcome(protocolError, tc.ranOutOfRoad), "what relay_end logs for the attempt")
 			var got writeCutOffs
 			got.add(protocolError, tc.ranOutOfRoad)

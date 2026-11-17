@@ -9,9 +9,9 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	"github.com/magma-Devs/smart-router/protocol/relaycoretest"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 )
@@ -42,7 +42,7 @@ func TestFailoverCadence_NextEndpointDispatchedAfterOneWindow(t *testing.T) {
 	require.NoError(t, err)
 	protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "dapp", "1.2.3.4")
 
-	usedProviders := lavasession.NewUsedProviders(nil)
+	usedProviders := routersession.NewUsedProviders(nil)
 	// The processing budget is deliberately far larger than the window, so the request cannot end
 	// before the ticker has fired twice — this measures cadence, not the budget.
 	stateMachine, err := NewSmartRouterRelayStateMachine(ctx, usedProviders,
@@ -57,7 +57,7 @@ func TestFailoverCadence_NextEndpointDispatchedAfterOneWindow(t *testing.T) {
 
 	// Every endpoint stays silent, so the only thing that can produce another dispatch is the
 	// ticker. Record when each one arrives.
-	sessions := lavasession.ConsumerSessionsMap{"lava@a": &lavasession.SessionInfo{}, "lava@b": &lavasession.SessionInfo{}}
+	sessions := routersession.ConsumerSessionsMap{"provider@a": &routersession.SessionInfo{}, "provider@b": &routersession.SessionInfo{}}
 	var dispatchedAt []time.Time
 
 	// Bounded, because the regression this guards against is a ticker that never fires within the

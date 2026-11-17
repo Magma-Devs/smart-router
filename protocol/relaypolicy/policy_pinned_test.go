@@ -5,8 +5,8 @@ import (
 	"testing"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/stretchr/testify/require"
 )
 
@@ -47,7 +47,7 @@ func TestDecide_PinnedNeverLeavesThePinnedUpstream(t *testing.T) {
 // change it, and the resend used to be where the pin was dropped and the request rerouted
 // (MAG-4123). The send stage stops at once, before SendRelayAttempts identical refusals.
 func TestOnSendRelayResult_PinnedUpstreamUnservableStopsAtOnce(t *testing.T) {
-	for _, sentinel := range []error{lavasession.SelectedProviderUnavailableError, lavasession.SelectedProviderAlreadyFailedError} {
+	for _, sentinel := range []error{routersession.SelectedProviderUnavailableError, routersession.SelectedProviderAlreadyFailedError} {
 		t.Run(sentinel.Error(), func(t *testing.T) {
 			policy := NewPolicy(PolicyConfig{SendRelayAttempts: 3})
 			wrapped := fmt.Errorf("pinned provider is 15 blocks behind the chain tip: %w", sentinel)

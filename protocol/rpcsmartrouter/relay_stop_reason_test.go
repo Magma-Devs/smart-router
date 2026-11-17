@@ -10,16 +10,16 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	common "github.com/magma-Devs/smart-router/protocol/common"
-	lavasession "github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	"github.com/magma-Devs/smart-router/protocol/relaycoretest"
+	routersession "github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 )
 
 // newStopReasonHarness builds a state machine + processor over the REST mock chain, the same shape
 // the other state-machine tests use. tickerValue is long so hedge retries do not interleave.
-func newStopReasonHarness(t *testing.T) (*relaycore.RelayProcessor, *lavasession.UsedProviders) {
+func newStopReasonHarness(t *testing.T) (*relaycore.RelayProcessor, *routersession.UsedProviders) {
 	t.Helper()
 	ctx := context.Background()
 	serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -33,7 +33,7 @@ func newStopReasonHarness(t *testing.T) (*relaycore.RelayProcessor, *lavasession
 	chainMsg, err := chainParser.ParseMsg("/cosmos/base/tendermint/v1beta1/blocks/17", nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 	require.NoError(t, err)
 	protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "dapp", "123.11")
-	usedProviders := lavasession.NewUsedProviders(nil)
+	usedProviders := routersession.NewUsedProviders(nil)
 	stateMachine, err := NewSmartRouterRelayStateMachine(ctx, usedProviders, &SmartRouterRelaySenderMock{retValue: nil, tickerValue: 10 * time.Second}, protocolMessage, nil, false)
 	require.NoError(t, err)
 	return relaycore.NewRelayProcessor(ctx, &common.DefaultCrossValidationParams, relaycoretest.RelayProcessorMetrics, relaycoretest.RelayProcessorMetrics, stateMachine), usedProviders
@@ -48,7 +48,7 @@ func newStopReasonHarness(t *testing.T) (*relaycore.RelayProcessor, *lavasession
 func TestStopReason_EveryTerminalPathNamesOne(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
 		relayProcessor, usedProviders := newStopReasonHarness(t)
-		consumerSessionsMap := lavasession.ConsumerSessionsMap{"lava@test": &lavasession.SessionInfo{}}
+		consumerSessionsMap := routersession.ConsumerSessionsMap{"provider@test": &routersession.SessionInfo{}}
 
 		relayTaskChannel, err := relayProcessor.GetRelayTaskChannel()
 		require.NoError(t, err)
@@ -60,7 +60,7 @@ func TestStopReason_EveryTerminalPathNamesOne(t *testing.T) {
 			}
 			usedProviders.AddUsed(consumerSessionsMap, nil)
 			relayProcessor.UpdateBatch(nil)
-			relaycoretest.SendSuccessResp(relayProcessor, "lava@test", time.Millisecond*1)
+			relaycoretest.SendSuccessResp(relayProcessor, "provider@test", time.Millisecond*1)
 		}
 		t.Fatal("channel closed without a Done instruction")
 	})
@@ -94,7 +94,7 @@ func TestStopReason_EveryTerminalPathNamesOne(t *testing.T) {
 				require.Equal(t, "AllProvidersExhausted", task.StopReason)
 				return
 			}
-			relayProcessor.UpdateBatch(lavasession.PairingListEmptyError)
+			relayProcessor.UpdateBatch(routersession.PairingListEmptyError)
 		}
 		t.Fatal("channel closed without a Done instruction")
 	})
@@ -108,7 +108,7 @@ func TestStopReason_EveryTerminalPathNamesOne(t *testing.T) {
 		defer func() { relaycore.RelayRetryLimit = originalValue }()
 
 		relayProcessor, usedProviders := newStopReasonHarness(t)
-		consumerSessionsMap := lavasession.ConsumerSessionsMap{"lava@test": &lavasession.SessionInfo{}}
+		consumerSessionsMap := routersession.ConsumerSessionsMap{"provider@test": &routersession.SessionInfo{}}
 
 		relayTaskChannel, err := relayProcessor.GetRelayTaskChannel()
 		require.NoError(t, err)
@@ -120,7 +120,7 @@ func TestStopReason_EveryTerminalPathNamesOne(t *testing.T) {
 			}
 			usedProviders.AddUsed(consumerSessionsMap, nil)
 			relayProcessor.UpdateBatch(nil)
-			relaycoretest.SendNodeError(relayProcessor, "lava@test", time.Millisecond*1)
+			relaycoretest.SendNodeError(relayProcessor, "provider@test", time.Millisecond*1)
 		}
 		t.Fatal("channel closed without a Done instruction")
 	})

@@ -153,7 +153,7 @@ func TestRedactIfURL(t *testing.T) {
 	}{
 		// Not urls — must survive byte-for-byte. A lava address carries an "@",
 		// which RedactURL would otherwise read as userinfo and strip.
-		{"lava provider address", "lava@harvestGenProvider", "lava@harvestGenProvider"},
+		{"provider address", "lava@harvestGenProvider", "lava@harvestGenProvider"},
 		{"lava bech32 address", "lava@1abcdefghijklmnop", "lava@1abcdefghijklmnop"},
 		{"provider name", "eth-primary-1", "eth-primary-1"},
 		{"host and port", "ep:8545", "ep:8545"},

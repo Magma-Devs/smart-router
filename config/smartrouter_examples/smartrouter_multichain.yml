@@ -11,10 +11,13 @@
 #   3366  COSMOSHUB   grpc           cosmos-grpc.publicnode.com  + cosmos-grpc.polkachu.com
 #   3367  APT1        rest           aptos-rest.publicnode.com   + fullnode.mainnet.aptoslabs.com
 #
-# ETH1 requires a ws:// leg for subscriptions, so it pairs an https url with a
-# wss one. SOLANA, BTC, HYPERLIQUID (jsonrpc) and APT1 (rest) are HTTP-only here,
-# so start the router with --skip-websocket-verification (the docker-compose
-# example does this).
+# ETH1 serves subscriptions over a ws:// leg, so it pairs an https url with a
+# wss one. SOLANA, BTC, HYPERLIQUID (jsonrpc) and APT1 (rest) are HTTP-only here
+# and serve everything but subscriptions. A provider with no ws url on an
+# interface that subscribes (SOLANA, Polkachu's tendermintrpc) publishes the
+# websocket's missing-url (MAG-3950). No flag is needed for that; the
+# docker-compose example passes --skip-websocket-verification, which only stops
+# checks over ws(s) urls.
 #
 # Specs resolve from the bundled specs/ (pass --use-static-spec specs/): ETH1,
 # SOLANA, BTC, HYPERLIQUID, APT1, and COSMOSHUB (imports COSMOSSDK50 + COSMOSWASM,
@@ -89,7 +92,7 @@ direct-rpc:
       - url: "https://mainnet.gateway.tenderly.co"
       - url: "wss://mainnet.gateway.tenderly.co"
 
-  # ---- Solana (SOLANA) — HTTP-only; run with --skip-websocket-verification ----
+  # ---- Solana (SOLANA) — HTTP-only: no subscriptions, publishes missing-url ----
   - name: "sol-publicnode"
     group-label: "publicnode"
     chain-id: "SOLANA"

@@ -15,10 +15,10 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/chainstate"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/performance"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	"github.com/magma-Devs/smart-router/protocol/relaycoretest"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
@@ -128,7 +128,7 @@ func newSecondaryTestServer(chainParser chainlib.ChainParser, primary *performan
 		secondaryCache:        secondary,
 		secondaryCacheTimeout: timeout,
 		chainParser:           chainParser,
-		listenEndpoint:        &lavasession.RPCEndpoint{ChainID: "LAVA", ApiInterface: spectypes.APIInterfaceRest},
+		listenEndpoint:        &routersession.RPCEndpoint{ChainID: "LAVA", ApiInterface: spectypes.APIInterfaceRest},
 	}
 }
 
@@ -157,7 +157,7 @@ func runSecondaryLookupOn(t *testing.T, rpcss *RPCSmartRouterServer, chainID str
 	hashKey, outputFormatter, err := protocolMessage.HashCacheRequest(chainID)
 	require.NoError(t, err)
 
-	usedProviders := lavasession.NewUsedProviders(nil)
+	usedProviders := routersession.NewUsedProviders(nil)
 	stateMachine, err := NewSmartRouterRelayStateMachine(ctx, usedProviders, &SmartRouterRelaySenderMock{retValue: nil}, protocolMessage, nil, false)
 	require.NoError(t, err)
 	relayProcessor := relaycore.NewRelayProcessor(ctx, &common.DefaultCrossValidationParams, relaycoretest.RelayProcessorMetrics, relaycoretest.RelayProcessorMetrics, stateMachine)
@@ -496,7 +496,7 @@ func TestSecondaryPoisonedEntrySanitizedForCallerAndBackfill(t *testing.T) {
 				Sig:         []byte{0xde, 0xad},
 				SigBlocks:   []byte{0xbe, 0xef},
 				Metadata: []pairingtypes.Metadata{
-					{Name: "Lava-Provider-Address", Value: "lava@provider1"},
+					{Name: "Lava-Provider-Address", Value: "provider@provider1"},
 					{Name: "X-Provider-ID", Value: "prov-42"},
 					{Name: "X-Backend", Value: "geth-fra-03"},
 					{Name: "X-Served-By", Value: "edge-9.internal"},
@@ -666,7 +666,7 @@ func TestSecondaryLookupNeverRequestsForeignBlockHashHeights(t *testing.T) {
 		},
 	}
 	rpcss := newSecondaryTestServer(chainParser, nil, fake, 100*time.Millisecond)
-	rpcss.listenEndpoint = &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: spectypes.APIInterfaceJsonRPC}
+	rpcss.listenEndpoint = &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: spectypes.APIInterfaceJsonRPC}
 
 	hashKey, outputFormatter, err := protocolMessage.HashCacheRequest("ETH1")
 	require.NoError(t, err)

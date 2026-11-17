@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -26,7 +26,7 @@ type subscriptionManagerCase struct {
 // subscriptionCascade is what the table reads off a built manager.
 type subscriptionCascade struct {
 	selectEndpoint func(ctx context.Context, clientKey string, ignored map[string]struct{}) (*common.NodeUrl, error)
-	stickyStore    *lavasession.StickySessionStore
+	stickyStore    *routersession.StickySessionStore
 	endpointsByURL map[string]*common.NodeUrl
 }
 
@@ -159,7 +159,7 @@ func TestSelectEndpoint_Cascade(t *testing.T) {
 
 					cascade := manager.build(nodeURLs(sc.primary), backup, optimizer)
 					if sc.sticky != "" {
-						cascade.stickyStore.Set("client-1", &lavasession.StickySession{Provider: manager.url(sc.sticky)})
+						cascade.stickyStore.Set("client-1", &routersession.StickySession{Provider: manager.url(sc.sticky)})
 					}
 					var ignored map[string]struct{}
 					if sc.ignored != nil {

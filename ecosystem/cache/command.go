@@ -29,7 +29,7 @@ longer DefaultExpirationForNonFinalized will reduce sync QoS for "latest" reques
 			ctx := context.Background()
 			logLevel, err := cmd.Flags().GetString(FlagLogLevel)
 			if err != nil {
-				utils.LavaFormatFatal("failed to read log level flag", err)
+				utils.FormatFatal("failed to read log level flag", err)
 			}
 			utils.SetGlobalLoggingLevel(logLevel)
 
@@ -39,7 +39,7 @@ longer DefaultExpirationForNonFinalized will reduce sync QoS for "latest" reques
 
 			metricsAddress, err := cmd.Flags().GetString(FlagMetricsAddress)
 			if err != nil {
-				utils.LavaFormatFatal("failed to read metrics address flag", err)
+				utils.FormatFatal("failed to read metrics address flag", err)
 			}
 			Server(ctx, address, metricsAddress, cmd.Flags())
 			return nil

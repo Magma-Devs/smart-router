@@ -17,8 +17,8 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	specutils "github.com/magma-Devs/smart-router/utils/keeper"
@@ -655,7 +655,7 @@ func startTestJsonRPCListenerWithSubscriptions(t *testing.T, ctx context.Context
 	if !rand.Initialized() {
 		rand.InitRandomSeed()
 	}
-	endpoint := &lavasession.RPCEndpoint{
+	endpoint := &routersession.RPCEndpoint{
 		NetworkAddress:  "127.0.0.1:0",
 		ChainID:         "ETH1",
 		ApiInterface:    "jsonrpc",
@@ -752,7 +752,7 @@ func TestJsonRPCChainListener_WebSocketUpgradesOnAnyPath(t *testing.T) {
 	defer cancelServe()
 	_, addr := startTestJsonRPCListener(t, serveCtx, false)
 
-	for _, path := range []string{"/", "/ws", "/websocket", "/lava@dapp"} {
+	for _, path := range []string{"/", "/ws", "/websocket", "/provider@dapp"} {
 		client, resp, err := websocket.DefaultDialer.Dial("ws://"+addr+path, nil)
 		require.NoError(t, err, "WS dial on %q should upgrade", path)
 		require.Equal(t, http.StatusSwitchingProtocols, resp.StatusCode, "path %q", path)

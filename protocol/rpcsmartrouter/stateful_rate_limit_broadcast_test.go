@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -16,11 +17,11 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/holdoff"
-	"github.com/magma-Devs/smart-router/protocol/lavaprotocol"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
+	"github.com/magma-Devs/smart-router/protocol/relayprotocol"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils/rand"
 )
@@ -134,14 +135,23 @@ var writeInterfaceCases = []writeInterfaceCase{
 // the write and neither order nor weighting decides who is asked.
 func newTwoPrimaryWriteServer(t *testing.T, tc writeInterfaceCase, chainParser chainlib.ChainParser, upstreams [2]writeUpstream) (*[2]int64, *RPCSmartRouterServer) {
 	t.Helper()
-	ctx := context.Background()
 	hits := &[2]int64{}
-	rpcEndpoint := &lavasession.RPCEndpoint{ChainID: tc.chainID, ApiInterface: tc.apiInterface}
-	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, tc.chainID)
-	csm := lavasession.NewConsumerSessionManager(rpcEndpoint, optimizer, nil, "test-router", lavasession.NewActiveSubscriptionProvidersStorage())
+	return hits, newWriteServer(t, tc, chainParser, upstreams[:], nil, hits[:])
+}
 
-	primaries := map[uint64]*lavasession.ConsumerSessionsWithProvider{}
-	for i, upstreamCfg := range upstreams {
+// newWriteServer is newTwoPrimaryWriteServer with any number of primaries and backups. hits holds
+// one counter per upstream, primaries first and then backups, in the order given.
+func newWriteServer(t *testing.T, tc writeInterfaceCase, chainParser chainlib.ChainParser, primaryUpstreams, backupUpstreams []writeUpstream, hits []int64) *RPCSmartRouterServer {
+	t.Helper()
+	require.Len(t, hits, len(primaryUpstreams)+len(backupUpstreams), "setup: one hit counter per upstream")
+	ctx := context.Background()
+	rpcEndpoint := &routersession.RPCEndpoint{ChainID: tc.chainID, ApiInterface: tc.apiInterface}
+	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, tc.chainID)
+	csm := routersession.NewConsumerSessionManager(rpcEndpoint, optimizer, nil, "test-router", routersession.NewActiveSubscriptionProvidersStorage())
+
+	primaries := map[uint64]*routersession.ConsumerSessionsWithProvider{}
+	var backups map[uint64]*routersession.ConsumerSessionsWithProvider
+	for i, upstreamCfg := range append(append([]writeUpstream{}, primaryUpstreams...), backupUpstreams...) {
 		counter, reply := &hits[i], upstreamCfg
 		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			_, _ = io.ReadAll(r.Body)
@@ -167,18 +177,25 @@ func newTwoPrimaryWriteServer(t *testing.T, tc writeInterfaceCase, chainParser c
 		name, url := upstreamCfg.name, upstream.URL+tc.nodeURLPath
 		t.Cleanup(func() { holdoff.Shared.RecordAnswer(name, url) })
 
-		connection, err := lavasession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: url}, 5, "")
+		connection, err := routersession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: url}, 5, "")
 		require.NoError(t, err)
-		endpoint := &lavasession.Endpoint{NetworkAddress: url, Enabled: true, DirectConnections: []lavasession.DirectRPCConnection{connection}}
-		provider := lavasession.NewConsumerSessionWithProvider(upstreamCfg.name, []*lavasession.Endpoint{endpoint}, 100000, 1, 1)
+		endpoint := &routersession.Endpoint{NetworkAddress: url, Enabled: true, DirectConnections: []routersession.DirectRPCConnection{connection}}
+		provider := routersession.NewConsumerSessionWithProvider(upstreamCfg.name, []*routersession.Endpoint{endpoint}, 100000, 1, 1)
 		provider.StaticProvider = true
-		primaries[uint64(i)] = provider
+		if i < len(primaryUpstreams) {
+			primaries[uint64(i)] = provider
+			continue
+		}
+		if backups == nil {
+			backups = map[uint64]*routersession.ConsumerSessionsWithProvider{}
+		}
+		backups[uint64(i)] = provider
 	}
-	require.NoError(t, csm.UpdateAllProviders(1, primaries, nil))
+	require.NoError(t, csm.UpdateAllProviders(1, primaries, backups))
 
 	logs, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
 	require.NoError(t, err)
-	return hits, &RPCSmartRouterServer{
+	return &RPCSmartRouterServer{
 		listenEndpoint:     rpcEndpoint,
 		chainParser:        chainParser,
 		consistencyConfig:  relaycore.DefaultConsistencyValidationConfig(),
@@ -192,7 +209,7 @@ func sendWrite(t *testing.T, tc writeInterfaceCase, chainParser chainlib.ChainPa
 	ctx := context.Background()
 	chainMessage, err := chainParser.ParseMsg(tc.path, []byte(tc.body), tc.method, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 	require.NoError(t, err)
-	relayData := lavaprotocol.NewRelayData(ctx, tc.method, tc.path, []byte(tc.body), 0, spectypes.NOT_APPLICABLE, tc.apiInterface,
+	relayData := relayprotocol.NewRelayData(ctx, tc.method, tc.path, []byte(tc.body), 0, spectypes.NOT_APPLICABLE, tc.apiInterface,
 		chainMessage.GetRPCMessage().GetHeaders(), chainlib.GetAddon(chainMessage), common.GetExtensionNames(chainMessage.GetExtensions()))
 	protocolMessage := chainlib.NewProtocolMessage(chainMessage, nil, relayData, "dapp", "1.2.3.4")
 	require.Equal(t, uint32(common.CONSISTENCY_SELECT_ALL_PROVIDERS), chainlib.GetStateful(protocolMessage),
@@ -295,7 +312,7 @@ func TestStatefulBroadcastReachesAProviderHeldOffAfterARateLimit(t *testing.T) {
 
 			_, err := sendWrite(t, tc, chainParser, server)
 			require.NoError(t, err, "setup: the healthy provider executed the first write")
-			_, held := holdoff.Shared.ProviderReadyAt(limitedOnce.name)
+			held := slices.ContainsFunc(server.sessionManager.ProviderRoutingSnapshot().HeldOff, func(p routersession.HeldOffProviderInfo) bool { return p.Address == limitedOnce.name })
 			require.True(t, held, "setup: the 429 must have held the provider off, or this measures nothing")
 
 			_, err = sendWrite(t, tc, chainParser, server)

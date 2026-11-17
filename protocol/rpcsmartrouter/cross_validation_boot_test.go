@@ -8,9 +8,9 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/magma-Devs/smart-router/utils/rand"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/require"
@@ -96,16 +96,16 @@ func TestCreateSmartRouterEndpoint_RefusesUnservedMethodBeforeDialing(t *testing
 	t.Cleanup(cancel)
 	rpsr := createTestRPCSmartRouter()
 	rpsr.reverifyInputs = make(map[string]*chainReverifyInputs)
-	endpoint := &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc", NetworkAddress: "127.0.0.1:0"}
+	endpoint := &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc", NetworkAddress: "127.0.0.1:0"}
 	metricsManager := metrics.NewSmartRouterMetricsManager(metrics.SmartRouterMetricsManagerOptions{})
 	logs, err := metrics.NewRPCConsumerLogs(metricsManager, nil, nil)
 	require.NoError(t, err)
 	options := &rpcSmartRouterStartOptions{
-		rpcEndpoints: []*lavasession.RPCEndpoint{endpoint},
+		rpcEndpoints: []*routersession.RPCEndpoint{endpoint},
 		strategy:     provideroptimizer.StrategyBalanced,
 		cmdFlags:     common.ConsumerCmdFlags{StaticSpecPaths: []string{"../../specs/ethereum.json"}},
 		// blackhole:1 would fail loudly if dialed; the guard fires before we get there, so it never is.
-		staticProvidersList: []*lavasession.RPCStaticProviderEndpoint{{
+		staticProvidersList: []*routersession.RPCStaticProviderEndpoint{{
 			Name: "sim-1", ChainID: "ETH1", ApiInterface: "jsonrpc",
 			NodeUrls: []common.NodeUrl{{Url: "http://127.0.0.1:1"}},
 		}},
