@@ -21,6 +21,9 @@ import (
 
 const stallN = 20
 
+// stallGrace is the grace the harness runs with unless a test sets its own: the 30 s floor.
+const stallGrace = 30 * time.Second
+
 type stallObs map[string]endpointstate.EndpointObservation
 
 func (o stallObs) get(url string) (endpointstate.EndpointObservation, bool) {
@@ -28,8 +31,15 @@ func (o stallObs) get(url string) (endpointstate.EndpointObservation, bool) {
 	return v, ok
 }
 
+// stuckAt is a url that reached block an hour before stallNow and has answered cycles times since
+// without going above it: far past any grace these tests use, so the cycle count alone decides.
 func stuckAt(block int64, cycles int) endpointstate.EndpointObservation {
-	return endpointstate.EndpointObservation{HighestBlockSeen: block, LastAnsweredBlock: block, SameBlockCycles: cycles}
+	return stuckSince(block, cycles, stallNow.Add(-time.Hour))
+}
+
+// stuckSince is a url that reached block at since and has answered cycles times without going above it.
+func stuckSince(block int64, cycles int, since time.Time) endpointstate.EndpointObservation {
+	return endpointstate.EndpointObservation{HighestBlockSeen: block, LastAnsweredBlock: block, SameBlockCycles: cycles, HighestBlockSince: since}
 }
 
 type stallHarness struct {
@@ -37,15 +47,16 @@ type stallHarness struct {
 	state     headStallState
 	recovered []string
 	health    map[string]bool
+	grace     time.Duration
 }
 
 func newStallHarness() *stallHarness {
-	return &stallHarness{obs: stallObs{}, health: map[string]bool{}}
+	return &stallHarness{obs: stallObs{}, health: map[string]bool{}, grace: stallGrace}
 }
 
 func (h *stallHarness) step(t *testing.T, now time.Time, endpoints ...*routersession.EndpointWithDirectConnection) headStallResult {
 	t.Helper()
-	return runHeadStallStep(endpoints, h.obs.get, stallN, now,
+	return runHeadStallStep(endpoints, h.obs.get, stallN, h.grace, now,
 		func(p string) { h.recovered = append(h.recovered, p) },
 		func(p string, healthy bool) { h.health[p] = healthy },
 		&h.state, nil)
@@ -519,4 +530,137 @@ func TestHeadStall_StalledSetFollowsRebuiltEndpoints(t *testing.T) {
 	h.obs["https://primary"] = stuckAt(1000, 0) // and its counter happens to be low
 	h.step(t, stallNow.Add(5*time.Second), rebuilt, other)
 	require.False(t, h.state.isStalled("https://primary"), "the set follows the live endpoints")
+}
+
+// MAG-5243 — the time half of the rule. N cycles prove a url kept answering; they do not say for how
+// long, because the tracker tick is capped at 60 s and cycles are skipped. The grace is the clock.
+
+// btcGrace is the grace of a 10-minute chain: 10 block times.
+const btcGrace = 100 * time.Minute
+
+// The Bitcoin shape that marked healthy providers many times an hour: every url sits on one block
+// for about 10 minutes, so every url is always far past N cycles. The first url to report the next
+// block is ahead of the others for a few seconds. Nobody is stuck, and nobody is marked.
+func TestHeadStall_SlowChain_NewBlockMarksNobody(t *testing.T) {
+	h := newStallHarness()
+	h.grace = btcGrace
+	a := ep("https://a", "vendor-a", true)
+	b := ep("https://b", "vendor-b", true)
+	c := backupEp("https://c", "vendor-c")
+	reached := stallNow.Add(-9 * time.Minute)
+	for _, u := range []string{"https://a", "https://b", "https://c"} {
+		h.obs[u] = stuckSince(975561, stallN*3, reached)
+	}
+	h.obs["https://c"] = stuckSince(975562, 0, stallNow)
+
+	require.Equal(t, headStallResult{}, h.step(t, stallNow, a, b, c))
+	require.False(t, stalled(t, a), "one block behind for a few seconds is the normal state of a slow chain")
+	require.False(t, stalled(t, b))
+	require.Empty(t, h.health, "no gauge is written")
+}
+
+// A slow chain's real stall is still caught, at the grace and not before.
+func TestHeadStall_SlowChain_RealStallMarkedAtTheGrace(t *testing.T) {
+	h := newStallHarness()
+	h.grace = btcGrace
+	stuck := ep("https://stuck", "vendor-a", true)
+	moving := ep("https://moving", "vendor-b", true)
+	reached := stallNow
+	h.obs["https://stuck"] = stuckSince(975561, stallN*10, reached)
+	h.obs["https://moving"] = stuckSince(975571, 0, reached.Add(99*time.Minute))
+
+	require.Equal(t, headStallResult{}, h.step(t, reached.Add(btcGrace-time.Second), stuck, moving))
+	require.False(t, stalled(t, stuck), "one second short of the grace")
+
+	require.Equal(t, headStallResult{added: 1}, h.step(t, reached.Add(btcGrace), stuck, moving))
+	require.True(t, stalled(t, stuck))
+	require.False(t, stalled(t, moving))
+}
+
+// Bitcoin testnet4: 20 minutes with no block, then a burst of blocks a few seconds apart. Every url
+// is past N cycles when the burst lands, and the url that is first on both blocks is two ahead of
+// the others. Nobody is marked, at either block.
+func TestHeadStall_SlowChain_BurstAfterALongGapMarksNobody(t *testing.T) {
+	h := newStallHarness()
+	h.grace = btcGrace
+	a := ep("https://a", "vendor-a", true)
+	b := ep("https://b", "vendor-b", true)
+	c := ep("https://c", "vendor-c", true)
+	reached := stallNow.Add(-20 * time.Minute)
+	for _, u := range []string{"https://a", "https://b", "https://c"} {
+		h.obs[u] = stuckSince(161822, stallN, reached)
+	}
+
+	h.obs["https://a"] = stuckSince(161823, 0, stallNow)
+	require.Equal(t, headStallResult{}, h.step(t, stallNow, a, b, c))
+
+	h.obs["https://a"] = stuckSince(161824, 0, stallNow.Add(10*time.Second))
+	require.Equal(t, headStallResult{}, h.step(t, stallNow.Add(10*time.Second), a, b, c))
+	require.False(t, stalled(t, b))
+	require.False(t, stalled(t, c))
+}
+
+// A sub-second chain: N cycles is 4 seconds, and a healthy node's head answer holds still for up to
+// 19 seconds before it jumps forward. Past N cycles and behind, but inside the 30 s floor: not marked.
+func TestHeadStall_FastChain_ShortFreezeNotMarked(t *testing.T) {
+	h := newStallHarness()
+	frozen := backupEp("https://frozen", "backup")
+	moving := ep("https://moving", "primary", true)
+	h.obs["https://frozen"] = stuckSince(5000, stallN*2, stallNow)
+	h.obs["https://moving"] = stuckSince(5045, 0, stallNow.Add(19*time.Second))
+
+	require.Equal(t, headStallResult{}, h.step(t, stallNow.Add(19*time.Second), frozen, moving))
+	require.False(t, stalled(t, frozen))
+}
+
+// The same node frozen for the whole 30 seconds is marked.
+func TestHeadStall_FastChain_RealStallMarkedAtThirtySeconds(t *testing.T) {
+	h := newStallHarness()
+	frozen := backupEp("https://frozen", "backup")
+	moving := ep("https://moving", "primary", true)
+	h.obs["https://frozen"] = stuckSince(5000, stallN*2, stallNow)
+	h.obs["https://moving"] = stuckSince(5075, 0, stallNow.Add(30*time.Second))
+
+	require.Equal(t, headStallResult{added: 1}, h.step(t, stallNow.Add(30*time.Second), frozen, moving))
+	require.True(t, stalled(t, frozen))
+}
+
+// Time alone is not enough. Time also passes when the router does not poll (idle mode, failed polls,
+// cycles another pod covered), so a url whose block is old but which answered fewer than N times is
+// not judged.
+func TestHeadStall_TimeWithoutNCyclesNotMarked(t *testing.T) {
+	h := newStallHarness()
+	quiet := ep("https://quiet", "vendor-a", true)
+	moving := ep("https://moving", "vendor-b", true)
+	h.obs["https://quiet"] = stuckSince(1000, stallN-1, stallNow.Add(-24*time.Hour))
+	h.obs["https://moving"] = stuckSince(5000, 0, stallNow)
+
+	require.Equal(t, headStallResult{}, h.step(t, stallNow, quiet, moving))
+	require.False(t, stalled(t, quiet))
+}
+
+// A url with no time for its highest block is not judged, whatever its counter says.
+func TestHeadStall_NoTimeForTheHighestBlockNotMarked(t *testing.T) {
+	h := newStallHarness()
+	unknown := ep("https://unknown", "vendor-a", true)
+	moving := ep("https://moving", "vendor-b", true)
+	h.obs["https://unknown"] = stuckSince(1000, stallN, time.Time{})
+	h.obs["https://moving"] = stuckSince(5000, 0, stallNow)
+
+	require.Equal(t, headStallResult{}, h.step(t, stallNow, unknown, moving))
+	require.False(t, stalled(t, unknown))
+}
+
+// A url that never-empty kept in rotation while it was inside the grace is not "kept": it was never
+// a candidate. The kept log and counter are for a url that would have gone out.
+func TestHeadStall_InsideTheGraceIsNotKeptByNeverEmpty(t *testing.T) {
+	h := newStallHarness()
+	primary := ep("https://primary", "p", true)
+	deadBackup := backupEp("https://backup", "b")
+	deadBackup.Endpoint.Enabled = false
+	h.obs["https://primary"] = stuckSince(1000, stallN, stallNow.Add(-10*time.Second))
+	h.obs["https://backup"] = stuckSince(5000, 0, stallNow)
+
+	require.Equal(t, headStallResult{}, h.step(t, stallNow, primary, deadBackup))
+	require.Equal(t, headStallResult{kept: 1}, h.step(t, stallNow.Add(20*time.Second), primary, deadBackup), "kept once the grace has passed")
 }

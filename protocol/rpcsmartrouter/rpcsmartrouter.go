@@ -1643,13 +1643,15 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 					// MAG-3986: Enabled is the event slot only. Usable is what selection
 					// sees — Enabled AND no state reason. StateReasons lists head-stalled
 					// with when it was added and the block it was stuck on; SameBlockCycles
-					// is the evidence that adds it, and a HighestBlockSeen above the stuck
-					// block removes it.
+					// and HighestBlockSince (how long the highest block has stood still,
+					// MAG-5243) are the evidence that adds it, and a HighestBlockSeen above
+					// the stuck block removes it.
 					"Usable":            health.Usable,
 					"StateReasons":      debugStateReasons(health.StateReasons),
 					"SameBlockCycles":   obs.SameBlockCycles,
 					"LastAnsweredBlock": obs.LastAnsweredBlock,
 					"HighestBlockSeen":  obs.HighestBlockSeen,
+					"HighestBlockSince": debugTimeRFC3339(obs.HighestBlockSince),
 					"Provider":          ep.ProviderAddress,
 					"Backup":            ep.Backup,
 					// PollIntervalMs is the live dedicated-poll cadence: base when healthy,
