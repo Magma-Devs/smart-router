@@ -246,6 +246,7 @@ func ParseGraphQLMsg(data []byte) (*GraphQLMessage, error) {
 	if err != nil {
 		return nil, err
 	}
+	envelope.Variables = exactGraphQLVariables(data, envelope.Variables)
 	if strings.TrimSpace(envelope.Query) == "" {
 		return nil, RefuseGraphQLRequest("graphql request carries no query")
 	}
@@ -365,11 +366,27 @@ func selectGraphQLOperation(doc *ast.QueryDocument, operationName string) (*ast.
 	return nil, RefuseGraphQLRequest("graphql document defines no operation named %q", operationName)
 }
 
-// graphQLRootFields flattens the operation's root selection set into the fields it actually
-// selects, expanding fragment spreads and inline fragments so a query that hides its root field
-// behind a fragment still resolves to that field's api.
+// graphQLRootFields flattens the operation's root selection set into the fields the node runs,
+// read the way the node reads it (MAG-5120): fragment spreads and inline fragments are expanded, so
+// a query that hides its root field behind a fragment still resolves to that field's api; a
+// selection that @skip or @include leaves out is left out; a field repeated under one response
+// key is one field, because the node runs it once; and a variable the request leaves out takes the
+// default the operation declares for it. These names drive routing, compute units, the cache and
+// the metrics, so each one must be a field the node actually runs.
+//
+// Every field selection still counts toward MaxGraphQLRootFields, left out or repeated, and every
+// fragment is still walked and checked, because the limit and the fragment checks bound and read
+// the document as written (MAG-4360, MAG-4351), not what runs.
 func graphQLRootFields(doc *ast.QueryDocument, operation *ast.OperationDefinition, variables map[string]interface{}) ([]GraphQLRootField, error) {
+	variables = graphQLVariablesWithDefaults(operation, variables)
 	rootFields := []GraphQLRootField{}
+	// leftOut holds the root fields @skip / @include leave out, only to name an operation whose
+	// every root field is left out (see below).
+	leftOut := []GraphQLRootField{}
+	// responseKeys are the response keys already named: the alias, or the field name without one.
+	responseKeys := map[string]struct{}{}
+	leftOutKeys := map[string]struct{}{}
+	selections := 0
 	// Guards a fragment cycle. gqlparser accepts a document whose fragments reference each other
 	// (cycle detection is a validation rule, which needs a schema), so an unguarded walk here
 	// would not return.
@@ -382,24 +399,31 @@ func graphQLRootFields(doc *ast.QueryDocument, operation *ast.OperationDefinitio
 	fragments := graphQLFragmentsByName(doc.Fragments)
 
 	// nesting counts the fragments being expanded around selectionSet. It and the root field
-	// count bound how much of the document the walk visits (MAG-4360).
-	var walk func(selectionSet ast.SelectionSet, nesting int) error
-	walk = func(selectionSet ast.SelectionSet, nesting int) error {
+	// count bound how much of the document the walk visits (MAG-4360). skipped is true inside a
+	// fragment that @skip or @include leaves out.
+	var walk func(selectionSet ast.SelectionSet, nesting int, skipped bool) error
+	walk = func(selectionSet ast.SelectionSet, nesting int, skipped bool) error {
 		if nesting > MaxGraphQLFragmentNesting {
 			return RefuseGraphQLRequest("graphql fragments nest more than %d deep", MaxGraphQLFragmentNesting)
 		}
 		for _, selection := range selectionSet {
 			switch typed := selection.(type) {
 			case *ast.Field:
-				if len(rootFields) == MaxGraphQLRootFields {
+				if selections == MaxGraphQLRootFields {
 					return RefuseGraphQLRequest("graphql operation selects more than %d root fields", MaxGraphQLRootFields)
 				}
-				rootFields = append(rootFields, GraphQLRootField{
+				selections++
+				rootField := GraphQLRootField{
 					Name: typed.Name,
 					Args: graphQLArguments(typed.Arguments, variables),
-				})
+				}
+				if skipped || graphQLSelectionIsLeftOut(typed.Directives, variables) {
+					leftOut = appendGraphQLRootField(leftOut, leftOutKeys, graphQLResponseKey(typed), rootField)
+					continue
+				}
+				rootFields = appendGraphQLRootField(rootFields, responseKeys, graphQLResponseKey(typed), rootField)
 			case *ast.InlineFragment:
-				if err := walk(typed.SelectionSet, nesting+1); err != nil {
+				if err := walk(typed.SelectionSet, nesting+1, skipped || graphQLSelectionIsLeftOut(typed.Directives, variables)); err != nil {
 					return err
 				}
 			case *ast.FragmentSpread:
@@ -411,7 +435,7 @@ func graphQLRootFields(doc *ast.QueryDocument, operation *ast.OperationDefinitio
 					return RefuseGraphQLRequest("graphql query spreads undefined fragment %q", typed.Name)
 				}
 				expanding[typed.Name] = struct{}{}
-				err := walk(fragment.SelectionSet, nesting+1)
+				err := walk(fragment.SelectionSet, nesting+1, skipped || graphQLSelectionIsLeftOut(typed.Directives, variables))
 				delete(expanding, typed.Name)
 				if err != nil {
 					return err
@@ -421,13 +445,118 @@ func graphQLRootFields(doc *ast.QueryDocument, operation *ast.OperationDefinitio
 		return nil
 	}
 
-	if err := walk(operation.SelectionSet, 0); err != nil {
+	if err := walk(operation.SelectionSet, 0, false); err != nil {
 		return nil, err
+	}
+	if len(rootFields) == 0 {
+		// Every root field is left out: the node runs nothing and answers {"data":{}}. With no
+		// field left the router would have nothing to route the request by, so it is named by the
+		// fields it selects, as before MAG-5120. Only this degenerate request keeps that naming.
+		rootFields = leftOut
 	}
 	if len(rootFields) == 0 {
 		return nil, RefuseGraphQLRequest("graphql operation selects no root field")
 	}
 	return rootFields, nil
+}
+
+// appendGraphQLRootField appends rootField unless a field under the same response key is already
+// named: the node merges the two into one field and runs it once, so `{ epoch { epochId } epoch {
+// startTimestamp } }` is one epoch read, charged once (MAG-5120). Two aliases are two response
+// keys, and two runs.
+func appendGraphQLRootField(rootFields []GraphQLRootField, responseKeys map[string]struct{}, responseKey string, rootField GraphQLRootField) []GraphQLRootField {
+	if _, repeated := responseKeys[responseKey]; repeated {
+		return rootFields
+	}
+	responseKeys[responseKey] = struct{}{}
+	return append(rootFields, rootField)
+}
+
+// graphQLResponseKey is the key a field's answer comes back under: its alias, or its name when it
+// has none.
+func graphQLResponseKey(field *ast.Field) string {
+	if field.Alias != "" {
+		return field.Alias
+	}
+	return field.Name
+}
+
+// graphQLSelectionIsLeftOut reports whether @skip or @include leaves a selection out, as the node
+// reads them: @skip(if: true) leaves it out whatever @include says, and @include(if: false) leaves
+// it out (MAG-5120). A condition the router cannot read as a boolean, such as a variable the
+// request does not send, leaves the selection in: the node refuses such a document, and counting
+// the field keeps the router from charging less than the request asked for.
+func graphQLSelectionIsLeftOut(directives ast.DirectiveList, variables map[string]interface{}) bool {
+	if condition, known := graphQLDirectiveCondition(directives.ForName("skip"), variables); known && condition {
+		return true
+	}
+	if condition, known := graphQLDirectiveCondition(directives.ForName("include"), variables); known && !condition {
+		return true
+	}
+	return false
+}
+
+// graphQLDirectiveCondition reads the `if` argument of @skip or @include, resolving a variable.
+// known is false when there is no such directive or its condition is not a boolean.
+func graphQLDirectiveCondition(directive *ast.Directive, variables map[string]interface{}) (condition, known bool) {
+	if directive == nil {
+		return false, false
+	}
+	argument := directive.Arguments.ForName("if")
+	if argument == nil {
+		return false, false
+	}
+	condition, known = graphQLValue(argument.Value, variables).(bool)
+	return condition, known
+}
+
+// graphQLVariablesWithDefaults returns the request's variables with every variable the operation
+// declares a default for, and the request leaves out, set to that default (MAG-5120). The node
+// applies the default before it reads an argument, so `query P($n: UInt53 = 5) {
+// checkpoint(sequenceNumber: $n) { digest } }` sent with no variables reads checkpoint 5, not the
+// latest one. A variable the request sends, null included, keeps the value it is sent with.
+func graphQLVariablesWithDefaults(operation *ast.OperationDefinition, variables map[string]interface{}) map[string]interface{} {
+	var resolved map[string]interface{}
+	for _, definition := range operation.VariableDefinitions {
+		if definition.DefaultValue == nil {
+			continue
+		}
+		if _, sent := variables[definition.Variable]; sent {
+			continue
+		}
+		if resolved == nil {
+			resolved = make(map[string]interface{}, len(variables)+1)
+			for name, value := range variables {
+				resolved[name] = value
+			}
+		}
+		// A default is a constant: it cannot refer to another variable.
+		resolved[definition.Variable] = graphQLValue(definition.DefaultValue, nil)
+	}
+	if resolved == nil {
+		return variables
+	}
+	return resolved
+}
+
+// exactGraphQLVariables re-reads the request's variables with every number kept as its exact text
+// (json.Number), as a literal argument already is (graphQLValue). Decoded as a float64, a
+// checkpoint above 2^53 rounds to a neighbour, and the router would pin, route and cache the
+// request under a checkpoint the node does not read (MAG-5120). The body has already been decoded
+// once, so a second decode cannot fail; if it somehow does, the first decode's variables are kept.
+func exactGraphQLVariables(data []byte, decoded map[string]interface{}) map[string]interface{} {
+	if decoded == nil {
+		return nil
+	}
+	var exact struct {
+		Variables map[string]interface{} `json:"variables"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	if err := decoder.Decode(&exact); err != nil || exact.Variables == nil {
+		return decoded
+	}
+	return exact.Variables
 }
 
 // graphQLArguments converts an argument list to plain Go values, resolving variable references

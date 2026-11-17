@@ -427,3 +427,47 @@ func TestGraphQLChainParserBlockParsingFromArguments(t *testing.T) {
 	variableBlock, _ := viaVariable.RequestedBlock()
 	require.EqualValues(t, 314800000, variableBlock, "a variable-pinned checkpoint must parse to its own block")
 }
+
+// MAG-5120's three reproductions, through the chain parser with lava-specs sui.json: what the
+// router routes, charges and caches a request by is what the node runs.
+func TestGraphQLChainParserReadsTheRequestTheWayTheNodeDoes(t *testing.T) {
+	chainParser, err := NewGraphQLChainParser()
+	require.NoError(t, err)
+	chainParser.SetSpec(loadSuiSpec(t, "SUI"))
+	parse := func(t *testing.T, body string) ChainMessage {
+		t.Helper()
+		chainMessage, err := chainParser.ParseMsg("", []byte(body), graphqlConnectionType, nil, extensionslib.ExtensionInfo{})
+		require.NoError(t, err)
+		return chainMessage
+	}
+
+	t.Run("a field @skip leaves out is not charged or routed", func(t *testing.T) {
+		chainMessage := parse(t, `{"query":"{ checkpoint(sequenceNumber: 1) @skip(if: true) { digest } chainIdentifier }"}`)
+		alone := parse(t, `{"query":"{ chainIdentifier }"}`)
+		require.Equal(t, "chainIdentifier", chainMessage.GetApi().Name)
+		require.Equal(t, alone.GetApi().ComputeUnits, chainMessage.GetApi().ComputeUnits)
+		requested, _ := chainMessage.RequestedBlock()
+		require.NotEqual(t, int64(1), requested, "the skipped checkpoint pin does not decide the block")
+		wantRequested, _ := alone.RequestedBlock()
+		require.Equal(t, wantRequested, requested)
+	})
+
+	t.Run("a field repeated under one response key is charged once", func(t *testing.T) {
+		chainMessage := parse(t, `{"query":"{ epoch { epochId } epoch { startTimestamp } }"}`)
+		alone := parse(t, `{"query":"{ epoch { epochId } }"}`)
+		require.Equal(t, "epoch", chainMessage.GetApi().Name)
+		require.Equal(t, alone.GetApi().ComputeUnits, chainMessage.GetApi().ComputeUnits)
+	})
+
+	t.Run("a variable's declared default pins the checkpoint", func(t *testing.T) {
+		chainMessage := parse(t, `{"query":"query P($n: UInt53 = 5) { checkpoint(sequenceNumber: $n) { digest } }"}`)
+		requested, _ := chainMessage.RequestedBlock()
+		require.Equal(t, int64(5), requested, "read as the node reads it, not as latest")
+	})
+
+	t.Run("a checkpoint above 2^53 in variables is read exactly", func(t *testing.T) {
+		chainMessage := parse(t, `{"query":"query P($n: UInt53!) { checkpoint(sequenceNumber: $n) { digest } }","variables":{"n":9007199254740993}}`)
+		requested, _ := chainMessage.RequestedBlock()
+		require.Equal(t, int64(9007199254740993), requested)
+	})
+}

@@ -1,6 +1,7 @@
 package rpcInterfaceMessages
 
 import (
+	"encoding/json"
 	"net/http"
 	"testing"
 
@@ -168,8 +169,9 @@ func TestGraphQLMessageGetParamsResolvesVariables(t *testing.T) {
 
 	params, ok := message.GetParams().(map[string]interface{})
 	require.True(t, ok)
-	// Keyed by the argument name, carrying the variable's resolved value.
-	require.EqualValues(t, 314800000, params["sequenceNumber"])
+	// Keyed by the argument name, carrying the variable's resolved value, as its exact text: a
+	// number in variables is read like a literal one (MAG-5120).
+	require.Equal(t, json.Number("314800000"), params["sequenceNumber"])
 }
 
 func TestGraphQLMessageGetParamsMultiRootIsPerRoot(t *testing.T) {
@@ -487,11 +489,12 @@ func TestParseGraphQLMsgSharedFragmentIsNotCyclic(t *testing.T) {
 }
 
 func TestParseGraphQLMsgSiblingFragmentsAreNotCyclic(t *testing.T) {
-	// Two different fragments that both spread a third are also valid.
+	// Two different fragments that both spread a third are also valid. Both put chainIdentifier
+	// under the same response key, which the node runs once, so it is one root field (MAG-5120).
 	body := `{"query":"fragment Base on Query { chainIdentifier } fragment L on Query { ...Base } fragment R on Query { ...Base } { ...L ...R }"}`
 	message, err := ParseGraphQLMsg([]byte(body))
 	require.NoError(t, err)
-	require.Equal(t, []string{"chainIdentifier", "chainIdentifier"}, message.RootFieldNames())
+	require.Equal(t, []string{"chainIdentifier"}, message.RootFieldNames())
 }
 
 // TestParseGraphQLMsgRefusesKeysTheNodeWouldReadDifferently is MAG-4908.
@@ -726,6 +729,72 @@ func TestParseGraphQLMsgEveryRefusalCarriesACode(t *testing.T) {
 			require.NotNil(t, refusal, "refused: %v", err)
 			require.Equal(t, tc.wantCode, refusal.Code())
 			require.Equal(t, tc.wantOutcome, refusal.WriteOutcome())
+		})
+	}
+}
+
+// MAG-5120: the root fields are the fields the node runs, so the router names, routes, charges and
+// caches a request by what the node does with it. A selection @skip or @include leaves out is left
+// out, a field repeated under one response key is one field, and a variable takes its declared
+// default when the request leaves it out.
+func TestParseGraphQLMsgReadsTheRootFieldsTheWayTheNodeDoes(t *testing.T) {
+	for _, tc := range []struct {
+		name, query, variables string
+		want                   []string
+	}{
+		{name: "@skip(if: true) leaves a field out", query: `{ checkpoint(sequenceNumber: 1) @skip(if: true) { digest } chainIdentifier }`, want: []string{"chainIdentifier"}},
+		{name: "@skip(if: false) keeps it", query: `{ checkpoint(sequenceNumber: 1) @skip(if: false) { digest } chainIdentifier }`, want: []string{"checkpoint", "chainIdentifier"}},
+		{name: "@include(if: false) leaves a field out", query: `{ checkpoint @include(if: false) { digest } chainIdentifier }`, want: []string{"chainIdentifier"}},
+		{name: "@include(if: true) keeps it", query: `{ checkpoint @include(if: true) { digest } chainIdentifier }`, want: []string{"checkpoint", "chainIdentifier"}},
+		{name: "@skip(if: true) wins over @include(if: true)", query: `{ checkpoint @skip(if: true) @include(if: true) { digest } chainIdentifier }`, want: []string{"chainIdentifier"}},
+		{name: "a condition from a variable", query: `query Q($s: Boolean!) { checkpoint @skip(if: $s) { digest } chainIdentifier }`, variables: `{"s":true}`, want: []string{"chainIdentifier"}},
+		{name: "a condition from a variable's default", query: `query Q($s: Boolean = true) { checkpoint @skip(if: $s) { digest } chainIdentifier }`, want: []string{"chainIdentifier"}},
+		{name: "a variable sent beats its default", query: `query Q($s: Boolean = true) { checkpoint @skip(if: $s) { digest } chainIdentifier }`, variables: `{"s":false}`, want: []string{"checkpoint", "chainIdentifier"}},
+		{name: "a condition the router cannot read keeps the field", query: `query Q($s: Boolean!) { checkpoint @skip(if: $s) { digest } chainIdentifier }`, want: []string{"checkpoint", "chainIdentifier"}},
+		{name: "a skipped inline fragment leaves its fields out", query: `{ ... @skip(if: true) { checkpoint { digest } } chainIdentifier }`, want: []string{"chainIdentifier"}},
+		{name: "a skipped fragment spread leaves its fields out", query: `{ ...F @skip(if: true) chainIdentifier } fragment F on Query { checkpoint { digest } }`, want: []string{"chainIdentifier"}},
+		{name: "a field left out inside a fragment", query: `{ ...F } fragment F on Query { checkpoint @include(if: false) { digest } chainIdentifier }`, want: []string{"chainIdentifier"}},
+		{name: "every root field left out is named as written", query: `{ chainIdentifier @skip(if: true) }`, want: []string{"chainIdentifier"}},
+		{name: "a field repeated under one response key is one field", query: `{ epoch { epochId } epoch { startTimestamp } }`, want: []string{"epoch"}},
+		{name: "two aliases are two fields", query: `{ a: epoch { epochId } b: epoch { startTimestamp } }`, want: []string{"epoch", "epoch"}},
+		{name: "a field repeated through a fragment is one field", query: `{ epoch { epochId } ...F } fragment F on Query { epoch { startTimestamp } }`, want: []string{"epoch"}},
+		{name: "an alias that repeats a field name is that field's key", query: `{ epoch { epochId } epoch: epoch { startTimestamp } }`, want: []string{"epoch"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `{"query":"` + tc.query + `"`
+			if tc.variables != "" {
+				body += `,"variables":` + tc.variables
+			}
+			message, err := ParseGraphQLMsg([]byte(body + `}`))
+			require.NoError(t, err)
+			require.Equal(t, tc.want, message.RootFieldNames())
+		})
+	}
+}
+
+// MAG-5120: a variable the request leaves out takes the default the operation declares, and a
+// number in variables keeps its exact text, so a checkpoint above 2^53 is not rounded.
+func TestParseGraphQLMsgReadsVariablesTheWayTheNodeDoes(t *testing.T) {
+	const query = `query P($n: UInt53 = 5) { checkpoint(sequenceNumber: $n) { digest } }`
+	for _, tc := range []struct {
+		name, variables string
+		want            interface{}
+	}{
+		{name: "no variables: the declared default", want: json.Number("5")},
+		{name: "an empty variables object: the declared default", variables: `{}`, want: json.Number("5")},
+		{name: "a variable sent beats the default", variables: `{"n":7}`, want: json.Number("7")},
+		{name: "a variable sent as null stays null", variables: `{"n":null}`, want: nil},
+		{name: "a number above 2^53 keeps its exact text", variables: `{"n":9007199254740993}`, want: json.Number("9007199254740993")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `{"query":"` + query + `"`
+			if tc.variables != "" {
+				body += `,"variables":` + tc.variables
+			}
+			message, err := ParseGraphQLMsg([]byte(body + `}`))
+			require.NoError(t, err)
+			require.Len(t, message.RootFields, 1)
+			require.Equal(t, tc.want, message.RootFields[0].Args["sequenceNumber"])
 		})
 	}
 }
