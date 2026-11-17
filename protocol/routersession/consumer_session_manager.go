@@ -1855,20 +1855,6 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 		stickiness = ""
 	}
 
-	// Cross-pod stickiness resolves BEFORE any lock is taken, because it may call the fleet
-	// store and no network round trip may happen while csm.lock is held.
-	//
-	// A resolved claim is then carried as selectedProvider rather than as stickiness. That is
-	// not a shortcut: under the fail-closed contract a fleet claim and a header-pinned provider
-	// have identical semantics — route here or fail — so reusing that path gives the guarantee
-	// exactly, and leaves the locked selection code untouched. With no store wired, stickiness
-	// passes through unchanged and keeps its pod-local meaning.
-	//
-	// selectedProvider WINS over a sticky claim when both are present. That order predates this
-	// feature — getValidProviderAddresses handles selectedProvider and returns before it ever
-	// reaches the sticky block — and naming a provider explicitly is the more specific ask of
-	// the two. Resolving stickiness here unconditionally would silently invert it, and only on
-	// deployments running --shared-state.
 	// The caller's own lava-select-provider name, before a sticky claim below can fill
 	// selectedProvider. Only that name can be the caller's mistake: a refusal of it that names no
 	// provider of this router at all is marked SelectedProviderNotConfiguredError, which the
@@ -1883,6 +1869,20 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 		}()
 	}
 
+	// Cross-pod stickiness resolves BEFORE any lock is taken, because it may call the fleet
+	// store and no network round trip may happen while csm.lock is held.
+	//
+	// A resolved claim is then carried as selectedProvider rather than as stickiness. That is
+	// not a shortcut: under the fail-closed contract a fleet claim and a header-pinned provider
+	// have identical semantics — route here or fail — so reusing that path gives the guarantee
+	// exactly, and leaves the locked selection code untouched. With no store wired, stickiness
+	// passes through unchanged and keeps its pod-local meaning.
+	//
+	// selectedProvider WINS over a sticky claim when both are present. That order predates this
+	// feature — getValidProviderAddresses handles selectedProvider and returns before it ever
+	// reaches the sticky block — and naming a provider explicitly is the more specific ask of
+	// the two. Resolving stickiness here unconditionally would silently invert it, and only on
+	// deployments running --shared-state.
 	if stickiness != "" && selectedProvider == "" && csm.sharedSticky != nil {
 		resolved, localKey, stickyErr := csm.resolveStickyPin(ctx, stickiness, cuNeededForSession, requestedBlock, addon, common.GetExtensionNames(extensions), internalPath, stateful)
 		switch {
