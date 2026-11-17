@@ -950,7 +950,7 @@ func (cswp *ConsumerSessionsWithProvider) GetConsumerSessionInstanceFromEndpoint
 			// (MAG-5063): otherwise a retired session outlives the failures that retired it for
 			// the rest of the epoch, no matter how long the node has been healthy again.
 			if session.isReclaimable() {
-				delete(cswp.Sessions, sessionID)
+				cswp.reclaimSession(sessionID, qosManager)
 			}
 			continue
 		}
@@ -959,7 +959,7 @@ func (cswp *ConsumerSessionsWithProvider) GetConsumerSessionInstanceFromEndpoint
 		} else if blocked {
 			// TryUseSession has already confirmed, under the session's own lock, that it is
 			// BlockListed and not in use: reclaim it the same way as the non-matching case above.
-			delete(cswp.Sessions, sessionID)
+			cswp.reclaimSession(sessionID, qosManager)
 		}
 	}
 
@@ -1024,6 +1024,18 @@ func (cswp *ConsumerSessionsWithProvider) GetConsumerSessionInstanceFromEndpoint
 		utils.LogAttr("isDirectRPC", !isProviderRelay),
 	)
 	return consumerSession, cswp.PairingEpoch, nil
+}
+
+// reclaimSession drops a retired session from the pool together with the QoS reports filed for it.
+// Nothing reads a retired session's reports, and they would otherwise stay until the QoS manager
+// purges the epoch after next: about 200 bytes per retired session, one session per 16 failed
+// relays, with no ceiling on how many an outage retires now that the pool no longer stops it
+// (MAG-5063). The caller holds cswp.Lock.
+func (cswp *ConsumerSessionsWithProvider) reclaimSession(sessionID int64, qosManager *qos.QoSManager) {
+	delete(cswp.Sessions, sessionID)
+	if qosManager != nil {
+		qosManager.ForgetSession(sessionID)
+	}
 }
 
 func (cswp *ConsumerSessionsWithProvider) sortEndpointsByLatency(endpointInfos []EndpointInfo) {

@@ -169,3 +169,70 @@ func TestRetiredSessionsNeverExhaustTheCeiling(t *testing.T) {
 	}
 	require.Zero(t, csm.atomicReadNumberOfResets(), "and it did not need a pool reset to get there")
 }
+
+// A reclaimed session takes its QoS reports with it (MAG-5063). Nothing reads a retired session's
+// reports once it is gone, and they would otherwise stay until the QoS manager purges the epoch
+// after next. With no ceiling left on how many sessions an outage retires, that was one report
+// per retired session, about 200 bytes each, for as long as the outage lasted.
+func TestReclaimedSessionLeavesNoQoSReportBehind(t *testing.T) {
+	level := zerolog.GlobalLevel()
+	zerolog.SetGlobalLevel(zerolog.Disabled)
+	t.Cleanup(func() { zerolog.SetGlobalLevel(level) })
+
+	original := MaxSessionsAllowedPerProvider
+	MaxSessionsAllowedPerProvider = 10
+	t.Cleanup(func() { MaxSessionsAllowedPerProvider = original })
+
+	const address = "reclaimed-session-qos"
+	ctx := context.Background()
+	csm := CreateConsumerSessionManager()
+	pairing := epochPairing(t, address, true)
+	pairing[0].MaxComputeUnits = 1000000000
+	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, pairing, nil))
+	endpoint := csm.pairing[address].Endpoints[0]
+
+	get := func() (ConsumerSessionsMap, error) {
+		return csm.GetSessions(ctx, 1, cuForFirstRequest, NewUsedProviders(nil),
+			servicedBlockNumber, "", nil, common.NO_STATE, 0, "", "")
+	}
+
+	retired := map[int64]uint64{} // session id → the epoch its failures were filed under
+	for round := 0; round < MaxSessionsAllowedPerProvider*3; round++ {
+		sessions, err := get()
+		require.NoError(t, err, "round %d", round)
+		for _, info := range sessions {
+			require.NoError(t, csm.OnSessionDone(info.Session, servicedBlockNumber, cuForFirstRequest,
+				time.Millisecond, info.Session.CalculateExpectedLatency(2*time.Millisecond), 1, 1, 1, false, nil))
+		}
+		endpoint.ResetHealth()
+
+		for i := 0; i <= MaximumNumberOfFailuresAllowedPerConsumerSession; i++ {
+			sessions, err = get()
+			require.NoError(t, err, "round %d attempt %d", round, i)
+			endpoint.MarkUnhealthy(EndpointDisableNodeError)
+			for _, info := range sessions {
+				require.NoError(t, csm.OnSessionFailure(info.Session, errors.New("transient upstream failure")))
+				if info.Session.BlockListed {
+					retired[info.Session.SessionId] = info.Session.epoch
+				}
+			}
+		}
+	}
+	require.Len(t, retired, MaxSessionsAllowedPerProvider*3, "one session retired per round")
+
+	// One more request scans past the newest retired session too.
+	sessions, err := get()
+	require.NoError(t, err)
+	for _, info := range sessions {
+		require.NoError(t, csm.OnSessionDiscarded(info.Session, nil))
+	}
+
+	pool := csm.pairing[address].Sessions
+	for id, epoch := range retired {
+		require.NotContains(t, pool, id, "retired session %d is still in the pool", id)
+		require.Zero(t, csm.qosManager.GetTotalRelays(epoch, id),
+			"reclaimed session %d left its QoS report behind", id)
+		require.Zero(t, csm.qosManager.GetTotalRelays(csm.atomicReadCurrentEpoch(), id),
+			"reclaimed session %d left its QoS report behind under the current epoch", id)
+	}
+}
