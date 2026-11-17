@@ -163,7 +163,8 @@ func TestListenerHandlers_Golden(t *testing.T) {
 				if name == "Date" || name == "Content-Length" {
 					continue
 				}
-				headerLines = append(headerLines, name+": "+strings.Join(values, ", "))
+				// Lava-Guid carries the per-request GUID too, so it is masked like the body's.
+				headerLines = append(headerLines, name+": "+guidPattern.ReplaceAllString(strings.Join(values, ", "), "<GUID>"))
 			}
 			sort.Strings(headerLines)
 			relay.mu.Lock()

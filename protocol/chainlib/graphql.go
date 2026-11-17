@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -318,7 +319,6 @@ func (apip *GraphQLChainParser) ChainBlockStats() (allowedBlockLagForQosSync int
 
 type GraphQLChainListener struct {
 	chainListenerBase
-	app *fiber.App // captured during Serve so Shutdown can drain HTTP
 }
 
 // NewGraphQLChainListener creates a new instance of GraphQLChainListener
@@ -345,8 +345,8 @@ func (apil *GraphQLChainListener) Serve(ctx context.Context, cmdFlags common.Con
 	// false: this listener serves no websockets and registers no GET route, so handing an
 	// upgrade on here would turn a health probe into a chain request. GraphQL subscriptions
 	// would need their own transport; gRPC carries streaming on this chain.
-	app := createAndSetupBaseAppListener(cmdFlags, apil.endpoint.HealthCheckPath, apil.healthReporter, false)
-	apil.app = app
+	// true: a DELETE reaches refuseGraphQLMethod below instead of the shared 204 (MAG-4524).
+	app := createAndSetupBaseAppListener(cmdFlags, apil.endpoint.HealthCheckPath, apil.healthReporter, false, true)
 
 	handlerPost := apil.relayHTTP(httpRelaySpec{
 		testMode:    common.IsTestMode(ctx),
@@ -362,7 +362,7 @@ func (apil *GraphQLChainListener) Serve(ctx context.Context, cmdFlags common.Con
 		},
 		logReceived: logReceivedWithSeedAfterDapp("Consumer received a new GraphQL request"),
 		logModule:   "graphql in/out",
-		noAnswer:    noAnswerJsonError,
+		noAnswer:    noAnswerGraphQL,
 		// A request the router refused by one of its OWN limits: too many root fields, too deep a
 		// document, too deep a chain of fragment spreads. Or one whose wrapper keys the router and
 		// the node would read as two different requests, or whose document holds a mutation beside
@@ -383,12 +383,20 @@ func (apil *GraphQLChainListener) Serve(ctx context.Context, cmdFlags common.Con
 		// request member is quoted as the client sent it, and it differs from a known member only
 		// by letter case (MAG-4908); an unreadable request quotes at most the client's own names and
 		// the token its parser stopped at, never a decoder's error text (MAG-4351).
-		refusal: func(err error, msgSeed string) (int, []byte, string, bool) {
+		//
+		// A refused write's shape (check Q8: a mutation beside another operation, or a mutation
+		// with more than one root field) also says Lava-Write-Outcome: not_sent, so the caller
+		// knows for certain the write never ran and can send it again fixed (MAG-5120).
+		refusal: func(err error, msgSeed string) (int, []byte, string, map[string]string, bool) {
 			refusal := rpcInterfaceMessages.GraphQLRefusalFrom(err)
 			if refusal == nil {
-				return 0, nil, "", false
+				return 0, nil, "", nil, false
 			}
-			return graphQLRefusalStatus, convertToGraphQLError(refusal.ClientMessage(), refusal.Code(), msgSeed), refusal.ClientMessage(), true
+			var headers map[string]string
+			if outcome := refusal.WriteOutcome(); outcome != "" {
+				headers = map[string]string{common.WRITE_OUTCOME_HEADER_NAME: outcome}
+			}
+			return graphQLRefusalStatus, convertToGraphQLError(refusal.ClientMessage(), refusal.Code(), msgSeed), refusal.ClientMessage(), headers, true
 		},
 		errorBody: func(_ *fiber.Ctx, _ *common.RelayResult, errMasking, _ string) []byte {
 			return convertToJsonError(errMasking)
@@ -398,22 +406,42 @@ func (apil *GraphQLChainListener) Serve(ctx context.Context, cmdFlags common.Con
 	// GraphQL-over-HTTP is POST only here. A GET carries its query in the URL, which is the very
 	// identity collapse this interface exists to avoid, so it is refused rather than served.
 	app.Post("/*", handlerPost)
-	app.Use("/*", func(fiberCtx *fiber.Ctx) error {
-		fiberCtx.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSONCharsetUTF8)
-		fiberCtx.Status(fiber.StatusMethodNotAllowed)
-		return addHeadersAndSendBytes(fiberCtx, nil, convertToJsonError("graphql requests must be sent as HTTP POST"))
-	})
+	app.Use("/*", refuseGraphQLMethod)
 
 	apil.listen(ctx, app)
+}
+
+// refuseGraphQLMethod answers a request in any method the GraphQL listener does not serve, at any
+// path but the health path: GET, PUT, PATCH, DELETE, HEAD and the rest (MAG-4524, the GraphQL
+// chapter's method check). OPTIONS keeps the shared listener's 204, and a POST is served.
+//
+// The reply is 405 with Allow: POST, which tells the caller the one method that is served, and the
+// router's own GraphQL error with the code REQUEST_REFUSED, its guid in extensions and in Lava-Guid,
+// like every other refusal (MAG-4351). No provider is asked. A HEAD gets the status and the headers,
+// since a HEAD reply has no body. A DELETE used to get 204 with nothing done, so a client bug read
+// as success; a GET, a PUT and a PATCH got a body with no errors list, which no GraphQL client can
+// read.
+func refuseGraphQLMethod(fiberCtx *fiber.Ctx) error {
+	guid := strconv.FormatUint(utils.GenerateUniqueIdentifier(), 10)
+	utils.FormatDebug("graphql request refused: the method is not served",
+		utils.LogAttr("method", fiberCtx.Method()),
+		utils.LogAttr("path", fiberCtx.Path()),
+		utils.LogAttr("GUID", guid),
+	)
+	fiberCtx.Set(fiber.HeaderAllow, fiber.MethodPost)
+	fiberCtx.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSONCharsetUTF8)
+	fiberCtx.Set(common.GUID_HEADER_NAME, guid)
+	fiberCtx.Status(fiber.StatusMethodNotAllowed)
+	return fiberCtx.Send(convertToGraphQLError("graphql requests must be sent as HTTP POST", rpcInterfaceMessages.GraphQLRequestRefusedCode, guid))
 }
 
 // Shutdown drains in-flight HTTP requests and closes the listener.
 // GraphQL has no client-facing WebSockets, so no 1001 close frames are needed.
 func (apil *GraphQLChainListener) Shutdown(ctx context.Context) error {
-	if apil == nil || apil.app == nil {
+	if apil == nil {
 		return nil
 	}
-	return apil.app.ShutdownWithContext(ctx)
+	return apil.gate.close(ctx)
 }
 
 type GraphQLChainProxy struct {

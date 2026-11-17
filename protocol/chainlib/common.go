@@ -200,19 +200,17 @@ func constructFiberCallbackWithHeaderAndParameterExtraction(callbackToBeCalled f
 }
 
 // drainHTTPThenWS performs the graceful shutdown sequence shared by every
-// chain listener: drain in-flight HTTP via app.ShutdownWithContext, then wait
-// for the per-listener websocket WaitGroup to reach zero. The HTTP shutdown
-// runs first so that (a) the listener stops accepting new /ws upgrades and
-// (b) any in-flight upgrade handler — which performs wsWG.Add(1) synchronously
-// in the upgrade middleware — has been observed before wsWG.Wait runs. If the
-// caller's context expires before wsWG drains, we log a warning and return;
-// the listener is already closed and remaining WS conns will tear down when
-// the process exits. name is used to disambiguate the warning across listeners.
-func drainHTTPThenWS(ctx context.Context, app *fiber.App, wg *sync.WaitGroup, name string) error {
-	if app == nil {
-		return nil
-	}
-	httpErr := app.ShutdownWithContext(ctx)
+// chain listener that serves websockets: close the serve gate, which drains
+// in-flight HTTP, then wait for the per-listener websocket WaitGroup to reach
+// zero. The HTTP shutdown runs first so that (a) the listener stops accepting
+// new /ws upgrades and (b) any in-flight upgrade handler — which performs
+// wsWG.Add(1) synchronously in the upgrade middleware — has been observed
+// before wsWG.Wait runs. If the caller's context expires before wsWG drains,
+// we log a warning and return; the listener is already closed and remaining WS
+// conns will tear down when the process exits. name is used to disambiguate
+// the warning across listeners.
+func drainHTTPThenWS(ctx context.Context, gate *serveGate, wg *sync.WaitGroup, name string) error {
+	httpErr := gate.close(ctx)
 
 	done := make(chan struct{})
 	go func() {
@@ -563,12 +561,17 @@ func validateEndpoints(endpoints []common.NodeUrl, apiInterface string) {
 	}
 }
 
-func ListenWithRetry(ctx context.Context, app *fiber.App, address string, chosenAddrCh *common.SafeChannelSender[string]) {
+// listenWithRetry binds address and serves app on it, binding again after a failure, until
+// ctx ends or gate is closed. A socket bound after the gate closed is closed unserved.
+func listenWithRetry(ctx context.Context, app *fiber.App, address string, chosenAddrCh *common.SafeChannelSender[string], gate *serveGate) {
 	for {
 		ln, err := net.Listen("tcp", address)
 		if err != nil {
 			utils.FormatError("net.Listen(tcp, address)", err, utils.LogAttr("address", address))
 		} else {
+			if !gate.open(app, ln) {
+				return
+			}
 			chosenAddrCh.Send(ln.Addr().String())
 
 			err = app.Listener(ln)
@@ -577,9 +580,11 @@ func ListenWithRetry(ctx context.Context, app *fiber.App, address string, chosen
 			}
 		}
 
-		// Stop retrying when the caller cancels (graceful shutdown). Without this,
-		// after app.ShutdownWithContext returns from app.Listener, the loop would
-		// sleep and rebind the port, undoing the shutdown.
+		// Stop retrying on shutdown. Without this, after app.Listener returns the
+		// loop would sleep and rebind the port, undoing the shutdown.
+		if gate.isClosed() {
+			return
+		}
 		select {
 		case <-ctx.Done():
 			return
@@ -858,6 +863,54 @@ type chainListenerBase struct {
 	healthReporter   HealthReporter
 	logger           *metrics.RPCConsumerLogs
 	listeningAddress atomic.Pointer[string]
+	gate             serveGate
+}
+
+// serveGate orders a listener's Shutdown against its serve loop, whichever runs first.
+// fasthttp's Shutdown closes only the listeners its Serve has already taken, and returns at
+// once when there are none, so a Shutdown that ran before Serve took the socket left the server
+// to serve it afterwards. Shutdown closes the gate instead: a socket bound but not yet served is
+// closed under it, and one the loop binds afterwards is closed before Serve sees it.
+type serveGate struct {
+	mu     sync.Mutex
+	closed bool
+	app    *fiber.App
+	ln     net.Listener
+}
+
+// open records app and the listener it is about to serve. Once the gate is closed it closes
+// ln instead and reports false.
+func (g *serveGate) open(app *fiber.App, ln net.Listener) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.closed {
+		_ = ln.Close()
+		return false
+	}
+	g.app, g.ln = app, ln
+	return true
+}
+
+func (g *serveGate) isClosed() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.closed
+}
+
+// close shuts the gate, drains the in-flight requests of the app it let through, and closes
+// that app's listener, which Serve may not have taken yet.
+func (g *serveGate) close(ctx context.Context) error {
+	g.mu.Lock()
+	g.closed = true
+	app, ln := g.app, g.ln
+	g.mu.Unlock()
+	if app == nil {
+		return nil
+	}
+	err := app.ShutdownWithContext(ctx)
+	// Already closed when Serve had taken it.
+	_ = ln.Close()
+	return err
 }
 
 func (apil *chainListenerBase) GetListeningAddress() string {
@@ -873,7 +926,10 @@ func (apil *chainListenerBase) GetListeningAddress() string {
 // websocket upgrade. Only those listeners may hand an upgrade on the health path
 // past the health handler; see the health route below for why the distinction has
 // to be explicit rather than inferred.
-func createAndSetupBaseAppListener(cmdFlags common.ConsumerCmdFlags, healthCheckPath string, healthReporter HealthReporter, servesWebSocketUpgrades bool) *fiber.App {
+// routesDelete is true for a listener whose own routes answer a DELETE: GraphQL refuses it with 405
+// and Allow: POST like every method it does not serve (MAG-4524). The other listeners still get the
+// shared 204 below, before any route runs, until their own refusal is built (MAG-5061 item 7).
+func createAndSetupBaseAppListener(cmdFlags common.ConsumerCmdFlags, healthCheckPath string, healthReporter HealthReporter, servesWebSocketUpgrades, routesDelete bool) *fiber.App {
 	app := fiber.New(fiber.Config{
 		JSONEncoder: json.Marshal,
 		JSONDecoder: json.Unmarshal,
@@ -915,7 +971,7 @@ func createAndSetupBaseAppListener(cmdFlags common.ConsumerCmdFlags, healthCheck
 			c.Set("Access-Control-Max-Age", cmdFlags.CDNCacheDuration)
 			return c.SendStatus(fiber.StatusNoContent)
 		}
-		if c.Method() == "DELETE" {
+		if c.Method() == "DELETE" && !routesDelete {
 			return c.SendStatus(fiber.StatusNoContent)
 		}
 		return c.Next()
