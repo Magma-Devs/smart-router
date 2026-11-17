@@ -27,12 +27,13 @@ const (
 
 // sendSteeredRequest sends steeringTestRequest through SendParsedRelay with the caller's directive
 // headers, as the listener hands them over once DirectiveHeaders has taken them out of the
-// request's metadata.
+// request's metadata and ParseRelay has applied them to the message.
 func sendSteeredRequest(t *testing.T, chainParser chainlib.ChainParser, server *RPCSmartRouterServer, directives map[string]string) *common.RelayResult {
 	t.Helper()
 	ctx := context.Background()
 	body := []byte(steeringTestRequest)
 	chainMessage := parseRefusalTestRequestBody(t, chainParser, body)
+	server.HandleDirectiveHeadersForMessage(chainMessage, directives)
 	reqBlock, _ := chainMessage.RequestedBlock()
 	relayData := relayprotocol.NewRelayData(ctx, http.MethodPost, "", body, 0, reqBlock, spectypes.APIInterfaceJsonRPC,
 		chainMessage.GetRPCMessage().GetHeaders(), chainlib.GetAddon(chainMessage), common.GetExtensionNames(chainMessage.GetExtensions()))

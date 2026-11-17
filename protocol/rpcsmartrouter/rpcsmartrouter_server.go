@@ -5006,6 +5006,7 @@ func skipCacheWriteAfterDegrade(ctx context.Context, relayProcessor *relaycore.R
 // - Cache is not active
 // - Quorum is enabled (quorum requires fresh endpoint validation)
 // - Request is stateful, node-bound or selects a GraphQL never-cache field (cacheExclusionReason)
+// - Request carries lava-force-cache-refresh, which neither reads nor writes the cache
 // - Response is a node error
 // - Response body is larger than cacheMaxEntryBytes (--cache-max-entry-bytes)
 // - Requested block is NOT_APPLICABLE
@@ -5046,6 +5047,16 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 		utils.FormatDebug("cache write skipped: "+reason+" request",
 			utils.LogAttr("api", protocolMessage.GetApi().Name),
 			utils.LogAttr("why", cacheExclusionWhy(protocolMessage)),
+			utils.LogAttr("GUID", ctx),
+		)
+		return
+	}
+
+	// lava-force-cache-refresh keeps the request out of the cache both ways. The lookup in
+	// sendRelayToEndpoint is skipped, and the answer is not written here, so a refresh changes
+	// nothing another caller is served (MAG-1765, Omer's Path B).
+	if protocolMessage.GetForceCacheRefresh() {
+		utils.FormatDebug("cache write skipped: force-cache-refresh request",
 			utils.LogAttr("GUID", ctx),
 		)
 		return
@@ -5570,7 +5581,8 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 				utils.LogAttr("why", cacheExclusionWhy(protocolMessage)),
 			)
 		} else if protocolMessage.GetForceCacheRefresh() {
-			// User requested cache bypass via header
+			// The caller asked to bypass the cache. The answer is not written either
+			// (tryCacheWriteResolved, MAG-1765).
 			utils.FormatDebug("Cache bypassed due to force-cache-refresh header",
 				utils.LogAttr("GUID", ctx),
 				utils.LogAttr("cacheActive", true),
