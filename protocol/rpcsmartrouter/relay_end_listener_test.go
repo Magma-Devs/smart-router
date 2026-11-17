@@ -19,8 +19,10 @@ import (
 	"github.com/magma-Devs/smart-router/utils/rand"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
@@ -194,6 +196,9 @@ func TestRelayEnd_GRPCListener(t *testing.T) {
 				require.Equal(t, int64(1), reply.GetValue(), "the node's answer reached the client")
 			} else {
 				require.Error(t, err)
+				// A name no provider of the router carries is the caller's to fix (MAG-3800).
+				require.Equal(t, codes.InvalidArgument, status.Code(err), "%v", err)
+				require.Equal(t, routersession.SelectedProviderNotConfiguredError.Error(), status.Convert(err).Message())
 			}
 
 			events := newRelayEndsSince(read, seen)

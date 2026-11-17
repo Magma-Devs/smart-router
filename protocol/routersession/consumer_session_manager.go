@@ -1869,6 +1869,20 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 	// reaches the sticky block — and naming a provider explicitly is the more specific ask of
 	// the two. Resolving stickiness here unconditionally would silently invert it, and only on
 	// deployments running --shared-state.
+	// The caller's own lava-select-provider name, before a sticky claim below can fill
+	// selectedProvider. Only that name can be the caller's mistake: a refusal of it that names no
+	// provider of this router at all is marked SelectedProviderNotConfiguredError, which the
+	// listeners answer as a refused request (MAG-3800). A blocked provider, one that lacks the
+	// add-on, a name matching two providers by case, and a sticky claim whose provider is gone keep
+	// the plain SelectedProviderUnavailableError: none of them is the caller's mistake.
+	if headerPin := selectedProvider; headerPin != "" {
+		defer func() {
+			if errors.Is(errRet, SelectedProviderUnavailableError) && !csm.selectedProviderConfigured(headerPin) {
+				errRet = fmt.Errorf("%w: %w", SelectedProviderNotConfiguredError, errRet)
+			}
+		}()
+	}
+
 	if stickiness != "" && selectedProvider == "" && csm.sharedSticky != nil {
 		resolved, localKey, stickyErr := csm.resolveStickyPin(ctx, stickiness, cuNeededForSession, requestedBlock, addon, common.GetExtensionNames(extensions), internalPath, stateful)
 		switch {
@@ -2279,6 +2293,26 @@ func (csm *ConsumerSessionManager) providerByAddress(address string) *ConsumerSe
 		return provider
 	}
 	return csm.backupProviders[address]
+}
+
+// selectedProviderConfigured reports whether name, a lava-select-provider value, names a provider
+// this router is configured with: a primary or a backup, blocked or not, in any letter case, the
+// way resolveSelectedProviderAddress matches it. It takes the read lock itself, so the caller must
+// not hold csm.lock.
+func (csm *ConsumerSessionManager) selectedProviderConfigured(name string) bool {
+	csm.lock.RLock()
+	defer csm.lock.RUnlock()
+	for address := range csm.pairing {
+		if strings.EqualFold(address, name) {
+			return true
+		}
+	}
+	for address := range csm.backupProviders {
+		if strings.EqualFold(address, name) {
+			return true
+		}
+	}
+	return false
 }
 
 // convertSelectionStatsToMetrics converts SelectionStats to metrics format with all provider scores

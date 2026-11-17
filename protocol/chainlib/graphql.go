@@ -384,6 +384,12 @@ func (apil *GraphQLChainListener) Serve(ctx context.Context, cmdFlags common.Con
 		// by letter case (MAG-4908); an unreadable request quotes at most the client's own names and
 		// the token its parser stopped at, never a decoder's error text (MAG-4351).
 		refusal: func(err error, msgSeed string) (int, []byte, string, bool) {
+			// A refusal of the request itself made after parsing, such as a lava-select-provider
+			// name no provider of the router carries (MAG-3800): the same refusal document, with
+			// REQUEST_REFUSED.
+			if message, ok := refusedRequestMessage(err); ok {
+				return graphQLRefusalStatus, convertToGraphQLError(message, rpcInterfaceMessages.GraphQLRequestRefusedCode, msgSeed), message, true
+			}
 			refusal := rpcInterfaceMessages.GraphQLRefusalFrom(err)
 			if refusal == nil {
 				return 0, nil, "", false

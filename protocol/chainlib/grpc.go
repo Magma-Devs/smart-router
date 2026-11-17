@@ -408,6 +408,14 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 		apil.logger.AddMetricForGrpc(metricsData, err, &metadataValues)
 
 		if err != nil {
+			if message, ok := refusedRequestMessage(err); ok {
+				// The router refused the request itself, so it is the caller's to fix:
+				// INVALID_ARGUMENT, the status gRPC gives a wrong request, with one fixed sentence
+				// and never err's text, which lists the router's provider names. A plain error, as
+				// below, reaches the client as Unknown (MAG-3800).
+				apil.logger.LogRequestAndResponse("grpc in/out", true, method, relayBodyForLog(string(reqBody), cmdFlags.DebugRelays), "", message, msgSeed, time.Since(startTime), err)
+				return nil, convertRelayMetaDataToMDMetaData(relayReply.GetMetadata()), status.Error(codes.InvalidArgument, message)
+			}
 			errMasking := apil.logger.GetUniqueGuidResponseForError(err, msgSeed)
 			apil.logger.LogRequestAndResponse("grpc in/out", true, method, relayBodyForLog(string(reqBody), cmdFlags.DebugRelays), "", errMasking, msgSeed, time.Since(startTime), err)
 			// Even on error the relay result may carry response metadata — notably the
