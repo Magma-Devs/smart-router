@@ -1,6 +1,7 @@
 package rpcInterfaceMessages
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -87,6 +88,20 @@ func TestGraphQLReadVerdicts(t *testing.T) {
 		{"extensions that is not an object counts as no code", 200, `{"data":null,"errors":[{"message":"bad","extensions":"x"}]}`, effectElsewhere},
 		{"an errors entry that is not an object is still read", 200, `{"errors":["bad"]}`, effectElsewhere},
 		{"a message that is not text is still read", 200, `{"errors":[{"message":{"text":"bad"},"extensions":{"code":"INTERNAL_SERVER_ERROR"}}]}`, effectFault},
+
+		// Quota text (Change 12): a vendor quota in words pauses the provider, as a 429 does.
+		{"'Too many requests' with no code pauses the provider", 200, `{"errors":[{"message":"Too many requests"}]}`, effectThrottled},
+		{"'rate limit exceeded' in any letter case pauses the provider", 200, `{"errors":[{"message":"Per anonymous IP RATE LIMIT EXCEEDED"}]}`, effectThrottled},
+		{"a quota text beside data pauses the provider", 200, `{"data":{"a":null},"errors":[{"message":"too many requests","path":["a"]}]}`, effectThrottled},
+		{"a quota text under an unmatched code pauses the provider", 200, `{"errors":[{"message":"Too Many Requests","extensions":{"code":"THROTTLED"}}]}`, effectThrottled},
+		{"a quota text under a numeric code pauses the provider", 200, `{"errors":[{"message":"Too many requests","extensions":{"code":-32090}}]}`, effectThrottled},
+		{"a quota text under a 400 pauses the provider", 400, `{"errors":[{"message":"rate limit exceeded"}]}`, effectThrottled},
+		{"a quota text under a 503 stays a provider fault", 503, `{"errors":[{"message":"Too many requests"}]}`, effectFault},
+		{"a real code beats a quota text", 200, `{"errors":[{"message":"Too many requests in the batch","extensions":{"code":"GRAPHQL_VALIDATION_FAILED"}}]}`, effectCaller},
+		{"'too many' alone is not a quota text", 200, `{"errors":[{"message":"too many keys supplied to multi-get"}]}`, effectElsewhere},
+		{"'rate limit' alone is not a quota text", 200, `{"errors":[{"message":"Rate limit settings could not be loaded"}]}`, effectElsewhere},
+		{"'quota' is not a quota text", 200, `{"errors":[{"message":"You've reached your monthly quota of Request Units"}]}`, effectElsewhere},
+		{"a quota text past the scan limit is not read", 200, `{"errors":[{"message":"` + strings.Repeat("x", graphQLQuotaTextScanLimit) + ` too many requests"}]}`, effectElsewhere},
 
 		// Several errors: the reply is retried if any error retries.
 		{"the caller's error beside a provider fault is retried and blamed", 200,
@@ -179,6 +194,17 @@ func TestGraphQLWriteVerdictsUnchanged(t *testing.T) {
 			require.Equal(t, test.wantStatus, write.ClassificationStatus([]byte(test.body), test.status))
 		})
 	}
+}
+
+// TestGraphQLQuotaTextCostsNothing pins that looking for a quota text allocates nothing, however
+// long the message: only its first graphQLQuotaTextScanLimit bytes are read, in place.
+func TestGraphQLQuotaTextCostsNothing(t *testing.T) {
+	huge := strings.Repeat("a", 10<<20)
+	allocations := testing.AllocsPerRun(10, func() {
+		require.False(t, isGraphQLQuotaText(huge))
+		require.True(t, isGraphQLQuotaText("TOO MANY REQUESTS"))
+	})
+	require.Zero(t, allocations)
 }
 
 // TestGraphQLRetryElsewhereStatusIsBlameless pins the registry row the unknown and elsewhere
