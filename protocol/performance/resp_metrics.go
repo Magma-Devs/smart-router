@@ -80,7 +80,7 @@ func newRespCacheMetricsSet() *respCacheMetricsSet {
 		}),
 		opsFailed: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "smartrouter_resp_cache_failed_total",
-			Help: "RESP cache operations that failed at the backend (never clean misses), split by op (get|set) and kind (error|timeout).",
+			Help: "RESP cache operations that failed at the backend (never clean misses), split by op (get|set|sticky_get|sticky_set|observation_get|observation_set) and kind (error|timeout).",
 		}, []string{"op", "kind"}),
 		connected: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "smartrouter_resp_cache_connected",

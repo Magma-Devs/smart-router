@@ -191,7 +191,7 @@ func TestSentinelTrackerRecordsOnlyMarkedDataDials(t *testing.T) {
 	sentinelAddr, masterAddr := discoveredSentinel.Addr().String(), master.Addr().String()
 
 	tracker := &endpointTracker{}
-	dial := trackingDialerMarkedOnly(nil, time.Second, tracker)
+	dial := sentinelDialer(nil, time.Second, tracker)
 	markedDial := markDataDialsHook{}.DialHook(dial)
 
 	dialOnce := func(dialFunc func(context.Context, string, string) (net.Conn, error), addr string) {
