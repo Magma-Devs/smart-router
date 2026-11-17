@@ -684,7 +684,7 @@ func TestCheckResponseError_AnyNonSuccessIsANodeError(t *testing.T) {
 		{"Tezos injection failure is a JSON array in a 500", 500, `[{"kind":"temporary","id":"failure","msg":"Can't parse the operation"}]`, true, ""},
 		{"Beacon NOT_FOUND", 404, `{"code":404,"message":"NOT_FOUND: beacon block at slot 9","stacktraces":[]}`, true, "NOT_FOUND"},
 		{"toncenter ok:false with a 422", 422, `{"ok":false,"error":"failed to parse ton_addr","code":422}`, true, "failed to parse"},
-		{"tatum gateway empty 404 (the dfns incident)", 404, ``, true, "HTTP 404"},
+		{"tatum gateway empty 404 (MAG-3974)", 404, ``, true, "HTTP 404"},
 		{"nginx HTML 404", 404, `<html><head><title>404 Not Found</title></head></html>`, true, "404 Not Found"},
 		{"Horizon's own empty 405", 405, ``, true, "HTTP 405"},
 		{"Tezos missing block is an empty 404", 404, ``, true, "HTTP 404"},

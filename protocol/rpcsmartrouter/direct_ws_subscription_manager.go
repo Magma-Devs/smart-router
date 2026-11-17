@@ -44,6 +44,29 @@ type directActiveSubscription struct {
 	subscriptionParams []byte // Original subscription params (JSON)
 	subscribeMethod    string // Method name (e.g., "eth_subscribe", "subscribe")
 
+	// isWrite is read once from the API's spec category when the subscription is created.
+	// It marks a subscribe method whose params are a write — Substrate's
+	// author_submitAndWatchExtrinsic and transactionWatch_v1_submitAndWatch are the only
+	// ones in the catalogue today — rather than a subscription request that merely asks to
+	// be told about something.
+	//
+	// handleUpstreamDisconnect reads it before ever touching the reconnect/restore path: a
+	// restore replays subscriptionParams to the node verbatim, and for a write that is the
+	// client's signed extrinsic, so the replay is a second submission of something that may
+	// already have executed. relaypolicy's ordinary relay path refuses to retry a write for
+	// exactly this reason (relaypolicy/policy.go's stateful guard); nothing on the
+	// subscription path had carried the same rule until now (MAG-5331). A write subscription
+	// that drops is ended, never restored, whatever the cause.
+	isWrite bool
+
+	// pushMethod is the method of the pushes the node has sent on a write subscription
+	// (author_extrinsicUpdate for author_submitAndWatchExtrinsic), recorded from the first one.
+	// endWriteSubscription names its final frame with it: a client library routes a push by that
+	// name plus the subscription id (polkadot.js keys its handler author_extrinsicUpdate::<id>),
+	// so a frame named after the subscribe call never reaches the caller. Nil until the first
+	// push; only a write subscription records it.
+	pushMethod atomic.Pointer[string]
+
 	// unsubscribeMethod is what the node is told to drop this subscription with on the paths
 	// where no client message names the method: the teardown that runs when the last client
 	// goes, a failed restore's cleanup, and the discard of a subscription a restore re-opened
@@ -496,6 +519,10 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 	// - Tendermint uses "subscribe"
 	subscribeMethod := protocolMessage.GetApi().Name
 
+	// A write subscription (the spec's stateful category) must never be replayed to the
+	// node on restore — see directActiveSubscription.isWrite.
+	isWrite := chainlib.GetStateful(protocolMessage) == common.CONSISTENCY_SELECT_ALL_PROVIDERS
+
 	// Resolved once, here, while the spec collection this message matched is in hand: the
 	// teardown paths have no client message to read the method off, and deriving it there is
 	// what sent non-EVM nodes a method they do not have (MAG-4278 item 1).
@@ -732,6 +759,7 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 		hashedParams:         hashedParams,
 		subscriptionParams:   subscriptionParams, // Store for restoration after reconnect
 		subscribeMethod:      subscribeMethod,    // Store for restoration (eth_subscribe, subscribe, etc.)
+		isWrite:              isWrite,            // Never restore a write subscription, see above
 		unsubscribeMethod:    unsubscribeMethod,  // Resolved from the spec above, for the teardown paths
 		numericIDs:           numericIDs,         // Chain-level, so it outlives any one upstream id
 		connectedClients:     make(map[string]*common.SafeChannelSender[*pairingtypes.RelayReply]),
@@ -1410,6 +1438,10 @@ func (dwsm *DirectWSSubscriptionManager) listenForUpstreamMessages(
 			if msg == nil {
 				continue
 			}
+			if activeSub.isWrite && msg.Method != "" && activeSub.pushMethod.Load() == nil {
+				method := msg.Method
+				activeSub.pushMethod.Store(&method)
+			}
 			dwsm.routeMessageToClients(activeSub, msg)
 		}
 	}
@@ -1550,6 +1582,15 @@ func (dwsm *DirectWSSubscriptionManager) handleUpstreamDisconnect(
 		return
 	}
 	defer activeSub.restoring.Store(false)
+
+	// A write subscription is ended here, never restored, whatever the cause — see
+	// directActiveSubscription.isWrite. Checked first, before this disconnect counts against
+	// the restore bound or touches the connection at all: none of that applies to a
+	// subscription that is never going to be re-subscribed.
+	if activeSub.isWrite {
+		dwsm.endWriteSubscription(hashedParams, activeSub, cause)
+		return
+	}
 
 	dwsm.lock.RLock()
 	connectedClients := len(activeSub.clientRouterIDs)
@@ -1710,6 +1751,105 @@ func (dwsm *DirectWSSubscriptionManager) handleUpstreamDisconnect(
 
 	// Start listening for messages on the new subscription
 	go dwsm.listenForUpstreamMessages(activeSub.ctx, hashedParams, activeSub, newUpstreamSub, newMsgChan)
+}
+
+// endWriteSubscription ends a write subscription instead of restoring it (MAG-5331): the stored
+// subscriptionParams are the write itself — for Substrate's submit-and-watch methods, a signed
+// extrinsic — and handleUpstreamDisconnect's ordinary restore replays them to the node verbatim,
+// resending something that may already have executed. Called in place of the restore, for every
+// cause handleUpstreamDisconnect handles (a dropped socket, ErrClientReconnected,
+// ErrSubscriptionQueueOverflow): a write subscription is never re-subscribed, whatever ended it.
+//
+// Every attached client is sent one final frame naming the subscription's outcome as unknown, on
+// its own router id, before the subscription is torn down the same way an explicit unsubscribe or
+// the periodic sweep would — the node told to drop it when it still can be, the manager and pool
+// left holding nothing for it. The client's socket is untouched: only this subscription ends, and
+// only with a frame, never a close.
+func (dwsm *DirectWSSubscriptionManager) endWriteSubscription(hashedParams string, activeSub *directActiveSubscription, cause error) {
+	type endingClient struct {
+		sender   *common.SafeChannelSender[*pairingtypes.RelayReply]
+		routerID string
+	}
+
+	dwsm.lock.RLock()
+	stillOwner := dwsm.activeSubscriptions[hashedParams] == activeSub
+	clients := make([]endingClient, 0, len(activeSub.connectedClients))
+	for clientKey, sender := range activeSub.connectedClients {
+		clients = append(clients, endingClient{sender: sender, routerID: activeSub.clientRouterIDs[clientKey]})
+	}
+	numericIDs := activeSub.numericIDs
+	dwsm.lock.RUnlock()
+
+	if !stillOwner {
+		// Torn down already by another path (an explicit unsubscribe, the periodic sweep);
+		// nothing here is this subscription's to end.
+		return
+	}
+
+	utils.FormatWarning("DirectWS: write subscription ended instead of restored after an upstream disconnect", cause,
+		utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
+		utils.LogAttr("subscribeMethod", activeSub.subscribeMethod),
+		utils.LogAttr("connectedClients", len(clients)),
+	)
+
+	// Named like the pushes the node already sent on this subscription, so the client routes
+	// it to the same handler; the subscribe call's name only when the drop came before any push.
+	frameMethod := activeSub.subscribeMethod
+	if pushMethod := activeSub.pushMethod.Load(); pushMethod != nil {
+		frameMethod = *pushMethod
+	}
+
+	// Sent before any client is released below: releaseClientLocked closes the same channel
+	// this writes to, and a send to it afterward would just report TrySendClosed.
+	for _, client := range clients {
+		frame, err := writeSubscriptionEndedFrame(frameMethod, client.routerID, numericIDs)
+		if err != nil {
+			utils.FormatError("DirectWS: failed to build the final frame for an ended write subscription", err,
+				utils.LogAttr("routerID", client.routerID),
+			)
+			continue
+		}
+		client.sender.SendWithin(&pairingtypes.RelayReply{Data: frame}, subscriptionClientSendGrace)
+	}
+
+	// Same teardown an explicit unsubscribe or the periodic sweep uses: releases every
+	// client, forgets the ids, tells the node (best-effort, and only where it still can
+	// matter — teardownUpstreamSubscription no-ops on a dead connection), and takes the
+	// subscription out of the map so nothing can join it again under this key.
+	dwsm.cleanupSubscription(hashedParams, activeSub)
+}
+
+// writeSubscriptionEndedFrame builds the final frame endWriteSubscription sends a client whose
+// write subscription was ended rather than restored. Shaped like an ordinary push notification —
+// method plus params.subscription — so a dispatcher keyed on this subscription's id still has
+// something to match it to, with "error" standing in for "result".
+//
+// method is the one the node's own pushes on this subscription carried (e.g.
+// "author_extrinsicUpdate" for author_submitAndWatchExtrinsic), recorded in
+// directActiveSubscription.pushMethod: the spec's SUBSCRIBE directive names only the subscribe
+// call, so the router learns the push name from the node. A client routes a push by that name and
+// the subscription id, and polkadot.js then reads params.error on a subscription message and fails
+// the caller's callback with it. When the drop came before any push, method is the subscribe
+// call's name, the only one the router has. The exact wire shape was left open by MAG-5331's
+// acceptance criteria pending a docs/compatibility decision — treat this as the provisional
+// answer, not a settled contract.
+//
+// The error reuses errUnclearWriteAnswerLost's text: the connection that would have carried the
+// write's final status broke after the write was already sent, which is exactly that case, not
+// a timeout (errUnknownWriteOutcome) — nothing here waited for a deadline.
+func writeSubscriptionEndedFrame(method, routerID string, numericIDs bool) ([]byte, error) {
+	response := map[string]any{
+		"jsonrpc": "2.0",
+		"method":  method,
+		"params": map[string]any{
+			"subscription": subscriptionIDValue(routerID, numericIDs),
+			"error": map[string]any{
+				"code":    -32000,
+				"message": errUnclearWriteAnswerLost.Error(),
+			},
+		},
+	}
+	return json.Marshal(response)
 }
 
 // handleClientDisconnect releases one client from one subscription when the client's

@@ -232,7 +232,7 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 		{MessageContains("method not found"), RouterErrorNodeMethodNotFound},
 		{MessageContains("method not supported"), RouterErrorNodeMethodNotSupported},
 		// A node that does not serve pending state answers a call tagged "pending" with this (Tatum on
-		// GK8 Hoodi, eth_call; MAG-5021). The method is on its surface and the block tag is not, so
+		// Hoodi, eth_call; MAG-5021). The method is on its surface and the block tag is not, so
 		// it is "can't serve here", the verdict Sui's FEATURE_UNAVAILABLE gets: a peer is asked and
 		// the endpoint is not blamed. Under the -32000 catch-all it was NODE_SERVER_ERROR, at fault,
 		// and those calls alone switched the URL off for every method. Matched on the text because
@@ -383,8 +383,8 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 		// "method not allowed" or "route not found" lost its route-refusal verdict and was
 		// returned as the caller's bad request instead of going to another provider).
 		//
-		// Evidence for every row: agent_docs/.../rest-stateful-bug/rest-status-code-map.md and
-		// rest-blockchain-errors-research.md (twelve families probed live 2026-09-27).
+		// Evidence for every row is recorded in MAG-3972, MAG-3974 and MAG-3976 (twelve families
+		// probed live 2026-09-27).
 
 		// --- 1. What the node said: the route does not exist, whoever answered. ---
 		{MessageContains("endpoint not found"), RouterErrorNodeEndpointNotFound},
