@@ -40,7 +40,8 @@ import (
 // This type and resolver are pure: they do not touch the relay hot path. Wiring the resolver into the
 // state machine's selection decision is a separate step.
 
-// Default knob values applied when an enabled policy specifies neither a caller value nor a floor.
+// Default knob values applied when an enabled policy specifies neither a caller value nor a floor. Under an
+// enabled policy each one is also the floor of a knob written without one (MAG-2784, resolveKnob).
 const (
 	defaultEnabledMaxParticipants    = 3
 	defaultEnabledAgreementThreshold = 2
