@@ -931,7 +931,7 @@ func (cswp *ConsumerSessionsWithProvider) GetConsumerSessionInstanceFromEndpoint
 	}
 
 	// try to lock an existing session, if can't create a new one
-	for _, session := range cswp.Sessions {
+	for sessionID, session := range cswp.Sessions {
 		// Match session to connection (different logic for provider-relay vs direct RPC)
 		var matchesConnection bool
 		if isProviderRelay {
@@ -942,21 +942,37 @@ func (cswp *ConsumerSessionsWithProvider) GetConsumerSessionInstanceFromEndpoint
 		}
 
 		if !matchesConnection {
-			// skip sessions that don't belong to the active connection
+			// A session belonging to another connection cannot serve this request — but a
+			// permanently retired one (BlockListed) is dead weight whichever connection it was
+			// created for, and it is never going to serve anyone again. Reclaim it here, on the
+			// one path that already walks every session this provider holds, so it stops
+			// counting against the ceiling below once the node that produced it has moved on
+			// (MAG-5063): otherwise a retired session outlives the failures that retired it for
+			// the rest of the epoch, no matter how long the node has been healthy again.
+			if session.isReclaimable() {
+				cswp.reclaimSession(sessionID, qosManager)
+			}
 			continue
 		}
-		if _, ok := session.TryUseSession(); ok {
+		if blocked, ok := session.TryUseSession(); ok {
 			return session, cswp.PairingEpoch, nil
+		} else if blocked {
+			// TryUseSession has already confirmed, under the session's own lock, that it is
+			// BlockListed and not in use: reclaim it the same way as the non-matching case above.
+			cswp.reclaimSession(sessionID, qosManager)
 		}
 	}
 
-	// No free session, so create one — bounded only by the total-session ceiling below.
+	// No free session, so create one — bounded only by the total-session ceiling below, which now
+	// counts only sessions the loop above could not already reclaim: one still in flight, or one
+	// genuinely live and in use. A session that failed enough to be retired no longer costs the
+	// provider any of this budget once nothing is using it (MAG-5063).
 	//
 	// There used to be a second, lower ceiling here: a provider was refused a new session once
 	// MaxSessionsAllowedPerProvider/3 of its sessions had been retired, and the count grew by that
 	// same third on every pool reset. It is gone (FAILOVER-TASKS section 2).
 	//
-	// It could not be kept once the provider block was dropped. Retired sessions are never
+	// It could not be kept once the provider block was dropped. Retired sessions were then never
 	// reclaimed inside an epoch, and the only thing that raised that ceiling was the reset the
 	// block itself triggered — so with the block gone the ceiling was fixed at a third, and an
 	// upstream that reached it was refused every session for the rest of the epoch while answering
@@ -1008,6 +1024,18 @@ func (cswp *ConsumerSessionsWithProvider) GetConsumerSessionInstanceFromEndpoint
 		utils.LogAttr("isDirectRPC", !isProviderRelay),
 	)
 	return consumerSession, cswp.PairingEpoch, nil
+}
+
+// reclaimSession drops a retired session from the pool together with the QoS reports filed for it.
+// Nothing reads a retired session's reports, and they would otherwise stay until the QoS manager
+// purges the epoch after next: about 200 bytes per retired session, one session per 16 failed
+// relays, with no ceiling on how many an outage retires now that the pool no longer stops it
+// (MAG-5063). The caller holds cswp.Lock.
+func (cswp *ConsumerSessionsWithProvider) reclaimSession(sessionID int64, qosManager *qos.QoSManager) {
+	delete(cswp.Sessions, sessionID)
+	if qosManager != nil {
+		qosManager.ForgetSession(sessionID)
+	}
 }
 
 func (cswp *ConsumerSessionsWithProvider) sortEndpointsByLatency(endpointInfos []EndpointInfo) {
