@@ -84,6 +84,7 @@ type SmartRouterMetricsManager struct {
 	crossValidationMismatchTotalMetric              *prometheus.CounterVec // smartrouter_cross_validation_mismatch_total {spec, apiInterface, method, group, finality} — bounded alerting surface
 	crossValidationFailuresTotalMetric              *prometheus.CounterVec // smartrouter_cross_validation_failures_total {spec, apiInterface, method, reason} — bounded by the CrossValidationReason* enum
 	crossValidationStragglerTotalMetric             *prometheus.CounterVec // smartrouter_cross_validation_straggler_total {spec, apiInterface, method, outcome} — bounded by the CrossValidationStragglerOutcome* enum
+	crossValidationRecordDroppedTotalMetric         *prometheus.CounterVec // smartrouter_cross_validation_record_dropped_total {spec, apiInterface} — the async compliance-record write queue was full; the same gap is independently visible as a hole in the record Seq sequence itself (MAG-2787)
 
 	// Incident group metrics
 	incidentNodeErrorsTotalMetric     *prometheus.CounterVec   // smartrouter_node_errors_total         {spec, apiInterface, provider_address, method}
@@ -497,6 +498,15 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		Name: "smartrouter_cross_validation_straggler_total",
 		Help: "Cross-validation straggler resolutions (responses that arrived after the quorum early-exit reply), by outcome (agreed, disagreed, node-error, protocol-error, not-received). Bounded — the outcome set is a closed enum.",
 	}, []string{"spec", "apiInterface", "method", "outcome"}))
+	// The structured compliance record (MAG-2787) is written off an async, bounded queue so a slow or
+	// unavailable log pipeline can never fail a relay. A full queue drops the record rather than
+	// blocking; this counter makes that drop visible without needing to notice a gap in the record's
+	// own Seq sequence. Deliberately unlabeled by method: it is a fact about the write pipeline's
+	// capacity, not about any one request.
+	m.crossValidationRecordDroppedTotalMetric = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "smartrouter_cross_validation_record_dropped_total",
+		Help: "Structured cross-validation compliance records (MAG-2787) dropped because the async write queue was full. Any non-zero value means the Seq sequence in the log stream has a gap.",
+	}, []string{"spec", "apiInterface"}))
 
 	// =========================================================================
 	// Incident group metrics
@@ -1607,6 +1617,16 @@ func (m *SmartRouterMetricsManager) SetCrossValidationStragglerMetric(chainId, a
 		return
 	}
 	incCounter(m.crossValidationStragglerTotalMetric, chainId, apiInterface, m.normalizeMethodLabel(chainId, method), outcome)
+}
+
+// SetCrossValidationRecordDroppedMetric records one structured compliance record (MAG-2787) lost
+// because the async write queue was full at emission time. Unlabeled by method/outcome: a drop is a
+// write-pipeline capacity fact, and the record's own Seq sequence already carries which request it was.
+func (m *SmartRouterMetricsManager) SetCrossValidationRecordDroppedMetric(chainId, apiInterface string) {
+	if m == nil {
+		return
+	}
+	incCounter(m.crossValidationRecordDroppedTotalMetric, chainId, apiInterface)
 }
 
 func (m *SmartRouterMetricsManager) UpdateHealthCheckStatus(status bool) {

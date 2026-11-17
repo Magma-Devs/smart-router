@@ -48,10 +48,26 @@ const (
 	defaultEnabledMinGroups          = 1
 )
 
+// participantsPrimary and participantsAll are max-participants' two string sentinels (MAG-2783):
+// every non-backup upstream configured for the request's chain and interface, or every upstream
+// including backups.
+const (
+	participantsPrimary = "primary"
+	participantsAll     = "all"
+)
+
 // Bound is an optional [Floor, Cap] range for one cross-validation knob. A nil side is unbounded.
 type Bound struct {
 	Floor *int `yaml:"floor,omitempty" json:"floor,omitempty" mapstructure:"floor,omitempty"`
 	Cap   *int `yaml:"cap,omitempty" json:"cap,omitempty" mapstructure:"cap,omitempty"`
+	// Participants is "primary", "all", or "" (MAG-2783). Only max-participants may set it — Validate
+	// rejects it on agreement-threshold/min-groups. It names a count the resolver cannot know at parse
+	// time (how many providers this endpoint actually has), so it is a placeholder: Floor and Cap stay
+	// nil until CrossValidationPolicyResolver.SetParticipantCounts replaces it with a concrete
+	// Bound{Floor: &n} once the endpoint's provider counts are known, after which every other call site
+	// (resolveKnob, Resolve, the capacity guards) sees an ordinary resolved Bound and needs no knowledge
+	// of this field at all.
+	Participants string `yaml:"-" json:"-" mapstructure:"-"`
 }
 
 // CrossValidationPolicy is a per-method cross-validation policy.
@@ -95,6 +111,10 @@ type CrossValidationConfig struct {
 type CrossValidationPolicyResolver struct {
 	policies  map[string]CrossValidationPolicy // keyed by policyKey(chain, api, method)
 	positions map[string]int                   // same keys: the policy's index in the configured list
+	// backups is the backup-tier count SetParticipantCounts resolved max-participants: all against
+	// (allCount - primaryCount), so the startup prediction counts the same backups that policy's count
+	// includes (MAG-2783). 0 until SetParticipantCounts runs.
+	backups int
 }
 
 // policyKeySeparator joins the three identifiers in a policy key. NUL is used because it cannot appear in a
@@ -136,6 +156,54 @@ func NewCrossValidationPolicyResolver(cfg CrossValidationConfig) (*CrossValidati
 		r.positions[key] = i
 	}
 	return r, nil
+}
+
+// SetParticipantCounts resolves every policy's max-participants "primary"/"all" sentinel (MAG-2783)
+// against this endpoint's actual provider counts by filling in Floor — after this call, resolveKnob,
+// Resolve, headerlessParams and the capacity guards all see an ordinary Floor/Cap and need no
+// knowledge of Participants to compute the right number. A policy with no sentinel is left untouched.
+//
+// Must be called once, after construction and before the resolver serves any request. One
+// CrossValidationPolicyResolver instance is built fresh per endpoint inside ServeRPCRequests (from the
+// same global config every endpoint parses), so baking one endpoint's counts into it never leaks to
+// another endpoint's policies sharing the same resolver — a policy for a different chain/interface is
+// never looked up through this instance.
+//
+// primaryCount is every configured direct-rpc provider for this chain and interface; allCount also
+// includes backup-direct-rpc. Both are the same layout the boot-time capacity advisory already counts
+// from (validateCrossValidationFleet's configuredProviderGroups), so "primary"/"all" ends up governed
+// by the exact same insufficient-capacity / insufficient-groups guards a numeric value always was.
+func (r *CrossValidationPolicyResolver) SetParticipantCounts(primaryCount, allCount int) {
+	if r == nil {
+		return
+	}
+	r.backups = max(allCount-primaryCount, 0)
+	for key, p := range r.policies {
+		switch p.MaxParticipants.Participants {
+		case participantsPrimary:
+			n := primaryCount
+			p.MaxParticipants.Floor = &n
+			r.policies[key] = p
+		case participantsAll:
+			n := allCount
+			p.MaxParticipants.Floor = &n
+			r.policies[key] = p
+		default:
+			continue
+		}
+		// Participants is deliberately NOT cleared: Resolve reads it afterward to set
+		// CrossValidationParams.IncludeBackups ("all" only — "primary" never draws on backups).
+		// resolveKnob/Resolve/the capacity guards only ever read Floor/Cap, so leaving it behind
+		// changes nothing for them.
+	}
+}
+
+// participantBackups returns the backup count SetParticipantCounts recorded, 0 for a nil resolver.
+func (r *CrossValidationPolicyResolver) participantBackups() int {
+	if r == nil {
+		return 0
+	}
+	return r.backups
 }
 
 // PreflightValidateCrossValidationConfig runs the context-free half of cross-validation config
@@ -209,10 +277,11 @@ func (p CrossValidationPolicy) governsRequests() bool {
 	return p.Enabled || p.ForbidCallerCV || p.hasBounds()
 }
 
-// hasBounds reports whether any knob carries a floor or a cap.
+// hasBounds reports whether any knob carries a floor or a cap. A max-participants "primary"/"all" counts:
+// it resolves to a floor (MAG-2783), only later than a number does.
 func (p CrossValidationPolicy) hasBounds() bool {
 	for _, b := range []Bound{p.MaxParticipants, p.AgreementThreshold, p.MinGroups} {
-		if b.Floor != nil || b.Cap != nil {
+		if b.Floor != nil || b.Cap != nil || b.Participants != "" {
 			return true
 		}
 	}
@@ -385,7 +454,10 @@ func (r *CrossValidationPolicyResolver) MinGroupsRequirements(chainID, apiInterf
 
 // ParseCrossValidationConfig reads the optional top-level `cross-validation:` block from viper config.
 // An absent key yields an empty config (fully backwards compatible). Each knob accepts either the object
-// form `{floor: N, cap: M}` or the scalar shorthand `N` (meaning `{floor: N}`).
+// form `{floor: N, cap: M}` or the scalar shorthand `N` (meaning `{floor: N}`). max-participants alone
+// also accepts the string shorthand `primary` or `all` (MAG-2783): every non-backup upstream configured
+// for the request's chain and interface, or every upstream including backups. Resolved once the
+// endpoint's actual provider counts are known — see CrossValidationPolicyResolver.SetParticipantCounts.
 func ParseCrossValidationConfig(v *viper.Viper) (CrossValidationConfig, error) {
 	var cfg CrossValidationConfig
 	if v == nil || !v.IsSet(common.CrossValidationConfigName) {
@@ -401,10 +473,16 @@ func ParseCrossValidationConfig(v *viper.Viper) (CrossValidationConfig, error) {
 // boundScalarShorthandHook lets a Bound be written as a bare integer: `agreement-threshold: 2` is decoded
 // as `{floor: 2}`. The object form (a map) is passed through untouched for normal decoding.
 //
-// Cross-validation knobs are whole-number counts, so only integer scalars are accepted. Float (`2.0`/`2.9`)
-// and quoted-string (`"2"`) scalars are rejected at parse time with a clear error rather than coerced — the
-// float tolerance was a leftover from the percentage-quorum era (when a fractional `0.66` was meaningful)
-// and is no longer valid now that the threshold is an integer count.
+// Cross-validation knobs are whole-number counts, so only integer scalars are accepted — except the two
+// string sentinels below. Float (`2.0`/`2.9`) and other quoted-string (`"2"`) scalars are rejected at
+// parse time with a clear error rather than coerced — the float tolerance was a leftover from the
+// percentage-quorum era (when a fractional `0.66` was meaningful) and is no longer valid now that the
+// threshold is an integer count.
+//
+// `"primary"` and `"all"` (MAG-2783) decode to a placeholder Bound{Participants: ...} instead of a
+// number: this hook has no field name to check against (mapstructure hooks see only types), so it
+// accepts the sentinel on whichever knob wrote it and leaves rejecting it on agreement-threshold or
+// min-groups to Validate, which does know the field name.
 func boundScalarShorthandHook() mapstructure.DecodeHookFuncType {
 	boundType := reflect.TypeOf(Bound{})
 	return func(from reflect.Type, to reflect.Type, data interface{}) (interface{}, error) {
@@ -419,7 +497,12 @@ func boundScalarShorthandHook() mapstructure.DecodeHookFuncType {
 				return nil, fmt.Errorf("invalid cross-validation knob value %v: %w", data, err)
 			}
 			return Bound{Floor: &n}, nil
-		case reflect.Float32, reflect.Float64, reflect.String:
+		case reflect.String:
+			if s, _ := data.(string); s == participantsPrimary || s == participantsAll {
+				return Bound{Participants: s}, nil
+			}
+			return nil, fmt.Errorf(`invalid cross-validation knob value %v: must be a whole-number integer, "primary", or "all"`, data)
+		case reflect.Float32, reflect.Float64:
 			return nil, fmt.Errorf("invalid cross-validation knob value %v: must be a whole-number integer, not a %s", data, from.Kind())
 		default:
 			return data, nil // object form: let mapstructure decode the map into Bound
@@ -516,6 +599,12 @@ func (r *CrossValidationPolicyResolver) Resolve(chainID, apiInterface, method st
 	// survives the clamping above. Config feasibility (max-participants >= min-groups * threshold) is
 	// enforced by Validate(); a caller-induced infeasibility surfaces at runtime as group-quorum-unmet.
 	eff.PerGroupQuorum = policy.PerGroupQuorum && eff.MinGroups > 1
+	// max-participants: all (MAG-2783) — selection must top up a primary-only shortfall from the
+	// backup tier to reach MaxParticipants, rather than treating backups as the emergency-only
+	// fallback they are for every other request. "primary" never sets this: it IS the primary count,
+	// so there is never a shortfall to top up. SetParticipantCounts leaves Participants in place
+	// specifically so this read still works after Floor has been filled in.
+	eff.IncludeBackups = policy.MaxParticipants.Participants == participantsAll
 	return eff, true
 }
 
@@ -622,6 +711,9 @@ func (p CrossValidationPolicy) Validate() error {
 		"agreement-threshold": p.AgreementThreshold,
 		"min-groups":          p.MinGroups,
 	} {
+		if b.Participants != "" && name != "max-participants" {
+			return fmt.Errorf(`%s cannot be %q: only max-participants accepts "primary" or "all"`, name, b.Participants)
+		}
 		if b.Floor != nil && *b.Floor < 1 {
 			return fmt.Errorf("%s floor must be >= 1, got %d", name, *b.Floor)
 		}
@@ -637,25 +729,36 @@ func (p CrossValidationPolicy) Validate() error {
 	// uses and reject if agreement-threshold or min-groups would exceed max-participants — otherwise
 	// Resolve would silently clamp them down, violating "floor = operator minimum". (A disabled policy
 	// never resolves on its own, so this does not apply.)
+	//
+	// max-participants: primary/all (MAG-2783) has not been resolved to a count yet at this point —
+	// Validate runs at config-load, before any endpoint's provider counts are known — so noCallerMax
+	// below would read a meaningless default (3) rather than the real "however many providers" value.
+	// The checks that depend on it are skipped for such a policy, deferring the feasibility judgment to
+	// runtime (the same place an ordinary numeric max-participants that exceeds the configured primaries
+	// has always been judged: the boot-time advisory and the per-request capacity guard, never a
+	// config-load error — see validateCrossValidationFleet).
 	if p.Enabled {
-		noCallerMax := resolveKnob(0, false, p.MaxParticipants, defaultEnabledMaxParticipants)
 		noCallerThreshold := resolveKnob(0, false, p.AgreementThreshold, defaultEnabledAgreementThreshold)
 		noCallerMinGroups := resolveKnob(0, false, p.MinGroups, defaultEnabledMinGroups)
-		if noCallerThreshold > noCallerMax {
-			return fmt.Errorf("agreement-threshold resolves to %d with no caller but max-participants resolves to %d; an enabled policy must be satisfiable without caller headers (raise max-participants or lower agreement-threshold)", noCallerThreshold, noCallerMax)
+		if p.PerGroupQuorum && noCallerMinGroups <= 1 {
+			return fmt.Errorf("per-group-quorum requires min-groups > 1, but min-groups resolves to %d", noCallerMinGroups)
 		}
-		if noCallerMinGroups > noCallerMax {
-			return fmt.Errorf("min-groups resolves to %d with no caller but max-participants resolves to %d; an enabled policy must be satisfiable without caller headers (raise max-participants or lower min-groups)", noCallerMinGroups, noCallerMax)
-		}
-		// Per-group quorum needs real diversity AND room for each group to reach its own internal quorum:
-		// min-groups > 1 and max-participants >= min-groups * agreement-threshold. Reject a self-contradictory
-		// per-group policy at config-load rather than letting every request fail group-quorum-unmet at runtime.
-		if p.PerGroupQuorum {
-			if noCallerMinGroups <= 1 {
-				return fmt.Errorf("per-group-quorum requires min-groups > 1, but min-groups resolves to %d", noCallerMinGroups)
+		if p.MaxParticipants.Participants == "" {
+			noCallerMax := resolveKnob(0, false, p.MaxParticipants, defaultEnabledMaxParticipants)
+			if noCallerThreshold > noCallerMax {
+				return fmt.Errorf("agreement-threshold resolves to %d with no caller but max-participants resolves to %d; an enabled policy must be satisfiable without caller headers (raise max-participants or lower agreement-threshold)", noCallerThreshold, noCallerMax)
 			}
-			if needed := noCallerMinGroups * noCallerThreshold; needed > noCallerMax {
-				return fmt.Errorf("per-group-quorum needs max-participants >= min-groups * agreement-threshold (%d * %d = %d) but max-participants resolves to %d; raise max-participants or lower min-groups/agreement-threshold", noCallerMinGroups, noCallerThreshold, needed, noCallerMax)
+			if noCallerMinGroups > noCallerMax {
+				return fmt.Errorf("min-groups resolves to %d with no caller but max-participants resolves to %d; an enabled policy must be satisfiable without caller headers (raise max-participants or lower min-groups)", noCallerMinGroups, noCallerMax)
+			}
+			// Per-group quorum needs real diversity AND room for each group to reach its own internal
+			// quorum: min-groups > 1 (checked above) and max-participants >= min-groups * agreement-threshold.
+			// Reject a self-contradictory per-group policy at config-load rather than letting every
+			// request fail group-quorum-unmet at runtime.
+			if p.PerGroupQuorum {
+				if needed := noCallerMinGroups * noCallerThreshold; needed > noCallerMax {
+					return fmt.Errorf("per-group-quorum needs max-participants >= min-groups * agreement-threshold (%d * %d = %d) but max-participants resolves to %d; raise max-participants or lower min-groups/agreement-threshold", noCallerMinGroups, noCallerThreshold, needed, noCallerMax)
+				}
 			}
 		}
 	}
