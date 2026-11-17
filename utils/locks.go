@@ -67,7 +67,6 @@ func (dm *Mutex) TryLock() (isLocked bool) {
 		isLocked = dm.mu.TryLock()
 		if isLocked {
 			dm.lockCount++
-			// fmt.Println("TryLock Locked: ", tempLineAndFile)
 			dm.lineAndFile = tempLineAndFile
 			dm.SecondsLeft = TIMEOUT
 			dm.waitForTimeout()
@@ -80,7 +79,6 @@ func (dm *Mutex) TryLock() (isLocked bool) {
 
 func (dm *Mutex) Unlock() {
 	if TimeoutMutexBoolean {
-		// fmt.Println("Unlock: ", dm.getLineAndFile())
 		dm.lockCount++
 		dm.quit <- true
 	}

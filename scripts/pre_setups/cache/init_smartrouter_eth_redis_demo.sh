@@ -329,7 +329,7 @@ stop_all_lanes() {
         init_smartrouter_eth_redis_demo.sh
         init_smartrouter_eth_redis_sentinel.sh
         init_smartrouter_eth_redis_multiregion.sh
-        init_smartrouter_eth_lavap_cache.sh
+        init_smartrouter_eth_grpc_cache.sh
     )
     for lane in "${lanes[@]}"; do
         local path="${__dir}/${lane}"
@@ -733,7 +733,7 @@ Shared state  a second router reads what this one cached
 
 UC-5  No RESP infrastructure — its own lane (stop this one first)
   $0 --stop
-  scripts/pre_setups/cache/init_smartrouter_eth_lavap_cache.sh
+  scripts/pre_setups/cache/init_smartrouter_eth_grpc_cache.sh
 
 Stop everything
   ${ENV_PREFIX}$0 --stop        this lane
