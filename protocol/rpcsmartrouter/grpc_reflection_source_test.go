@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/stretchr/testify/require"
 )
 
@@ -18,26 +18,26 @@ import (
 // counts the calls that may start a refresh.
 type fakeSnapshotter struct {
 	mu        sync.Mutex
-	held      *lavasession.GRPCReflectionSnapshot
-	fresh     *lavasession.GRPCReflectionSnapshot
+	held      *routersession.GRPCReflectionSnapshot
+	fresh     *routersession.GRPCReflectionSnapshot
 	err       error
 	hang      bool
 	refreshes atomic.Int32
 	awaits    atomic.Int32
 }
 
-func (f *fakeSnapshotter) PeekReflectionSnapshot() *lavasession.GRPCReflectionSnapshot {
+func (f *fakeSnapshotter) PeekReflectionSnapshot() *routersession.GRPCReflectionSnapshot {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.held
 }
 
-func (f *fakeSnapshotter) ReflectionSnapshot() *lavasession.GRPCReflectionSnapshot {
+func (f *fakeSnapshotter) ReflectionSnapshot() *routersession.GRPCReflectionSnapshot {
 	f.refreshes.Add(1)
 	return f.PeekReflectionSnapshot()
 }
 
-func (f *fakeSnapshotter) AwaitReflectionSnapshot(ctx context.Context) (*lavasession.GRPCReflectionSnapshot, error) {
+func (f *fakeSnapshotter) AwaitReflectionSnapshot(ctx context.Context) (*routersession.GRPCReflectionSnapshot, error) {
 	f.awaits.Add(1)
 	if held := f.PeekReflectionSnapshot(); held != nil {
 		return held, nil
@@ -55,12 +55,12 @@ func (f *fakeSnapshotter) AwaitReflectionSnapshot(ctx context.Context) (*lavases
 	return f.fresh, nil
 }
 
-func snapshotNamed(name string, complete bool, age time.Duration) *lavasession.GRPCReflectionSnapshot {
-	return &lavasession.GRPCReflectionSnapshot{Services: []string{name}, Complete: complete, Taken: time.Now().Add(-age)}
+func snapshotNamed(name string, complete bool, age time.Duration) *routersession.GRPCReflectionSnapshot {
+	return &routersession.GRPCReflectionSnapshot{Services: []string{name}, Complete: complete, Taken: time.Now().Add(-age)}
 }
 
-func snapshotters(fakes ...*fakeSnapshotter) []lavasession.GRPCReflectionSnapshotter {
-	out := make([]lavasession.GRPCReflectionSnapshotter, 0, len(fakes))
+func snapshotters(fakes ...*fakeSnapshotter) []routersession.GRPCReflectionSnapshotter {
+	out := make([]routersession.GRPCReflectionSnapshotter, 0, len(fakes))
 	for _, fake := range fakes {
 		out = append(out, fake)
 	}
@@ -183,11 +183,11 @@ func TestPickReflectionSnapshot_ReportsFailure(t *testing.T) {
 // the order has to be imposed here, by provider and then by address.
 func TestOrderSnapshotters_ByTierThenProviderThenAddress(t *testing.T) {
 	ctx := context.Background()
-	endpoint := func(provider, address string, backup bool) *lavasession.EndpointWithDirectConnection {
-		conn, err := lavasession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: "grpcs://" + address + ":443"}, 5, "")
+	endpoint := func(provider, address string, backup bool) *routersession.EndpointWithDirectConnection {
+		conn, err := routersession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: "grpcs://" + address + ":443"}, 5, "")
 		require.NoError(t, err)
-		return &lavasession.EndpointWithDirectConnection{
-			Endpoint:         &lavasession.Endpoint{NetworkAddress: address},
+		return &routersession.EndpointWithDirectConnection{
+			Endpoint:         &routersession.Endpoint{NetworkAddress: address},
 			DirectConnection: conn,
 			ProviderAddress:  provider,
 			Backup:           backup,
@@ -198,13 +198,13 @@ func TestOrderSnapshotters_ByTierThenProviderThenAddress(t *testing.T) {
 	aA := endpoint("alpha", "a.example", false)
 	backup := endpoint("aaa-backup", "c.example", true)
 
-	snapshotterOf := func(e *lavasession.EndpointWithDirectConnection) lavasession.GRPCReflectionSnapshotter {
-		snapshotter, ok := e.DirectConnection.(lavasession.GRPCReflectionSnapshotter)
+	snapshotterOf := func(e *routersession.EndpointWithDirectConnection) routersession.GRPCReflectionSnapshotter {
+		snapshotter, ok := e.DirectConnection.(routersession.GRPCReflectionSnapshotter)
 		require.True(t, ok)
 		return snapshotter
 	}
 
-	primaries, backups := orderSnapshotters([]*lavasession.EndpointWithDirectConnection{bB, backup, aZ, aA})
-	require.Equal(t, []lavasession.GRPCReflectionSnapshotter{snapshotterOf(aA), snapshotterOf(aZ), snapshotterOf(bB)}, primaries)
-	require.Equal(t, []lavasession.GRPCReflectionSnapshotter{snapshotterOf(backup)}, backups)
+	primaries, backups := orderSnapshotters([]*routersession.EndpointWithDirectConnection{bB, backup, aZ, aA})
+	require.Equal(t, []routersession.GRPCReflectionSnapshotter{snapshotterOf(aA), snapshotterOf(aZ), snapshotterOf(bB)}, primaries)
+	require.Equal(t, []routersession.GRPCReflectionSnapshotter{snapshotterOf(backup)}, backups)
 }

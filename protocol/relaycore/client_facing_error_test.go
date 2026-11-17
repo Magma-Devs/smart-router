@@ -14,14 +14,14 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/stretchr/testify/require"
 )
 
 // upstream503Err is what the direct JSON-RPC sender hands the processor for a node's 503:
 // the typed status error wrapped with its classification (classifyAndWrap).
 func upstream503Err(body string) error {
-	return common.NewLavaErrorWrapping(common.LavaErrorNodeServiceUnavailable, &lavasession.HTTPStatusError{
+	return common.NewRouterErrorWrapping(common.RouterErrorNodeServiceUnavailable, &routersession.HTTPStatusError{
 		StatusCode: http.StatusServiceUnavailable,
 		Status:     "503 Service Unavailable",
 		Body:       []byte(body),
@@ -33,25 +33,25 @@ func refusedErr() error {
 	dial := &url.Error{Op: "Post", URL: "http://127.0.0.1:18545", Err: &net.OpError{
 		Op: "dial", Net: "tcp", Err: os.NewSyscallError("connect", syscall.ECONNREFUSED),
 	}}
-	return common.NewLavaErrorWrapping(common.LavaErrorConnectionRefused, fmt.Errorf("http request failed: %w", dial))
+	return common.NewRouterErrorWrapping(common.RouterErrorConnectionRefused, fmt.Errorf("http request failed: %w", dial))
 }
 
 func TestClientFacingFromProtocolError_UpstreamAnswered(t *testing.T) {
-	cf := clientFacingFromProtocolError(upstream503Err("down"), common.LavaErrorNodeServiceUnavailable)
+	cf := clientFacingFromProtocolError(upstream503Err("down"), common.RouterErrorNodeServiceUnavailable)
 	require.NotNil(t, cf)
 	require.Equal(t, http.StatusServiceUnavailable, cf.UpstreamStatus)
 	require.Equal(t, "503 Service Unavailable", cf.UpstreamStatusText)
 	require.Equal(t, []byte("down"), cf.UpstreamBody)
 	require.Empty(t, cf.Cause, "the upstream answered, so there is no transport cause")
-	require.Equal(t, common.LavaErrorNodeServiceUnavailable.Code, cf.RouterErrorCode)
-	require.Equal(t, common.LavaErrorNodeServiceUnavailable.Name, cf.RouterErrorName)
+	require.Equal(t, common.RouterErrorNodeServiceUnavailable.Code, cf.RouterErrorCode)
+	require.Equal(t, common.RouterErrorNodeServiceUnavailable.Name, cf.RouterErrorName)
 }
 
 // MAG-4863: a node's error body goes back to the caller as is (MAG-4481). It is redacted where
 // it is taken, so the reply built from it is too.
 func TestClientFacingFromProtocolError_RedactsTheUpstreamBody(t *testing.T) {
 	body := `{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"rejected by https://node.example.com/v2/KEY123SECRET"}}`
-	cf := clientFacingFromProtocolError(upstream503Err(body), common.LavaErrorNodeServiceUnavailable)
+	cf := clientFacingFromProtocolError(upstream503Err(body), common.RouterErrorNodeServiceUnavailable)
 	require.NotNil(t, cf)
 	require.NotContains(t, string(cf.UpstreamBody), "KEY123SECRET")
 	require.Contains(t, string(cf.UpstreamBody), "https://node.example.com/[redacted]", "the host stays")
@@ -62,24 +62,24 @@ func TestClientFacingFromProtocolError_RedactsTheUpstreamBody(t *testing.T) {
 func TestClientFacingFromProtocolError_TransportFailures(t *testing.T) {
 	leaf := errors.New("dial tcp 10.0.0.1:443: connect: connection refused")
 	for _, tc := range []struct {
-		lavaErr *common.LavaError
-		status  int // 504 for a timeout, 502 otherwise (MAG-4481)
+		routerErr *common.RouterError
+		status    int // 504 for a timeout, 502 otherwise (MAG-4481)
 	}{
-		{common.LavaErrorConnectionTimeout, http.StatusGatewayTimeout},
-		{common.LavaErrorConnectionRefused, http.StatusBadGateway},
-		{common.LavaErrorDNSFailure, http.StatusBadGateway},
-		{common.LavaErrorTLSMismatch, http.StatusBadGateway},
-		{common.LavaErrorConnectionReset, http.StatusBadGateway},
-		{common.LavaErrorConnectionClosed, http.StatusBadGateway},
-		{common.LavaErrorContextDeadline, http.StatusGatewayTimeout},
-		{common.LavaErrorNetworkUnreachable, http.StatusBadGateway},
+		{common.RouterErrorConnectionTimeout, http.StatusGatewayTimeout},
+		{common.RouterErrorConnectionRefused, http.StatusBadGateway},
+		{common.RouterErrorDNSFailure, http.StatusBadGateway},
+		{common.RouterErrorTLSMismatch, http.StatusBadGateway},
+		{common.RouterErrorConnectionReset, http.StatusBadGateway},
+		{common.RouterErrorConnectionClosed, http.StatusBadGateway},
+		{common.RouterErrorContextDeadline, http.StatusGatewayTimeout},
+		{common.RouterErrorNetworkUnreachable, http.StatusBadGateway},
 	} {
-		t.Run(tc.lavaErr.Name, func(t *testing.T) {
-			cf := clientFacingFromProtocolError(common.NewLavaErrorWrapping(tc.lavaErr, leaf), tc.lavaErr)
+		t.Run(tc.routerErr.Name, func(t *testing.T) {
+			cf := clientFacingFromProtocolError(common.NewRouterErrorWrapping(tc.routerErr, leaf), tc.routerErr)
 			require.NotNil(t, cf)
 			require.Zero(t, cf.UpstreamStatus)
 			require.Equal(t, leaf.Error(), cf.Cause, "the retained cause, not the registry description")
-			require.Equal(t, tc.lavaErr.Code, cf.RouterErrorCode)
+			require.Equal(t, tc.routerErr.Code, cf.RouterErrorCode)
 			require.Equal(t, tc.status, NoAnswerStatus(cf))
 			require.Equal(t, tc.status == http.StatusGatewayTimeout, cf.TimedOut)
 		})
@@ -88,14 +88,14 @@ func TestClientFacingFromProtocolError_TransportFailures(t *testing.T) {
 
 // 1043 is not a transport failure any more: nothing produces it (MAG-4481).
 func TestClientFacingFromProtocolError_1043IsNotATransportFailure(t *testing.T) {
-	noResponse := common.LavaErrorNoResponseTimeout
+	noResponse := common.RouterErrorNoResponseTimeout
 	require.EqualValues(t, 1043, noResponse.Code)
-	require.Nil(t, clientFacingFromProtocolError(common.NewLavaErrorWrapping(noResponse, errors.New("x")), noResponse))
+	require.Nil(t, clientFacingFromProtocolError(common.NewRouterErrorWrapping(noResponse, errors.New("x")), noResponse))
 }
 
 // The upstream's Content-Type travels with its body.
 func TestClientFacingFromProtocolError_CarriesContentType(t *testing.T) {
-	cf := clientFacingFromProtocolError(&lavasession.HTTPStatusError{StatusCode: 520, Body: []byte("<html/>"), ContentType: "text/html"}, nil)
+	cf := clientFacingFromProtocolError(&routersession.HTTPStatusError{StatusCode: 520, Body: []byte("<html/>"), ContentType: "text/html"}, nil)
 	require.NotNil(t, cf)
 	require.Equal(t, 520, cf.UpstreamStatus)
 	require.Equal(t, "text/html", cf.UpstreamContentType)
@@ -103,22 +103,22 @@ func TestClientFacingFromProtocolError_CarriesContentType(t *testing.T) {
 
 // Anything else keeps today's reply: no client-facing answer at all.
 func TestClientFacingFromProtocolError_OtherErrorsKeepTodaysReply(t *testing.T) {
-	require.Nil(t, clientFacingFromProtocolError(nil, common.LavaErrorConnectionRefused))
+	require.Nil(t, clientFacingFromProtocolError(nil, common.RouterErrorConnectionRefused))
 	// A cancel says when the router stopped waiting, not that the upstream failed.
 	require.Nil(t, clientFacingFromProtocolError(
-		common.NewLavaErrorWrapping(common.LavaErrorContextCanceled, context.Canceled), common.LavaErrorContextCanceled))
-	require.Nil(t, clientFacingFromProtocolError(errors.New("no providers"), common.LavaErrorNoProviders))
+		common.NewRouterErrorWrapping(common.RouterErrorContextCanceled, context.Canceled), common.RouterErrorContextCanceled))
+	require.Nil(t, clientFacingFromProtocolError(errors.New("no providers"), common.RouterErrorNoProviders))
 	require.Nil(t, clientFacingFromProtocolError(errors.New("unclassified"), nil))
 	// A status below 400 is not an upstream error answer.
-	require.Nil(t, clientFacingFromProtocolError(&lavasession.HTTPStatusError{StatusCode: http.StatusFound, Status: "302 Found"}, nil))
+	require.Nil(t, clientFacingFromProtocolError(&routersession.HTTPStatusError{StatusCode: http.StatusFound, Status: "302 Found"}, nil))
 }
 
 func TestLeafCause(t *testing.T) {
 	inner := errors.New("connect: connection refused")
 	// The registry wrapper keeps the original: that is what the client should read.
-	require.Equal(t, inner.Error(), leafCause(common.NewLavaErrorWrapping(common.LavaErrorConnectionRefused, inner)))
+	require.Equal(t, inner.Error(), leafCause(common.NewRouterErrorWrapping(common.RouterErrorConnectionRefused, inner)))
 	// A wrapper above the registry wrapper does not hide it.
-	require.Equal(t, inner.Error(), leafCause(fmt.Errorf("relay: %w", common.NewLavaErrorWrapping(common.LavaErrorConnectionRefused, inner))))
+	require.Equal(t, inner.Error(), leafCause(fmt.Errorf("relay: %w", common.NewRouterErrorWrapping(common.RouterErrorConnectionRefused, inner))))
 	// No registry wrapper: the innermost error of a %w chain.
 	require.Equal(t, inner.Error(), leafCause(fmt.Errorf("a: %w", fmt.Errorf("b: %w", inner))))
 	require.Equal(t, "plain", leafCause(errors.New("plain")))
@@ -152,8 +152,8 @@ func TestProcessingResult_Upstream503IsForwarded(t *testing.T) {
 	rp, _, closer := newTwoProviderProcessor(t)
 	defer closer()
 
-	go SendProtocolError(rp, "lava@a", time.Millisecond, upstream503Err("node a down"))
-	go SendProtocolError(rp, "lava@b", 2*time.Millisecond, upstream503Err("node b down"))
+	go SendProtocolError(rp, "provider@a", time.Millisecond, upstream503Err("node a down"))
+	go SendProtocolError(rp, "provider@b", 2*time.Millisecond, upstream503Err("node b down"))
 	waitForBoth(t, rp)
 
 	result, err := rp.ProcessingResult()
@@ -163,7 +163,7 @@ func TestProcessingResult_Upstream503IsForwarded(t *testing.T) {
 	require.NotNil(t, cf)
 	require.Equal(t, http.StatusServiceUnavailable, cf.UpstreamStatus)
 	require.Contains(t, []string{"node a down", "node b down"}, string(cf.UpstreamBody))
-	require.Equal(t, common.LavaErrorNodeServiceUnavailable.Code, cf.RouterErrorCode, "the classification is unchanged")
+	require.Equal(t, common.RouterErrorNodeServiceUnavailable.Code, cf.RouterErrorCode, "the classification is unchanged")
 
 	for _, stored := range storedProtocolResults(t, rp) {
 		require.Zero(t, stored.StatusCode, "the stored result must keep its own status")
@@ -176,8 +176,8 @@ func TestProcessingResult_TransportFailureIs502(t *testing.T) {
 	rp, _, closer := newTwoProviderProcessor(t)
 	defer closer()
 
-	go SendProtocolError(rp, "lava@a", time.Millisecond, refusedErr())
-	go SendProtocolError(rp, "lava@b", 2*time.Millisecond, refusedErr())
+	go SendProtocolError(rp, "provider@a", time.Millisecond, refusedErr())
+	go SendProtocolError(rp, "provider@b", 2*time.Millisecond, refusedErr())
 	waitForBoth(t, rp)
 
 	result, err := rp.ProcessingResult()
@@ -187,7 +187,7 @@ func TestProcessingResult_TransportFailureIs502(t *testing.T) {
 	require.NotNil(t, cf)
 	require.Zero(t, cf.UpstreamStatus)
 	require.Contains(t, cf.Cause, "connection refused")
-	require.Equal(t, common.LavaErrorConnectionRefused.Code, cf.RouterErrorCode)
+	require.Equal(t, common.RouterErrorConnectionRefused.Code, cf.RouterErrorCode)
 
 	for _, stored := range storedProtocolResults(t, rp) {
 		require.Zero(t, stored.StatusCode)
@@ -201,8 +201,8 @@ func TestProcessingResult_ClientFacingDoesNotStick(t *testing.T) {
 	rp, _, closer := newTwoProviderProcessor(t)
 	defer closer()
 
-	go SendProtocolError(rp, "lava@a", time.Millisecond, refusedErr())
-	go SendProtocolError(rp, "lava@b", 2*time.Millisecond, refusedErr())
+	go SendProtocolError(rp, "provider@a", time.Millisecond, refusedErr())
+	go SendProtocolError(rp, "provider@b", 2*time.Millisecond, refusedErr())
 	waitForBoth(t, rp)
 	first, err := rp.ProcessingResult()
 	require.Error(t, err)
@@ -224,8 +224,8 @@ func TestProcessingResult_NodeErrorIsPreferredAndNotStamped(t *testing.T) {
 	rp, _, closer := newTwoProviderProcessor(t)
 	defer closer()
 
-	go SendNodeError(rp, "lava@a", time.Millisecond)
-	go SendProtocolError(rp, "lava@b", 2*time.Millisecond, upstream503Err("node b down"))
+	go SendNodeError(rp, "provider@a", time.Millisecond)
+	go SendProtocolError(rp, "provider@b", 2*time.Millisecond, upstream503Err("node b down"))
 	waitForBoth(t, rp)
 
 	result, _ := rp.ProcessingResult()
@@ -240,7 +240,7 @@ func TestGetClientFacing_NilSafe(t *testing.T) {
 }
 
 func vendor503Err(statusLine string) error {
-	return common.NewLavaErrorWrapping(common.LavaErrorNodeServiceUnavailable, &lavasession.HTTPStatusError{
+	return common.NewRouterErrorWrapping(common.RouterErrorNodeServiceUnavailable, &routersession.HTTPStatusError{
 		StatusCode: http.StatusServiceUnavailable,
 		Status:     statusLine,
 	})
@@ -252,14 +252,14 @@ func vendor503Err(statusLine string) error {
 // the 502 "no answer from upstream" although two nodes had answered (MAG-4218).
 func TestGetBestErrorMessageForUser_MixedVendor503sStayOneMajority(t *testing.T) {
 	errs := []RelayError{
-		{Err: vendor503Err("503 Service Temporarily Unavailable"), ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@nginx"}, LavaError: common.LavaErrorNodeServiceUnavailable},
-		{Err: vendor503Err("503 Service Unavailable"), ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@go"}, LavaError: common.LavaErrorNodeServiceUnavailable},
-		{Err: refusedErr(), ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@refused"}, LavaError: common.LavaErrorConnectionRefused},
+		{Err: vendor503Err("503 Service Temporarily Unavailable"), ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@nginx"}, RouterError: common.RouterErrorNodeServiceUnavailable},
+		{Err: vendor503Err("503 Service Unavailable"), ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@go"}, RouterError: common.RouterErrorNodeServiceUnavailable},
+		{Err: refusedErr(), ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@refused"}, RouterError: common.RouterErrorConnectionRefused},
 	}
 	// The map the picker groups by is iterated in random order, so one run proves nothing.
 	for i := 0; i < 200; i++ {
 		picked := (&RelayErrors{RelayErrors: errs}).GetBestErrorMessageForUser()
-		require.NotEqual(t, "lava@refused", picked.ProviderInfo.ProviderAddress, "iteration %d", i)
+		require.NotEqual(t, "provider@refused", picked.ProviderInfo.ProviderAddress, "iteration %d", i)
 	}
 }
 
@@ -268,8 +268,8 @@ func TestGetBestErrorMessageForUser_MixedVendor503sStayOneMajority(t *testing.T)
 func TestProcessingResult_MixedVendor503sForwardTheVendorsLine(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		rp, _, closer := newTwoProviderProcessor(t)
-		go SendProtocolError(rp, "lava@a", time.Millisecond, vendor503Err("503 Service Temporarily Unavailable"))
-		go SendProtocolError(rp, "lava@b", 2*time.Millisecond, vendor503Err("503 Service Unavailable"))
+		go SendProtocolError(rp, "provider@a", time.Millisecond, vendor503Err("503 Service Temporarily Unavailable"))
+		go SendProtocolError(rp, "provider@b", 2*time.Millisecond, vendor503Err("503 Service Unavailable"))
 		waitForBoth(t, rp)
 
 		result, err := rp.ProcessingResult()
@@ -293,8 +293,8 @@ func TestProcessingResult_UpstreamAnswerBeatsTransportFailure(t *testing.T) {
 		}
 		for i := 0; i < 50; i++ {
 			rp, _, closer := newTwoProviderProcessor(t)
-			go SendProtocolError(rp, "lava@a", answerDelay, upstream503Err("node a down"))
-			go SendProtocolError(rp, "lava@b", refusedDelay, refusedErr())
+			go SendProtocolError(rp, "provider@a", answerDelay, upstream503Err("node a down"))
+			go SendProtocolError(rp, "provider@b", refusedDelay, refusedErr())
 			waitForBoth(t, rp)
 
 			result, err := rp.ProcessingResult()
@@ -311,9 +311,9 @@ func TestProcessingResult_UpstreamAnswerBeatsTransportFailure(t *testing.T) {
 // A transport failure is the reply only when every attempt failed in transport: next to any
 // other error, that error's reply stands, whichever arrives first.
 func TestReplyProtocolError_TransportFailureIsTheLastResort(t *testing.T) {
-	answered := RelayError{Err: upstream503Err("node a down"), LavaError: common.LavaErrorNodeServiceUnavailable}
-	refused := RelayError{Err: refusedErr(), LavaError: common.LavaErrorConnectionRefused}
-	other := RelayError{Err: errors.New("no providers"), LavaError: common.LavaErrorNoProviders}
+	answered := RelayError{Err: upstream503Err("node a down"), RouterError: common.RouterErrorNodeServiceUnavailable}
+	refused := RelayError{Err: refusedErr(), RouterError: common.RouterErrorConnectionRefused}
+	other := RelayError{Err: errors.New("no providers"), RouterError: common.RouterErrorNoProviders}
 
 	for _, picked := range []RelayError{answered, refused, other} {
 		require.Equal(t, answered.Err, replyProtocolError(picked, []RelayError{refused, other, answered}).Err)
@@ -324,7 +324,7 @@ func TestReplyProtocolError_TransportFailureIsTheLastResort(t *testing.T) {
 
 // timeoutErr is a dial or request that ran out of time: no upstream answered, and the reply is 504.
 func timeoutErr() error {
-	return common.NewLavaErrorWrapping(common.LavaErrorContextDeadline, fmt.Errorf("http request failed: %w", context.DeadlineExceeded))
+	return common.NewRouterErrorWrapping(common.RouterErrorContextDeadline, fmt.Errorf("http request failed: %w", context.DeadlineExceeded))
 }
 
 // A refused connection next to a timeout is a one-to-one tie between two no-answers, which the
@@ -338,8 +338,8 @@ func TestProcessingResult_ATimeoutBeatsARefusedConnection(t *testing.T) {
 		}
 		for i := 0; i < 40; i++ {
 			rp, _, closer := newTwoProviderProcessor(t)
-			go SendProtocolError(rp, "lava@a", refusedDelay, refusedErr())
-			go SendProtocolError(rp, "lava@b", timeoutDelay, timeoutErr())
+			go SendProtocolError(rp, "provider@a", refusedDelay, refusedErr())
+			go SendProtocolError(rp, "provider@b", timeoutDelay, timeoutErr())
 			waitForBoth(t, rp)
 
 			result, err := rp.ProcessingResult()
@@ -353,9 +353,9 @@ func TestProcessingResult_ATimeoutBeatsARefusedConnection(t *testing.T) {
 
 // Among the no-answers a timeout ranks first, and both still lose to any other error.
 func TestReplyProtocolError_ATimeoutBeatsOtherTransportFailures(t *testing.T) {
-	refused := RelayError{Err: refusedErr(), LavaError: common.LavaErrorConnectionRefused}
-	timedOut := RelayError{Err: timeoutErr(), LavaError: common.LavaErrorContextDeadline}
-	other := RelayError{Err: errors.New("no providers"), LavaError: common.LavaErrorNoProviders}
+	refused := RelayError{Err: refusedErr(), RouterError: common.RouterErrorConnectionRefused}
+	timedOut := RelayError{Err: timeoutErr(), RouterError: common.RouterErrorContextDeadline}
+	other := RelayError{Err: errors.New("no providers"), RouterError: common.RouterErrorNoProviders}
 
 	require.Equal(t, timedOut.Err, replyProtocolError(refused, []RelayError{refused, refused, timedOut}).Err)
 	require.Equal(t, timedOut.Err, replyProtocolError(timedOut, []RelayError{timedOut, refused}).Err)
@@ -364,18 +364,18 @@ func TestReplyProtocolError_ATimeoutBeatsOtherTransportFailures(t *testing.T) {
 
 func upstream429RelayError(body string) RelayError {
 	return RelayError{
-		Err:       common.NewLavaErrorWrapping(common.LavaErrorNodeRateLimited, &lavasession.HTTPStatusError{StatusCode: http.StatusTooManyRequests, Body: []byte(body)}),
-		LavaError: common.LavaErrorNodeRateLimited,
+		Err:         common.NewRouterErrorWrapping(common.RouterErrorNodeRateLimited, &routersession.HTTPStatusError{StatusCode: http.StatusTooManyRequests, Body: []byte(body)}),
+		RouterError: common.RouterErrorNodeRateLimited,
 	}
 }
 
 // A fault beats a throttle: one upstream's 503 next to two 429s is the 503, whatever the majority
 // (MAG-4638). A 429 still beats router text and a transport failure, and all-429 stays 429.
 func TestReplyProtocolError_FaultBeatsThrottle(t *testing.T) {
-	answered := RelayError{Err: upstream503Err("node a down"), LavaError: common.LavaErrorNodeServiceUnavailable}
+	answered := RelayError{Err: upstream503Err("node a down"), RouterError: common.RouterErrorNodeServiceUnavailable}
 	throttled := upstream429RelayError("quota")
-	refused := RelayError{Err: refusedErr(), LavaError: common.LavaErrorConnectionRefused}
-	other := RelayError{Err: errors.New("no providers"), LavaError: common.LavaErrorNoProviders}
+	refused := RelayError{Err: refusedErr(), RouterError: common.RouterErrorConnectionRefused}
+	other := RelayError{Err: errors.New("no providers"), RouterError: common.RouterErrorNoProviders}
 
 	require.Equal(t, answered.Err, replyProtocolError(throttled, []RelayError{throttled, throttled, answered}).Err)
 	require.Equal(t, throttled.Err, replyProtocolError(refused, []RelayError{refused, throttled}).Err)
@@ -392,11 +392,11 @@ func TestProcessingResult_A503BeatsTwo429s(t *testing.T) {
 			answerDelay, throttleDelay = throttleDelay, answerDelay
 		}
 		rp, usedProviders, closer := newTwoProviderProcessor(t)
-		go SendProtocolError(rp, "lava@a", answerDelay, upstream503Err("node a down"))
-		go SendProtocolError(rp, "lava@b", throttleDelay, upstream429RelayError("quota").Err)
+		go SendProtocolError(rp, "provider@a", answerDelay, upstream503Err("node a down"))
+		go SendProtocolError(rp, "provider@b", throttleDelay, upstream429RelayError("quota").Err)
 		waitForBoth(t, rp)
-		startBatch(t, usedProviders, "lava@c")
-		go SendProtocolError(rp, "lava@c", time.Millisecond, upstream429RelayError("quota").Err)
+		startBatch(t, usedProviders, "provider@c")
+		go SendProtocolError(rp, "provider@c", time.Millisecond, upstream429RelayError("quota").Err)
 		waitForBoth(t, rp)
 
 		result, err := rp.ProcessingResult()

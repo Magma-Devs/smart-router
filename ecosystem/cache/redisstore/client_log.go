@@ -58,7 +58,7 @@ func (l *clientLogger) Printf(_ context.Context, format string, v ...interface{}
 		for i, name := range change.attrs {
 			attrs = append(attrs, utils.LogAttr(name, v[i]))
 		}
-		utils.LavaFormatInfo(change.message, attrs...)
+		utils.FormatInfo(change.message, attrs...)
 		return
 	}
 	suppressed, due := l.due(format)
@@ -69,7 +69,7 @@ func (l *clientLogger) Printf(_ context.Context, format string, v ...interface{}
 	if suppressed > 0 {
 		attrs = append(attrs, utils.LogAttr("suppressed", suppressed))
 	}
-	utils.LavaFormatWarning(clientFailureMessage, nil, attrs...)
+	utils.FormatWarning(clientFailureMessage, nil, attrs...)
 }
 
 // due reports whether a line of this kind is printed now, and how many of its

@@ -6,9 +6,9 @@ import (
 	"testing"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/magma-Devs/smart-router/utils/rand"
 	"github.com/stretchr/testify/require"
 )
@@ -28,27 +28,27 @@ func newCapacityTestServerFor(t *testing.T, chainID, apiInterface string, groupB
 	t.Helper()
 	rand.InitRandomSeed()
 	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, 0, 1, nil, "dontcare")
-	csm := lavasession.NewConsumerSessionManager(
-		&lavasession.RPCEndpoint{NetworkAddress: "stub", ChainID: chainID, ApiInterface: apiInterface},
-		optimizer, nil, "lava@test", lavasession.NewActiveSubscriptionProvidersStorage())
+	csm := routersession.NewConsumerSessionManager(
+		&routersession.RPCEndpoint{NetworkAddress: "stub", ChainID: chainID, ApiInterface: apiInterface},
+		optimizer, nil, "provider@test", routersession.NewActiveSubscriptionProvidersStorage())
 
-	pairingList := make(map[uint64]*lavasession.ConsumerSessionsWithProvider, len(groupByAddr))
+	pairingList := make(map[uint64]*routersession.ConsumerSessionsWithProvider, len(groupByAddr))
 	var i uint64
 	for addr, group := range groupByAddr {
-		pairingList[i] = &lavasession.ConsumerSessionsWithProvider{
-			PublicLavaAddress: addr,
-			Endpoints:         []*lavasession.Endpoint{{NetworkAddress: "127.0.0.1:0", Enabled: true, Connections: []*lavasession.EndpointConnection{}}},
-			Sessions:          map[int64]*lavasession.SingleConsumerSession{},
-			MaxComputeUnits:   200,
-			PairingEpoch:      1,
-			GroupLabel:        group,
+		pairingList[i] = &routersession.ConsumerSessionsWithProvider{
+			PublicAddress:   addr,
+			Endpoints:       []*routersession.Endpoint{{NetworkAddress: "127.0.0.1:0", Enabled: true, Connections: []*routersession.EndpointConnection{}}},
+			Sessions:        map[int64]*routersession.SingleConsumerSession{},
+			MaxComputeUnits: 200,
+			PairingEpoch:    1,
+			GroupLabel:      group,
 		}
 		i++
 	}
 	require.NoError(t, csm.UpdateAllProviders(1, pairingList, nil))
 	return &RPCSmartRouterServer{
 		sessionManager: csm,
-		listenEndpoint: &lavasession.RPCEndpoint{ChainID: chainID, ApiInterface: apiInterface},
+		listenEndpoint: &routersession.RPCEndpoint{ChainID: chainID, ApiInterface: apiInterface},
 	}
 }
 
@@ -56,7 +56,7 @@ func newCapacityTestServerFor(t *testing.T, chainID, apiInterface string, groupB
 // unsatisfiable policy to the correct structured reason (distinct from the quorum-time reasons), and
 // returns no error when the candidate set can satisfy the policy. Two primary providers span two groups.
 func TestValidateCrossValidationCapacity_Reasons(t *testing.T) {
-	srv := newCapacityTestServer(t, map[string]string{"lava@p0": "g1", "lava@p1": "g2"})
+	srv := newCapacityTestServer(t, map[string]string{"provider@p0": "g1", "provider@p1": "g2"})
 	ctx := context.Background()
 
 	t.Run("min-groups exceeds candidate groups -> insufficient-groups", func(t *testing.T) {
@@ -89,13 +89,13 @@ func TestValidateCrossValidationCapacity_Reasons(t *testing.T) {
 }
 
 // TestValidateCrossValidationCapacity_NoParticipantCeiling is the MAG-2796 regression. A caller-supplied
-// max-participants above the old hard-coded 50 used to reach a LavaFormatFatal in NewRelayProcessor and end
+// max-participants above the old hard-coded 50 used to reach a FormatFatal in NewRelayProcessor and end
 // the router process for every caller. There is now no fixed ceiling anywhere: this check is the only bound,
 // and it rejects against the endpoints that actually exist. A realistic deployment holds a handful of nodes,
 // so 51 is refused for the same reason 4 is — not because it crossed an invented constant.
 func TestValidateCrossValidationCapacity_NoParticipantCeiling(t *testing.T) {
 	// Three nodes: what a real centralised deployment looks like.
-	srv := newCapacityTestServer(t, map[string]string{"lava@p0": "g1", "lava@p1": "g1", "lava@p2": "g1"})
+	srv := newCapacityTestServer(t, map[string]string{"provider@p0": "g1", "provider@p1": "g1", "provider@p2": "g1"})
 	ctx := context.Background()
 
 	for _, maxParticipants := range []int{4, 51, 1_000_000} {
@@ -123,7 +123,7 @@ func TestValidateCrossValidationCapacity_PerGroup(t *testing.T) {
 	t.Run("caller-induced impossible: minGroups 2 * threshold 3 > maxParticipants 4 -> insufficient-capacity", func(t *testing.T) {
 		// Fleet has 4 providers across 2 groups, so the provider/group checks pass and the self-consistency
 		// check is what fires. This is the case config-time Validate cannot catch (the caller raised the threshold).
-		srv := newCapacityTestServer(t, map[string]string{"lava@a0": "A", "lava@a1": "A", "lava@b0": "B", "lava@b1": "B"})
+		srv := newCapacityTestServer(t, map[string]string{"provider@a0": "A", "provider@a1": "A", "provider@b0": "B", "provider@b1": "B"})
 		params := &common.CrossValidationParams{AgreementThreshold: 3, MaxParticipants: 4, MinGroups: 2, PerGroupQuorum: true}
 		reason, err := srv.validateCrossValidationCapacity(ctx, relaycore.CrossValidation, params, "", nil)
 		require.Error(t, err)
@@ -133,7 +133,7 @@ func TestValidateCrossValidationCapacity_PerGroup(t *testing.T) {
 	t.Run("two groups but only one has >= threshold providers -> insufficient-groups", func(t *testing.T) {
 		// A=2, B=1, C=1: 4 candidates across 3 groups (passes provider/group/self-consistency checks for
 		// minGroups 2, threshold 2, max 4), but only group A can reach an internal quorum of 2.
-		srv := newCapacityTestServer(t, map[string]string{"lava@a0": "A", "lava@a1": "A", "lava@b0": "B", "lava@c0": "C"})
+		srv := newCapacityTestServer(t, map[string]string{"provider@a0": "A", "provider@a1": "A", "provider@b0": "B", "provider@c0": "C"})
 		params := &common.CrossValidationParams{AgreementThreshold: 2, MaxParticipants: 4, MinGroups: 2, PerGroupQuorum: true}
 		reason, err := srv.validateCrossValidationCapacity(ctx, relaycore.CrossValidation, params, "", nil)
 		require.Error(t, err)
@@ -141,7 +141,7 @@ func TestValidateCrossValidationCapacity_PerGroup(t *testing.T) {
 	})
 
 	t.Run("two adequately-staffed groups -> ok", func(t *testing.T) {
-		srv := newCapacityTestServer(t, map[string]string{"lava@a0": "A", "lava@a1": "A", "lava@b0": "B", "lava@b1": "B"})
+		srv := newCapacityTestServer(t, map[string]string{"provider@a0": "A", "provider@a1": "A", "provider@b0": "B", "provider@b1": "B"})
 		params := &common.CrossValidationParams{AgreementThreshold: 2, MaxParticipants: 4, MinGroups: 2, PerGroupQuorum: true}
 		reason, err := srv.validateCrossValidationCapacity(ctx, relaycore.CrossValidation, params, "", nil)
 		require.NoError(t, err)

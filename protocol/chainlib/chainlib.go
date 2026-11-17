@@ -8,8 +8,8 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 )
@@ -32,7 +32,7 @@ func NewChainParser(apiInterface string) (chainParser ChainParser, err error) {
 
 func NewChainListener(
 	ctx context.Context,
-	listenEndpoint *lavasession.RPCEndpoint,
+	listenEndpoint *routersession.RPCEndpoint,
 	relaySender RelaySender,
 	healthReporter HealthReporter,
 	rpcConsumerLogs *metrics.RPCConsumerLogs,
@@ -240,7 +240,7 @@ type ChainProxy interface {
 	SendNodeMsg(ctx context.Context, chainMessage ChainMessageForSend) (relayReply *RelayReplyWrapper, err error) // has to be thread safe, reuse code within ParseMsg as common functionality
 }
 
-func GetChainRouter(ctx context.Context, nConns uint, rpcProviderEndpoint *lavasession.RPCProviderEndpoint, chainParser ChainParser) (ChainRouter, error) {
+func GetChainRouter(ctx context.Context, nConns uint, rpcProviderEndpoint *routersession.RPCProviderEndpoint, chainParser ChainParser) (ChainRouter, error) {
 	proxyConstructor, err := chainProxyConstructor(rpcProviderEndpoint.ApiInterface)
 	if err != nil {
 		return nil, err

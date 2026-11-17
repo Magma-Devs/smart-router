@@ -3,7 +3,7 @@ package relaycore
 import (
 	"fmt"
 
-	"github.com/magma-Devs/smart-router/protocol/lavaprotocol/protocolerrors"
+	"github.com/magma-Devs/smart-router/protocol/relayprotocol/protocolerrors"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 )
@@ -107,7 +107,7 @@ func ValidateEndpointCapability(
 
 	// Check if lag exceeds threshold
 	if config.IsEndpointTooFarBehind(lag) {
-		utils.LavaFormatDebug("endpoint failed capability validation: too far behind",
+		utils.FormatDebug("endpoint failed capability validation: too far behind",
 			utils.LogAttr("endpointLatestBlock", endpointLatestBlock),
 			utils.LogAttr("chainTip", chainTip),
 			utils.LogAttr("lag", lag),
@@ -119,7 +119,7 @@ func ValidateEndpointCapability(
 	}
 
 	// Lag is within acceptable threshold
-	utils.LavaFormatDebug("endpoint within lag threshold",
+	utils.FormatDebug("endpoint within lag threshold",
 		utils.LogAttr("endpointLatestBlock", endpointLatestBlock),
 		utils.LogAttr("chainTip", chainTip),
 		utils.LogAttr("lag", lag),

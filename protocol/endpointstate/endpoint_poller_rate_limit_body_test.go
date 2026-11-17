@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 )
@@ -18,12 +18,12 @@ type fixedReplyConnection struct {
 	body string
 }
 
-func (c *fixedReplyConnection) SendRequest(context.Context, []byte, map[string]string) (*lavasession.DirectRPCResponse, error) {
-	return &lavasession.DirectRPCResponse{Data: []byte(c.body), StatusCode: 200}, nil
+func (c *fixedReplyConnection) SendRequest(context.Context, []byte, map[string]string) (*routersession.DirectRPCResponse, error) {
+	return &routersession.DirectRPCResponse{Data: []byte(c.body), StatusCode: 200}, nil
 }
 
-func (c *fixedReplyConnection) GetProtocol() lavasession.DirectRPCProtocol {
-	return lavasession.DirectRPCProtocolWS
+func (c *fixedReplyConnection) GetProtocol() routersession.DirectRPCProtocol {
+	return routersession.DirectRPCProtocolWS
 }
 
 func (c *fixedReplyConnection) Close() error { return nil }
@@ -38,7 +38,7 @@ func newReplyingETHPoller(t *testing.T, body string) *EndpointPoller {
 	t.Helper()
 	const url = "ws://eth-ep:8546"
 	return NewEndpointPoller(
-		&lavasession.Endpoint{NetworkAddress: url, Enabled: true},
+		&routersession.Endpoint{NetworkAddress: url, Enabled: true},
 		&fixedReplyConnection{url: url, body: body},
 		newRealChainParser(t, "ETH1", spectypes.APIInterfaceJsonRPC),
 		"ETH1",
@@ -87,7 +87,7 @@ func TestEndpointPoller_CustomMessage_TypesRateLimitBody(t *testing.T) {
 	const url = "ws://sol-ep:8900"
 	newPoller := func(body string) *EndpointPoller {
 		return NewEndpointPoller(
-			&lavasession.Endpoint{NetworkAddress: url, Enabled: true},
+			&routersession.Endpoint{NetworkAddress: url, Enabled: true},
 			&fixedReplyConnection{url: url, body: body},
 			nil,
 			"SOLANA",

@@ -16,8 +16,8 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/grpcproxy"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/holdoff"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
@@ -674,7 +674,7 @@ func dialRestoreListener(t *testing.T, manager *DirectGRPCSubscriptionManager) *
 	// harness has: a server-streaming method over the reflection request and response types.
 	connectionForUpstream(t, manager).descriptors.cache.Store("test.v1.Feed.Subscribe", streamingMethodDescriptor(t))
 
-	endpoint := &lavasession.RPCEndpoint{NetworkAddress: "127.0.0.1:0", ChainID: "SUI", ApiInterface: spectypes.APIInterfaceGrpc}
+	endpoint := &routersession.RPCEndpoint{NetworkAddress: "127.0.0.1:0", ChainID: "SUI", ApiInterface: spectypes.APIInterfaceGrpc}
 	sender := &restoreRelaySender{rpcss: &RPCSmartRouterServer{chainParser: parser, listenEndpoint: endpoint}, manager: manager}
 	logger, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
 	require.NoError(t, err)

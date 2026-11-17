@@ -11,10 +11,10 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils/rand"
 	"github.com/stretchr/testify/require"
@@ -50,7 +50,7 @@ func TestRelayEnd_JSONRPCListener_HTTPAndWebSocket(t *testing.T) {
 	t.Cleanup(cancel)
 	logs, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
 	require.NoError(t, err)
-	endpoint := &lavasession.RPCEndpoint{NetworkAddress: "127.0.0.1:0", ChainID: "ETH1", ApiInterface: spectypes.APIInterfaceJsonRPC, HealthCheckPath: common.DEFAULT_HEALTH_PATH}
+	endpoint := &routersession.RPCEndpoint{NetworkAddress: "127.0.0.1:0", ChainID: "ETH1", ApiInterface: spectypes.APIInterfaceJsonRPC, HealthCheckPath: common.DEFAULT_HEALTH_PATH}
 	listener := chainlib.NewJrpcChainListener(ctx, endpoint, server, nil, logs, nil, NewNoOpWSSubscriptionManager("ETH1", spectypes.APIInterfaceJsonRPC))
 	go listener.Serve(ctx, common.ConsumerCmdFlags{})
 	t.Cleanup(func() {
@@ -139,15 +139,15 @@ func TestRelayEnd_GRPCListener(t *testing.T) {
 
 	// The node answers every method with the same bytes; its reflection service never answers.
 	nodeUrl := common.NodeUrl{Url: "grpc://" + startStalledReflectionNode(t), GrpcConfig: common.GrpcConfig{AllowInsecure: true, ReflectionTimeout: time.Second}}
-	connection, err := lavasession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
+	connection, err := routersession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = connection.Close() })
-	rpcEndpoint := &lavasession.RPCEndpoint{ChainID: "GRPCTEST", ApiInterface: spectypes.APIInterfaceGrpc}
+	rpcEndpoint := &routersession.RPCEndpoint{ChainID: "GRPCTEST", ApiInterface: spectypes.APIInterfaceGrpc}
 	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "GRPCTEST")
-	csm := lavasession.NewConsumerSessionManager(rpcEndpoint, optimizer, nil, "test-router", lavasession.NewActiveSubscriptionProvidersStorage())
-	provider := lavasession.NewConsumerSessionWithProvider("grpc-node", []*lavasession.Endpoint{{NetworkAddress: nodeUrl.Url, Enabled: true, DirectConnections: []lavasession.DirectRPCConnection{connection}}}, 100000, 1, 1)
+	csm := routersession.NewConsumerSessionManager(rpcEndpoint, optimizer, nil, "test-router", routersession.NewActiveSubscriptionProvidersStorage())
+	provider := routersession.NewConsumerSessionWithProvider("grpc-node", []*routersession.Endpoint{{NetworkAddress: nodeUrl.Url, Enabled: true, DirectConnections: []routersession.DirectRPCConnection{connection}}}, 100000, 1, 1)
 	provider.StaticProvider = true
-	require.NoError(t, csm.UpdateAllProviders(1, map[uint64]*lavasession.ConsumerSessionsWithProvider{0: provider}, map[uint64]*lavasession.ConsumerSessionsWithProvider{}))
+	require.NoError(t, csm.UpdateAllProviders(1, map[uint64]*routersession.ConsumerSessionsWithProvider{0: provider}, map[uint64]*routersession.ConsumerSessionsWithProvider{}))
 	logs, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
 	require.NoError(t, err)
 	server := &RPCSmartRouterServer{
@@ -158,7 +158,7 @@ func TestRelayEnd_GRPCListener(t *testing.T) {
 		rpcSmartRouterLogs: logs,
 	}
 
-	listenEndpoint := &lavasession.RPCEndpoint{NetworkAddress: "127.0.0.1:0", ChainID: "GRPCTEST", ApiInterface: spectypes.APIInterfaceGrpc}
+	listenEndpoint := &routersession.RPCEndpoint{NetworkAddress: "127.0.0.1:0", ChainID: "GRPCTEST", ApiInterface: spectypes.APIInterfaceGrpc}
 	listener := chainlib.NewGrpcChainListener(ctx, listenEndpoint, server, healthyReporter{}, logs, parser)
 	listenerDone := make(chan struct{})
 	go func() {

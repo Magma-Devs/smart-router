@@ -10,8 +10,8 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/endpointtip"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/stretchr/testify/require"
@@ -29,17 +29,17 @@ func TestConsistencyRejectionLine(t *testing.T) {
 	t.Cleanup(utils.DisableDebugLogBuffer)
 	utils.ClearDebugLogBuffer()
 
-	endpoint := &lavasession.Endpoint{NetworkAddress: "http://behind:8545"}
+	endpoint := &routersession.Endpoint{NetworkAddress: "http://behind:8545"}
 	seedEndpointTip("ETH1", "jsonrpc", "http://behind:8545", 700)
-	sessions := lavasession.ConsumerSessionsMap{
-		"lava@behind": &lavasession.SessionInfo{
-			Session: &lavasession.SingleConsumerSession{
-				Connection: &lavasession.DirectRPCSessionConnection{Endpoint: endpoint},
+	sessions := routersession.ConsumerSessionsMap{
+		"provider@behind": &routersession.SessionInfo{
+			Session: &routersession.SingleConsumerSession{
+				Connection: &routersession.DirectRPCSessionConnection{Endpoint: endpoint},
 			},
 		},
 	}
 	rpcss := &RPCSmartRouterServer{
-		listenEndpoint:    &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		listenEndpoint:    &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 		consistencyConfig: relaycore.DefaultConsistencyValidationConfig(),
 		chainState:        seedChainTip(1000),
 	}
@@ -50,11 +50,11 @@ func TestConsistencyRejectionLine(t *testing.T) {
 	}
 
 	_, failed, err := rpcss.filterEndpointsByConsistency(context.Background(), sessions, protocolMsg)
-	require.ErrorIs(t, err, lavasession.ConsistencyPreValidationError, "the caller keys on the sentinel to pick again")
+	require.ErrorIs(t, err, routersession.ConsistencyPreValidationError, "the caller keys on the sentinel to pick again")
 	require.Len(t, failed, 1)
 	// Cross-validation hands this error to the client: the log names the node, the error must not.
 	require.Contains(t, err.Error(), consistencyRejectedAllLine)
-	require.NotContains(t, err.Error(), "lava@behind")
+	require.NotContains(t, err.Error(), "provider@behind")
 	require.NotContains(t, err.Error(), "700")
 
 	var line map[string]any
@@ -74,7 +74,7 @@ func TestConsistencyRejectionLine(t *testing.T) {
 	require.NotNil(t, line, "the rejection line was not logged")
 	require.Equal(t, "warn", line["level"])
 	require.Equal(t, "1", fmt.Sprint(line["selected"]), "selected counts this attempt's pick")
-	require.Equal(t, "lava@behind latest=700 lag=300", line["rejected"])
+	require.Equal(t, "provider@behind latest=700 lag=300", line["rejected"])
 	require.Equal(t, "1000", fmt.Sprint(line["chainTip"]))
 	require.Equal(t, "10", fmt.Sprint(line["threshold"]))
 	for key := range line {

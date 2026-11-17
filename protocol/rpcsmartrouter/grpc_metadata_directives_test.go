@@ -11,8 +11,8 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/assert"
@@ -95,14 +95,14 @@ func dialGrpcDirectivesListener(t *testing.T) (*grpc.ClientConn, *parsingRelaySe
 	// fail; the ordinary header shows the forwarding path is live.
 	collection := spec.ApiCollections[0]
 	collection.Headers = append(collection.Headers, &spectypes.Header{Name: grpcDirectivesPassthroughHeader, Kind: spectypes.Header_pass_send})
-	for name := range common.SPECIAL_LAVA_DIRECTIVE_HEADERS {
+	for name := range common.SPECIAL_DIRECTIVE_HEADERS {
 		collection.Headers = append(collection.Headers, &spectypes.Header{Name: name, Kind: spectypes.Header_pass_send})
 	}
 	parser, err := chainlib.NewGrpcChainParser()
 	require.NoError(t, err)
 	parser.SetSpec(spec)
 
-	endpoint := &lavasession.RPCEndpoint{NetworkAddress: "127.0.0.1:0", ChainID: "SUIT", ApiInterface: spectypes.APIInterfaceGrpc}
+	endpoint := &routersession.RPCEndpoint{NetworkAddress: "127.0.0.1:0", ChainID: "SUIT", ApiInterface: spectypes.APIInterfaceGrpc}
 	sender := &parsingRelaySender{rpcss: &RPCSmartRouterServer{chainParser: parser, listenEndpoint: endpoint}}
 	logger, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
 	require.NoError(t, err)
@@ -162,7 +162,7 @@ func forwardedHeaders(protocolMessage chainlib.ProtocolMessage) map[string]strin
 // travels as call metadata, the gRPC listener hands its metadata to the same
 // directive parser as an HTTP header, the pin is kept out of the metadata the node
 // receives, and it reaches resolvePinDirectives. What the session manager does with a
-// pin is covered in lavasession; this guards the listener-to-directive seam no other
+// pin is covered in routersession; this guards the listener-to-directive seam no other
 // test crosses for gRPC.
 //
 // Unary calls only. A server-streaming subscription parses the pin into the same
@@ -206,7 +206,7 @@ func TestGrpcMetadataCarriesEveryDirective(t *testing.T) {
 		// An extension the spec doesn't declare; the directive is still read.
 		common.EXTENSION_OVERRIDE_HEADER_NAME: "archive",
 	}
-	for name := range common.SPECIAL_LAVA_DIRECTIVE_HEADERS {
+	for name := range common.SPECIAL_DIRECTIVE_HEADERS {
 		t.Run(name, func(t *testing.T) {
 			conn, sender := dialGrpcDirectivesListener(t)
 			value, ok := values[name]

@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	LavaErrorCode       = 555
+	RouterErrorCode     = 555
 	InternalErrorString = "Internal Error"
 )
 

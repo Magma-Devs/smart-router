@@ -172,9 +172,11 @@ func TestAdmissionFrom_AWarningIsKeptApartFromRefusals(t *testing.T) {
 
 // What a retry of a pass re-runs (MAG-3950): every check that failed or that a rate
 // limit kept from answering, once, by verification and the add-on and extension its
-// value covers; the whole pass for a url it could not dial. Not a Warning check, which
-// switches nothing off, nor an add-on name the spec does not define, which only a
-// restart reads again. The verdicts a retry kept are not counted as runs (Rerun, Ran).
+// value covers; the dial of a url it could not dial, or did not ask for its hold-off,
+// not the whole pass (MAG-4505). Not
+// a Warning check, which switches nothing off, nor an add-on name the spec does not
+// define, which only a restart reads again. The verdicts a retry kept are not counted as
+// runs (Rerun, Ran).
 func TestRetries_AreTheChecksThatFailed(t *testing.T) {
 	a, b := common.NodeUrl{Url: "https://a", Addons: []string{"debug", "archive"}}, common.NodeUrl{Url: "https://b"}
 	chainID, archive, debug := baseCollectionOnly("chain-id"), archiveOnBaseCollection(), addonScoped("enabled", "debug")
@@ -190,9 +192,18 @@ func TestRetries_AreTheChecksThatFailed(t *testing.T) {
 		{url: b, served: b, err: &VerificationFailure{Check: CheckConnect, Err: errors.New("refused")}},
 	})
 	require.True(t, admission.Verified())
-	require.Equal(t, []CheckID{{}, {Name: "enabled", Addon: "debug"}, {Name: archive.Name, Extension: "archive"}}, admission.Retries())
+	require.Equal(t, []CheckID{{Name: CheckConnect}, {Name: "enabled", Addon: "debug"}, {Name: archive.Name, Extension: "archive"}}, admission.Retries())
 	require.False(t, ProviderAdmission{}.Verified(), "no pass, no verdicts to keep")
 	require.Empty(t, ProviderAdmission{}.Retries())
+
+	// A url the pass left out for its hold-off (MAG-4733) is retried like one it could
+	// not dial: alone, by its dial, once the hold-off ends. Not the whole pass, which
+	// would ask the url that passed everything its checks again.
+	heldOff, _ := admissionFrom([]nodeUrlOutcome{
+		{url: a, served: a, checks: []checkOutcome{{verification: chainID}}},
+		{url: b, served: b, err: ErrNotAskedHeldOff},
+	})
+	require.Equal(t, []CheckID{{Name: CheckConnect}}, heldOff.Retries(), "a held-off url is retried alone")
 
 	kept, _ := admissionFrom([]nodeUrlOutcome{{url: a, served: a, checks: []checkOutcome{
 		{verification: chainID},

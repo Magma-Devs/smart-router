@@ -29,13 +29,13 @@ func TestRESTRowsDoNotShadowTheRouteRefusalRows(t *testing.T) {
 	for _, tc := range []struct {
 		status int
 		body   string
-		want   *common.LavaError
+		want   *common.RouterError
 	}{
-		{400, "method not allowed", common.LavaErrorNodeMethodNotAllowed},
-		{400, "route not found", common.LavaErrorNodeEndpointNotFound},
-		{400, `{"message":"endpoint not found"}`, common.LavaErrorNodeEndpointNotFound},
-		{404, "route not found", common.LavaErrorNodeEndpointNotFound},
-		{405, `{"message":"method not allowed","error_code":"web_framework_error"}`, common.LavaErrorNodeMethodNotAllowed},
+		{400, "method not allowed", common.RouterErrorNodeMethodNotAllowed},
+		{400, "route not found", common.RouterErrorNodeEndpointNotFound},
+		{400, `{"message":"endpoint not found"}`, common.RouterErrorNodeEndpointNotFound},
+		{404, "route not found", common.RouterErrorNodeEndpointNotFound},
+		{405, `{"message":"method not allowed","error_code":"web_framework_error"}`, common.RouterErrorNodeMethodNotAllowed},
 	} {
 		t.Run(fmt.Sprintf("%d %.24s", tc.status, tc.body), func(t *testing.T) {
 			require.Equal(t, tc.want, common.ClassifyError(nil, common.ChainFamilyUnknown, common.TransportREST, tc.status, tc.body),

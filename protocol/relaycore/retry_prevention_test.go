@@ -15,7 +15,7 @@ func TestRelayProcessorRetryPrevention(t *testing.T) {
 	t.Run("shouldRetryWithNodeMethodNotFound", func(t *testing.T) {
 		// MAG-2771: a node saying the method is not on its surface is a claim about that node, so
 		// another provider is asked rather than the request failing.
-		methodNotFound := common.NewLavaError(common.LavaErrorNodeMethodNotFound, `unsupported method "eth_test"`)
+		methodNotFound := common.NewRouterError(common.RouterErrorNodeMethodNotFound, `unsupported method "eth_test"`)
 
 		result := chainlib.ShouldRetryError(methodNotFound)
 		require.True(t, result, "a node's method-not-found must be retried on another provider")

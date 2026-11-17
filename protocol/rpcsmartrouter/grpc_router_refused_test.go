@@ -13,8 +13,8 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 )
 
 // MAG-4355: a node whose gRPC port is closed refuses the connection. grpc-go reports that as
@@ -47,19 +47,19 @@ func TestSendGRPCRelay_RefusedConnectionIsUnreachable(t *testing.T) {
 	}, 10*time.Second, 50*time.Millisecond, "a call on the closed port must fail")
 
 	require.Nil(t, result, "a refused connection is not an answer from the node")
-	require.Equal(t, common.LavaErrorConnectionRefused, common.AsLavaError(err))
+	require.Equal(t, common.RouterErrorConnectionRefused, common.AsRouterError(err))
 	var undelivered *common.GRPCCallUndeliveredError
 	require.ErrorAs(t, err, &undelivered)
 	require.False(t, common.IsClientCancellation(err, context.Background()), "the endpoint is not excused")
 
-	unhealthy, _ := classifyEndpointHealth(common.AsLavaError(err), false)
+	unhealthy, _ := classifyEndpointHealth(common.AsRouterError(err), false)
 	require.True(t, unhealthy, "the endpoint is still blamed, as it was")
-	require.Equal(t, lavasession.EndpointDisableUnreachable, endpointDisableReasonFor(common.AsLavaError(err)),
+	require.Equal(t, routersession.EndpointDisableUnreachable, endpointDisableReasonFor(common.AsRouterError(err)),
 		"a closed gRPC port gives the reason a closed JSON-RPC port gives")
 
-	attempt := relayEndProtocolErrorAttempt(relaycore.RelayError{Err: err, LavaError: common.AsLavaError(err)}, false)
+	attempt := relayEndProtocolErrorAttempt(relaycore.RelayError{Err: err, RouterError: common.AsRouterError(err)}, false)
 	require.Equal(t, attemptOutcomeTransportError, attempt.outcome, "relay_end reads it as a transport error")
-	require.Equal(t, common.LavaErrorConnectionRefused.Name, attempt.errorCode)
+	require.Equal(t, common.RouterErrorConnectionRefused.Name, attempt.errorCode)
 }
 
 // The guard on the other side: a node that answers UNAVAILABLE itself, on an open connection,
@@ -84,7 +84,7 @@ func TestSendGRPCRelay_NodeSentUnavailableIsANodeError(t *testing.T) {
 func grpcRelaySenderTo(t *testing.T, addr string) (*DirectRPCRelaySender, *grpcStatusChainMessage) {
 	t.Helper()
 	nodeUrl := common.NodeUrl{Url: "grpc://" + addr, GrpcConfig: common.GrpcConfig{AllowInsecure: true}}
-	conn, err := lavasession.NewDirectRPCConnection(context.Background(), nodeUrl, 5, "")
+	conn, err := routersession.NewDirectRPCConnection(context.Background(), nodeUrl, 5, "")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close() })
 

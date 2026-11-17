@@ -125,7 +125,7 @@ func (rpccl *RPCConsumerLogs) GetUniqueGuidResponseForError(responseError error,
 
 	// The listeners pass the request's GUID in decimal, so GUID reads as it does on the request's
 	// other lines and a search for the request finds this one. msgSeed stays for its readers.
-	utils.LavaFormatError("UniqueGuidResponseForError", responseError, utils.Attribute{Key: "GUID", Value: msgSeed}, utils.Attribute{Key: "msgSeed", Value: msgSeed})
+	utils.FormatError("UniqueGuidResponseForError", responseError, utils.Attribute{Key: "GUID", Value: msgSeed}, utils.Attribute{Key: "msgSeed", Value: msgSeed})
 
 	ret, _ := json.Marshal(data)
 
@@ -139,7 +139,7 @@ func (rpccl *RPCConsumerLogs) AnalyzeWebSocketErrorAndGetFormattedMessage(webSoc
 	if err != nil {
 		errMessage := err.Error()
 		if strings.Contains(errMessage, webSocketCloseMessage) {
-			utils.LavaFormatDebug("Websocket connection closed by the user", utils.LogAttr("error", errMessage))
+			utils.FormatDebug("Websocket connection closed by the user", utils.LogAttr("error", errMessage))
 			return nil
 		}
 		rpccl.LogRequestAndResponse(rpcType+" ws msg", true, "ws", webSocketAddr, msg, "", msgSeed, timeTaken, err)
@@ -148,7 +148,7 @@ func (rpccl *RPCConsumerLogs) AnalyzeWebSocketErrorAndGetFormattedMessage(webSoc
 			"Error_Received": rpccl.GetUniqueGuidResponseForError(err, msgSeed),
 		})
 		if err != nil {
-			utils.LavaFormatError("AnalyzeWebSocketErrorAndGetFormattedMessage unexpected behavior, failed marshalling json response", err, utils.LogAttr("GUID", msgSeed), utils.LogAttr("seed", msgSeed))
+			utils.FormatError("AnalyzeWebSocketErrorAndGetFormattedMessage unexpected behavior, failed marshalling json response", err, utils.LogAttr("GUID", msgSeed), utils.LogAttr("seed", msgSeed))
 		}
 		return jsonResponse
 	}
@@ -161,10 +161,10 @@ func (rpccl *RPCConsumerLogs) AnalyzeWebSocketErrorAndGetFormattedMessage(webSoc
 // capped here.
 func (rpccl *RPCConsumerLogs) LogRequestAndResponse(module string, hasError bool, method, path, req, resp, msgSeed string, timeTaken time.Duration, err error) {
 	if hasError && err != nil {
-		utils.LavaFormatError(module, err, []utils.Attribute{{Key: "GUID", Value: msgSeed}, {Key: "timeTaken", Value: timeTaken}, {Key: "request", Value: req}, {Key: "response", Value: parser.CapStringLen(resp)}, {Key: "method", Value: method}, {Key: "path", Value: path}, {Key: "HasError", Value: hasError}}...)
+		utils.FormatError(module, err, []utils.Attribute{{Key: "GUID", Value: msgSeed}, {Key: "timeTaken", Value: timeTaken}, {Key: "request", Value: req}, {Key: "response", Value: parser.CapStringLen(resp)}, {Key: "method", Value: method}, {Key: "path", Value: path}, {Key: "HasError", Value: hasError}}...)
 		return
 	}
-	utils.LavaFormatDebug(module, []utils.Attribute{{Key: "GUID", Value: msgSeed}, {Key: "timeTaken", Value: timeTaken}, {Key: "request", Value: req}, {Key: "response", Value: parser.CapStringLen(resp)}, {Key: "method", Value: method}, {Key: "path", Value: path}, {Key: "HasError", Value: hasError}}...)
+	utils.FormatDebug(module, []utils.Attribute{{Key: "GUID", Value: msgSeed}, {Key: "timeTaken", Value: timeTaken}, {Key: "request", Value: req}, {Key: "response", Value: parser.CapStringLen(resp)}, {Key: "method", Value: method}, {Key: "path", Value: path}, {Key: "HasError", Value: hasError}}...)
 }
 
 func (rpccl *RPCConsumerLogs) RecordEndToEndLatency(chainId string, apiInterface string, method string, latencyMs float64) {
@@ -231,5 +231,5 @@ func (rpccl *RPCConsumerLogs) LogTestMode(fiberCtx *fiber.Ctx) {
 	for header, HeaderVal := range headers {
 		st += fmt.Sprintf("Header %16s HeaderVal: %s\n", header, HeaderVal)
 	}
-	utils.LavaFormatInfo(st)
+	utils.FormatInfo(st)
 }

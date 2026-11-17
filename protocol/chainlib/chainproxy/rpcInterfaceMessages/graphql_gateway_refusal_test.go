@@ -21,7 +21,7 @@ const graphQLValidationErrorReply = `{"errors":[{"message":"Cannot query field \
 
 // classifyLikeTheGraphQLSender classifies a reply from the inputs sendGraphQLRelay hands the
 // registry: the message's classification status and CheckResponseError's message.
-func classifyLikeTheGraphQLSender(t *testing.T, message *GraphQLMessage, body string, status int) *common.LavaError {
+func classifyLikeTheGraphQLSender(t *testing.T, message *GraphQLMessage, body string, status int) *common.RouterError {
 	t.Helper()
 	hasError, errorMessage := message.CheckResponseError([]byte(body), status)
 	require.True(t, hasError, "a reply outside 2xx is a node error")
@@ -40,7 +40,7 @@ func TestGraphQLGatewayJSONRPCEnvelopeIsARouteRefusal(t *testing.T) {
 
 	for _, message := range []*GraphQLMessage{query, mutation} {
 		classified := classifyLikeTheGraphQLSender(t, message, quickNodeWrongPathReply, http.StatusBadRequest)
-		require.Equal(t, common.LavaErrorNodeMethodNotAllowed.Code, classified.Code,
+		require.Equal(t, common.RouterErrorNodeMethodNotAllowed.Code, classified.Code,
 			"QuickNode's wrong-path 400 must classify as a route refusal, got %s", classified.Name)
 		require.True(t, classified.Retryable, "another provider can serve the request")
 		require.False(t, classified.EndpointAtFault(), "the gateway answered truthfully about its route")
@@ -49,7 +49,7 @@ func TestGraphQLGatewayJSONRPCEnvelopeIsARouteRefusal(t *testing.T) {
 
 	// The node's own GraphQL answer under a 400 is the caller's, as before.
 	classified := classifyLikeTheGraphQLSender(t, query, graphQLValidationErrorReply, http.StatusBadRequest)
-	require.Equal(t, common.LavaErrorUserInvalidRequest.Code, classified.Code)
+	require.Equal(t, common.RouterErrorUserInvalidRequest.Code, classified.Code)
 	require.False(t, classified.Retryable)
 }
 
@@ -86,7 +86,7 @@ func TestGraphQLGatewayJSONRPCEnvelopeRemapsOnlyTheCallerRows(t *testing.T) {
 	// caller's malformed request, so a row reassigned there cannot be remapped here by accident.
 	for status := range remapped {
 		classified := common.ClassifyError(nil, common.ChainFamilyUnknown, common.TransportREST, status, "")
-		require.Contains(t, []uint32{common.LavaErrorUserInvalidRequest.Code, common.LavaErrorUserInvalidParams.Code}, classified.Code,
+		require.Contains(t, []uint32{common.RouterErrorUserInvalidRequest.Code, common.RouterErrorUserInvalidParams.Code}, classified.Code,
 			"status %d is remapped but the registry does not file it as the caller's", status)
 	}
 }

@@ -57,8 +57,8 @@ direct-rpc:
 
   # Endpoint 2 — dRPC public endpoint (HTTP + WS). Tenderly's public WS
   # gateway rejects the chain-tracker's subscription probes ("method not
-  # found"), and the ETH1 spec requires a websocket leg per provider — an
-  # HTTP-only provider is excluded at verification and fails overall-health.
+  # found"). Each provider here keeps a websocket leg: an HTTP-only one would
+  # serve no subscriptions and publish the websocket's missing-url (MAG-3950).
   - name: "eth-drpc"
     chain-id: "ETH1"
     api-interface: "jsonrpc"

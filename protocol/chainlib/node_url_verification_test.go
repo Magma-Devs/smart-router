@@ -17,7 +17,7 @@ func throttledErr() error {
 	return fmt.Errorf("chain-id verification failed: %w", common.StatusCodeError429)
 }
 
-// A provider has nothing to serve from when a path it declares has no url left. A path
+// A provider has nothing to serve from when no path it declares has a url left. A path
 // whose urls all failed outright is a failure, whatever else is throttled; only when
 // every empty path is merely throttled is the answer the rate limit.
 func TestServingError(t *testing.T) {
@@ -31,18 +31,84 @@ func TestServingError(t *testing.T) {
 	require.NoError(t, allFine.servingError(urls[:2]))
 
 	var failed ProviderAdmission
-	failed.throttleURL(0, throttledErr())
+	failed.throttleURL(0, common.NodeUrl{}, throttledErr())
 	failed.refuseURL(1, errNotServed)
 	err := failed.servingError(urls)
 	require.ErrorIs(t, err, errNotServed, "a failed path outranks a throttled one in either order")
 	require.False(t, IsRateLimitFailure(err))
 
 	var throttled ProviderAdmission
-	throttled.throttleURL(0, throttledErr())
+	throttled.throttleURL(0, common.NodeUrl{}, throttledErr())
 	require.True(t, IsRateLimitFailure(throttled.servingError(urls[:1])), "nothing but a throttle: inconclusive")
 
 	var socketsOnly ProviderAdmission
 	require.Error(t, socketsOnly.servingError(urls[2:]), "a socket serves no path")
+}
+
+// A failed path costs that path, not the provider, while another path is served
+// (MAG-4214): TON's /v2 url failing chain-id must not take the healthy /v3 url with it.
+func TestServingError_AFailedPathCostsOnlyThatPath(t *testing.T) {
+	urls := []common.NodeUrl{
+		{Url: "https://a/v2", InternalPath: "/v2"},
+		{Url: "https://a/v3", InternalPath: "/v3"},
+		{Url: "https://a/v4", InternalPath: "/v4"},
+	}
+
+	var v2Refused ProviderAdmission
+	v2Refused.refuseURL(0, errNotServed)
+	require.NoError(t, v2Refused.servingError(urls[:2]), "/v3 is still served")
+
+	var noneServed ProviderAdmission
+	noneServed.refuseURL(0, errNotServed)
+	noneServed.throttleURL(1, urls[1], throttledErr())
+	err := noneServed.servingError(urls[:2])
+	require.ErrorIs(t, err, errNotServed, "no path served: the failure, not the throttle")
+	require.False(t, IsRateLimitFailure(err))
+
+	var servedAndUnknown ProviderAdmission
+	servedAndUnknown.refuseURL(0, errNotServed)
+	servedAndUnknown.throttleURL(2, urls[2], throttledErr())
+	require.True(t, IsRateLimitFailure(servedAndUnknown.servingError(urls)),
+		"a lost path is no failure while /v3 is served; the throttled /v4 leaves the pass inconclusive, as before")
+}
+
+// RefusesURL finds a url by value in the list the pass verified, so a caller holding
+// the configured list and one holding the generated per-path list agree (MAG-4214).
+func TestProviderAdmission_RefusesURL(t *testing.T) {
+	base := common.NodeUrl{Url: "https://a"}
+	v2 := common.NodeUrl{Url: "https://a/v2", InternalPath: "/v2"}
+	v3 := common.NodeUrl{Url: "https://a/v3", InternalPath: "/v3"}
+	admission, err := admissionFrom([]nodeUrlOutcome{
+		{url: base, served: base},
+		{url: v2, served: v2, err: errNotServed},
+		{url: v3, served: v3},
+	})
+	require.NoError(t, err)
+
+	require.True(t, admission.RefusesURL(v2))
+	require.False(t, admission.RefusesURL(v3))
+	require.False(t, admission.RefusesURL(base))
+	require.False(t, admission.RefusesURL(common.NodeUrl{Url: "https://a/v2"}), "same url, other path: another endpoint")
+	require.False(t, admission.RefusesURL(common.NodeUrl{Url: "https://a/v2", InternalPath: "/v2", Addons: []string{"archive"}}),
+		"declared add-ons are part of what was verified")
+	require.False(t, ProviderAdmission{}.RefusesURL(v2), "no pass, nothing refused")
+
+	require.False(t, admission.WithoutURLRefusals([]int{1}).RefusesURL(v2), "the url grace admits it again")
+	require.True(t, admission.KeepingThrottledFrom(ProviderAdmission{}).RefusesURL(v2), "a copy keeps the verified list")
+
+	keyed := func(key string) common.NodeUrl {
+		url := v2
+		url.AuthConfig.AuthHeaders = map[string]string{"X-Api-Key": key}
+		return url
+	}
+	revoked, good := keyed("revoked"), keyed("good")
+	twoKeys, err := admissionFrom([]nodeUrlOutcome{
+		{url: revoked, served: revoked, err: errNotServed},
+		{url: good, served: good},
+	})
+	require.NoError(t, err)
+	require.True(t, twoKeys.RefusesURL(revoked))
+	require.False(t, twoKeys.RefusesURL(good), "same url and path, other key: verified apart (MAG-4214 review)")
 }
 
 // A path that declares a url serving the base collection needs one of those left: a standalone-
@@ -75,8 +141,8 @@ func TestKeepingThrottledFrom(t *testing.T) {
 	previous.fail(url, "trace", "trace")
 
 	var now ProviderAdmission
-	now.throttleURL(1, throttledErr())
-	now.throttleURL(2, throttledErr())
+	now.throttleURL(1, common.NodeUrl{}, throttledErr())
+	now.throttleURL(2, common.NodeUrl{}, throttledErr())
 	now.throttleService(url, "trace", throttledErr())
 	now.throttleService(url, "archive", throttledErr())
 	now.refuseURL(3, errNotServed)
@@ -94,6 +160,31 @@ func TestKeepingThrottledFrom(t *testing.T) {
 	require.False(t, now.URLRefused(2), "the copy shares no map with its source")
 }
 
+// A url this pass could not ask — held off, or rate-limited at the url level —
+// re-checked none of its services, so the services it was refused stay refused.
+// Another url's refusals are not carried over by it.
+func TestKeepingThrottledFrom_AURLNotCheckedKeepsItsServiceRefusals(t *testing.T) {
+	full := common.NodeUrl{Url: "https://full"}
+	pruned := common.NodeUrl{Url: "https://pruned", Addons: []string{"archive"}}
+	other := common.NodeUrl{Url: "https://other", Addons: []string{"archive"}}
+
+	var previous ProviderAdmission
+	previous.fail(pruned, "archive", "archive")
+	previous.fail(other, "archive", "archive")
+
+	var now ProviderAdmission
+	now.throttleURL(1, pruned, ErrNotAskedHeldOff)
+
+	kept := now.KeepingThrottledFrom(previous)
+	services, keep := kept.AdmittedServices(pruned)
+	require.True(t, keep, "the url still serves its base collection")
+	require.Empty(t, services, "archive stays refused: nothing re-checked it")
+	services, _ = kept.AdmittedServices(other)
+	require.Equal(t, []string{"archive"}, services, "a url this pass did check settles its own services")
+	services, _ = kept.AdmittedServices(full)
+	require.Empty(t, services)
+}
+
 func TestWithoutURLRefusals(t *testing.T) {
 	var admission ProviderAdmission
 	admission.refuseURL(0, errNotServed)
@@ -107,7 +198,7 @@ func TestEqualIgnoresWhatWasOnlyThrottled(t *testing.T) {
 	var a, b ProviderAdmission
 	a.refuseURL(0, errNotServed)
 	b.refuseURL(0, errNotServed)
-	b.throttleURL(1, throttledErr())
+	b.throttleURL(1, common.NodeUrl{}, throttledErr())
 	require.True(t, a.Equal(b))
 	b.refuseURL(2, errNotServed)
 	require.False(t, a.Equal(b))
@@ -144,4 +235,23 @@ func TestReadsOwnHead(t *testing.T) {
 	parser.EXPECT().GetParsingByTagForCollection(spectypes.FUNCTION_TAG_GET_BLOCKNUM, versioned.Addons, "/C/rpc", true).
 		Return(&spectypes.ParseDirective{}, atPath("/C/rpc"), true)
 	require.True(t, readsOwnHead(parser, versioned, false))
+}
+
+// A url was asked when the pass dialed it or ran a check on it. One left out for its
+// hold-off, or one a retry kept whole without dialing, was not.
+func TestURLAsked(t *testing.T) {
+	admission := ProviderAdmission{pass: []nodeUrlOutcome{
+		{checks: []checkOutcome{{kept: true}, {kept: true}}},
+		{err: ErrNotAskedHeldOff},
+		{checks: []checkOutcome{{kept: true}, {}}},
+		{err: errNotServed},
+		{},
+	}}
+	require.False(t, admission.URLAsked(0), "a retry kept every verdict: not dialed")
+	require.False(t, admission.URLAsked(1), "held off: not asked")
+	require.True(t, admission.URLAsked(2), "one check ran")
+	require.True(t, admission.URLAsked(3), "a dial that failed was an attempt")
+	require.True(t, admission.URLAsked(4), "dialed only (a websocket url)")
+	require.False(t, admission.URLAsked(5), "no such url")
+	require.False(t, ProviderAdmission{}.URLAsked(0), "no pass ran")
 }

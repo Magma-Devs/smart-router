@@ -9,9 +9,9 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavaprotocol"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/performance"
+	"github.com/magma-Devs/smart-router/protocol/relayprotocol"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
@@ -40,7 +40,7 @@ func ethProtocolMessage(t *testing.T, chainParser chainlib.ChainParser, body str
 	chainMsg, err := chainParser.ParseMsg("", []byte(body), http.MethodPost, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 	require.NoError(t, err)
 	reqBlock, _ := chainMsg.RequestedBlock()
-	relayData := lavaprotocol.NewRelayData(context.Background(), http.MethodPost, "", []byte(body), seenBlock, reqBlock, spectypes.APIInterfaceJsonRPC, chainMsg.GetRPCMessage().GetHeaders(), chainlib.GetAddon(chainMsg), common.GetExtensionNames(chainMsg.GetExtensions()))
+	relayData := relayprotocol.NewRelayData(context.Background(), http.MethodPost, "", []byte(body), seenBlock, reqBlock, spectypes.APIInterfaceJsonRPC, chainMsg.GetRPCMessage().GetHeaders(), chainlib.GetAddon(chainMsg), common.GetExtensionNames(chainMsg.GetExtensions()))
 	return chainlib.NewProtocolMessage(chainMsg, nil, relayData, "test-dapp", "127.0.0.1")
 }
 
@@ -48,7 +48,7 @@ func ethCacheTestServer(chainParser chainlib.ChainParser, primary *performance.C
 	return &RPCSmartRouterServer{
 		cache:          primary,
 		chainParser:    chainParser,
-		listenEndpoint: &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: spectypes.APIInterfaceJsonRPC},
+		listenEndpoint: &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: spectypes.APIInterfaceJsonRPC},
 	}
 }
 

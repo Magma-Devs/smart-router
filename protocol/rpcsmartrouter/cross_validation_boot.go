@@ -7,7 +7,7 @@ import (
 	"sync"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/spf13/viper"
 )
@@ -75,7 +75,7 @@ func (b *bootConfigBarrier) wait() error {
 // crossValidationBootCheck runs the spec-only cross-validation guards for one endpoint against the spec
 // it just loaded. The config is read the way ServeRPCRequests reads it, so the two cannot disagree about
 // which policies exist.
-func crossValidationBootCheck(endpoint *lavasession.RPCEndpoint, chainParser chainlib.ChainParser) error {
+func crossValidationBootCheck(endpoint *routersession.RPCEndpoint, chainParser chainlib.ChainParser) error {
 	cfg, err := ParseCrossValidationConfig(viper.GetViper())
 	if err != nil {
 		return err
@@ -106,7 +106,7 @@ func validateCrossValidationSpecGuards(resolver *CrossValidationPolicyResolver, 
 	}
 	statefulChecker, ok := chainParser.(interface{ ApiHasStatefulCategory(string) bool })
 	if !ok {
-		return utils.LavaFormatError("cross-validation policies are configured but the chain parser cannot classify stateful methods; cannot enforce the write-method guard", nil,
+		return utils.FormatError("cross-validation policies are configured but the chain parser cannot classify stateful methods; cannot enforce the write-method guard", nil,
 			utils.LogAttr("chainID", chainID),
 			utils.LogAttr("apiInterface", apiInterface))
 	}
@@ -121,7 +121,7 @@ func validateCrossValidationSpecGuards(resolver *CrossValidationPolicyResolver, 
 	}
 	methodChecker, ok := chainParser.(interface{ ApiNameDefined(string) bool })
 	if !ok {
-		return utils.LavaFormatError("cross-validation policies are configured but the chain parser cannot list its methods; cannot check the methods the policies name", nil,
+		return utils.FormatError("cross-validation policies are configured but the chain parser cannot list its methods; cannot check the methods the policies name", nil,
 			utils.LogAttr("chainID", chainID),
 			utils.LogAttr("apiInterface", apiInterface))
 	}
@@ -152,5 +152,5 @@ func validateCrossValidationSpecGuards(resolver *CrossValidationPolicyResolver, 
 		attrs = append(attrs, utils.LogAttr("servedAs", servedAs))
 	}
 	attrs = append(attrs, utils.LogAttr("hint", "a policy names the method as the spec does, exactly: the JSON-RPC method, the REST path template, or the gRPC service/method; positions count from 0 in cross-validation.policies, and servedAs lists the spec names that differ from the policy's only by letter case or by a placeholder's name"))
-	return utils.LavaFormatError("cross-validation policies name methods this endpoint's spec does not serve under that name, so no request would select them", nil, attrs...)
+	return utils.FormatError("cross-validation policies name methods this endpoint's spec does not serve under that name, so no request would select them", nil, attrs...)
 }

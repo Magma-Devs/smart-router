@@ -8,7 +8,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/holdoff"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/magma-Devs/smart-router/utils"
 	"golang.org/x/time/rate"
 )
@@ -196,7 +196,7 @@ type subscriptionEndpoints struct {
 	exhausted string
 
 	optimizer   WebSocketEndpointOptimizer // can be nil: first-available selection
-	stickyStore *lavasession.StickySessionStore
+	stickyStore *routersession.StickySessionStore
 
 	// rateLimitHoldoff is the hold-off registry selection reads and a subscribe's rate limit
 	// is recorded into. Nil reads relayHoldoff at the time of the call; see holdoffs.
@@ -217,7 +217,7 @@ func newSubscriptionEndpoints(logPrefix, exhausted string, primary, backup []*co
 		logPrefix:      logPrefix,
 		exhausted:      exhausted,
 		optimizer:      optimizer,
-		stickyStore:    lavasession.NewStickySessionStore(),
+		stickyStore:    routersession.NewStickySessionStore(),
 		primary:        primary,
 		backup:         backup,
 		endpointsByURL: indexEndpoints(primary, backup),
@@ -328,14 +328,14 @@ func (se *subscriptionEndpoints) selectEndpoint(ctx context.Context, clientKey s
 		if stickySession, exists := se.stickyStore.Get(clientKey); exists {
 			if stickyEndpoint, found := snapshot.byURL[stickySession.Provider]; found {
 				if _, ignored := ignoredEndpoints[stickySession.Provider]; !ignored {
-					utils.LavaFormatDebug(se.logPrefix+": using sticky session endpoint",
+					utils.FormatDebug(se.logPrefix+": using sticky session endpoint",
 						utils.LogAttr("clientKey", clientKey),
 						utils.LogAttr("endpoint", sanitizeEndpointURL(stickySession.Provider)),
 					)
 					return stickyEndpoint, nil
 				}
 				// Sticky endpoint is ignored — clear and continue to cascade.
-				utils.LavaFormatDebug(se.logPrefix+": sticky endpoint ignored, clearing affinity",
+				utils.FormatDebug(se.logPrefix+": sticky endpoint ignored, clearing affinity",
 					utils.LogAttr("clientKey", clientKey),
 					utils.LogAttr("ignoredEndpoint", sanitizeEndpointURL(stickySession.Provider)),
 				)
@@ -351,7 +351,7 @@ func (se *subscriptionEndpoints) selectEndpoint(ctx context.Context, clientKey s
 	}
 
 	// Tier 2: backup endpoints (only when primary is exhausted).
-	utils.LavaFormatDebug(se.logPrefix+": primary endpoints exhausted, falling back to backup",
+	utils.FormatDebug(se.logPrefix+": primary endpoints exhausted, falling back to backup",
 		utils.LogAttr("primaryReason", primaryErr.Error()),
 		utils.LogAttr("backupCount", len(snapshot.backup)),
 	)
@@ -434,7 +434,7 @@ func (se *subscriptionEndpoints) selectFromTier(ctx context.Context, tier []*com
 		return nil, fmt.Errorf("optimizer selected unknown endpoint: %s", utils.RedactURL(selectedURL))
 	}
 
-	utils.LavaFormatDebug(se.logPrefix+": selected endpoint via optimizer",
+	utils.FormatDebug(se.logPrefix+": selected endpoint via optimizer",
 		utils.LogAttr("endpoint", sanitizeEndpointURL(selectedURL)),
 		utils.LogAttr("tierSize", len(tier)),
 	)

@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils/rand"
@@ -131,7 +131,7 @@ func TestCachedNonRetryableNodeErrorEndsTheRelay(t *testing.T) {
 // recorded status included, and leaves an entry it cannot read that way without a verdict.
 func TestClassifyCachedNodeError(t *testing.T) {
 	ctx := context.Background()
-	server := &RPCSmartRouterServer{listenEndpoint: &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: spectypes.APIInterfaceJsonRPC}}
+	server := &RPCSmartRouterServer{listenEndpoint: &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: spectypes.APIInterfaceJsonRPC}}
 	jsonRPC := refusalTestProtocolMessage(t, ctx, ethJsonRPCParser(t), []byte(refusalTestRequest))
 	_, rest := buildRestProtocolMessage(t, ctx, 100)
 	const headerNotFound = `{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"header not found"}}`

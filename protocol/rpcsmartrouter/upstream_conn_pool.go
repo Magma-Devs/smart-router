@@ -183,7 +183,7 @@ func (p *connPool[C]) pickConnectionLocked(ctx context.Context) (C, error) {
 		if err != nil {
 			// If we can't create a new connection but have an existing one, use it
 			if found {
-				utils.LavaFormatWarning(p.logPrefix()+"failed to scale up, using existing connection", err,
+				utils.FormatWarning(p.logPrefix()+"failed to scale up, using existing connection", err,
 					utils.LogAttr("endpoint", p.sanitizedURL),
 					utils.LogAttr("currentConnections", len(p.connections)),
 					utils.LogAttr(p.vocabulary.slotAttr, lowestSlots),
@@ -194,7 +194,7 @@ func (p *connPool[C]) pickConnectionLocked(ctx context.Context) (C, error) {
 			return none, fmt.Errorf("failed to create connection: %w", err)
 		}
 
-		utils.LavaFormatInfo(p.logPrefix()+"scaled up",
+		utils.FormatInfo(p.logPrefix()+"scaled up",
 			utils.LogAttr("endpoint", p.sanitizedURL),
 			utils.LogAttr("totalConnections", len(p.connections)),
 			utils.LogAttr("reason", "all connections near capacity"),
@@ -222,7 +222,7 @@ func (p *connPool[C]) dropUnhealthyLocked() []C {
 			continue
 		}
 		dropped = append(dropped, conn)
-		utils.LavaFormatDebug(p.logPrefix()+"dropped a dead connection",
+		utils.FormatDebug(p.logPrefix()+"dropped a dead connection",
 			utils.LogAttr("endpoint", p.sanitizedURL),
 			utils.LogAttr("remainingConnections", len(kept)),
 		)
@@ -242,7 +242,7 @@ func (p *connPool[C]) createConnectionLocked(ctx context.Context) (C, error) {
 	p.connections = append(p.connections, conn)
 	p.backoff.Reset()
 
-	utils.LavaFormatDebug(p.logPrefix()+"connection added",
+	utils.FormatDebug(p.logPrefix()+"connection added",
 		utils.LogAttr("endpoint", p.sanitizedURL),
 		utils.LogAttr("totalConnections", len(p.connections)),
 	)
@@ -302,7 +302,7 @@ func (p *connPool[C]) maybeScaleDown() {
 		// Close removed connections asynchronously
 		go func(conns []C) {
 			closeConns(conns)
-			utils.LavaFormatDebug(p.logPrefix()+"scaled down",
+			utils.FormatDebug(p.logPrefix()+"scaled down",
 				utils.LogAttr("endpoint", p.sanitizedURL),
 				utils.LogAttr("removedConnections", len(conns)),
 				utils.LogAttr("remainingConnections", len(kept)),
@@ -409,7 +409,7 @@ func (p *connPool[C]) reconnectOnFreshLadder(ctx context.Context) error {
 		}
 		delay = reconnectDelay(delay, err)
 
-		utils.LavaFormatDebug(p.logPrefix()+"reconnect failed, retrying",
+		utils.FormatDebug(p.logPrefix()+"reconnect failed, retrying",
 			utils.LogAttr("endpoint", p.sanitizedURL),
 			utils.LogAttr("attempt", ladder.Attempt()),
 			utils.LogAttr("next_delay", delay),
@@ -437,7 +437,7 @@ func (p *connPool[C]) reconnectOnSharedLadder(ctx context.Context) error {
 	delay = reconnectDelay(delay, p.lastReconnectErr)
 	p.lock.RUnlock()
 
-	utils.LavaFormatDebug(p.logPrefix()+"waiting before reconnect",
+	utils.FormatDebug(p.logPrefix()+"waiting before reconnect",
 		utils.LogAttr("endpoint", p.sanitizedURL),
 		utils.LogAttr("backoff", delay),
 	)
@@ -483,7 +483,7 @@ func (p *connPool[C]) adoptReconnected(conn C, logAttrs ...utils.Attribute) erro
 
 	closeConns(dropped)
 
-	utils.LavaFormatInfo(p.logPrefix()+"reconnected successfully",
+	utils.FormatInfo(p.logPrefix()+"reconnected successfully",
 		append([]utils.Attribute{
 			utils.LogAttr("endpoint", p.sanitizedURL),
 			utils.LogAttr("totalConnections", total),
@@ -525,7 +525,7 @@ func (p *connPool[C]) Close() error {
 
 	closeConns(conns)
 
-	utils.LavaFormatDebug(p.logPrefix()+"closed",
+	utils.FormatDebug(p.logPrefix()+"closed",
 		utils.LogAttr("endpoint", p.sanitizedURL),
 		utils.LogAttr("closedConnections", len(conns)),
 	)

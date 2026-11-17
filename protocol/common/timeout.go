@@ -81,7 +81,7 @@ func ValidateAndCapMinRelayTimeout() {
 	// CapContextTimeout — values below 1s cause immediate DeadlineExceeded on every relay.
 	reset := time.Duration(DefaultTimeoutSeconds) * time.Second
 	if DefaultTimeout < time.Second {
-		utils.LavaFormatWarning("default-processing-timeout is unreasonably small, resetting to default",
+		utils.FormatWarning("default-processing-timeout is unreasonably small, resetting to default",
 			nil,
 			utils.LogAttr("invalid_value", DefaultTimeout),
 			utils.LogAttr("reset_to", reset),
@@ -96,7 +96,7 @@ func ValidateAndCapMinRelayTimeout() {
 		if capped <= 0 {
 			capped = time.Millisecond
 		}
-		utils.LavaFormatWarning("min-relay-timeout >= default-processing-timeout, capping to 50% of processing timeout",
+		utils.FormatWarning("min-relay-timeout >= default-processing-timeout, capping to 50% of processing timeout",
 			nil,
 			utils.LogAttr("min_relay_timeout", MinimumTimePerRelayDelay),
 			utils.LogAttr("default_processing_timeout", DefaultTimeout),
@@ -108,7 +108,7 @@ func ValidateAndCapMinRelayTimeout() {
 	// Guard MinimumTimePerRelayDelay <= 0: GetTimePerCu returns 0 for low-CU methods,
 	// which feeds into CapContextTimeout and causes immediate timeouts.
 	if MinimumTimePerRelayDelay <= 0 {
-		utils.LavaFormatWarning("min-relay-timeout is zero or negative, resetting to 1s",
+		utils.FormatWarning("min-relay-timeout is zero or negative, resetting to 1s",
 			nil,
 			utils.LogAttr("invalid_value", MinimumTimePerRelayDelay),
 		)
@@ -118,7 +118,7 @@ func ValidateAndCapMinRelayTimeout() {
 	// Guard CacheTimeout <= 0: the lookup context would be born expired and
 	// every cache read would fail immediately — a silently disabled cache.
 	if CacheTimeout <= 0 {
-		utils.LavaFormatWarning("cache-timeout is zero or negative, resetting to default",
+		utils.FormatWarning("cache-timeout is zero or negative, resetting to default",
 			nil,
 			utils.LogAttr("invalid_value", CacheTimeout),
 			utils.LogAttr("reset_to", DefaultCacheTimeout),
@@ -129,7 +129,7 @@ func ValidateAndCapMinRelayTimeout() {
 	// Guard MaxCallerRelayTimeout < 0: a negative ceiling has no meaning. 0 is the default, and
 	// means a caller cannot extend a request's budget.
 	if MaxCallerRelayTimeout < 0 {
-		utils.LavaFormatWarning("max-caller-relay-timeout is negative, resetting to 0 (a caller's lava-relay-timeout cannot extend a request's budget)",
+		utils.FormatWarning("max-caller-relay-timeout is negative, resetting to 0 (a caller's lava-relay-timeout cannot extend a request's budget)",
 			nil,
 			utils.LogAttr("invalid_value", MaxCallerRelayTimeout),
 		)
@@ -140,7 +140,7 @@ func ValidateAndCapMinRelayTimeout() {
 	// Below the default budget it cannot extend anything, and it never shortens anything, so an
 	// operator who set it to cut requests short would otherwise see no effect and no reason.
 	if MaxCallerRelayTimeout > 0 && MaxCallerRelayTimeout <= DefaultTimeout {
-		utils.LavaFormatWarning("max-caller-relay-timeout is not above default-processing-timeout, so it has no effect: it only lets a caller's lava-relay-timeout extend a request's budget, it never shortens one",
+		utils.FormatWarning("max-caller-relay-timeout is not above default-processing-timeout, so it has no effect: it only lets a caller's lava-relay-timeout extend a request's budget, it never shortens one",
 			nil,
 			utils.LogAttr("max_caller_relay_timeout", MaxCallerRelayTimeout),
 			utils.LogAttr("default_processing_timeout", DefaultTimeout),
