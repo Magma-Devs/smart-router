@@ -604,7 +604,13 @@ func TestParseGraphQLMsgRefusesWhatItCannotRead(t *testing.T) {
 	}{
 		{"a syntax error", `{"query":"{ checkpoint { sequenceNumber }"}`, GraphQLParseFailedCode, "failed parsing graphql query: Expected Name, found <EOF> (line 1, column 32)"},
 		{"a query that is not GraphQL", `{"query":"not graphql at all"}`, GraphQLParseFailedCode, `failed parsing graphql query: Unexpected Name "not" (line 1, column 1)`},
-		{"a string the lexer cannot read", `{"query":"{ a(\"x) }"}`, GraphQLParseFailedCode, "failed parsing graphql query: "},
+		// The lexer itself refuses these three, before the parser ever runs (checkGraphQLQueryDepth
+		// reads the document first, to bound recursion). Each must carry the LEXER's own specific
+		// reason, not the parser's generic re-derivation of the same failure ("Unexpected <Invalid>"
+		// for all three, were it reached): re-parsing to get a message throws the detail away.
+		{"a string the lexer cannot read", `{"query":"{ a(\"x) }"}`, GraphQLParseFailedCode, "failed parsing graphql query: Unterminated string. (line 1, column 10)"},
+		{"a bad escape the lexer cannot read", `{"query":"{ a(x: \"ab\\zcd\") }"}`, GraphQLParseFailedCode, `failed parsing graphql query: Invalid character escape sequence: \z. (line 1, column 12)`},
+		{"a bad number the lexer cannot read", `{"query":"{ a(x: 1.2.3) }"}`, GraphQLParseFailedCode, `failed parsing graphql query: Cannot parse the unexpected character ".". (line 1, column 11)`},
 		{"an empty body", ``, GraphQLRequestRefusedCode, "graphql request body is empty"},
 		{"a body of whitespace", " \n\t", GraphQLRequestRefusedCode, "graphql request body is empty"},
 		{"a body that is not JSON", `not json at all`, GraphQLRequestRefusedCode, "graphql request body is not JSON"},

@@ -1456,6 +1456,53 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		}
 	}))
 
+	// POST /debug/reset-cache — flushes only the cache backend, the --cache-be pod
+	// or the resp-cache store (MAG-2454): the BTC-safe, cache-only companion to
+	// /debug/reset-all. A cache-behavior test previously had only reset-all, which
+	// also resets session-manager state that trips a documented BTC-router
+	// regression (MAG-2395) and resets optimizer scores, pairing, endpoint health
+	// and chain-tracker state along with it — none of which a cache test wants
+	// disturbed. Same pattern as /debug/reset-scores: a focused reset added
+	// because reset-all's bundle is unsafe for one kind of test.
+	//
+	// CacheActive() gates it exactly as it gates reset-all's own cache-be step: a
+	// deployment with no cache backend has nothing to flush, and this reports
+	// that honestly (cleared: []) rather than erroring.
+	//
+	// Nothing else in this router is touched, but the backend holds more than
+	// replies: under --shared-state it also carries the fleet's sticky-session
+	// claims and the fleet tracker gate's endpoint observations, and Flush drops
+	// those with the replies (the RESP backend every key under the router's
+	// prefix, the sidecar its whole store). This pod's own sticky pins stay, where
+	// reset-all clears them with the session-manager state.
+	//
+	// This does NOT call ProviderOptimizer.ResetState — reset-all's own comments
+	// call that "the in-process Ristretto [response] reset", but what it actually
+	// clears is providersStorage, the optimizer's QoS/score cache
+	// (provider_optimizer.go's ResetState: "Discard all per-provider score
+	// caches"), not a response cache. The Ristretto store is the cache-be pod's
+	// own (ecosystem/cache), which Flush empties; every relay reply this router
+	// caches lives in the backend flushed below. Clearing providersStorage here
+	// would reset scores, which this endpoint's one job is to leave alone.
+	mux.HandleFunc("/debug/reset-cache", debugMethod(http.MethodPost, func(w http.ResponseWriter, r *http.Request) {
+		if deps.cache == nil || !deps.cache.CacheActive() {
+			writeDebugJSONf(w, `{"reset":true,"cleared":[]}`)
+			return
+		}
+		flushCtx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		err := deps.cache.Flush(flushCtx)
+		cancel()
+		switch {
+		case err == nil:
+			writeDebugJSONf(w, `{"reset":true,"cleared":["cache-be"]}`)
+		case status.Code(err) == codes.Unimplemented:
+			utils.FormatWarning("cache-be does not implement FlushCache; treating as legacy pod", err)
+			writeDebugJSONf(w, `{"reset":true,"cleared":[]}`)
+		default:
+			http.Error(w, fmt.Sprintf("cache-be flush failed: %v", err), http.StatusInternalServerError)
+		}
+	}))
+
 	// POST /debug/reset-pairing — cold-rebuild every chain's pairing table from
 	// the startup provider config, re-admitting providers the per-epoch spec
 	// re-verifier (applyReverification) demoted. Additive companion to
@@ -3861,7 +3908,7 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 	cmdRPCSmartRouter.Flags().String(common.CorsMethodsFlag, "GET,POST,PUT,DELETE,OPTIONS", "set up Allowed OPTIONS methods, defaults to: \"GET,POST,PUT,DELETE,OPTIONS\"")
 	cmdRPCSmartRouter.Flags().String(common.CorsExposeHeadersFlag, "", "Set up CORS Access-Control-Expose-Headers — response headers a browser may read (e.g. \"Lava-Provider-Address\", or \"*\" for all). Empty by default (only simple response headers are readable from JS).")
 	cmdRPCSmartRouter.Flags().String(common.CDNCacheDurationFlag, "86400", "set up preflight options response cache duration, default 86400 (24h in seconds)")
-	cmdRPCSmartRouter.Flags().Bool(common.SharedStateFlag, false, "Share state across router replicas through the cache backend (cache-be or resp-cache): the consumer consistency seen-block travels through either. The per-endpoint chain-tracker poll observations (an upstream polled about once per interval fleet-wide instead of once per pod) additionally require --cache-be — the RESP backend does not carry them, so a RESP-backed router polls locally and logs a warning (docs/RESP-CACHE.md). Cross-pod sticky sessions (a lava-stickiness id resolving to the same upstream on every replica) travel through either backend; without this flag stickiness stays pod-local")
+	cmdRPCSmartRouter.Flags().Bool(common.SharedStateFlag, false, "Share state across router replicas through the cache backend (cache-be or resp-cache). Three things travel through either: the consumer consistency seen-block, the per-endpoint chain-tracker poll observations (an upstream polled about once per interval fleet-wide instead of once per pod; on resp-cache, among routers on the same key-prefix, see docs/RESP-CACHE.md), and cross-pod sticky sessions (a lava-stickiness id resolving to the same upstream on every replica). Without this flag stickiness stays pod-local")
 	// relays health check related flags
 	cmdRPCSmartRouter.Flags().Bool(common.RelaysHealthEnableFlag, RelaysHealthEnableFlagDefault, "enables relays health check; when false, /readyz and /metrics/overall-health report 503 unconditionally, so keep it on under a readiness probe")
 	cmdRPCSmartRouter.Flags().Duration(common.RelayHealthIntervalFlag, RelayHealthIntervalFlagDefault, "interval between relay health checks")
