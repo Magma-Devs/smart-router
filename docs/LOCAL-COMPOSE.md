@@ -117,7 +117,7 @@ curl -s http://localhost:7779/metrics | grep smartrouter_cache_success_total
 
 Both compose caches start empty, so a secondary hit needs the secondary seeded
 by another writer. The bare-metal two-zone lane
-(`scripts/pre_setups/init_smartrouter_eth_secondary_cache.sh`) does exactly
+(`scripts/pre_setups/cache/init_smartrouter_eth_secondary_cache.sh`) does exactly
 that: a second "internal-zone" router warms the shared cache, and the
 "external-zone" router demonstrates secondary-hit → primary-backfill →
 primary-hit end to end (`RUN_DEMO=1` runs and checks the flow).
