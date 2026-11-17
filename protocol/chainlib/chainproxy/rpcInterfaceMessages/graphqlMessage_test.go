@@ -670,3 +670,62 @@ func TestParseGraphQLMsgADocumentHoldingAMutationIsAWrite(t *testing.T) {
 	require.False(t, read.IsMutation())
 	require.Equal(t, []string{"checkpoint"}, read.RootFieldNames())
 }
+
+// MAG-5120, check Q8: a mutation that selects more than one root field once its fragments are
+// expanded, __typename not counted, is refused as a write's shape, with REQUEST_REFUSED and
+// Lava-Write-Outcome: not_sent.
+func TestParseGraphQLMsgRefusesAMutationWithMoreThanOneRootField(t *testing.T) {
+	const write = `executeTransaction(transactionDataBcs: \"AA==\") { digest }`
+	for _, tc := range []struct {
+		name, query string
+		refused     bool
+	}{
+		{"a write beside a read", `mutation { ` + write + ` chainIdentifier }`, true},
+		{"two writes under two aliases", `mutation { a: ` + write + ` b: ` + write + ` }`, true},
+		{"a second root field in a fragment", `mutation { ...W } fragment W on Mutation { ` + write + ` chainIdentifier }`, true},
+		{"a second root field in an inline fragment", `mutation { ... on Mutation { ` + write + ` } chainIdentifier }`, true},
+		{"three root fields", `mutation { ` + write + ` chainIdentifier epoch { epochId } }`, true},
+		{"one write", `mutation { ` + write + ` }`, false},
+		{"one write in a fragment", `mutation { ...W } fragment W on Mutation { ` + write + ` }`, false},
+		{"__typename beside the write", `mutation { __typename ` + write + ` }`, false},
+		{"a query with two root fields is no write", `{ chainIdentifier epoch { epochId } }`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ParseGraphQLMsg([]byte(`{"query":"` + tc.query + `"}`))
+			if !tc.refused {
+				require.NoError(t, err)
+				return
+			}
+			refusal := GraphQLRefusalFrom(err)
+			require.NotNil(t, refusal, "refused as a write's shape: %v", err)
+			require.Contains(t, refusal.ClientMessage(), "root fields; send each write in a request of its own")
+			require.Equal(t, GraphQLRequestRefusedCode, refusal.Code())
+			require.Equal(t, GraphQLWriteOutcomeNotSent, refusal.WriteOutcome())
+		})
+	}
+}
+
+// Every refusal carries a code (MAG-5120): GRAPHQL_PARSE_FAILED for a query that does not parse and
+// REQUEST_REFUSED for every other one, the router's own limits and MAG-4908's wrapper and mixed
+// document included. Only a write's shape says not_sent.
+func TestParseGraphQLMsgEveryRefusalCarriesACode(t *testing.T) {
+	deep := nestedSelection(MaxGraphQLQueryDepth + 1)
+	for _, tc := range []struct {
+		name, body, wantCode, wantOutcome string
+	}{
+		{"a query that does not parse", `{"query":"{ checkpoint { sequenceNumber }"}`, GraphQLParseFailedCode, ""},
+		{"a repeated wrapper member", `{"query":"{ chainIdentifier }","query":"{ epoch { epochId } }"}`, GraphQLRequestRefusedCode, ""},
+		{"a wrapper member that differs by letter case", `{"query":"{ chainIdentifier }","QUERY":"{ epoch { epochId } }"}`, GraphQLRequestRefusedCode, ""},
+		{"a document past the depth limit", `{"query":"` + deep + `"}`, GraphQLRequestRefusedCode, ""},
+		{"a query beside a mutation", `{"query":"query R { chainIdentifier } mutation W { executeTransaction { digest } }","operationName":"R"}`, GraphQLRequestRefusedCode, GraphQLWriteOutcomeNotSent},
+		{"a subscription", `{"query":"subscription { checkpoints { cursor } }"}`, GraphQLRequestRefusedCode, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ParseGraphQLMsg([]byte(tc.body))
+			refusal := GraphQLRefusalFrom(err)
+			require.NotNil(t, refusal, "refused: %v", err)
+			require.Equal(t, tc.wantCode, refusal.Code())
+			require.Equal(t, tc.wantOutcome, refusal.WriteOutcome())
+		})
+	}
+}

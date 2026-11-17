@@ -159,32 +159,32 @@ func decodeGraphQLRequestEnvelope(data []byte) (graphQLRequestEnvelope, error) {
 		// `null` decodes into the empty envelope without an error, and is no more a request than a
 		// string or a number is.
 		if trimmed := bytes.TrimLeft(data, " \t\r\n"); len(trimmed) == 0 || trimmed[0] != '{' {
-			return envelope, refuseUnreadableGraphQLRequest("graphql request body is not a JSON object")
+			return envelope, RefuseGraphQLRequest("graphql request body is not a JSON object")
 		}
 		return envelope, nil
 	case errors.As(err, &syntaxErr):
 		if len(bytes.TrimSpace(data)) == 0 {
-			return envelope, refuseUnreadableGraphQLRequest("graphql request body is empty")
+			return envelope, RefuseGraphQLRequest("graphql request body is empty")
 		}
-		return envelope, refuseUnreadableGraphQLRequest("graphql request body is not JSON")
+		return envelope, RefuseGraphQLRequest("graphql request body is not JSON")
 	case errors.As(err, &typeErr) && typeErr.Field == "":
 		// The body itself has the wrong type. An array is a batch, which GraphQL over HTTP does not
 		// define and Sui answers with its own refusal (UnsupportedBatch).
 		if typeErr.Value == "array" {
-			return envelope, refuseUnreadableGraphQLRequest("graphql request body is a JSON array: batched requests are not served, send each request on its own")
+			return envelope, RefuseGraphQLRequest("graphql request body is a JSON array: batched requests are not served, send each request on its own")
 		}
-		return envelope, refuseUnreadableGraphQLRequest("graphql request body is not a JSON object")
+		return envelope, RefuseGraphQLRequest("graphql request body is not a JSON object")
 	case errors.As(err, &typeErr):
 		// Field is the path of the value the decoder could not take: "variables", or
 		// "variables.n" for a value inside it.
 		member, _, inside := strings.Cut(typeErr.Field, ".")
 		kind, known := graphQLRequestMemberKinds[member]
 		if inside || !known {
-			return envelope, refuseUnreadableGraphQLRequest("graphql request member %q holds a value the router cannot read", member)
+			return envelope, RefuseGraphQLRequest("graphql request member %q holds a value the router cannot read", member)
 		}
-		return envelope, refuseUnreadableGraphQLRequest("graphql request member %q must be %s", member, kind)
+		return envelope, RefuseGraphQLRequest("graphql request member %q must be %s", member, kind)
 	default:
-		return envelope, refuseUnreadableGraphQLRequest("graphql request body cannot be read")
+		return envelope, RefuseGraphQLRequest("graphql request body cannot be read")
 	}
 }
 
@@ -247,7 +247,7 @@ func ParseGraphQLMsg(data []byte) (*GraphQLMessage, error) {
 		return nil, err
 	}
 	if strings.TrimSpace(envelope.Query) == "" {
-		return nil, refuseUnreadableGraphQLRequest("graphql request carries no query")
+		return nil, RefuseGraphQLRequest("graphql request carries no query")
 	}
 
 	// parseGraphQLQuery names its own failures: a parse error is GRAPHQL_PARSE_FAILED with the
@@ -273,12 +273,17 @@ func ParseGraphQLMsg(data []byte) (*GraphQLMessage, error) {
 	// reaches no provider (MAG-4351, MAG-4577): no customer needs one today, and serving one would be
 	// a feature of its own, with a connection that stays open.
 	if operation.Operation == ast.Subscription {
-		return nil, refuseUnreadableGraphQLRequest("graphql subscriptions are not served over HTTP POST")
+		return nil, RefuseGraphQLRequest("graphql subscriptions are not served over HTTP POST")
 	}
 
 	rootFields, err := graphQLRootFields(doc, operation, envelope.Variables)
 	if err != nil {
 		return nil, err
+	}
+	if operation.Operation == ast.Mutation {
+		if err := refuseMultiRootMutation(rootFields); err != nil {
+			return nil, err
+		}
 	}
 
 	return &GraphQLMessage{
@@ -308,21 +313,47 @@ func refuseMixedMutationDocument(doc *ast.QueryDocument) error {
 		}
 	}
 	if hasMutation && hasOther {
-		return RefuseGraphQLRequest("graphql document holds a mutation beside another operation; send the mutation in a request of its own")
+		return refuseGraphQLWriteShape("graphql document holds a mutation beside another operation; send the mutation in a request of its own")
 	}
 	return nil
 }
+
+// refuseMultiRootMutation refuses a mutation that selects more than one root field once its
+// fragments are expanded, __typename not counted (MAG-5120, check Q8).
+//
+// The write path answers one write per request: one copy per provider, never re-sent, one verdict
+// (MAG-5122). A second root field would ride on the first one's copies and verdict: a second write
+// whose own outcome the caller is never told, or a read run once per primary and answered with the
+// write's reply. Until this refusal the router sent such a mutation to every primary as it was. A
+// client that means two writes sends them as two requests; __typename is the one root field a
+// mutation may carry beside its write, because it runs nothing.
+func refuseMultiRootMutation(rootFields []GraphQLRootField) error {
+	selected := 0
+	for _, rootField := range rootFields {
+		if rootField.Name != graphQLTypenameField {
+			selected++
+		}
+	}
+	if selected > 1 {
+		return refuseGraphQLWriteShape("graphql mutation selects %d root fields; send each write in a request of its own", selected)
+	}
+	return nil
+}
+
+// graphQLTypenameField is the meta field every GraphQL type answers with its own name. It runs
+// nothing on the node.
+const graphQLTypenameField = "__typename"
 
 // selectGraphQLOperation picks the operation the request executes. A named request names it; an
 // anonymous one is only valid when the document holds exactly one operation, which is the
 // GraphQL spec's own rule and not a simplification.
 func selectGraphQLOperation(doc *ast.QueryDocument, operationName string) (*ast.OperationDefinition, error) {
 	if len(doc.Operations) == 0 {
-		return nil, refuseUnreadableGraphQLRequest("graphql document defines no operation")
+		return nil, RefuseGraphQLRequest("graphql document defines no operation")
 	}
 	if operationName == "" {
 		if len(doc.Operations) > 1 {
-			return nil, refuseUnreadableGraphQLRequest("graphql document defines multiple operations and the request names none")
+			return nil, RefuseGraphQLRequest("graphql document defines multiple operations and the request names none")
 		}
 		return doc.Operations[0], nil
 	}
@@ -331,7 +362,7 @@ func selectGraphQLOperation(doc *ast.QueryDocument, operationName string) (*ast.
 			return operation, nil
 		}
 	}
-	return nil, refuseUnreadableGraphQLRequest("graphql document defines no operation named %q", operationName)
+	return nil, RefuseGraphQLRequest("graphql document defines no operation named %q", operationName)
 }
 
 // graphQLRootFields flattens the operation's root selection set into the fields it actually
@@ -373,11 +404,11 @@ func graphQLRootFields(doc *ast.QueryDocument, operation *ast.OperationDefinitio
 				}
 			case *ast.FragmentSpread:
 				if _, cyclic := expanding[typed.Name]; cyclic {
-					return refuseUnreadableGraphQLRequest("graphql fragment %q is cyclic", typed.Name)
+					return RefuseGraphQLRequest("graphql fragment %q is cyclic", typed.Name)
 				}
 				fragment := fragments[typed.Name]
 				if fragment == nil {
-					return refuseUnreadableGraphQLRequest("graphql query spreads undefined fragment %q", typed.Name)
+					return RefuseGraphQLRequest("graphql query spreads undefined fragment %q", typed.Name)
 				}
 				expanding[typed.Name] = struct{}{}
 				err := walk(fragment.SelectionSet, nesting+1)
@@ -394,7 +425,7 @@ func graphQLRootFields(doc *ast.QueryDocument, operation *ast.OperationDefinitio
 		return nil, err
 	}
 	if len(rootFields) == 0 {
-		return nil, refuseUnreadableGraphQLRequest("graphql operation selects no root field")
+		return nil, RefuseGraphQLRequest("graphql operation selects no root field")
 	}
 	return rootFields, nil
 }

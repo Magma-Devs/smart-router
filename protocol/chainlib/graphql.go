@@ -381,12 +381,20 @@ func (apil *GraphQLChainListener) Serve(ctx context.Context, cmdFlags common.Con
 		// request member is quoted as the client sent it, and it differs from a known member only
 		// by letter case (MAG-4908); an unreadable request quotes at most the client's own names and
 		// the token its parser stopped at, never a decoder's error text (MAG-4351).
-		refusal: func(err error, msgSeed string) (int, []byte, string, bool) {
+		//
+		// A refused write's shape (check Q8: a mutation beside another operation, or a mutation
+		// with more than one root field) also says Lava-Write-Outcome: not_sent, so the caller
+		// knows for certain the write never ran and can send it again fixed (MAG-5120).
+		refusal: func(err error, msgSeed string) (int, []byte, string, map[string]string, bool) {
 			refusal := rpcInterfaceMessages.GraphQLRefusalFrom(err)
 			if refusal == nil {
-				return 0, nil, "", false
+				return 0, nil, "", nil, false
 			}
-			return graphQLRefusalStatus, convertToGraphQLError(refusal.ClientMessage(), refusal.Code(), msgSeed), refusal.ClientMessage(), true
+			var headers map[string]string
+			if outcome := refusal.WriteOutcome(); outcome != "" {
+				headers = map[string]string{common.WRITE_OUTCOME_HEADER_NAME: outcome}
+			}
+			return graphQLRefusalStatus, convertToGraphQLError(refusal.ClientMessage(), refusal.Code(), msgSeed), refusal.ClientMessage(), headers, true
 		},
 		errorBody: func(_ *fiber.Ctx, _ *common.RelayResult, errMasking, _ string) []byte {
 			return convertToJsonError(errMasking)

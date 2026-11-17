@@ -150,19 +150,28 @@ func TestGraphQLChainParserMultiRootCombinesToTheStrictestApi(t *testing.T) {
 	require.EqualValues(t, 0, api.Category.Stateful)
 }
 
-func TestGraphQLChainParserMutationAmongReadsStaysStateful(t *testing.T) {
+func TestGraphQLChainParserMutationAmongReadsIsRefused(t *testing.T) {
 	chainParser := newGraphQLTestParser(t)
 
-	// The hazard this interface exists to prevent: if a request that hides a transaction
-	// submission among reads resolved to a read's api, the stateful guard would not see the
-	// write and an enabled cross-validation policy would submit it to every provider.
-	chainMessage, err := chainParser.ParseMsg("",
+	// The hazard this interface exists to prevent: a transaction submission hidden among reads.
+	// It used to combine to a stateful api, so the stateful guard saw the write, and the router
+	// then sent the whole document, read included, to every primary. A mutation runs one write
+	// per request, so one with a second root field is refused before any provider is asked, and
+	// the caller is told the write was not sent (MAG-5120, check Q8).
+	_, err := chainParser.ParseMsg("",
 		[]byte(`{"query":"mutation { chainIdentifier executeTransaction(transactionDataBcs: \"x\") { digest } }"}`),
+		graphqlConnectionType, nil, extensionslib.ExtensionInfo{})
+	refusal := rpcInterfaceMessages.GraphQLRefusalFrom(err)
+	require.NotNil(t, refusal, "a mutation with two root fields is refused: %v", err)
+	require.Equal(t, rpcInterfaceMessages.GraphQLRequestRefusedCode, refusal.Code())
+	require.Equal(t, rpcInterfaceMessages.GraphQLWriteOutcomeNotSent, refusal.WriteOutcome())
+
+	// __typename runs nothing, so it may ride beside the write, and the write is still a write.
+	chainMessage, err := chainParser.ParseMsg("",
+		[]byte(`{"query":"mutation { __typename executeTransaction(transactionDataBcs: \"x\") { digest } }"}`),
 		graphqlConnectionType, nil, extensionslib.ExtensionInfo{})
 	require.NoError(t, err)
 	api := chainMessage.GetApi()
-	require.Equal(t, "chainIdentifier&executeTransaction", api.Name)
-	require.EqualValues(t, 110, api.ComputeUnits)
 	require.EqualValues(t, 1, api.Category.Stateful, "a request carrying a mutation must combine to stateful")
 	require.False(t, api.Category.Deterministic, "a request carrying a mutation must not be deterministic")
 }
