@@ -1560,28 +1560,35 @@ func TestPairingWithStateful(t *testing.T) {
 	})
 }
 
-// A provider that keeps failing must eventually exhaust the pairing list rather than loop forever.
+// A provider with no room for another concurrent session must exhaust the pairing list rather
+// than loop forever.
 //
-// The ceiling that produces this used to be the retired-session one at MaxSessionsAllowedPerProvider/3.
-// FAILOVER-TASKS section 2 removed it — see TestRetiredSessionCapacityRecovers for why — so the
-// property is now delivered by the total-session ceiling instead, one session further along. Same
-// guarantee, three times as much rope.
+// Before MAG-5063 this was driven by retiring one session per iteration: a BlockListed session
+// cost the provider its capacity for the rest of the epoch, so MaxSessionsAllowedPerProvider+1
+// retirements alone reached the total-session ceiling. That is the bug MAG-5063 fixes — a
+// retired session is reclaimed as soon as GetConsumerSessionInstanceFromEndpoint next scans past
+// it (its own lock is free, since OnSessionFailure always calls Free) — so retiring sessions no
+// longer reaches this ceiling at all. What still does: MaxSessionsAllowedPerProvider+1 sessions
+// genuinely in flight at once, none of them freed, each one a real concurrent request this
+// provider cannot also serve. That is what this test now drives, and it is the case the ceiling
+// exists to bound.
 func TestSessionCeilingErrorsInPairingListEmpty(t *testing.T) {
 	ctx := context.Background()
 	csm := CreateConsumerSessionManager()
 	pairingList := createPairingList("", true)
+	// createPairingList's stub CU budget (200) is sized for a handful of requests, not
+	// MaxSessionsAllowedPerProvider+1 concurrent ones; none of them is ever done, so none of
+	// their compute units is ever released either.
+	pairingList[0].MaxComputeUnits = uint64(MaxSessionsAllowedPerProvider+10) * cuForFirstRequest
 	err := csm.UpdateAllProviders(firstEpochHeight, map[uint64]*ConsumerSessionsWithProvider{0: pairingList[0]}, nil) // update the providers.
 	require.NoError(t, err)
 	utils.FormatDebug(fmt.Sprintf("%v", len(csm.validAddresses)))
-	// One past the ceiling: every session is retired on failure, so the last iteration is the one
-	// that leaves the provider with no room to create another.
+	// One past the ceiling: every session stays locked (never freed, as a real in-flight relay
+	// would leave it), so the last iteration is the one that leaves the provider with no room to
+	// create another.
 	for i := 0; i <= MaxSessionsAllowedPerProvider; i++ {
-		css, err := csm.GetSessions(ctx, 1, cuForFirstRequest, NewUsedProviders(nil), servicedBlockNumber, "", nil, common.NO_STATE, 0, "", "") // get a session
+		_, err := csm.GetSessions(ctx, 1, cuForFirstRequest, NewUsedProviders(nil), servicedBlockNumber, "", nil, common.NO_STATE, 0, "", "") // get a session, and never free it
 		require.NoError(t, err)
-		for _, cs := range css {
-			err = csm.OnSessionFailure(cs.Session, errors.Join(BlockProviderError, SessionOutOfSyncError))
-			require.NoError(t, err)
-		}
 	}
 
 	_, err = csm.GetSessions(ctx, 1, cuForFirstRequest, NewUsedProviders(nil), servicedBlockNumber, "", nil, common.NO_STATE, 0, "", "") // get a session

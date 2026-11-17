@@ -171,6 +171,11 @@ read-only per-request record of the dissent it observed (which provider, which g
 recording path) for test suites that cannot scrape the metrics port — see
 [Reading recorded dissent](../protocol/rpcsmartrouter/README.md#reading-recorded-dissent).
 
+Separately, and **not** debug-gated, every cross-validated request — agreement or dissent, success or
+failure — emits one structured compliance log record (digests and metadata only, never a body), always
+on regardless of `--log-level` — see
+[Compliance record](../protocol/rpcsmartrouter/README.md#compliance-record-always-on-not-debug-gated).
+
 ## Caveats
 
 - **Writes.** Cross-validation does not apply to a method in the stateful category, by either
