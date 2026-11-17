@@ -629,6 +629,16 @@ func (gm *GraphQLMessage) ClassificationStatus(data []byte, httpStatusCode int) 
 	return verdict.status
 }
 
+// ReplyVerdict is CheckResponseError and ClassificationStatus from one reading of the reply, for
+// a caller that needs both: each of them decodes the whole body.
+func (gm *GraphQLMessage) ReplyVerdict(data []byte, httpStatusCode int) (hasError bool, errorMessage string, classificationStatus int) {
+	verdict, isError := gm.verdict(data, httpStatusCode)
+	if !isError {
+		return false, "", httpStatusCode
+	}
+	return true, verdict.message, verdict.status
+}
+
 func (gm *GraphQLMessage) verdict(data []byte, httpStatusCode int) (graphQLVerdict, bool) {
 	if gm.IsMutation() {
 		return writeVerdict(data, httpStatusCode)

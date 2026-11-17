@@ -82,29 +82,46 @@ type graphQLReplyError struct {
 	hasPath bool
 }
 
-// graphQLReply is a decoded GraphQL-over-HTTP response body. data is kept raw so a null data is
-// told apart from an object.
+// graphQLReply is a decoded GraphQL-over-HTTP response body. Only the shape of data is kept: a
+// read's data can be megabytes, and the verdict needs to know only whether it is an object.
 type graphQLReply struct {
-	data   json.RawMessage
-	errors []graphQLReplyError
+	dataIsObject bool
+	errors       []graphQLReplyError
 }
 
 // readGraphQLReply decodes a body and reports whether it is a GraphQL response at all: a non-empty
 // errors list, or data that is an object. JSON of another shape (a top-level null, a string, errors
 // that is not a list) is not one.
+//
+// A read's data can be megabytes and the verdict needs only to know whether it is an object, so
+// data is first decoded into a pointer to an empty struct: the decoder walks the object without
+// keeping any of it, where a json.RawMessage (or any value handed to an UnmarshalJSON method) is a
+// copy of the whole value. A data member of another shape (a string, a list, a number) does not
+// fit that pointer, and the reply is read again keeping data raw, the only case that pays the copy.
 func readGraphQLReply(body []byte) (reply graphQLReply, isResponse bool) {
 	var envelope struct {
+		Data   *struct{}         `json:"data"`
+		Errors []json.RawMessage `json:"errors"`
+	}
+	if err := json.Unmarshal(body, &envelope); err == nil {
+		return newGraphQLReply(envelope.Data != nil, envelope.Errors)
+	}
+	var raw struct {
 		Data   json.RawMessage   `json:"data"`
 		Errors []json.RawMessage `json:"errors"`
 	}
-	if err := json.Unmarshal(body, &envelope); err != nil {
+	if err := json.Unmarshal(body, &raw); err != nil {
 		return graphQLReply{}, false
 	}
-	reply.data = envelope.Data
-	for _, raw := range envelope.Errors {
+	return newGraphQLReply(graphQLDataIsObject(raw.Data), raw.Errors)
+}
+
+func newGraphQLReply(dataIsObject bool, rawErrors []json.RawMessage) (reply graphQLReply, isResponse bool) {
+	reply.dataIsObject = dataIsObject
+	for _, raw := range rawErrors {
 		reply.errors = append(reply.errors, readGraphQLReplyError(raw))
 	}
-	return reply, len(reply.errors) > 0 || graphQLDataIsObject(reply.data)
+	return reply, len(reply.errors) > 0 || reply.dataIsObject
 }
 
 // readGraphQLReplyError reads one errors entry. An entry that is not an object keeps its text (a
@@ -158,7 +175,7 @@ func graphQLPathIsPresent(raw json.RawMessage) bool {
 
 // graphQLDataIsObject reports whether a response's raw data member holds an object. An absent
 // member and a JSON null both decode to something that is not one.
-func graphQLDataIsObject(data json.RawMessage) bool {
+func graphQLDataIsObject(data []byte) bool {
 	trimmed := bytes.TrimLeft(data, " \t\r\n")
 	return len(trimmed) > 0 && trimmed[0] == '{'
 }
