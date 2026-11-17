@@ -2202,6 +2202,10 @@ func (m *MockProtocolMessage) IsBatch() bool {
 	return false
 }
 
+func (m *MockProtocolMessage) HasBlocklessElement() bool {
+	return false
+}
+
 func (m *MockProtocolMessage) GetRPCMessage() rpcInterfaceMessages.GenericMessage {
 	return nil
 }

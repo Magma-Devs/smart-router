@@ -285,6 +285,8 @@ func (apip *GraphQLChainParser) ParseMsg(url string, data []byte, connectionType
 	if earliest != nil {
 		nodeMsg.earliestRequestedBlock = *earliest
 	}
+	// The cache never writes the request as final when the fold left a root field out (MAG-4650).
+	nodeMsg.blocklessElement = blockFold.skippedBlocklessElement()
 	apip.BaseChainParser.ExtensionParsing(apiCollection.CollectionData.AddOn, nodeMsg, extensionInfo)
 	return nodeMsg, nil
 }
