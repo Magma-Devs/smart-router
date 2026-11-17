@@ -225,8 +225,10 @@ func TestGraphQLListener_RefusalIsAClientErrorWithAGraphQLBody(t *testing.T) {
 			require.Equal(t, graphQLRefusalStatus, status)
 			entry := requireGraphQLErrorEntry(t, body)
 			require.Contains(t, entry.Message, tc.wantMessage)
-			require.NotContains(t, entry.Extensions, "code",
-				"a limit's reply is the one MAG-4577 decided, with no code: %s", body)
+			require.Equal(t, rpcInterfaceMessages.GraphQLRequestRefusedCode, entry.Extensions["code"],
+				"every refusal but a parse failure carries REQUEST_REFUSED, a limit's too (MAG-5120): %s", body)
+			require.Empty(t, reply.header.Get(common.WRITE_OUTCOME_HEADER_NAME),
+				"a limit says nothing about a write: %s", body)
 			require.Equal(t, entry.Extensions["guid"], reply.header.Get(common.GUID_HEADER_NAME),
 				"the reply carries the request id in Lava-Guid too, as every relayed reply does")
 			require.NotContains(t, body, "Error_GUID",
@@ -379,6 +381,60 @@ func TestGraphQLListener_RefusalLogsTheBodyCutUnlessDebugRelays(t *testing.T) {
 			require.Contains(t, lines, "graphql in/out", "the refusal's failure line carries the request's GUID")
 			require.Equal(t, "error", lines["graphql in/out"]["level"])
 			require.Equal(t, relayBodyForLog(string(body), debugRelays), lines["graphql in/out"]["request"], "the failure line's body")
+		})
+	}
+}
+
+// TestGraphQLListener_RefusedWriteShapeSaysNotSent is MAG-5120's check Q8: a document that holds a
+// mutation beside another operation, and a mutation that selects more than one root field, are
+// refused with 400 REQUEST_REFUSED and reach no provider, and the reply says
+// Lava-Write-Outcome: not_sent, so the caller knows for certain the write never ran. Before it the
+// router sent a two-root mutation to every primary as it was. A refusal that is not about a write's
+// shape says nothing about a write, and a write the router sends is not refused.
+func TestGraphQLListener_RefusedWriteShapeSaysNotSent(t *testing.T) {
+	relay := &parsingRelay{}
+	post := serveGraphQLListenerReplies(t, relay)
+	const write = `executeTransaction(transactionDataBcs: \"AA==\", signatures: [\"AA==\"]) { effects { status } }`
+
+	for _, tc := range []struct {
+		name, body, wantMessage string
+	}{
+		{"a mutation with a read beside the write", `{"query":"mutation { ` + write + ` chainIdentifier }"}`, "graphql mutation selects 2 root fields"},
+		{"a mutation with two writes", `{"query":"mutation { a: ` + write + ` b: ` + write + ` }"}`, "graphql mutation selects 2 root fields"},
+		{"a mutation whose fragment holds a second root field", `{"query":"mutation { ...W } fragment W on Mutation { ` + write + ` chainIdentifier }"}`, "graphql mutation selects 2 root fields"},
+		{"a document with a query and a mutation", `{"query":"query R { chainIdentifier } mutation W { ` + write + ` }","operationName":"R"}`, "graphql document holds a mutation beside another operation"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			relayed := relay.relayed
+			reply := post(tc.body)
+
+			require.Equal(t, graphQLRefusalStatus, reply.status, "a client error, not a server failure: %s", reply.body)
+			entry := requireGraphQLErrorEntry(t, reply.body)
+			require.Contains(t, entry.Message, tc.wantMessage)
+			require.Equal(t, rpcInterfaceMessages.GraphQLRequestRefusedCode, entry.Extensions["code"], "body: %s", reply.body)
+			require.Equal(t, rpcInterfaceMessages.GraphQLWriteOutcomeNotSent, reply.header.Get(common.WRITE_OUTCOME_HEADER_NAME),
+				"the caller is told the write was not sent")
+			require.Equal(t, entry.Extensions["guid"], reply.header.Get(common.GUID_HEADER_NAME))
+			require.Equal(t, relayed, relay.relayed, "a refused write reaches no provider")
+		})
+	}
+
+	t.Run("a refusal that is not about a write's shape says nothing about a write", func(t *testing.T) {
+		reply := post(`{"query":"subscription { checkpoints { cursor } }"}`)
+		require.Equal(t, graphQLRefusalStatus, reply.status, "body: %s", reply.body)
+		require.Empty(t, reply.header.Get(common.WRITE_OUTCOME_HEADER_NAME))
+	})
+
+	// The controls: a write the router sends, alone or with __typename beside it, is relayed.
+	for _, tc := range []struct{ name, body string }{
+		{"a mutation with one root field", `{"query":"mutation { ` + write + ` }"}`},
+		{"a mutation with __typename beside the write", `{"query":"mutation { __typename ` + write + ` }"}`},
+	} {
+		t.Run("control: "+tc.name, func(t *testing.T) {
+			relayed := relay.relayed
+			reply := post(tc.body)
+			require.Equal(t, http.StatusOK, reply.status, "body: %s", reply.body)
+			require.Equal(t, relayed+1, relay.relayed, "the write must reach the relay")
 		})
 	}
 }
