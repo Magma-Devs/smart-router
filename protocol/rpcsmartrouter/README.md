@@ -169,7 +169,7 @@ cross-validation:
 | --- | --- |
 | `enabled` | `true` mandates CV for this method even with no caller headers. |
 | `forbid-caller-cv` | `true` disables CV for this method: the caller's CV headers are ignored and the method routes by its normal category. Mutually exclusive with `enabled` (rejected at startup if both set); the other knobs are ignored when set. Redundant on a stateful method, which ignores the headers on its own (MAG-3603); such an entry still loads and is harmless. |
-| `max-participants` | How many providers to fan out to. |
+| `max-participants` | How many providers to fan out to — a number, or `primary` (every configured `direct-rpc` upstream) / `all` (also `backup-direct-rpc`); see [CROSS-VALIDATION.md](../../docs/CROSS-VALIDATION.md#max-participants-every-configured-upstream). |
 | `agreement-threshold` | How many identical responses form a quorum (in per-group mode, *within each group*). |
 | `min-groups` | Distinct provider groups the quorum must span (`1` = no diversity requirement). |
 | `per-group-quorum` | Upgrade `min-groups` to per-group quorum (operator-only; requires `min-groups > 1`). |
@@ -196,7 +196,10 @@ groups than its `min-groups`, or fewer providers than its `max-participants`), i
 `ATTENTION` line naming the missing providers and refuses only the requests that policy governs
 until the background retry re-admits them. Two shortfalls are warned about rather than refused:
 a `max-participants` larger than the configured primaries, and an endpoint configured with
-backup providers only, which cross-validation never draws on. The startup line counts every
+backup providers only. Cross-validation never draws on backups for a numeric or `primary`
+`max-participants` — only `max-participants: all` does, topping up a primary-only shortfall
+from the backup tier (MAG-2783); a backup-only endpoint still cannot meet a `primary`-valued
+or numeric policy. The startup line counts every
 verified primary; a request that needs an addon or extension draws only on the primaries serving
 it and can be refused with fewer.
 
