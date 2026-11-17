@@ -6488,7 +6488,7 @@ func (rpcss *RPCSmartRouterServer) watchCrossValidationStragglers(ctx context.Co
 	complianceRecord := buildCrossValidationRecord(crossValidationRecordInputs{
 		ChainID:              chainId,
 		ApiInterface:         apiInterface,
-		Method:               apiName,
+		Method:               crossValidationRecordMethod(protocolMessage, apiInterface),
 		RequestID:            crossValidationRequestID(ctx),
 		Tenant:               crossValidationRecordTenant(analytics),
 		BlockHeight:          requestedBlock,
@@ -6846,7 +6846,7 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 			rpcss.emitCrossValidationRecord(buildCrossValidationRecord(crossValidationRecordInputs{
 				ChainID:              chainId,
 				ApiInterface:         apiInterface,
-				Method:               apiName,
+				Method:               crossValidationRecordMethod(protocolMessage, apiInterface),
 				RequestID:            crossValidationRequestID(ctx),
 				Tenant:               crossValidationRecordTenant(analytics),
 				BlockHeight:          requestedBlock,
