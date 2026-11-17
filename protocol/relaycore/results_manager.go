@@ -28,6 +28,9 @@ func transportFromProtocolMessage(pm chainlib.ProtocolMessage) common.TransportT
 // error code does for JSON-RPC.
 type replyStatusClassifier interface {
 	ClassificationStatus(data []byte, httpStatusCode int) int
+	// OwnClassification is the registry entry the interface's own rows file an error reply
+	// under, or nil when the shared rows decide (GraphQL: a read, MAG-5121).
+	OwnClassification(data []byte, httpStatusCode int) *common.RouterError
 }
 
 type ResultsManager interface {
@@ -195,8 +198,10 @@ func (rp *ResultsManagerInst) setValidResponse(response *RelayResponse, protocol
 		// decision (sendGraphQLRelay). Classified by the 200 instead, every GraphQL node fault was
 		// UNKNOWN_ERROR, logged at DEBUG and never blamed on the endpoint, while the same fault
 		// behind a 503 was an ERROR line with its own name (MAG-4375).
+		var ownClassification *common.RouterError
 		if statusClassifier, ok := protocolMessage.GetRPCMessage().(replyStatusClassifier); ok {
 			errorCode = statusClassifier.ClassificationStatus(response.RelayResult.Reply.Data, response.RelayResult.StatusCode)
+			ownClassification = statusClassifier.OwnClassification(response.RelayResult.Reply.Data, response.RelayResult.StatusCode)
 		}
 		// Resolve chain family so Tier-2 chain-specific matchers win over
 		// Tier-1 generic ones. Without this, chain-native codes like Solana's
@@ -205,7 +210,10 @@ func (rp *ResultsManagerInst) setValidResponse(response *RelayResponse, protocol
 		// (zero CU, no retry) — a silent retry-starvation bug.
 		chainFamily := common.GetChainFamilyOrDefault(rp.chainID)
 		// err is the node's reply text, so the transport-only rows stay out of it (MAG-4242).
-		nodeClassified := common.ClassifyError(common.DetectConnectionErrorInReplyText(errorMessage), chainFamily, transport, errorCode, err.Error())
+		nodeClassified := ownClassification
+		if nodeClassified == nil {
+			nodeClassified = common.ClassifyError(common.DetectConnectionErrorInReplyText(errorMessage), chainFamily, transport, errorCode, err.Error())
+		}
 		// ERROR only when the endpoint is to blame. A not-found, a pruned height, a rejected
 		// transaction is the node answering the question it was asked, and on REST those are
 		// routine — see LogCodedNodeAnswer. The metric fires either way.

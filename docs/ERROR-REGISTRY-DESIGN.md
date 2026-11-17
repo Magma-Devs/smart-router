@@ -74,6 +74,8 @@ Errors returned by the blockchain node itself (not execution/state errors).
 | 2018 | `NODE_ACCESS_DENIED` | Endpoint refused the router itself — credentials, plan or quota, WAF or IP rule, proxy auth, protocol, region | Yes | REST HTTP 401, 402, 403, 407, 426, 451 |
 | 2017 | `NODE_DATA_NOT_HELD` | Endpoint does not hold the requested data — pruned or never existed (SubCategoryDataScope) | Yes | gRPC 5, gRPC 11 |
 | 2019 | `NODE_ABORTED` | Node aborted the operation. On Sui (the only sender), the validators' answer to a submitted transaction: consensus rejection, expired status, an input object that does not exist yet, already finalized under other signatures, or another transient processing failure. Sui's own message calls it retriable with another submission, which is the client's call; not evidence against the endpoint, so not scored | No | gRPC 10 |
+| 2020 | `NODE_UNRECOGNIZED_ERROR` | GraphQL only (MAG-5121): an error the router has no row for, an error with no code or an unknown code inside a 200, or a 4xx status GraphQL's status table does not name (400, 409, 410, 413, 415, 422, ...). The router cannot tell whose mistake it is, so it asks another provider and does not blame this one; when every provider says the same, a provider's reply is served as is | Yes | GraphQL |
+| 2021 | `NODE_URL_REFUSED` | GraphQL only (MAG-5121): HTTP 404, 405 or a redirect on GraphQL's one url. Says the configured url is wrong, so every request to it fails the same way: retried and blamed on the endpoint | Yes | HTTP 404, 405, 3xx (GraphQL) |
 
 > **SubCategoryDataScope is no longer 2017 alone.** FAILOVER-TASKS section 2 extended it to every
 > "the answer you want is not here" code: 2012, 2013, 3201-3206, and the chain-specific not-found

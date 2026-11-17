@@ -2163,6 +2163,9 @@ func RateLimitedReplyError(chainID string, chainMessage ChainMessageForSend, dat
 // (rpcInterfaceMessages.GraphQLMessage, which maps RESOURCE_EXHAUSTED to a 429).
 type replyStatusClassifier interface {
 	ClassificationStatus(data []byte, httpStatusCode int) int
+	// OwnClassification is the registry entry the interface's own rows file an error reply
+	// under, or nil when the shared rows decide (GraphQL: a read, MAG-5121).
+	OwnClassification(data []byte, httpStatusCode int) *common.RouterError
 }
 
 // rateLimitedClassifiedReply is RateLimitedReplyError's reading of an error the request message
@@ -2186,7 +2189,10 @@ func rateLimitedClassifiedReply(chainID string, chainMessage ChainMessageForSend
 		transport = common.ApiInterfaceToTransport(collection.CollectionData.ApiInterface)
 	}
 	status := classifier.ClassificationStatus(data, httpStatusCode)
-	classified := common.ClassifyError(nil, common.GetChainFamilyOrDefault(chainID), transport, status, message)
+	classified := classifier.OwnClassification(data, httpStatusCode)
+	if classified == nil {
+		classified = common.ClassifyError(nil, common.GetChainFamilyOrDefault(chainID), transport, status, message)
+	}
 	if classified == nil || !classified.Retryable || !classified.SubCategory.IsRateLimit() {
 		return nil
 	}
