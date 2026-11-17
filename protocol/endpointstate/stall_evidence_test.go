@@ -244,7 +244,7 @@ func TestStallEvidence_HighestBlockSinceMovesOnlyOnANewHighestBlock(t *testing.T
 	require.Equal(t, at(8), since(), "a relay with a new highest block")
 }
 
-// The grace is 10 block times and never under 30 seconds. One rule: it does not read the poll
+// The grace is 6 block times and never under 30 seconds. One rule: it does not read the poll
 // divisor, so the 60-second cap on the tracker tick cannot shorten it.
 func TestStallGrace(t *testing.T) {
 	for _, c := range []struct {
@@ -253,10 +253,10 @@ func TestStallGrace(t *testing.T) {
 		want      time.Duration
 	}{
 		{"Solana", 400 * time.Millisecond, 30 * time.Second},
-		{"a 3 s chain sits exactly on the floor", 3 * time.Second, 30 * time.Second},
-		{"Stellar testnet", 5 * time.Second, 50 * time.Second},
-		{"Ethereum", 12 * time.Second, 2 * time.Minute},
-		{"Bitcoin", 10 * time.Minute, 100 * time.Minute},
+		{"a 5 s chain sits exactly on the floor", 5 * time.Second, 30 * time.Second},
+		{"a 6 s chain is the first above it", 6 * time.Second, 36 * time.Second},
+		{"Ethereum", 12 * time.Second, 72 * time.Second},
+		{"Bitcoin", 10 * time.Minute, 60 * time.Minute},
 	} {
 		for _, divisor := range []float64{0.25, 0.5, 2, 8} {
 			ctx, cancel := context.WithCancel(context.Background())

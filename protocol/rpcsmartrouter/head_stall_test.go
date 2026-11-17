@@ -535,8 +535,8 @@ func TestHeadStall_StalledSetFollowsRebuiltEndpoints(t *testing.T) {
 // MAG-5243 — the time half of the rule. N cycles prove a url kept answering; they do not say for how
 // long, because the tracker tick is capped at 60 s and cycles are skipped. The grace is the clock.
 
-// btcGrace is the grace of a 10-minute chain: 10 block times.
-const btcGrace = 100 * time.Minute
+// btcGrace is the grace of a 10-minute chain: 6 block times.
+const btcGrace = 60 * time.Minute
 
 // The Bitcoin shape that marked healthy providers many times an hour: every url sits on one block
 // for about 10 minutes, so every url is always far past N cycles. The first url to report the next
@@ -567,7 +567,7 @@ func TestHeadStall_SlowChain_RealStallMarkedAtTheGrace(t *testing.T) {
 	moving := ep("https://moving", "vendor-b", true)
 	reached := stallNow
 	h.obs["https://stuck"] = stuckSince(975561, stallN*10, reached)
-	h.obs["https://moving"] = stuckSince(975571, 0, reached.Add(99*time.Minute))
+	h.obs["https://moving"] = stuckSince(975571, 0, reached.Add(btcGrace-time.Minute))
 
 	require.Equal(t, headStallResult{}, h.step(t, reached.Add(btcGrace-time.Second), stuck, moving))
 	require.False(t, stalled(t, stuck), "one second short of the grace")

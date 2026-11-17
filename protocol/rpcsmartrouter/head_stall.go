@@ -25,7 +25,7 @@ import (
 // Rules, from the MAG-3986 plan:
 //   - add at the first cycle that sees all three (MAG-5243, which revises D3):
 //     the url answered SameBlockCycles >= N times without moving (D11), N = StallCycleThreshold (D20);
-//     its highest block has stood still for the grace, StallGrace = 10 block times, at least 30 s;
+//     its highest block has stood still for the grace, StallGrace = 6 block times, at least 30 s;
 //     and another url of the chain has shown a higher block — a quiet chain marks nothing.
 //     The cycles prove the url kept answering, so it is never judged on silence. The grace is the
 //     clock: cycles alone are 5 minutes on Bitcoin, where every healthy url sits on one block for

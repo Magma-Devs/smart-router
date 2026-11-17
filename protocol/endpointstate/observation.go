@@ -466,12 +466,14 @@ func stallCyclesFor(divisor float64) int {
 }
 
 // The head-stall grace (MAG-5243): how long a url's highest block must stand still before the url
-// can be marked. 10 block times, because block gaps are uneven: on a 10-minute chain a gap over 5
-// block times comes about once a day, one over 10 about once in 150 days. Never under 30 seconds,
-// because 10 block times of a sub-second chain is shorter than the pauses a healthy node's head
-// answer makes (up to 19 s seen on Solana).
+// can be marked. 6 block times: a trade between catching a stuck node soon and marking healthy ones.
+// Block gaps are uneven, and when a gap runs past the grace every healthy url is past it together,
+// so the first one to report the next block gets the others marked. Measured over 61 days of
+// Bitcoin mainnet blocks, a gap over 5 block times came once a day, over 6 once in 3 days, over 7.5
+// once, over 10 never. Never under 30 seconds, because 6 block times of a sub-second chain is
+// shorter than the pauses a healthy node's head answer makes (up to 19 s seen on Solana).
 const (
-	stallGraceBlockTimes = 10
+	stallGraceBlockTimes = 6
 	minStallGrace        = 30 * time.Second
 )
 
