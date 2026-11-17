@@ -895,8 +895,55 @@ func TestClassifyError_TransportScoping(t *testing.T) {
 	assert.NotEqual(t, RouterErrorNodeAborted, ClassifyError(nil, ChainFamilyEVM, TransportJsonRPC, 10, ""),
 		"JSON-RPC 10 is not a gRPC status")
 
-	// DATA_LOSS (15) stays unregistered: no node we route to sends it.
-	assert.Equal(t, RouterErrorUnknown, ClassifyError(nil, ChainFamilyCosmosSDK, TransportGRPC, 15, ""))
+	// MAG-3564: the rulebook's other provider faults, 13, 15, and 1 and 4 sent by the node, count
+	// against the endpoint as 14 does.
+	for code, want := range map[int]*RouterError{
+		13: RouterErrorNodeInternalError,
+		15: RouterErrorNodeInternalError,
+		4:  RouterErrorNodeGatewayTimeout,
+		1:  RouterErrorNodeServerError,
+	} {
+		result = ClassifyError(nil, ChainFamilyCosmosSDK, TransportGRPC, code, "node said so")
+		assert.Equal(t, want, result, "gRPC %d", code)
+		assert.True(t, result.EndpointAtFault(), "gRPC %d must count toward --bench-after", code)
+		assert.NotEqual(t, want, ClassifyError(nil, ChainFamilyEVM, TransportJsonRPC, code, "node said so"),
+			"JSON-RPC %d is not a gRPC status", code)
+	}
+}
+
+// MAG-3564: grpc-go makes up INTERNAL for a gateway's plain HTTP 400. No node answered it, so the
+// INTERNAL row must not blame the node for it (rulebook decision D12 reads it by the HTTP status).
+func TestClassifyError_GRPCGatewayStatusIsNotTheNodes(t *testing.T) {
+	gateway400 := `unexpected HTTP status code received from server: 400 (Bad Request); transport: received unexpected content-type "text/html"`
+	result := ClassifyError(nil, ChainFamilyCosmosSDK, TransportGRPC, 13, gateway400)
+	assert.Equal(t, RouterErrorUnknown, result)
+	assert.False(t, result.EndpointAtFault())
+
+	assert.True(t, GRPCNodeCodeEquals(13).Matches(13, "stream terminated by RST_STREAM with error code: INTERNAL_ERROR"),
+		"a node that resets the stream did answer")
+	assert.False(t, GRPCNodeCodeEquals(13).Matches(13, "Unexpected HTTP Status Code Received From Server: 400 (Bad Request)"),
+		"the gateway text is matched case-insensitively")
+	assert.False(t, GRPCNodeCodeEquals(13).Matches(14, "internal"), "a different code is not 13")
+}
+
+// MAG-3564: the provider-fault rows are the last gRPC rows, so every text row that decided one of
+// these statuses before still decides it. Only a reply that ended UNKNOWN_ERROR changes.
+func TestClassifyError_GRPCProviderFaultRowsComeAfterTheTextRows(t *testing.T) {
+	for _, tc := range []struct {
+		code    int
+		message string
+		want    *RouterError
+	}{
+		{13, "rate limit exceeded", RouterErrorNodeRateLimited},
+		{4, "too many requests", RouterErrorNodeRateLimited},
+		{13, "method not implemented", RouterErrorNodeUnimplemented},
+		{15, "service not found", RouterErrorNodeUnimplemented},
+		{13, "upstream answered HTTP 401", RouterErrorNodeUnauthorized},
+		{1, "upstream answered HTTP 500", RouterErrorNodeInternalError},
+	} {
+		assert.Equal(t, tc.want, ClassifyError(nil, ChainFamilyUnknown, TransportGRPC, tc.code, tc.message),
+			"gRPC %d %q", tc.code, tc.message)
+	}
 }
 
 func TestClassifyError_ChainSpecificMappings(t *testing.T) {
