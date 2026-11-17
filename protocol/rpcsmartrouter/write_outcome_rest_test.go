@@ -13,6 +13,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
+	"github.com/magma-Devs/smart-router/protocol/chainlibtest"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
@@ -79,7 +80,7 @@ func TestRESTListener_WriteOutcome(t *testing.T) {
 				data = nil
 			}
 			var requests atomic.Int32
-			parser, _, _, closeServer, endpoint, err := chainlib.CreateChainLibMocks(
+			parser, _, _, closeServer, endpoint, err := chainlibtest.CreateChainLibMocks(
 				ctx, "LAVA", spectypes.APIInterfaceRest, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					requests.Add(1)
 					assert.Equal(t, tc.method, r.Method)

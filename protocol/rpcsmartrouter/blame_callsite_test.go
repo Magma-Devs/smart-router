@@ -9,6 +9,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
+	"github.com/magma-Devs/smart-router/protocol/chainlibtest"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
 	"github.com/magma-Devs/smart-router/protocol/qos"
@@ -62,7 +63,7 @@ func TestBlameAtCallSite(t *testing.T) {
 			defer upstream.Close()
 			defer close(release)
 
-			chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(
+			chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(
 				ctx, "LAVA", spectypes.APIInterfaceRest,
 				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }),
 				nil, "../../", nil)

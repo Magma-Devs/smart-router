@@ -7,6 +7,7 @@ import (
 
 	"github.com/golang/mock/gomock"
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
+	"github.com/magma-Devs/smart-router/protocol/chainlibtest"
 	commonlib "github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
@@ -97,7 +98,7 @@ func TestHealth_AnUnknownAddonIsIgnored(t *testing.T) {
 // as admission does, instead of reading every path as an http collection.
 func TestSubscriptionCollectionProbe_IgnoresAnUnknownAddon(t *testing.T) {
 	ctrl := gomock.NewController(t)
-	parser := chainlib.NewMockChainParser(ctrl)
+	parser := chainlibtest.NewMockChainParser(ctrl)
 	parser.EXPECT().SeparateAddonsExtensions(gomock.Any(), []string{"debugg", "debug"}).
 		Return([]string{"debug"}, nil, errors.New("debugg is neither an addon nor an extension")).AnyTimes()
 	parser.EXPECT().IsTagInCollection(spectypes.FUNCTION_TAG_SUBSCRIBE, gomock.Any()).

@@ -13,6 +13,7 @@ import (
 	ecocache "github.com/magma-Devs/smart-router/ecosystem/cache"
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
+	"github.com/magma-Devs/smart-router/protocol/chainlibtest"
 	"github.com/magma-Devs/smart-router/protocol/chainstate"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/performance"
@@ -111,7 +112,7 @@ func startCacheServerWithNonFinalizedTTLForTest(t *testing.T, nonFinalized time.
 func buildRestProtocolMessage(t *testing.T, ctx context.Context, seenBlock int64) (chainlib.ChainParser, chainlib.ProtocolMessage) {
 	t.Helper()
 	serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
-	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, "LAVA", spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
+	chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, "LAVA", spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 	if closeServer != nil {
 		t.Cleanup(closeServer)
 	}
@@ -627,7 +628,7 @@ func TestSecondaryCacheFlagAndYamlWiring(t *testing.T) {
 func buildHashBearingProtocolMessage(t *testing.T, ctx context.Context, blockHash string) (chainlib.ChainParser, chainlib.ProtocolMessage) {
 	t.Helper()
 	serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
-	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, "ETH1", spectypes.APIInterfaceJsonRPC, serverHandler, nil, "../../", nil)
+	chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, "ETH1", spectypes.APIInterfaceJsonRPC, serverHandler, nil, "../../", nil)
 	if closeServer != nil {
 		t.Cleanup(closeServer)
 	}

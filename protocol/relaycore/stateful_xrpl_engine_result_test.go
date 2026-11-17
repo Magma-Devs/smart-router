@@ -10,6 +10,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
+	"github.com/magma-Devs/smart-router/protocol/chainlibtest/fixture"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
 )
 
@@ -31,7 +32,7 @@ func newStatefulXRPLProcessor(t *testing.T, providers ...string) *RelayProcessor
 	ctx := context.Background()
 	chainParser, err := chainlib.NewChainParser("jsonrpc")
 	require.NoError(t, err)
-	chainParser.SetSpec(chainlib.CreateMockXRPLSpec("XRPT"))
+	chainParser.SetSpec(fixture.CreateMockXRPLSpec("XRPT"))
 	chainMsg, err := chainParser.ParseMsg("", []byte(`{"method":"submit","params":[{"tx_blob":"1200002280000000"}]}`), http.MethodPost, nil, extensionslib.ExtensionInfo{})
 	require.NoError(t, err)
 	protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "dapp", "127.0.0.1")

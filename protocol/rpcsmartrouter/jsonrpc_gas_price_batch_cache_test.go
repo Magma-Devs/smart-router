@@ -14,6 +14,7 @@ import (
 
 	cachecore "github.com/magma-Devs/smart-router/ecosystem/cache/core"
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
+	"github.com/magma-Devs/smart-router/protocol/chainlibtest"
 	"github.com/magma-Devs/smart-router/protocol/chainstate"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
@@ -62,7 +63,7 @@ func hyperliquidBatch(elements ...string) string { return "[" + strings.Join(ele
 func hyperliquidJsonRPCParser(t *testing.T) chainlib.ChainParser {
 	t.Helper()
 	noop := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
-	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(context.Background(), "HYPERLIQUID", spectypes.APIInterfaceJsonRPC, noop, nil, "../../", nil)
+	chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(context.Background(), "HYPERLIQUID", spectypes.APIInterfaceJsonRPC, noop, nil, "../../", nil)
 	require.NoError(t, err)
 	if closeServer != nil {
 		t.Cleanup(closeServer)

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/magma-Devs/smart-router/protocol/chainlib"
+	"github.com/magma-Devs/smart-router/protocol/chainlibtest"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/endpointtip"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
@@ -45,7 +45,7 @@ func sendToEveryEndpointStale(t *testing.T, msg archiveRequest) (*relaycore.Rela
 	noopHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(
+	chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(
 		ctx, "LAVA", spectypes.APIInterfaceRest, noopHandler, nil, "../../", nil)
 	if closeServer != nil {
 		t.Cleanup(closeServer)

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/magma-Devs/smart-router/protocol/chainlibtest/fixture"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
@@ -45,7 +46,7 @@ func parserFor(t *testing.T, apiInterface string, collections []*spectypes.ApiCo
 	t.Helper()
 	chainParser, err := NewChainParser(apiInterface)
 	require.NoError(t, err)
-	spec := CreateMockSpec()
+	spec := fixture.CreateMockSpec()
 	spec.ApiCollections = collections
 	chainParser.SetSpec(spec)
 	return chainParser
