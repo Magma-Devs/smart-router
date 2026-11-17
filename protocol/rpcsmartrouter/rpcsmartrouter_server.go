@@ -202,6 +202,15 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 		return cvErr
 	}
 	rpcss.crossValidationResolver = cvResolver
+	// Resolve any max-participants: primary/all sentinel (MAG-2783) against this endpoint's actual
+	// provider counts before anything reads it — the boot-time advisory right below included.
+	// configuredProviderGroups is the same configured-primaries layout that advisory already counts
+	// from; backups are otherwise invisible to cross-validation entirely (BackupProviderCount).
+	primaryCount := 0
+	for _, group := range configuredProviderGroups {
+		primaryCount += len(group)
+	}
+	cvResolver.SetParticipantCounts(primaryCount, primaryCount+sessionManager.BackupProviderCount())
 	// Scoped to this endpoint: a policy for another chain or interface is not this endpoint's to check or
 	// to report (MAG-3604).
 	if len(cvResolver.PolicyRefs(listenEndpoint.ChainID, listenEndpoint.ApiInterface)) > 0 {
@@ -652,7 +661,11 @@ func validateCrossValidationFleet(resolver *CrossValidationPolicyResolver, chain
 		utils.LogAttr("configuredGroupSizes", configuredSizes),
 		utils.LogAttr("configuredGroupAssignments", configured))
 	requiredProviders, requiredGroups := crossValidationShortfall(resolver, chainID, apiInterface, verifiedSizes)
-	backupOnly := len(configured) == 0 && len(resolver.headerlessParams(chainID, apiInterface)) > 0
+	// With no configured primary, only a max-participants: all policy can be met: it is the one whose
+	// fan-out reaches the backup tier (MAG-2783), and crossValidationShortfall already judged its count.
+	backupOnly := len(configured) == 0 && slices.ContainsFunc(resolver.headerlessParams(chainID, apiInterface), func(params common.CrossValidationParams) bool {
+		return !params.IncludeBackups
+	})
 	if requiredProviders == 0 && requiredGroups == 0 && !backupOnly {
 		return nil, nil //nolint:nilnil // nil means there is no shortfall to report for this endpoint; the error is for a malformed layout
 	}
@@ -725,9 +738,10 @@ func (a *crossValidationFleetAdvisory) log() {
 }
 
 // crossValidationShortfall predicts what the request-time guard (validateCrossValidationCapacity) will do
-// with a request that sends no cross-validation headers when the candidates are the given primaries. It
-// returns the largest max-participants and the largest min-groups among the enabled policies it would refuse
-// for that reason, each 0 when none. Groups are judged by crossValidationGroupShortfall, the guards' own test.
+// with a request that sends no cross-validation headers when the candidates are the given primaries, plus,
+// for a max-participants: all policy, the backups SetParticipantCounts counted. It returns the largest
+// max-participants and the largest min-groups among the enabled policies it would refuse for that reason,
+// each 0 when none. Groups are judged by crossValidationGroupShortfall, the guards' own test.
 //
 // The prediction is for a request of the base collection. groupSizes counts every primary, while the guard
 // counts only the candidates that support the request's addon and extensions
@@ -739,7 +753,12 @@ func crossValidationShortfall(resolver *CrossValidationPolicyResolver, chainID, 
 		providers += size
 	}
 	for _, params := range resolver.headerlessParams(chainID, apiInterface) {
-		if params.MaxParticipants > providers {
+		candidates := providers
+		if params.IncludeBackups {
+			// max-participants: all counts the backups as well, the way the request-time guard does (MAG-2783).
+			candidates += resolver.participantBackups()
+		}
+		if params.MaxParticipants > candidates {
 			requiredProviders = max(requiredProviders, params.MaxParticipants)
 		}
 		if _, reason := crossValidationGroupShortfall(groupSizes, &params); reason != "" {
@@ -904,6 +923,9 @@ func preferStructuralFailureReason(result *common.RelayResult, failFastReason st
 // natural pre-finality propagation lag. "unknown" covers sentinel requested blocks (latest/pending/
 // not-applicable) and the case where the latest block is not yet known.
 func (rpcss *RPCSmartRouterServer) crossValidationFinalityLabel(protocolMessage chainlib.ProtocolMessage) string {
+	if rpcss.chainParser == nil {
+		return "unknown"
+	}
 	requestedBlock, _ := protocolMessage.RequestedBlock()
 	// The GATED tip (fresh ChainState tip, else 0) — deliberately the same read cache finalization
 	// uses, so this label agrees with the finalized/temp cache split rather than describing a
@@ -941,6 +963,12 @@ func (rpcss *RPCSmartRouterServer) validateCrossValidationCapacity(ctx context.C
 		return "", nil
 	}
 	candidateProviders, candidateGroups := rpcss.sessionManager.ProviderAndGroupCountsForRequest(addon, extensions, ctx)
+	if params.IncludeBackups {
+		// max-participants: all (MAG-2783) fans out to the backup tier too, so a backup that can serve the
+		// request is a candidate as well. The group check below still counts the primaries' groups alone,
+		// as the selection does, although the quorum counts a backup's answer under its group-label.
+		candidateProviders += rpcss.sessionManager.BackupCountForRequest(addon, extensions, ctx)
+	}
 	if params.MaxParticipants > candidateProviders {
 		return common.CrossValidationReasonInsufficientCapacity, utils.FormatError("requested cross-validation maxParticipants exceeds available candidate endpoints",
 			routersession.PairingListEmptyError,
@@ -1848,7 +1876,9 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 		// capacity/diversity failure from a generic upstream error (the "reuse header channel" contract).
 		if relayProcessor != nil {
 			if reason := relayProcessor.GetCrossValidationFailFastReason(); reason != "" {
-				return rpcss.crossValidationFailFast(reason, protocolMessage), err
+				failFast := rpcss.crossValidationFailFast(reason, protocolMessage)
+				rpcss.recordCrossValidationFailFast(ctx, relayProcessor, protocolMessage, analytics, reason, failFast)
+				return failFast, err
 			}
 		}
 
@@ -1952,7 +1982,7 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 	// Start the async straggler watcher AFTER the headers snapshot (MAG-2187): it becomes the responses
 	// channel's sole reader and resolves the exact pending set the header just reported. No-op when
 	// nothing is pending or no consensus was reached.
-	rpcss.watchCrossValidationStragglers(ctx, relayProcessor, returnedResult, protocolMessage, protocolMessage.GetApi().GetName(), pendingProviders)
+	rpcss.watchCrossValidationStragglers(ctx, relayProcessor, returnedResult, protocolMessage, protocolMessage.GetApi().GetName(), pendingProviders, analytics)
 
 	// Checked BEFORE the err branch, and independently of it. processNonCrossValidationResult returns
 	// the first node error with err == nil whenever there are no successes, so gating this on
@@ -4907,6 +4937,11 @@ func (rpcss *RPCSmartRouterServer) adoptSharedStateTip(ctx context.Context, peer
 // (a trace, a log query, a fee estimate) are not excluded here: that is a reproducibility
 // question, and the spec's deterministic flag, which cross-validation owns, is where it
 // is answered.
+//
+// GraphQL adds a third: a root field whose answer differs from provider to provider because
+// each runs its own server version, such as introspection or Sui's serviceConfig
+// (graphQLNeverCacheRootFields, MAG-5123). It is read on both gates too, so an entry an
+// older router wrote for such a field is not served either.
 func cacheExclusionReason(protocolMessage chainlib.ProtocolMessage) string {
 	if chainlib.GetStateful(protocolMessage) == common.CONSISTENCY_SELECT_ALL_PROVIDERS {
 		return "stateful"
@@ -4914,7 +4949,20 @@ func cacheExclusionReason(protocolMessage chainlib.ProtocolMessage) string {
 	if nodeBoundReason(protocolMessage.GetApi().Name) != "" {
 		return "node-bound"
 	}
+	if graphQLNeverCacheReason(protocolMessage) != "" {
+		return "never-cache"
+	}
 	return ""
+}
+
+// cacheExclusionWhy is the detail behind cacheExclusionReason for the log: which method is
+// node-bound or which GraphQL field is never cached, and why. "" for a stateful request,
+// whose reason says it all.
+func cacheExclusionWhy(protocolMessage chainlib.ProtocolMessage) string {
+	if why := nodeBoundReason(protocolMessage.GetApi().Name); why != "" {
+		return why
+	}
+	return graphQLNeverCacheReason(protocolMessage)
 }
 
 // cacheAnsweredEarlierAttempt reports whether the cache answered an earlier attempt of this relay.
@@ -4957,11 +5005,12 @@ func skipCacheWriteAfterDegrade(ctx context.Context, relayProcessor *relaycore.R
 // Cache writes are skipped when:
 // - Cache is not active
 // - Quorum is enabled (quorum requires fresh endpoint validation)
-// - Request is stateful or node-bound (cacheExclusionReason)
+// - Request is stateful, node-bound or selects a GraphQL never-cache field (cacheExclusionReason)
 // - Response is a node error
 // - Response body is larger than cacheMaxEntryBytes (--cache-max-entry-bytes)
 // - Requested block is NOT_APPLICABLE
 // - Reply is a null for a concrete block at or below the router's tip (nullForBlockAtOrBelowTip)
+// - Reply is a GraphQL reply with an error, or with a root field that is null or [] (graphQLReplyCacheExclusion)
 // - Requested block is a tag the resolution above leaves negative (EARLIEST/PENDING/SAFE/FINALIZED)
 func (rpcss *RPCSmartRouterServer) tryCacheWrite(
 	ctx context.Context,
@@ -4996,7 +5045,7 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 	if reason := cacheExclusionReason(protocolMessage); reason != "" {
 		utils.FormatDebug("cache write skipped: "+reason+" request",
 			utils.LogAttr("api", protocolMessage.GetApi().Name),
-			utils.LogAttr("why", nodeBoundReason(protocolMessage.GetApi().Name)),
+			utils.LogAttr("why", cacheExclusionWhy(protocolMessage)),
 			utils.LogAttr("GUID", ctx),
 		)
 		return
@@ -5086,6 +5135,20 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 		return
 	}
 
+	// A GraphQL reply is cached only as a clean, complete answer: no error (a partial reply
+	// included), and no root field that is null or an empty list (MAG-5123). Each is a 200 that
+	// passed the node-error gate above, and each, replayed, would hand the next caller one
+	// provider's miss as the chain's answer (MAG-5201's lagging-provider null).
+	if why := graphQLReplyCacheExclusion(protocolMessage, relayResult.Reply.Data); why != "" {
+		utils.FormatDebug("cache write skipped: not a clean graphql answer",
+			utils.LogAttr("chainId", chainId),
+			utils.LogAttr("api", apiName),
+			utils.LogAttr("why", why),
+			utils.LogAttr("GUID", ctx),
+		)
+		return
+	}
+
 	// Compute cache key via the protocol message so the SET key matches the GET key,
 	// including any explicit lava-extension directive folded in by HashCacheRequest.
 	hashKey, _, hashErr := protocolMessage.HashCacheRequest(chainId)
@@ -5122,6 +5185,13 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 		// transaction answers null) is stamped downstream with the endpoint's observed
 		// tip, and that value must never settle an answer that can still change.
 		finalized = byHashFinalized(extractBlockHeightFromJSONResponse(relayResult.Reply.Data, protocolMessage), int64(rpcss.getLatestBlock()), int64(blockDistanceForFinalizedData))
+	}
+	// An element that names no block took no part in the request's block, so that block being
+	// final says nothing about the element's answer: a gas price batched with a read of a final
+	// block is still a gas price, and filed as final it was served for an hour (MAG-4650). The
+	// entry gets the chain's short lifetime, as a block-less element beside a latest read does.
+	if finalized && protocolMessage.HasBlocklessElement() {
+		finalized = false
 	}
 
 	// Convert LATEST_BLOCK to the concrete block the cache key carries. This MUST be the
@@ -5496,7 +5566,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 				utils.LogAttr("cacheActive", true),
 				utils.LogAttr("api", protocolMessage.GetApi().Name),
 				utils.LogAttr("reason", reason),
-				utils.LogAttr("why", nodeBoundReason(protocolMessage.GetApi().Name)),
+				utils.LogAttr("why", cacheExclusionWhy(protocolMessage)),
 			)
 		} else if protocolMessage.GetForceCacheRefresh() {
 			// User requested cache bypass via header
@@ -5746,11 +5816,16 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 		resolvedInternalPath := apiCollection.CollectionData.InternalPath
 		sessionOpts.InternalPath = &resolvedInternalPath
 	}
-	if cvp := relayProcessor.GetCrossValidationParams(); cvp != nil && cvp.MinGroups > 1 {
-		sessionOpts.MinGroups = cvp.MinGroups
-		if cvp.PerGroupQuorum {
-			sessionOpts.PerGroupTarget = cvp.AgreementThreshold
+	if cvp := relayProcessor.GetCrossValidationParams(); cvp != nil {
+		if cvp.MinGroups > 1 {
+			sessionOpts.MinGroups = cvp.MinGroups
+			if cvp.PerGroupQuorum {
+				sessionOpts.PerGroupTarget = cvp.AgreementThreshold
+			}
 		}
+		// max-participants: all (MAG-2783) — independent of group diversity, so this is read
+		// unconditionally rather than nested under the MinGroups > 1 branch above.
+		sessionOpts.IncludeBackups = cvp.IncludeBackups
 	}
 
 	// MAG-4032: a pending-nonce read or a transaction lookup that names a write this router just
@@ -6384,7 +6459,7 @@ const crossValidationStragglerGrace = 5 * time.Second
 // reply-time path could never see for a provider that lost the race to quorum). No-op unless a
 // consensus was reached and a provider is actually pending; on a failed cross-validation there is
 // no consensus to compare against.
-func (rpcss *RPCSmartRouterServer) watchCrossValidationStragglers(ctx context.Context, relayProcessor *relaycore.RelayProcessor, relayResult *common.RelayResult, protocolMessage chainlib.ProtocolMessage, apiName string, pendingProviders []string) {
+func (rpcss *RPCSmartRouterServer) watchCrossValidationStragglers(ctx context.Context, relayProcessor *relaycore.RelayProcessor, relayResult *common.RelayResult, protocolMessage chainlib.ProtocolMessage, apiName string, pendingProviders []string, analytics *metrics.RelayMetrics) {
 	if relayProcessor == nil || relayResult == nil || relayProcessor.GetSelection() != relaycore.CrossValidation || len(pendingProviders) == 0 {
 		return
 	}
@@ -6392,7 +6467,7 @@ func (rpcss *RPCSmartRouterServer) watchCrossValidationStragglers(ctx context.Co
 	if cvParams == nil || relayResult.CrossValidation < cvParams.AgreementThreshold {
 		return
 	}
-	successResults, _, _ := relayProcessor.GetResultsData()
+	successResults, nodeErrorResults, protocolErrorResults := relayProcessor.GetResultsData()
 
 	consensusHash := relayResult.ResponseHash
 	deterministic := protocolMessage.GetApi() != nil && protocolMessage.GetApi().Category.Deterministic
@@ -6401,6 +6476,30 @@ func (rpcss *RPCSmartRouterServer) watchCrossValidationStragglers(ctx context.Co
 	if rpcss.listenEndpoint != nil {
 		chainId, apiInterface = rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface
 	}
+
+	// MAG-2787: the compliance record this request owns (appendHeadersToRelayResult deferred it here
+	// because providers were still pending when a consensus was already reached). Built once, now,
+	// from everything known at this exact moment — pendingProviders are reported not-received
+	// provisionally — then patched in place as each straggler resolves (the record closure below),
+	// and emitted exactly once after the watch loop returns, by which point every pending provider has
+	// been accounted for one way or another.
+	requestedBlock, _ := protocolMessage.RequestedBlock()
+	complianceRecord := buildCrossValidationRecord(crossValidationRecordInputs{
+		ChainID:              chainId,
+		ApiInterface:         apiInterface,
+		Method:               apiName,
+		RequestID:            crossValidationRequestID(ctx),
+		Tenant:               crossValidationRecordTenant(analytics),
+		BlockHeight:          requestedBlock,
+		Finality:             finality,
+		CVParams:             cvParams,
+		CVSuccess:            true,
+		ConsensusHash:        consensusHash,
+		SuccessResults:       successResults,
+		NodeErrorResults:     nodeErrorResults,
+		ProtocolErrorResults: protocolErrorResults,
+		AllProviders:         relayProcessor.GetCrossValidationQueriedProviders(),
+	})
 	// Deadline: the generous per-batch bound stamped at launch (see sendRelayToDirectEndpoints —
 	// relayTimeout + attemptBudget + max url.Timeout + grace, anchored at launch, dominating any real relay-phase
 	// sum). The watcher normally returns early when the last straggler pushes, so this only bounds a
@@ -6478,6 +6577,12 @@ func (rpcss *RPCSmartRouterServer) watchCrossValidationStragglers(ctx context.Co
 			MismatchCounted: mismatchCounted,
 			DelayMs:         straggler.Delay.Milliseconds(),
 		})
+		// MAG-2787: patch this provider's entry in the compliance record owned by this request from
+		// its provisional not-received state to the real resolution. Safe without a lock: record() runs
+		// sequentially on the single watcher goroutine below, strictly before WatchCrossValidationStragglers
+		// returns and the record is emitted. Before the metrics guard below: the record is written
+		// whether or not the router exposes metrics (--metrics-listen-address defaults to disabled).
+		patchCrossValidationRecordStraggler(complianceRecord, straggler)
 		if rpcss.smartRouterEndpointMetrics == nil {
 			return
 		}
@@ -6489,8 +6594,14 @@ func (rpcss *RPCSmartRouterServer) watchCrossValidationStragglers(ctx context.Co
 	}
 
 	// WithoutCancel: the reply has already been sent, so the watcher must outlive the request context;
-	// it is bounded by maxWait. Values (GUID) are preserved for log correlation.
-	go relayProcessor.WatchCrossValidationStragglers(context.WithoutCancel(ctx), pendingProviders, consensusHash, maxWait, record)
+	// it is bounded by maxWait. Values (GUID) are preserved for log correlation. The compliance record
+	// is emitted once every pending provider is accounted for — genuinely resolved or, past maxWait,
+	// reported not-received — which is exactly what WatchCrossValidationStragglers guarantees before
+	// it returns.
+	go func() {
+		relayProcessor.WatchCrossValidationStragglers(context.WithoutCancel(ctx), pendingProviders, consensusHash, maxWait, record)
+		rpcss.emitCrossValidationRecord(complianceRecord)
+	}()
 }
 
 // RelayProcessorForHeaders interface for methods used by appendHeadersToRelayResult
@@ -6713,6 +6824,41 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 					Value: strings.Join(pluralityProviders, ","),
 				},
 			)
+		}
+
+		// MAG-2787: the structured compliance record. Deferred to the straggler watcher — which the
+		// caller invokes right after this function returns, handed the exact pendingProviders computed
+		// above — whenever a consensus was reached but providers are still in flight: the watcher owns
+		// building the FINAL record once every one of them resolves, so emitting here too would double
+		// -record that exact case. Every other case (a failure, or a success with nothing pending) is
+		// already complete right now.
+		if !(cvSuccess && len(pendingProviders) > 0) {
+			var failureReason string
+			if relayResult != nil {
+				failureReason = relayResult.CrossValidationFailureReason
+			}
+			var chainId, apiInterface string
+			if rpcss.listenEndpoint != nil {
+				chainId, apiInterface = rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface
+			}
+			requestedBlock, _ := protocolMessage.RequestedBlock()
+			rpcss.emitCrossValidationRecord(buildCrossValidationRecord(crossValidationRecordInputs{
+				ChainID:              chainId,
+				ApiInterface:         apiInterface,
+				Method:               apiName,
+				RequestID:            crossValidationRequestID(ctx),
+				Tenant:               crossValidationRecordTenant(analytics),
+				BlockHeight:          requestedBlock,
+				Finality:             rpcss.crossValidationFinalityLabel(protocolMessage),
+				CVParams:             cvParams,
+				CVSuccess:            cvSuccess,
+				FailureReason:        failureReason,
+				ConsensusHash:        consensusHash,
+				SuccessResults:       successResults,
+				NodeErrorResults:     nodeErrorResults,
+				ProtocolErrorResults: protocolErrorResults,
+				AllProviders:         allProvidersList,
+			}))
 		}
 	} else if relayResult != nil {
 		// For non-cross-validation mode: keep existing single provider behavior

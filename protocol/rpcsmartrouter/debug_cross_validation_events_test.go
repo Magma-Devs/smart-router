@@ -442,7 +442,7 @@ func TestCrossValidationEvents_StragglerPathRecords(t *testing.T) {
 		ctx := utils.WithUniqueIdentifier(baseCtx, 555000111)
 		method := "cv_events_straggler_disagreed"
 		rp, consensusHash := newCVProcessorWithConsensus(t)
-		srv.watchCrossValidationStragglers(ctx, rp, mkRelayResult(consensusHash), &MockProtocolMessage{api: deterministicAPI(method), requestedBlock: 100}, method, []string{"p3"})
+		srv.watchCrossValidationStragglers(ctx, rp, mkRelayResult(consensusHash), &MockProtocolMessage{api: deterministicAPI(method), requestedBlock: 100}, method, []string{"p3"}, nil)
 		pushSuccess(rp, "p3", "external", dissentBody)
 
 		events := awaitEvents(t, "555000111", 1)
@@ -469,7 +469,7 @@ func TestCrossValidationEvents_StragglerPathRecords(t *testing.T) {
 		ctx := utils.WithUniqueIdentifier(baseCtx, 555000222)
 		method := "cv_events_straggler_agreed"
 		rp, consensusHash := newCVProcessorWithConsensus(t)
-		srv.watchCrossValidationStragglers(ctx, rp, mkRelayResult(consensusHash), &MockProtocolMessage{api: deterministicAPI(method), requestedBlock: 100}, method, []string{"p3"})
+		srv.watchCrossValidationStragglers(ctx, rp, mkRelayResult(consensusHash), &MockProtocolMessage{api: deterministicAPI(method), requestedBlock: 100}, method, []string{"p3"}, nil)
 		pushSuccess(rp, "p3", "external", consensusBody)
 
 		event := awaitEvents(t, "555000222", 1)[0]
@@ -483,7 +483,7 @@ func TestCrossValidationEvents_StragglerPathRecords(t *testing.T) {
 		ctx := utils.WithUniqueIdentifier(baseCtx, 555000333)
 		method := "cv_events_straggler_dedup"
 		rp, consensusHash := newCVProcessorWithConsensus(t)
-		srv.watchCrossValidationStragglers(ctx, rp, mkRelayResult(consensusHash), &MockProtocolMessage{api: deterministicAPI(method), requestedBlock: 100}, method, []string{"p3", "p4"})
+		srv.watchCrossValidationStragglers(ctx, rp, mkRelayResult(consensusHash), &MockProtocolMessage{api: deterministicAPI(method), requestedBlock: 100}, method, []string{"p3", "p4"}, nil)
 		pushSuccess(rp, "p3", "external", dissentBody)
 		pushSuccess(rp, "p4", "external", dissentBody)
 

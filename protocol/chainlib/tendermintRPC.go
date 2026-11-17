@@ -247,6 +247,8 @@ func (apip *TendermintChainParser) ParseMsg(urlPath string, data []byte, connect
 		}
 	}
 
+	// The cache never writes the request as final when the fold left an element out (MAG-4650).
+	nodeMsg.blocklessElement = blockFold.skippedBlocklessElement()
 	utils.FormatTrace("[Archive Debug] TendermintRPC ParseMsg calling ExtensionParsing", utils.LogAttr("addon", apiCollection.CollectionData.AddOn), utils.LogAttr("extensionInfo", extensionInfo), utils.LogAttr("urlPath", urlPath))
 	apip.BaseChainParser.ExtensionParsing(apiCollection.CollectionData.AddOn, nodeMsg, extensionInfo)
 	return nodeMsg, nil

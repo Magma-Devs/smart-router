@@ -255,6 +255,8 @@ func (apip *JsonRPCChainParser) ParseMsg(url string, data []byte, connectionType
 			return nil, err
 		}
 	}
+	// The cache never writes the request as final when the fold left an element out (MAG-4650).
+	nodeMsg.blocklessElement = blockFold.skippedBlocklessElement()
 	apip.BaseChainParser.ExtensionParsing(apiCollection.CollectionData.AddOn, nodeMsg, extensionInfo)
 	return nodeMsg, nil
 }

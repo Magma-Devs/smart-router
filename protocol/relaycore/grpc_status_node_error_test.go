@@ -73,6 +73,7 @@ func (grpcChainMessage) SetExtension(*spectypes.Extension)              {}
 func (grpcChainMessage) GetUsedDefaultValue() bool                      { return false }
 func (grpcChainMessage) GetParseDirective() *spectypes.ParseDirective   { return nil }
 func (grpcChainMessage) IsBatch() bool                                  { return false }
+func (grpcChainMessage) HasBlocklessElement() bool                      { return false }
 
 func grpcProtocolMessage() chainlib.ProtocolMessage {
 	return chainlib.NewProtocolMessage(

@@ -97,10 +97,10 @@ func (e *Engine) GetSharedTip(ctx context.Context, chainId, sharedStateId string
 	key := SharedTipKey(chainId, sharedStateId)
 	value, found, err := e.Store.GetInt64(ctx, key)
 	if err != nil || !found {
-		utils.FormatInfo("Failed fetching state from cache for this user id", utils.LogAttr("id", key))
+		utils.FormatDebug("Failed fetching state from cache for this user id", utils.LogAttr("id", key))
 		return 0
 	}
-	utils.FormatInfo("getting seen block cache", utils.LogAttr("id", key), utils.LogAttr("value", value))
+	utils.FormatDebug("getting seen block cache", utils.LogAttr("id", key), utils.LogAttr("value", value))
 	return value
 }
 

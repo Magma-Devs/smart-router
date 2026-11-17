@@ -1,0 +1,49 @@
+name: RESP Cache Sentinel Lane
+
+# Runs the docker-gated Sentinel lane of the RESP cache backend: real Valkey
+# stores and Sentinels on a bridge network, and the router's store on its
+# production path. It stops a primary, stops and hangs a Sentinel, and cuts a
+# node off the network; each scenario ends with a write on the current primary.
+# The unit tests run the same client against in-process fakes, which cannot
+# show what a real Sentinel does.
+#
+# Its own workflow, not a leg of Unit Tests: that job is required on main, and
+# this lane pulls an image and takes its time from Sentinel's own failover.
+
+on:
+  push:
+    branches:
+      - main
+  # Every base branch and no paths filter, as in unit-tests.yml: the lane
+  # covers the client library's behaviour, which a dependency bump changes
+  # without touching the cache packages.
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  resp-cache-sentinel:
+    name: resp-cache-sentinel
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # As in the unit-tests leg: the shipped binary is built without cgo.
+      CGO_ENABLED: "0"
+      RESP_CACHE_TEST_SENTINEL_DOCKER: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      # The lane fails, never skips, when docker is unreachable, so a runner
+      # without it turns this job red instead of green.
+      - name: Run the Sentinel lane
+        run: go test ./ecosystem/cache/redisstore -run '^TestSentinelFailover$' -count=1 -v -timeout 5m
