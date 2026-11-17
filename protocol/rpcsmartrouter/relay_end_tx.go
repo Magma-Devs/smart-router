@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"google.golang.org/protobuf/encoding/protowire"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
@@ -31,6 +32,14 @@ const (
 	solanaSendMethod           = "sendTransaction"
 	suiJSONRPCExecuteMethod    = "sui_executeTransactionBlock"
 	suiGraphQLExecuteRootField = "executeTransaction"
+)
+
+// The gRPC submits whose reply names the transaction. Their replies are protobuf, read from the wire
+// by the field numbers in the chains' own proto files, so neither a descriptor nor a provider's
+// reflection service is needed to read them.
+const (
+	cosmosGRPCBroadcastMethod = "cosmos.tx.v1beta1.Service/BroadcastTx"
+	concordiumGRPCSendMethod  = "concordium.v2.Queries/SendBlockItem"
 )
 
 // cosmosTxSubmitMethods are the Cosmos submits whose reply carries the transaction's hash, by api
@@ -75,7 +84,7 @@ func (e *relayEnd) readTransaction(protocolMessage chainlib.ProtocolMessage, rep
 	case spectypes.APIInterfaceTendermintRPC, spectypes.APIInterfaceRest:
 		// A Cosmos node answers a refused transaction with a normal reply, so the outcome stays ok and
 		// the reply's code says whether the node took it. Read on a write only: REST names the
-		// transaction query by events with the submit's path. gRPC's reply is protobuf and is not read.
+		// transaction query by events with the submit's path.
 		if len(reply) == 0 || !e.stateful {
 			return
 		}
@@ -89,7 +98,113 @@ func (e *relayEnd) readTransaction(protocolMessage chainlib.ProtocolMessage, rep
 		if _, submit := cosmosTxSubmitMethods[strings.TrimPrefix(api.Name, "/")]; submit && isCosmosTxHash(hash) {
 			e.txHash = hash
 		}
+	case spectypes.APIInterfaceGrpc:
+		// Each submit has a method of its own, so the name says it is one. Sui's ExecuteTransaction
+		// is not read yet: it ships with Sui's write rows (MAG-5128).
+		switch strings.TrimPrefix(api.Name, "/") {
+		case cosmosGRPCBroadcastMethod:
+			tx, found := cosmosGRPCBroadcast(reply)
+			if !found {
+				return
+			}
+			e.txCode, e.txCodespace = &tx.code, tx.codespace
+			if tx.code != 0 {
+				e.txLog = relayEndText(tx.rawLog)
+			}
+			if isCosmosTxHash(tx.hash) {
+				e.txHash = tx.hash
+			}
+		case concordiumGRPCSendMethod:
+			e.txHash = concordiumTransactionHash(reply)
+		}
 	}
+}
+
+// cosmosGRPCTx is what a BroadcastTx reply says about the transaction.
+type cosmosGRPCTx struct {
+	hash, codespace, rawLog string
+	code                    uint32
+}
+
+// cosmosGRPCBroadcast reads a BroadcastTxResponse: its tx_response is field 1, a TxResponse whose
+// txhash is field 2, codespace 3, code 4 and raw_log 6. Protobuf leaves a 0 off the wire, so a
+// tx_response with no code names 0. found is false for a reply that does not decode as the message
+// or carries no tx_response; a node error's reply is the router's JSON, which does not decode.
+func cosmosGRPCBroadcast(reply []byte) (tx cosmosGRPCTx, found bool) {
+	var txResponse []byte
+	if !protoWireFields(reply, func(num protowire.Number, typ protowire.Type, _ uint64, value []byte) {
+		if num == 1 && typ == protowire.BytesType {
+			txResponse, found = value, true
+		}
+	}) || !found {
+		return cosmosGRPCTx{}, false
+	}
+	decoded := protoWireFields(txResponse, func(num protowire.Number, typ protowire.Type, varint uint64, value []byte) {
+		switch {
+		case num == 2 && typ == protowire.BytesType:
+			tx.hash = string(value)
+		case num == 3 && typ == protowire.BytesType:
+			tx.codespace = string(value)
+		case num == 4 && typ == protowire.VarintType:
+			tx.code = uint32(varint)
+		case num == 6 && typ == protowire.BytesType:
+			tx.rawLog = string(value)
+		}
+	})
+	if !decoded {
+		return cosmosGRPCTx{}, false
+	}
+	return tx, true
+}
+
+// concordiumTransactionHash is a SendBlockItem reply's hash: TransactionHash's value, field 1, 32
+// bytes, written in lowercase hex as Concordium writes it.
+func concordiumTransactionHash(reply []byte) string {
+	var hash []byte
+	if !protoWireFields(reply, func(num protowire.Number, typ protowire.Type, _ uint64, value []byte) {
+		if num == 1 && typ == protowire.BytesType {
+			hash = value
+		}
+	}) || len(hash) != 32 {
+		return ""
+	}
+	return hex.EncodeToString(hash)
+}
+
+// protoWireFields calls field for each top-level field of a protobuf message, in wire order, with
+// its value: a varint's number, or a length-delimited field's bytes. Fields of any other wire type
+// are skipped. false when the message does not decode.
+func protoWireFields(message []byte, field func(num protowire.Number, typ protowire.Type, varint uint64, value []byte)) bool {
+	for len(message) > 0 {
+		num, typ, n := protowire.ConsumeTag(message)
+		if n < 0 {
+			return false
+		}
+		message = message[n:]
+		switch typ {
+		case protowire.VarintType:
+			varint, n := protowire.ConsumeVarint(message)
+			if n < 0 {
+				return false
+			}
+			field(num, typ, varint, nil)
+			message = message[n:]
+		case protowire.BytesType:
+			value, n := protowire.ConsumeBytes(message)
+			if n < 0 {
+				return false
+			}
+			field(num, typ, 0, value)
+			message = message[n:]
+		default:
+			n := protowire.ConsumeFieldValue(num, typ, message)
+			if n < 0 {
+				return false
+			}
+			message = message[n:]
+		}
+	}
+	return true
 }
 
 // evmTxHash is an eth_sendRawTransaction's hash: the one its reply returns, or, when the reply
