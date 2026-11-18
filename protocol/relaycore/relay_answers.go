@@ -28,6 +28,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
 )
 
@@ -60,16 +61,26 @@ type RelayAnswer struct {
 	ApiInterface string
 	// RequestID is the request's guid in decimal: the value of the Lava-Guid reply header.
 	RequestID string
-	Method    string
+	// Method is the request's api as the ring's RelayAnswerMethod names it. A router installs
+	// relay_end's naming, so it is what relay_end writes as method.
+	Method string
 
 	ProviderAddress string
 	// StatusCode is the status the upstream answered with: the reply's, or for a failed attempt the
 	// one its HTTPStatusError carries (relayInnerDirect keeps an error status off the result, so the
-	// client is not handed it). 0 when no status came back. On gRPC it is the call's code, where 0 is
-	// OK.
+	// client is not handed it). 0 when no status came back. On gRPC a call that succeeded reads 200,
+	// the status the gRPC sender puts on every OK reply, and a node's error reads its gRPC status
+	// code, 1 to 16.
 	StatusCode int
 	Outcome    string
 }
+
+// RelayAnswerMethod names an answer's request on the ring. The api name alone is not safe to keep:
+// an unlisted api is named by what the client sent, which for an api named by URL is the client's
+// own path, and which has no length bound. relay_end withholds the first and caps the second
+// (relayEndMethod), and a router installs that naming with the ring, so the ring stays bounded in
+// bytes and holds nothing relay_end does not log.
+type RelayAnswerMethod func(protocolMessage chainlib.ProtocolMessage, apiInterface string) string
 
 // relayAnswerRing is the bounded store: append at the tail, evict the oldest at capacity. Written
 // from every attempt's goroutine and from the request's reader, read from the debug handler, so
@@ -80,18 +91,21 @@ type relayAnswerRing struct {
 	capacity int
 	nextSeq  uint64
 	dropped  uint64 // evicted since the ring was installed, so truncation is never silent
+	// method names each answer's request. Set at install and read-only after, so it needs no lock.
+	// nil records no method.
+	method RelayAnswerMethod
 }
 
 // relayAnswerRecorder holds the live ring, or nil when recording is off (the production default).
 var relayAnswerRecorder atomic.Pointer[relayAnswerRing]
 
-// EnableRelayAnswerRecording installs a fresh ring. Debug-mode only: rpcsmartrouter.Start calls it
-// when --debug-address is set.
-func EnableRelayAnswerRecording(capacity int) {
+// EnableRelayAnswerRecording installs a fresh ring that names each answer's request with method.
+// Debug-mode only: rpcsmartrouter.Start calls it when --debug-address is set.
+func EnableRelayAnswerRecording(capacity int, method RelayAnswerMethod) {
 	if capacity <= 0 {
 		capacity = RelayAnswerRingCapacity
 	}
-	relayAnswerRecorder.Store(&relayAnswerRing{buf: make([]RelayAnswer, 0, capacity), capacity: capacity})
+	relayAnswerRecorder.Store(&relayAnswerRing{buf: make([]RelayAnswer, 0, capacity), capacity: capacity, method: method})
 }
 
 // DisableRelayAnswerRecording removes the ring. A router never calls it; a test does, to leave the
@@ -169,6 +183,10 @@ func (rp *RelayProcessor) recordAnswer(response *RelayResponse) {
 		requestID = strconv.FormatUint(rp.guid, 10)
 	}
 	chainID, apiInterface := rp.chainIdAndApiInterfaceGetter.GetChainIdAndApiInterface()
+	method := ""
+	if ring.method != nil {
+		method = ring.method(rp.RelayStateMachine.GetProtocolMessage(), apiInterface)
+	}
 	now := time.Now()
 	response.answerRing = ring
 	response.answerSeq = ring.record(RelayAnswer{
@@ -177,7 +195,7 @@ func (rp *RelayProcessor) recordAnswer(response *RelayResponse) {
 		ChainID:         chainID,
 		ApiInterface:    apiInterface,
 		RequestID:       requestID,
-		Method:          rp.RelayStateMachine.GetProtocolMessage().GetApi().Name,
+		Method:          method,
 		ProviderAddress: provider,
 		StatusCode:      answerStatus(response),
 	})

@@ -26,7 +26,9 @@ import (
 // process-wide recorder records nothing for the other tests of the package.
 func useRelayAnswerRing(t *testing.T, capacity int) {
 	t.Helper()
-	EnableRelayAnswerRecording(capacity)
+	EnableRelayAnswerRecording(capacity, func(protocolMessage chainlib.ProtocolMessage, _ string) string {
+		return protocolMessage.GetApi().Name
+	})
 	t.Cleanup(DisableRelayAnswerRecording)
 }
 

@@ -422,7 +422,7 @@ func (rpsr *RPCSmartRouter) Start(ctx context.Context, options *rpcSmartRouterSt
 		enableCrossValidationEventRing(crossValidationEventRingCapacity)
 		// And the answers each request received, in the order they reached it, for
 		// /debug/relay-answers (MAG-4358).
-		relaycore.EnableRelayAnswerRecording(relaycore.RelayAnswerRingCapacity)
+		relaycore.EnableRelayAnswerRecording(relaycore.RelayAnswerRingCapacity, relayAnswerMethod)
 		var currentOffsetNano atomic.Int64
 		debugMux := buildDebugMux(debugMuxDeps{
 			optimizers: optimizers,

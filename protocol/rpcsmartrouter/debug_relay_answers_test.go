@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -39,7 +40,7 @@ type relayAnswerRow struct {
 
 func useRelayAnswerRecording(t *testing.T) {
 	t.Helper()
-	relaycore.EnableRelayAnswerRecording(relaycore.RelayAnswerRingCapacity)
+	relaycore.EnableRelayAnswerRecording(relaycore.RelayAnswerRingCapacity, relayAnswerMethod)
 	t.Cleanup(relaycore.DisableRelayAnswerRecording)
 }
 
@@ -115,7 +116,7 @@ func TestDebugRelayAnswers_AWriteShowsTheRefusalBeforeTheAcceptance(t *testing.T
 		require.Equal(t, strconv.Itoa(guid), row.RequestID)
 		require.Equal(t, tc.chainID, row.ChainID)
 		require.Equal(t, tc.apiInterface, row.ApiInterface)
-		require.NotEmpty(t, row.Method)
+		require.Equal(t, "cosmos/tx/v1beta1/txs", row.Method, "relay_end's name for the api, without the leading slash")
 	}
 
 	recorder := getRelayAnswers(t, "?request_id=1")
@@ -142,4 +143,59 @@ func TestDebugRelayAnswers_EmptyAndDroppedHeader(t *testing.T) {
 	require.Equal(t, http.StatusOK, recorder.Code)
 	require.JSONEq(t, `[]`, recorder.Body.String())
 	require.Equal(t, "0", recorder.Header().Get("X-Relay-Answers-Dropped"))
+}
+
+// An unlisted REST api is named by the path the client sent, which may carry a credential. The ring
+// names the request as relay_end does (TestRelayEnd_UnlistedRestPathIsWithheld), so the route
+// shows Default-REDACTED, for the request and in the listing of every request alike.
+func TestDebugRelayAnswers_AnUnlistedRestPathIsWithheld(t *testing.T) {
+	rand.InitRandomSeed()
+	useRelayAnswerRecording(t)
+	noop := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(context.Background(), "COSMOSHUB", spectypes.APIInterfaceRest, noop, nil, "../../", nil)
+	if closeServer != nil {
+		t.Cleanup(closeServer)
+	}
+	require.NoError(t, err)
+	server := newRelayEndServer(t, "COSMOSHUB", spectypes.APIInterfaceRest, chainParser, relayEndNode{"node-a", relayEndReply(200, `{}`, 0)})
+	const guid = 4359
+	_, err = sendRelayEnd(t, server, guid, relayEndShortWait, "/v1/AbC123SecretKey/status?apikey=AbC123SecretKey", "")
+	require.NoError(t, err)
+
+	recorder := getRelayAnswers(t, "?request_id="+strconv.Itoa(guid))
+	require.Equal(t, http.StatusOK, recorder.Code)
+	var rows []relayAnswerRow
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &rows))
+	require.Len(t, rows, 1)
+	require.Equal(t, "Default-REDACTED", rows[0].Method)
+	require.NotContains(t, getRelayAnswers(t, "").Body.String(), "AbC123SecretKey", "nor in the listing of every request")
+}
+
+// An unlisted method named in a body is the client's own text, of any length. The ring keeps the
+// last few thousand answers, so its name is capped as relay_end caps it: one long request cannot
+// make the ring as big as the request times its capacity.
+func TestDebugRelayAnswers_AnUnlistedMethodIsCapped(t *testing.T) {
+	rand.InitRandomSeed()
+	useRelayAnswerRecording(t)
+	noop := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(context.Background(), "LAVA", spectypes.APIInterfaceTendermintRPC, noop, nil, "../../", nil)
+	if closeServer != nil {
+		t.Cleanup(closeServer)
+	}
+	require.NoError(t, err)
+	server := newRelayEndServer(t, "LAVA", spectypes.APIInterfaceTendermintRPC, chainParser,
+		relayEndNode{"node-a", relayEndReply(200, `{"jsonrpc":"2.0","id":1,"result":{}}`, 0)})
+	const guid = 4360
+	long := "not_a_method_" + strings.Repeat("x", 64*1024)
+	ctx, cancel := context.WithTimeout(utils.WithUniqueIdentifier(context.Background(), guid), relayEndShortWait)
+	defer cancel()
+	_, _ = server.SendRelay(ctx, "", `{"jsonrpc":"2.0","method":"`+long+`","params":[],"id":1}`, "", relayEndNoCustomerID, "", nil, nil)
+
+	recorder := getRelayAnswers(t, "?request_id="+strconv.Itoa(guid))
+	require.Equal(t, http.StatusOK, recorder.Code)
+	var rows []relayAnswerRow
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &rows))
+	require.Len(t, rows, 1, "the unlisted method was relayed and its answer recorded")
+	require.True(t, strings.HasPrefix(rows[0].Method, "Default-not_a_method_"), rows[0].Method[:40])
+	require.LessOrEqual(t, len(rows[0].Method), relayEndMethodLimit+len("...truncated..."))
 }
