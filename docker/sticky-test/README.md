@@ -151,8 +151,8 @@ Theory predicts roughly a third of unpinned rounds should fail with heads at H, 
 # Production-readiness scenarios (`run-qa.sh`)
 
 ```bash
-docker/sticky-test/run-qa.sh                          # 7 scenarios, ~6 min
-STICKY_SHARED_STATE=false docker/sticky-test/run-qa.sh # negative control: all but select-provider should fail
+docker/sticky-test/run-qa.sh                          # 8 scenarios, ~6 min
+STICKY_SHARED_STATE=false docker/sticky-test/run-qa.sh # negative control: all but select-provider MUST fail
 ```
 
 Brings the stack up once and runs every scenario against it, including the ones that need the
@@ -160,27 +160,39 @@ infrastructure disturbed — a replica restarted, the registry stopped and start
 
 | Scenario | What it proves | Detects a broken feature? |
 |---|---|---|
-| Customer sequence across replicas | head-then-fetch over 3 replicas, no false gaps | yes |
+| Customer sequence across replicas | head-then-fetch over 3 replicas: both on one upstream, no false gaps | yes |
 | Session id on every call | the id must be on the head request too, not only the fetch | yes |
-| Concurrent requests on one id | simultaneous requests for one id do not split across upstreams, for each of 6 ids | yes |
+| Concurrent requests on one id | simultaneous requests for one id do not split across upstreams | yes |
 | `lava-select-provider` beats a claim | naming a provider explicitly still wins | no, by design |
-| A replica restarts | a pod with an empty table adopts the fleet's claim | weakly, one id |
+| Claims hold before a restart | each id stays on one upstream across all 3 replicas; records the claims | yes |
+| A replica restarts | the restarted pod, its table empty, adopts the claims made before the restart | yes |
 | Registry unreachable | sticky fails closed; traffic without the header is unaffected | yes |
-| Registry restored | sticky works again | weakly, one id |
+| Registry restored | sticky works again | yes |
 
 One of these does not discriminate, and that is stated on purpose rather than left to look
 stronger than it is: `select-provider` does not depend on shared state at all.
 
-The concurrency check used to be the second. It asked with one id, and without the registry the
-three replicas pick the same upstream by chance at least one time in nine (2 of 24 trials), so it
-passed with the feature disabled. A replica sends its share of the 24 requests almost entirely to
-one upstream, so more requests per id barely help; more ids do. Every one of 6 has to hold
-(MAG-4129).
+**Every affinity check asks with 6 session ids** (MAG-4129). Without the registry each replica
+picks for itself, and the three pick the same upstream by chance at least one time in nine (2 of
+24 trials), so a check that asked with one id passed with the feature disabled: concurrency did,
+and so did the restart check, once in three runs. A replica sends its share of a session's
+requests almost entirely to one upstream, so more requests per id barely help; more ids do.
+Every one of 6 has to hold, so a feature-off run passes a check by chance about once in half a
+million.
 
-`restarted-pod` and `cache-recovered` are still weak for the same reason: each asks with one id,
-so with the feature disabled each passes whenever the replicas happen to agree. `restarted-pod`
-did, once in three negative-control runs. It also first uses its id after the restart, so no
-claim predates the restart it is named for.
+**The head-then-fetch checks assert the pin, not only the gap.** A false gap needs the head and
+the fetch on different upstreams *and* the fetch's upstream behind, so with the feature off only
+9 of 36 rounds gapped while 23 of 36 split, and a run that counted gaps alone passed about one
+time in twenty (once in four negative-control runs). The customer and id-on-every-call scenarios
+now also require every pinned round's two replies to name the same upstream: 0 of 40 split with
+the feature on.
+
+**The restart check needs claims older than the restart.** `claims-before-restart` makes them,
+one request per replica per id, and writes them to `$STICKY_QA_STATE` (`run-qa.sh` gives each run
+its own file); `restarted-pod` reads them back after router-a restarts and requires every id to
+keep its upstream. It used to make its claim after the restart, which tested a fresh claim, not
+an adopted one. Run by hand against a `KEEP=1` stack, the order is the same: `claims-before-restart`,
+`docker compose -f docker-compose.falsegap.yml restart router-a`, `restarted-pod`.
 
 **Reading a failure.** Which upstream answered is read from the router's `Lava-Provider-Address`,
 not from the `servedBy` the fake writes into the body: a reply from the response cache carries the

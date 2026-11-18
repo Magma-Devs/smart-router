@@ -10,10 +10,13 @@ set -uo pipefail
 cd "$(dirname "$0")"
 COMPOSE=(docker compose -f docker-compose.falsegap.yml)
 FAILED=0
+# The claims made before the replica restart, read back by the check after it in another process.
+export STICKY_QA_STATE="$(mktemp)"
 
 run() { python3 qa_scenarios.py "$1" || FAILED=$((FAILED+1)); }
 
 cleanup() {
+  rm -f "$STICKY_QA_STATE"
   if [[ "${KEEP:-0}" != "1" ]]; then
     "${COMPOSE[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
   fi
@@ -41,6 +44,7 @@ run select-provider
 
 echo
 echo "=== A REPLICA RESTARTS (rolling deploy, crash, eviction) ==="
+run claims-before-restart
 "${COMPOSE[@]}" restart router-a >/dev/null 2>&1
 sleep 12
 run restarted-pod

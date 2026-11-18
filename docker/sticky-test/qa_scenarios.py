@@ -17,15 +17,28 @@ import argparse
 import collections
 import concurrent.futures
 import json
+import os
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
 
 INGRESS = "http://127.0.0.1:18081"
 PRIMARIES = ["upstream-primary-0", "upstream-primary-1", "upstream-primary-2"]
+# router-a, router-b and router-c behind the round-robin ingress (docker-compose.falsegap.yml).
+REPLICAS = 3
 # Lava-Provider-Address on a reply the router took from its response cache.
 CACHED = "Cached"
+# How many session ids a check asks with when it has to fail without the registry. Without it
+# each replica picks for itself, and all three pick the same upstream at least one time in nine
+# (the minimum for three upstreams, reached when selection is even): 2 of 24 single-id trials
+# with the feature off. A one-id check passes a missing feature that often. Every one of six ids
+# has to hold, so at that rate a feature-off run passes by chance about once in half a million.
+SESSIONS = 6
+# Where claims-before-restart leaves the claims that restarted-pod reads after the restart, in
+# its own process. run-qa.sh points this at a file of its own.
+STATE = os.environ.get("STICKY_QA_STATE") or os.path.join(tempfile.gettempdir(), "sticky-qa-claims.json")
 
 
 class Reply:
@@ -124,6 +137,36 @@ def anomalies(cached, failed):
     return lines
 
 
+def sessions_hold(prefix, send):
+    """Ask with SESSIONS ids, send(id) returning each id's replies, and judge them together.
+
+    Every run takes fresh ids. Re-run against a kept stack, a fixed id would adopt the claim the
+    previous run left, and its first requests would race for nothing.
+
+    Returns whether every id stayed on one upstream with no reply cached or failed, the report
+    lines, and each id's upstream (the first that answered it).
+    """
+    run = int(time.time())
+    split, lines, claims, everything = 0, [], {}, []
+    for s in range(SESSIONS):
+        sticky = f"{prefix}-{run}-{s}"
+        replies = send(sticky)
+        servers, _, _ = tally(replies)
+        split += len(servers) != 1
+        lines.append(f"  {sticky}: {dict(servers)}")
+        first = next((r.provider for r in replies if r.ok and not r.cached), None)
+        if first:
+            claims[sticky] = first
+        everything += replies
+    _, cached, failed = tally(everything)
+    lines += [
+        f"replicas that served: {len({r.pod for r in everything})}",
+        f"ids on more than one upstream: {split} (must be 0)",
+        *anomalies(cached, failed),
+    ]
+    return split == 0 and not cached and not failed, lines, claims
+
+
 class Round:
     """One round of the customer's sequence: ask for the head, then ask for that block."""
 
@@ -141,6 +184,11 @@ class Round:
     @property
     def gap(self):
         return not self.refused and self.fetch.result is None
+
+    @property
+    def split(self):
+        """Head and fetch named different upstreams: the pin did not hold across the two calls."""
+        return not self.refused and self.head.provider != self.fetch.provider
 
     def __str__(self):
         if not self.head.ok:
@@ -171,6 +219,27 @@ def pinned_gap_cause(round_):
         return ("two replicas sent head and fetch to different upstreams: they disagree on the claim (MAG-3136),"
                 " or a pinned call moved (MAG-4123)")
     return "one upstream answered null for a block it gave as its head: no known cause"
+
+
+def pinned_verdict(rounds):
+    """Judge rounds that carried the id on both calls: whether they held, and the lines to print.
+
+    A false gap needs the head and the fetch on different upstreams, so that is asserted
+    directly. It catches the pin failing in every round it fails, not only in those where the
+    fetch's upstream is also behind: with the feature off, 23 of 36 rounds split and 9 of them
+    gapped. Ten rounds that all agree by chance is then about 0.36^10, one in 25,000; asserting
+    gaps alone let a feature-off run pass about one time in 20. With the feature on, 0 of 40 split.
+    """
+    answered = [r for r in rounds if not r.refused]
+    split = [r for r in answered if r.split]
+    gaps = [r for r in answered if r.gap]
+    lines = [
+        f"head and fetch on different upstreams: {len(split)} of {len(answered)} answered rounds (must be 0)",
+        f"false gaps: {len(gaps)} of {len(answered)} answered rounds (must be 0)",
+        *(f"  {r}" + (f" -> false gap: {pinned_gap_cause(r)}" if r.gap else "") for r in answered if r.split or r.gap),
+        *refusals(rounds),
+    ]
+    return bool(answered) and not split and not gaps, lines
 
 
 def refusals(rounds):
@@ -204,54 +273,37 @@ def s_customer_sequence(rounds=12, block_time=1.0):
         if i:
             time.sleep(block_time)
         results.append(ingestion_round(i, sticky=f"ingest-{i}"))
-    answered = [r for r in results if not r.refused]
-    gaps = [r for r in answered if r.gap]
+    held, verdict = pinned_verdict(results)
     pods = {r.head.pod for r in results} | {r.fetch.pod for r in results}
-    servers = collections.Counter(r.fetch.provider for r in answered)
-    return report("Customer sequence across replicas", bool(answered) and not gaps and len(pods) > 1, [
+    servers = collections.Counter(r.fetch.provider for r in results if not r.refused)
+    return report("Customer sequence across replicas", held and len(pods) > 1, [
         f"{rounds} head-then-fetch rounds, one session id each",
         f"replicas that served: {len(pods)}",
         f"upstreams used: {dict(servers)}",
-        *refusals(results),
-        f"false gaps: {len(gaps)} of {len(answered)} answered rounds (must be 0)",
-        *(f"  {r} -> {pinned_gap_cause(r)}" for r in gaps),
+        *verdict,
     ])
 
 
-def s_concurrency(parallel=24, sessions=6):
+def s_concurrency(parallel=24):
     """Many requests for ONE session id at once must not split across upstreams.
 
-    One id cannot tell the feature from its absence. Without the registry each replica picks for
-    itself, and all three replicas pick the same upstream at least one time in nine (the minimum
-    for three upstreams, reached when selection is even): 2 of 24 single-id trials with the
-    feature off. Every id has to hold, so at that rate a feature-off run passes by chance about
-    once in half a million.
+    One id cannot tell the feature from its absence (see SESSIONS): the replicas send their
+    shares of the 24 almost entirely to one upstream each, so more requests per id barely help.
 
-    Each run takes fresh ids. Re-run against a kept stack, a fixed id would adopt the claim the
-    previous run left, and the simultaneous first requests would race for nothing. Every id asks
-    for the same blocks: a sticky request never reads the cache, and one that did would say
-    Cached and fail the check, not pass it.
+    Every id asks for the same blocks: a sticky request never reads the cache, and one that did
+    would say Cached and fail the check, not pass it.
     """
     h = tip()
     blocks = [h - 1 - i for i in range(parallel)]
-    run = int(time.time())
-    split, lines, all_replies = 0, [], []
-    for s in range(sessions):
-        sticky = f"concurrent-{run}-{s}"
+
+    def send(sticky):
         with concurrent.futures.ThreadPoolExecutor(max_workers=parallel) as pool:
-            replies = list(pool.map(lambda ib: fetch_block(ib[1], sticky, None, ib[0]), enumerate(blocks)))
-        servers, _, _ = tally(replies)
-        split += len(servers) != 1
-        lines.append(f"  {sticky}: {dict(servers)}")
-        all_replies += replies
-    _, cached, failed = tally(all_replies)
-    pods = {r.pod for r in all_replies}
-    return report("Concurrent requests on one session id", split == 0 and not cached and not failed, [
-        f"{sessions} session ids, {parallel} simultaneous requests each",
-        f"replicas that served: {len(pods)}",
+            return list(pool.map(lambda ib: fetch_block(ib[1], sticky, None, ib[0]), enumerate(blocks)))
+
+    ok, lines, _ = sessions_hold("concurrent", send)
+    return report("Concurrent requests on one session id", ok, [
+        f"{SESSIONS} session ids, {parallel} simultaneous requests each",
         *lines,
-        f"ids on more than one upstream: {split} (must be 0)",
-        *anomalies(cached, failed),
     ])
 
 
@@ -269,16 +321,53 @@ def s_select_provider_wins():
     ])
 
 
-def s_restarted_pod_adopts(sticky_id="survives-restart"):
-    """A replica with an empty local table must adopt the fleet's existing claim."""
+def s_claims_before_restart():
+    """Claims hold across the replicas before one restarts, and are recorded for the check after.
+
+    Each id is asked once per replica, which the round-robin ingress spreads one to each, so every
+    replica holds the claim when router-a goes down and only the restarted one has to adopt it.
+    The upstream each id settled on is written to STATE for s_restarted_pod_adopts.
+    """
     h = tip()
-    before = fetch_block(h - 200, sticky=sticky_id, request_id=1)
-    replies = [fetch_block(h - 201 - i, sticky=sticky_id, request_id=i + 2) for i in range(9)]
-    servers, cached, failed = tally(replies)
-    ok = before.ok and not before.cached and set(servers) == {before.provider} and not cached and not failed
-    return report("Restarted replica adopts the existing claim", ok, [
-        f"claim before the restart: {before}",
-        f"upstreams after the restart: {dict(servers)} (must be only the original)",
+    ok, lines, claims = sessions_hold(
+        "survives-restart", lambda sticky: [fetch_block(h - 200, sticky=sticky, request_id=i) for i in range(REPLICAS)])
+    with open(STATE, "w") as state:
+        json.dump(claims, state)
+    return report("Claims hold before a replica restarts", ok, [
+        f"{SESSIONS} session ids, one request per replica each",
+        *lines,
+    ])
+
+
+def s_restarted_pod_adopts():
+    """A replica with an empty local table must adopt the fleet's existing claim.
+
+    The claims are the ones claims-before-restart made before run-qa.sh restarted router-a. An id
+    first used after the restart would only be claimed afresh, which says nothing about adoption.
+    Every id must stay on the upstream it had before.
+    """
+    try:
+        with open(STATE) as state:
+            claims = json.load(state)
+    except (OSError, ValueError):
+        claims = {}
+    if not claims:
+        return report("Restarted replica adopts the existing claim", False, [
+            f"no claims recorded in {STATE}: run claims-before-restart before restarting a replica",
+        ])
+    h = tip()
+    moved, lines, everything = 0, [], []
+    for sticky, before in claims.items():
+        replies = [fetch_block(h - 201 - i, sticky=sticky, request_id=i) for i in range(9)]
+        servers, _, _ = tally(replies)
+        moved += set(servers) != {before}
+        lines.append(f"  {sticky}: before {before}, after {dict(servers)}")
+        everything += replies
+    _, cached, failed = tally(everything)
+    return report("Restarted replica adopts the existing claim", moved == 0 and not cached and not failed, [
+        f"{len(claims)} claims made before the restart, 9 requests each after it",
+        *lines,
+        f"ids that left their upstream: {moved} (must be 0)",
         *anomalies(cached, failed),
     ])
 
@@ -312,11 +401,11 @@ def s_cache_down_fails_closed():
 def s_cache_recovers():
     """After the registry comes back, sticky traffic works again."""
     h = tip()
-    replies = [fetch_block(h - 400 - i, sticky="after-recovery", request_id=i) for i in range(8)]
-    servers, cached, failed = tally(replies)
-    return report("Registry restored: sticky sessions work again", len(servers) == 1 and not cached and not failed, [
-        f"upstreams used: {dict(servers)} (must be exactly 1)",
-        *anomalies(cached, failed),
+    ok, lines, _ = sessions_hold(
+        "after-recovery", lambda sticky: [fetch_block(h - 400 - i, sticky=sticky, request_id=i) for i in range(8)])
+    return report("Registry restored: sticky sessions work again", ok, [
+        f"{SESSIONS} session ids, 8 requests each",
+        *lines,
     ])
 
 
@@ -339,8 +428,7 @@ def s_id_required_on_every_call(rounds=10, block_time=1.0, fetch_only_rounds=30)
         if i:
             time.sleep(block_time)
         both.append(ingestion_round(i, sticky=f"both-{i}", pin_head=True))
-    answered = [r for r in both if not r.refused]
-    both_gaps = [r for r in answered if r.gap]
+    held, verdict = pinned_verdict(both)
 
     fetch_only, tried = None, 0
     while fetch_only is None and tried < fetch_only_rounds:
@@ -350,11 +438,10 @@ def s_id_required_on_every_call(rounds=10, block_time=1.0, fetch_only_rounds=30)
         tried += 1
         if round_.gap:
             fetch_only = round_
-    ok = bool(answered) and not both_gaps and fetch_only is not None
+    ok = held and fetch_only is not None
     return report("Session id required on every call in the sequence", ok, [
-        f"id on BOTH calls          -> false gaps: {len(both_gaps)} of {len(answered)} answered rounds (must be 0)",
-        *(f"  {r} -> {pinned_gap_cause(r)}" for r in both_gaps),
-        *refusals(both),
+        "id on BOTH calls:",
+        *(f"  {line}" for line in verdict),
         f"id on the FETCH call only -> {'a' if fetch_only else 'no'} false gap in {tried} rounds"
         " (must be one; proves the requirement is real)",
         *([f"  {fetch_only}"] if fetch_only else []),
@@ -367,6 +454,7 @@ SCENARIOS = {
     "customer": s_customer_sequence,
     "concurrency": s_concurrency,
     "select-provider": s_select_provider_wins,
+    "claims-before-restart": s_claims_before_restart,
     "restarted-pod": s_restarted_pod_adopts,
     "cache-down": s_cache_down_fails_closed,
     "cache-recovered": s_cache_recovers,
