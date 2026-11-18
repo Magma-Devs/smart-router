@@ -10,6 +10,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/health"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
@@ -67,20 +69,27 @@ func newGRPCBenchHarness(t *testing.T, addr string) *grpcBenchHarness {
 // relay runs one unary relay and reports the endpoint's refusal count and enabled bit afterwards.
 func (h *grpcBenchHarness) relay(t *testing.T) (refusals uint64, enabled bool) {
 	t.Helper()
-	const method = "cosmos.bank.v1beta1.Query/Balance"
 	// A binary body goes to the node as is, so the test node needs no reflection.
-	body := []byte{0x0a, 0x01, 0x61}
+	_, refusals, enabled = h.relayRequest(t, "cosmos.bank.v1beta1.Query/Balance", []byte{0x0a, 0x01, 0x61})
+	return refusals, enabled
+}
+
+// relayRequest runs one unary relay of body to method, and returns the relay result with the
+// endpoint's refusal count and enabled bit afterwards.
+func (h *grpcBenchHarness) relayRequest(t *testing.T, method string, body []byte) (result *common.RelayResult, refusals uint64, enabled bool) {
+	t.Helper()
 	msg := &grpcStatusChainMessage{mockChainMessage: &mockChainMessage{
 		apiInterface: "grpc",
 		api:          &spectypes.Api{Name: method},
 		rpcMessage:   &rpcInterfaceMessages.GrpcMessage{Path: method, Msg: body},
 	}}
+	result = &common.RelayResult{}
 	_, _ = h.rpcss.relayInnerDirect(
-		context.Background(), h.session, &common.RelayResult{}, 5*time.Second, 30*time.Second,
+		context.Background(), h.session, result, 5*time.Second, 30*time.Second,
 		msg, body, func() bool { return false }, nil,
 		false, // not the router's health check
 	)
-	return h.endpoint.ConnectionRefusals, h.endpoint.IsEnabled()
+	return result, h.endpoint.ConnectionRefusals, h.endpoint.IsEnabled()
 }
 
 // The rulebook's provider faults switch the endpoint off after --bench-after answers, as a node
@@ -175,4 +184,39 @@ func TestRelayInnerDirect_GRPCGatewayHTTP400LeavesTheEndpointOn(t *testing.T) {
 		require.Zero(t, refusals, "relay #%d: a gateway's 400 is not the node's INTERNAL", i)
 		require.True(t, enabled, "relay #%d", i)
 	}
+}
+
+// A node's gRPC library answers INTERNAL when it cannot decode the request message (gRPC's
+// status-code table: "Error parsing request proto", INTERNAL, sent by the server). That answer is
+// about the request's bytes, which every provider refuses the same way, so it is the caller's: it is
+// served as is and never counts toward --bench-after. The node is a real grpc-go server with the
+// standard codec, so the status and its text are grpc-go's own.
+func TestRelayInnerDirect_GRPCRequestTheNodeCannotDecodeLeavesTheEndpointOn(t *testing.T) {
+	benchAfter(t, 3)
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	srv := grpc.NewServer()
+	healthpb.RegisterHealthServer(srv, health.NewServer())
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(srv.Stop)
+	h := newGRPCBenchHarness(t, lis.Addr().String())
+
+	const method = "grpc.health.v1.Health/Check"
+	// Field 1 says five bytes follow, and one does.
+	undecodable := []byte{0x0a, 0x05, 0x61}
+	for i := 0; i < 5; i++ {
+		result, refusals, enabled := h.relayRequest(t, method, undecodable)
+		require.Equal(t, int(codes.Internal), result.StatusCode, "relay #%d", i)
+		require.NotNil(t, result.Reply, "relay #%d", i)
+		require.Contains(t, string(result.Reply.Data), "grpc: failed to unmarshal the received message", "relay #%d", i)
+		require.True(t, result.IsNonRetryable, "relay #%d: every provider refuses the same bytes", i)
+		require.False(t, result.IsNodeAtFault, "relay #%d", i)
+		require.Zero(t, refusals, "relay #%d: a request the node cannot decode is not the node's fault", i)
+		require.True(t, enabled, "relay #%d", i)
+	}
+
+	// The same node, sent a request it can decode, answers it.
+	result, _, enabled := h.relayRequest(t, method, []byte{})
+	require.False(t, result.IsNodeError)
+	require.True(t, enabled)
 }

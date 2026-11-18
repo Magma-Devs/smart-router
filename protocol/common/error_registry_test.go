@@ -926,6 +926,27 @@ func TestClassifyError_GRPCGatewayStatusIsNotTheNodes(t *testing.T) {
 	assert.False(t, GRPCNodeCodeEquals(13).Matches(14, "internal"), "a different code is not 13")
 }
 
+// MAG-3564: INTERNAL is also a gRPC server's answer to a request message it cannot decode. That
+// answer is about the request's bytes, which every provider refuses the same way: the caller's,
+// not retried and not counted. Any other INTERNAL stays the node's.
+func TestClassifyError_GRPCRequestTheNodeCannotDecodeIsTheCallers(t *testing.T) {
+	for _, message := range []string{
+		"grpc: error unmarshalling request: unexpected EOF",                                            // grpc-go up to v1.82
+		"grpc: failed to unmarshal the received message: proto: cannot parse invalid wire-format data", // grpc-go from v1.82
+		"GRPC: Failed To Unmarshal The Received Message: string field contains invalid UTF-8",          // matched case-insensitively
+	} {
+		result := ClassifyError(nil, ChainFamilyCosmosSDK, TransportGRPC, 13, message)
+		assert.Equal(t, RouterErrorUserInvalidRequest, result, message)
+		assert.False(t, result.EndpointAtFault(), "%q must not count toward --bench-after", message)
+		assert.False(t, result.Retryable, "%q: every provider refuses the same bytes", message)
+	}
+
+	assert.Equal(t, RouterErrorNodeInternalError, ClassifyError(nil, ChainFamilyCosmosSDK, TransportGRPC, 13, "failed to load the latest block"),
+		"any other INTERNAL is still the node's")
+	assert.NotEqual(t, RouterErrorUserInvalidRequest, ClassifyError(nil, ChainFamilyCosmosSDK, TransportGRPC, 14, "grpc: failed to unmarshal the received message"),
+		"only an INTERNAL carries the decode text")
+}
+
 // MAG-3564: the provider-fault rows are the last gRPC rows, so every text row that decided one of
 // these statuses before still decides it. Only a reply that ended UNKNOWN_ERROR changes.
 func TestClassifyError_GRPCProviderFaultRowsComeAfterTheTextRows(t *testing.T) {

@@ -555,6 +555,16 @@ func GRPCCodeEquals(code uint32) ErrorMatcher {
 // grpc-go's reading of the HTTP status (a 400 becomes INTERNAL), not one the node sent. Lowercase.
 const GRPCGatewayStatusText = "unexpected http status code received from server"
 
+// GRPCRequestDecodeTexts are the texts grpc-go's server writes into the INTERNAL it answers when it
+// cannot decode the request message: "grpc: error unmarshalling request" up to v1.82 (server.go), and
+// "grpc: failed to unmarshal the received message" from v1.82 on (rpc_util.go, recv). The router's
+// own gRPC client never decodes a reply (it carries the wire bytes), so on the direct relay path
+// either text is the node's server refusing the request's bytes. Lowercase.
+var GRPCRequestDecodeTexts = []string{
+	"grpc: error unmarshalling request",
+	"grpc: failed to unmarshal the received message",
+}
+
 // GRPCNodeCodeEquals matches a gRPC status code the node sent: GRPCCodeEquals, except for a status
 // grpc-go made up from a gateway's HTTP reply (GRPCGatewayStatusText). No node answered that reply.
 type grpcNodeCodeMatcher struct {

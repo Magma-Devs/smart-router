@@ -556,14 +556,23 @@ func grpcErrorMappings() []errorMapping {
 // queries, has no such check, and a verification fails either way. GRPCNodeCodeEquals leaves out
 // the status grpc-go makes up for a gateway's HTTP reply: an HTTP 400 arrives as INTERNAL, and no
 // node sent it.
+//
+// The rows for GRPCRequestDecodeTexts come first. INTERNAL is also a gRPC server's answer to a
+// request message it cannot decode (gRPC's status-code table: "Error parsing request proto",
+// INTERNAL, sent by the server). That answer is about the request's bytes, which every provider
+// refuses the same way, so it is the caller's: not retried and not counted, as INVALID_ARGUMENT is.
 func grpcProviderFaultMappings() []errorMapping {
-	return []errorMapping{
+	mappings := make([]errorMapping, 0, len(GRPCRequestDecodeTexts)+4)
+	for _, text := range GRPCRequestDecodeTexts {
+		mappings = append(mappings, errorMapping{CodeAndMessage(13, text), RouterErrorUserInvalidRequest}) // codes.Internal
+	}
+	return append(mappings, []errorMapping{
 		{GRPCNodeCodeEquals(13), RouterErrorNodeInternalError}, // codes.Internal
 		{GRPCNodeCodeEquals(15), RouterErrorNodeInternalError}, // codes.DataLoss
 		// The node's own deadline: the work may still have run, as behind a gateway's 504.
 		{GRPCNodeCodeEquals(4), RouterErrorNodeGatewayTimeout}, // codes.DeadlineExceeded
 		{GRPCNodeCodeEquals(1), RouterErrorNodeServerError},    // codes.Canceled
-	}
+	}...)
 }
 
 // ---------------------------------------------------------------------------
