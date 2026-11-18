@@ -113,3 +113,81 @@ func TestConnPool_ReleaseOfANilConnectionIsANoOp(t *testing.T) {
 	pool.release(nil)
 	assert.Zero(t, pool.totalSlots())
 }
+
+// newDepartureTestPool is a pool whose dial hands out fake connections, one slot per
+// connection, so each take lands on a connection of its own.
+func newDepartureTestPool(departed bool) *connPool[*fakePooledConn] {
+	pool := newFakeConnPool(wsReconnectPolicy, func(context.Context) (*fakePooledConn, error) {
+		return newFakePooledConn(), nil
+	}) // minConnections 1
+	pool.perConn = 1
+	pool.departed = func() bool { return departed }
+	return pool
+}
+
+// TestConnPool_ADepartedEndpointClosesItsConnectionsWithItsLastSubscription pins the floor of
+// an endpoint that left its manager's tiers. While a subscription remains, the pool scales
+// down as before; once the last one leaves, its last connection closes too. minConnections
+// kept that one open to an upstream nothing is placed on any more, for the life of the process
+// (MAG-4924). An endpoint still served keeps its minimum.
+func TestConnPool_ADepartedEndpointClosesItsConnectionsWithItsLastSubscription(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		departed bool
+		kept     int
+	}{
+		{name: "still served", departed: false, kept: 1},
+		{name: "departed", departed: true, kept: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := newDepartureTestPool(tc.departed)
+			first, err := pool.take(context.Background(), true)
+			require.NoError(t, err)
+			second, err := pool.take(context.Background(), true)
+			require.NoError(t, err)
+			require.NotSame(t, first, second)
+
+			pool.release(second)
+			require.Equal(t, 1, pool.ConnectionCount(),
+				"the connection still carrying a subscription stays, departed or not")
+			require.Eventually(t, second.closed.Load, time.Second, time.Millisecond)
+
+			pool.release(first)
+			require.Equal(t, tc.kept, pool.ConnectionCount())
+			if tc.departed {
+				require.Eventually(t, first.closed.Load, time.Second, time.Millisecond)
+			} else {
+				require.False(t, first.closed.Load())
+			}
+		})
+	}
+}
+
+// TestConnPool_ADepartedEndpointKeepsTheConnectionARestoreReopened: a subscription on a departed
+// endpoint loses its connection and restores. The reconnect drops the dead connection, which
+// the subscription still holds its slot on, and dials one the restore has not taken a slot on
+// yet. A scale-down in that window must leave the new connection alone: the WebSocket waiters on
+// the reconnect judge it by whether the pool holds a healthy connection, and would end their
+// subscriptions on finding none.
+func TestConnPool_ADepartedEndpointKeepsTheConnectionARestoreReopened(t *testing.T) {
+	pool := newDepartureTestPool(true)
+	dead, err := pool.take(context.Background(), true)
+	require.NoError(t, err)
+
+	dead.healthy.Store(false)
+	require.NoError(t, pool.ReconnectWithBackoff(context.Background()))
+	require.Equal(t, 1, pool.ConnectionCount(), "the reconnect replaced the dead connection")
+
+	pool.maybeScaleDown()
+	require.True(t, pool.IsHealthy(), "the restore's subscription still holds a slot")
+
+	restored, err := pool.take(context.Background(), true)
+	require.NoError(t, err)
+	pool.release(dead)
+	require.Equal(t, 1, pool.ConnectionCount())
+	require.False(t, restored.closed.Load())
+
+	pool.release(restored)
+	require.Equal(t, 0, pool.ConnectionCount(), "the last subscription left")
+	require.Eventually(t, restored.closed.Load, time.Second, time.Millisecond)
+}
