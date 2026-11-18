@@ -232,6 +232,7 @@ func (apip *TendermintChainParser) ParseMsg(urlPath string, data []byte, connect
 		tenderMsg := rpcInterfaceMessages.TendermintrpcMessage{JsonrpcMessage: msgs[0], Path: ""}
 		if !isJsonrpc {
 			tenderMsg.Path = urlPath // add path
+			tenderMsg.FromURI = true
 		}
 		nodeMsg = apip.newChainMessage(api, latestRequestedBlock, blockHashes, &tenderMsg, apiCollection, parsedDefault)
 		// A single request has no earliest of its own unless its parsers read a range lower bound;
