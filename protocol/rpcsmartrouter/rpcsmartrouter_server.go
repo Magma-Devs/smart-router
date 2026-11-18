@@ -5386,11 +5386,12 @@ func (rpcss *RPCSmartRouterServer) replyHeaderDirectives() []*spectypes.Header {
 // so nothing the router minted is in the set. The reply is the lookup's own unmarshalled
 // copy and is filtered in place.
 func (rpcss *RPCSmartRouterServer) filterCachedReplyMetadata(reply *pairingtypes.RelayReply, protocolMessage chainlib.ProtocolMessage) {
-	if reply == nil || len(reply.Metadata) == 0 {
+	if reply == nil || (len(reply.Metadata) == 0 && len(reply.Trailers) == 0) {
 		return
 	}
 	interfaceDirectives, collectionDirectives := rpcss.cachedReplyDirectives(protocolMessage)
 	reply.Metadata = common.FilterUpstreamReplyMetadata(reply.Metadata, interfaceDirectives, collectionDirectives)
+	reply.Trailers = common.FilterUpstreamReplyMetadata(reply.Trailers, interfaceDirectives, collectionDirectives)
 }
 
 // cachedReplyDirectives is the pair of directive lists a cached reply is filtered with,

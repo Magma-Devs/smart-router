@@ -47,6 +47,12 @@ func TestPrimaryCacheHitReplaysOnlyTheFilteredUpstreamHeaders(t *testing.T) {
 		require.NotContains(t, names, gone)
 	}
 
+	// A gRPC entry's trailers (MAG-5129) replay through the same filter, also on an entry that
+	// holds trailers alone.
+	reply = &pairingtypes.RelayReply{Trailers: vendorEntry().Metadata}
+	rpcss.filterCachedReplyMetadata(reply, protocolMessage)
+	require.Equal(t, []string{"Content-Type", "X-Cosmos-Block-Height"}, metadataNames(reply.Trailers))
+
 	// Nothing to filter is not an error.
 	bare.filterCachedReplyMetadata(nil, nil)
 	empty := &pairingtypes.RelayReply{}

@@ -47,7 +47,8 @@ func TestHandleGRPCError_UnusableHeaderWaitDoesNotHideTheTrailers(t *testing.T) 
 		wait, ok := common.RetryAfterFrom(err)
 		require.True(t, ok, "header %q", value)
 		require.Equal(t, time.Minute, wait, "header %q", value)
-		require.Equal(t, []string{value}, resp.Metadata["grpc-retry-pushback-ms"], "the reply carries the header block only")
+		require.Equal(t, []string{value}, resp.Metadata["grpc-retry-pushback-ms"], "the reply's header block is the node's header block")
+		require.Equal(t, trailer["grpc-retry-pushback-ms"], resp.Trailers["grpc-retry-pushback-ms"], "and its trailer block the node's trailer block")
 	}
 }
 
@@ -95,8 +96,8 @@ func (s rateLimitingHealthServer) Check(ctx context.Context, _ *healthpb.HealthC
 // A node's wait is read whichever block of its reply carries it, on both of SendRequest's paths. A
 // reply that is only a status has no header block at all (trailers-only), and grpc-go's own retry
 // reads grpc-retry-pushback-ms from the trailer; a wait sent there was never seen, so the refusal
-// was not even a rate limit (MAG-4915). The reply's metadata is still the header block alone: the
-// wait is the router's to act on, not the client's to read.
+// was not even a rate limit (MAG-4915). Each block comes back in its own place: the header block
+// as the reply's metadata, the trailer as its trailers (MAG-5129).
 func TestSendRequest_RateLimitWaitIsReadFromHeaderOrTrailer(t *testing.T) {
 	const pushbackKey = "grpc-retry-pushback-ms"
 	asked := time.Minute // the wait the MAG-4915 reproduction asked for
@@ -108,14 +109,15 @@ func TestSendRequest_RateLimitWaitIsReadFromHeaderOrTrailer(t *testing.T) {
 		{"header", pushback, nil},
 		{"trailer", nil, pushback},
 	}
-	requireRateLimited := func(t *testing.T, resp *DirectRPCResponse, err error, header metadata.MD) {
+	requireRateLimited := func(t *testing.T, resp *DirectRPCResponse, err error, header, trailer metadata.MD) {
 		t.Helper()
 		require.ErrorIs(t, err, common.StatusCodeError429, "RESOURCE_EXHAUSTED with a wait is a rate limit")
 		wait, ok := common.RetryAfterFrom(err)
 		require.True(t, ok, "the wait reaches the hold-off")
 		require.Equal(t, asked, wait)
 		require.NotNil(t, resp)
-		require.Equal(t, header[pushbackKey], resp.Metadata[pushbackKey], "the reply carries the header block only")
+		require.Equal(t, header[pushbackKey], resp.Metadata[pushbackKey], "the reply's header block is the node's header block")
+		require.Equal(t, trailer[pushbackKey], resp.Trailers[pushbackKey], "and its trailer block the node's trailer block")
 	}
 	for _, block := range blocks {
 		t.Run(block.name+"/binary body", func(t *testing.T) {
@@ -138,7 +140,7 @@ func TestSendRequest_RateLimitWaitIsReadFromHeaderOrTrailer(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			resp, err := g.SendRequest(ctx, []byte{0x08, 0x01}, map[string]string{GRPCMethodHeader: "test.v1.Node/Call"})
-			requireRateLimited(t, resp, err, block.header)
+			requireRateLimited(t, resp, err, block.header, block.trailer)
 		})
 		t.Run(block.name+"/JSON body", func(t *testing.T) {
 			lis := bufconn.Listen(1024 * 1024)
@@ -152,7 +154,7 @@ func TestSendRequest_RateLimitWaitIsReadFromHeaderOrTrailer(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			resp, err := g.SendRequest(ctx, []byte(`{"service":"x"}`), map[string]string{GRPCMethodHeader: "grpc.health.v1.Health/Check"})
-			requireRateLimited(t, resp, err, block.header)
+			requireRateLimited(t, resp, err, block.header, block.trailer)
 		})
 	}
 }

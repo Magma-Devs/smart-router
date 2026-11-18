@@ -21,7 +21,6 @@ import (
 	"github.com/magma-Devs/smart-router/version"
 
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 
 	"github.com/fullstorydev/grpcurl"
@@ -40,10 +39,9 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-type GrpcNodeErrorResponse struct {
-	ErrorMessage string `json:"error_message"`
-	ErrorCode    uint32 `json:"error_code"`
-}
+// GrpcNodeErrorResponse is the JSON a node's gRPC error travels in through the relay, written
+// by the direct gRPC connection and read back by the listener; one type, so the two agree.
+type GrpcNodeErrorResponse = routersession.GRPCNodeErrorResponse
 
 type GrpcChainParser struct {
 	BaseChainParser
@@ -381,7 +379,7 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 	addr := lis.Addr().String()
 	apil.listeningAddress.Store(&addr)
 	apiInterface := apil.endpoint.ApiInterface
-	sendRelayCallback := func(ctx context.Context, method string, reqBody []byte) ([]byte, metadata.MD, error) {
+	sendRelayCallback := func(ctx context.Context, method string, reqBody []byte) ([]byte, metadata.MD, metadata.MD, error) {
 		guid := utils.GenerateUniqueIdentifier()
 		ctx = utils.WithUniqueIdentifier(ctx, guid)
 		msgSeed := strconv.FormatUint(guid, 10)
@@ -415,18 +413,22 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 			// (the proxy attaches it as gRPC trailers on the error path) so gRPC clients get the same
 			// structured cross-validation signal as the HTTP interfaces. nil/empty when there is nothing to
 			// propagate, preserving prior behavior for ordinary errors.
-			return nil, convertRelayMetaDataToMDMetaData(relayReply.GetMetadata()), utils.FormatError("Failed to SendRelay", fmt.Errorf("%s", errMasking))
+			return nil, convertRelayMetaDataToMDMetaData(relayReply.GetMetadata()), nil, utils.FormatError("Failed to SendRelay", fmt.Errorf("%s", errMasking))
 		}
 		apil.logger.LogRequestAndResponse("grpc in/out", false, method, string(reqBody), "", "", msgSeed, time.Since(startTime), nil)
+
+		// A node's headers and trailers go back as it sent them, those the spec passes (MAG-5129).
+		headersToReply := convertRelayMetaDataToMDMetaData(relayReply.Metadata)
+		trailersToReply := convertRelayMetaDataToMDMetaData(relayReply.Trailers)
 
 		// try checking for node errors.
 		nodeError := &GrpcNodeErrorResponse{}
 		unMarshalingError := json.Unmarshal(relayReply.Data, nodeError)
-		metadataToReply := relayReply.Metadata
 		if unMarshalingError == nil {
-			return nil, convertRelayMetaDataToMDMetaData(metadataToReply), status.Error(codes.Code(nodeError.ErrorCode), nodeError.ErrorMessage)
+			// The node's status as it answered: code, message and details (MAG-5129).
+			return nil, headersToReply, trailersToReply, nodeError.Status().Err()
 		}
-		return relayReply.Data, convertRelayMetaDataToMDMetaData(metadataToReply), nil
+		return relayReply.Data, headersToReply, trailersToReply, nil
 	}
 
 	// Reflection is answered from the relay sender's upstream snapshots when it can

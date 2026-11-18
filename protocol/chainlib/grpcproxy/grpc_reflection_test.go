@@ -367,9 +367,9 @@ func TestReflection_ServedThroughTheProxyListener(t *testing.T) {
 // answering on both versions for the reflection services alone.
 func TestReflection_WithoutASourceNothingReachesTheRelayCallback(t *testing.T) {
 	var relayed atomic.Int32
-	relay := func(context.Context, string, []byte) ([]byte, metadata.MD, error) {
+	relay := func(context.Context, string, []byte) ([]byte, metadata.MD, metadata.MD, error) {
 		relayed.Add(1)
-		return nil, nil, status.Error(codes.Internal, "reflection reached the relay callback")
+		return nil, nil, nil, status.Error(codes.Internal, "reflection reached the relay callback")
 	}
 	_, httpServer, err := newGRPCProxy(relay, "", testCmdFlags(), nil)
 	require.NoError(t, err)

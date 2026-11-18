@@ -24,12 +24,12 @@ func testCmdFlags() common.ConsumerCmdFlags {
 
 // unaryEcho is the pre-streaming behaviour, used to prove it is untouched.
 func unaryEcho(t *testing.T) ProxyCallBack {
-	return func(ctx context.Context, method string, reqBody []byte) ([]byte, metadata.MD, error) {
+	return func(ctx context.Context, method string, reqBody []byte) ([]byte, metadata.MD, metadata.MD, error) {
 		req := new(testproto.TestRequest)
 		require.NoError(t, req.Unmarshal(reqBody))
 		respBytes, err := (&testproto.TestResponse{Response: req.Request + "-unary"}).Marshal()
 		require.NoError(t, err)
-		return respBytes, nil, nil
+		return respBytes, nil, nil, nil
 	}
 }
 

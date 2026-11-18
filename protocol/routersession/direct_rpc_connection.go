@@ -59,9 +59,13 @@ type DirectRPCResponse struct {
 
 	// Metadata contains response headers/metadata from the underlying protocol.
 	// For HTTP: response headers (Content-Type, X-Request-Id, etc.)
-	// For gRPC: response metadata (trailers and headers)
+	// For gRPC: the reply's header metadata
 	// For WebSocket: typically empty (metadata is per-message)
 	Metadata map[string][]string
+
+	// Trailers is a gRPC reply's trailer metadata, kept apart from Metadata so a node's trailer
+	// reaches the client as a trailer (MAG-5129). Empty on every other protocol.
+	Trailers map[string][]string
 
 	// StatusCode contains the HTTP status code (for HTTP/REST) or gRPC status code.
 	// For successful gRPC calls, this will be 200 (OK equivalent).
@@ -677,6 +681,11 @@ const GRPCContentTypeHeader = "x-grpc-content-type"
 type GRPCNodeErrorResponse struct {
 	ErrorMessage string `json:"error_message"`
 	ErrorCode    uint32 `json:"error_code"`
+	// ErrorDetails is the node's status details, a google.rpc.Status holding only its details,
+	// serialized: the listener puts them back on the status it answers the client with, so the
+	// client gets the details the node sent (MAG-5129). Withheld secrets are already masked
+	// (redactStatusDetails); empty when the node sent none.
+	ErrorDetails []byte `json:"error_details,omitempty"`
 }
 
 // NewDirectRPCConnection creates a new direct RPC connection based on URL protocol.
@@ -1240,9 +1249,10 @@ func (g *GRPCDirectRPCConnection) SendRequest(
 	// Create output message
 	outputMsg := msgFactory.NewMessage(methodDescriptor.GetOutputType())
 
-	// Invoke gRPC method - capture response headers/metadata, and the trailer a failed call's
-	// rate-limit wait may ride in (handleGRPCError). The peer is set only once a stream to the
-	// node is open; a call that failed with none never reached a node.
+	// Invoke gRPC method - capture the response headers and trailers, both returned to the
+	// client (the trailer is also where a failed call's rate-limit wait may ride, see
+	// handleGRPCError). The peer is set only once a stream to the node is open; a call that
+	// failed with none never reached a node.
 	var respHeaders, respTrailers metadata.MD
 	var nodePeer peer.Peer
 	err = conn.Invoke(ctx, "/"+methodPath, inputMsg, outputMsg, grpc.Header(&respHeaders), grpc.Trailer(&respTrailers), grpc.Peer(&nodePeer))
@@ -1262,6 +1272,7 @@ func (g *GRPCDirectRPCConnection) SendRequest(
 	return &DirectRPCResponse{
 		Data:       respBytes,
 		Metadata:   respHeaders, // gRPC metadata.MD is map[string][]string
+		Trailers:   withoutStatusDetails(respTrailers),
 		StatusCode: http.StatusOK,
 	}, nil
 }
@@ -2083,8 +2094,8 @@ func GRPCRequestNeedsDescriptor(data []byte) bool {
 }
 
 // invokeRaw sends a binary request to the node unchanged and returns the node's
-// reply unchanged, with the response headers. It needs no descriptor, so it works
-// whether or not the node serves reflection.
+// reply unchanged, with the response headers and trailers. It needs no descriptor, so it
+// works whether or not the node serves reflection.
 func (g *GRPCDirectRPCConnection) invokeRaw(ctx context.Context, conn *grpc.ClientConn, methodPath string, data []byte) (*DirectRPCResponse, error) {
 	var reply []byte
 	var respHeaders, respTrailers metadata.MD
@@ -2096,6 +2107,7 @@ func (g *GRPCDirectRPCConnection) invokeRaw(ctx context.Context, conn *grpc.Clie
 	return &DirectRPCResponse{
 		Data:       reply,
 		Metadata:   respHeaders,
+		Trailers:   withoutStatusDetails(respTrailers),
 		StatusCode: http.StatusOK,
 	}, nil
 }
@@ -2132,7 +2144,7 @@ func (rawProtoCodec) Name() string { return "proto" }
 // any node saw it.
 //
 // respHeaders and respTrailers are the reply's header and trailer metadata. Both are read to
-// recognise a rate limit; only the header block goes back in the response.
+// recognise a rate limit, and both go back in the response, as the node sent them.
 func (g *GRPCDirectRPCConnection) handleGRPCError(ctx context.Context, err error, respHeaders, respTrailers metadata.MD, nodeReached bool) (*DirectRPCResponse, error) {
 	// A relay the router itself cancelled — a loser of a stateful fan-out race,
 	// or a client that disconnected — is not a node failure and must not be
@@ -2193,10 +2205,12 @@ func (g *GRPCDirectRPCConnection) handleGRPCError(ctx context.Context, err error
 
 	var errorCode uint32 = common.GRPCStatusCodeOnFailedMessages
 	var errorMessage string
+	var errorDetails []byte
 
 	if statusErr, ok := status.FromError(err); ok {
 		errorCode = uint32(statusErr.Code())
 		errorMessage = statusErr.Message()
+		errorDetails = marshalStatusDetails(redactStatusDetails(statusErr.Proto().GetDetails()))
 	} else {
 		errorMessage = err.Error()
 	}
@@ -2205,6 +2219,7 @@ func (g *GRPCDirectRPCConnection) handleGRPCError(ctx context.Context, err error
 	resp := GRPCNodeErrorResponse{
 		ErrorMessage: errorMessage,
 		ErrorCode:    errorCode,
+		ErrorDetails: errorDetails,
 	}
 
 	respBytes, marshalErr := json.Marshal(resp)
@@ -2217,13 +2232,13 @@ func (g *GRPCDirectRPCConnection) handleGRPCError(ctx context.Context, err error
 	response := &DirectRPCResponse{
 		Data:       respBytes,
 		Metadata:   respHeaders, // Include any headers received before the error
+		Trailers:   withoutStatusDetails(respTrailers),
 		StatusCode: int(errorCode),
 	}
 	// A node's rate-limit wait may arrive in either block. A reply that is only a status has no
 	// header block at all, and grpc-go's own retry reads grpc-retry-pushback-ms from the trailer;
 	// read in the header alone, a wait sent there was never seen, and the refusal was scored as a
-	// node failure (MAG-4915). The trailer is read here only: the response keeps the header block,
-	// so the wait stays the router's own, as an HTTP Retry-After does.
+	// node failure (MAG-4915).
 	return response, NewGRPCStatusError(errorCode, errorMessage, err, metadata.Join(respHeaders, respTrailers))
 }
 

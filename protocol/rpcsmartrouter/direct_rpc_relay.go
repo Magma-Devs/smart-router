@@ -483,8 +483,10 @@ func (d *DirectRPCRelaySender) SendDirectRelay(
 	if result != nil && result.Reply != nil {
 		// An upstream's headers reach the client only through this filter (MAG-3104). It
 		// runs here, once, for every transport and every arm of the senders, a gRPC error
-		// body returned as a result included; the senders hand it the raw set.
+		// body returned as a result included; the senders hand it the raw set. A gRPC
+		// node's trailers pass the same filter (MAG-5129).
 		result.Reply.Metadata = common.FilterUpstreamReplyMetadata(result.Reply.Metadata, d.replyHeaderDirectives, apiCollection.Headers)
+		result.Reply.Trailers = common.FilterUpstreamReplyMetadata(result.Reply.Trailers, d.replyHeaderDirectives, apiCollection.Headers)
 	}
 	return result, err
 }
@@ -1177,6 +1179,7 @@ func (d *DirectRPCRelaySender) sendGRPCRelay(
 				Reply: &pairingtypes.RelayReply{
 					Data:     response.Data,                                   // Error response in JSON format
 					Metadata: convertHTTPHeadersToMetadata(response.Metadata), // Include metadata even for errors
+					Trailers: convertHTTPHeadersToMetadata(response.Trailers),
 				},
 				Finalized:  true,
 				StatusCode: response.StatusCode,
@@ -1266,6 +1269,7 @@ func (d *DirectRPCRelaySender) sendGRPCRelay(
 			Data:        response.Data,
 			LatestBlock: latestBlockFromResponse,
 			Metadata:    convertHTTPHeadersToMetadata(response.Metadata), // Include gRPC response metadata
+			Trailers:    convertHTTPHeadersToMetadata(response.Trailers),
 		},
 		Finalized:  true,
 		StatusCode: response.StatusCode,
