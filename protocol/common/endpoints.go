@@ -32,12 +32,18 @@ const (
 	STATEFUL_API_HEADER                             = "lava-stateful-api"
 	STATEFUL_ALL_PROVIDERS_HEADER_NAME              = "lava-fast-tx-participants"
 	REQUESTED_BLOCK_HEADER_NAME                     = "lava-parsed-requested-block"
-	// WRITE_OUTCOME_HEADER_NAME names a GraphQL write's verdict across the copies it was sent to
-	// (MAG-5122): "accepted" on the chain's success row (Sui: effects with SUCCESS or FAILURE) or
-	// "unknown" today; "rejected" and "not_sent" need the chain's refusal rows (MAG-4909, MAG-5121),
-	// and any other reply carries no header. Absent on a read and on every other interface's
-	// write, which this ticket does not change.
-	WRITE_OUTCOME_HEADER_NAME        = "Lava-Write-Outcome"
+	// WRITE_OUTCOME_HEADER_NAME names a write's verdict across the copies it was sent to (Part I
+	// R-L). On GraphQL (MAG-5122): "accepted" on the chain's success row (Sui: effects with SUCCESS
+	// or FAILURE) or "unknown"; "rejected" and "not_sent" there need the chain's refusal rows
+	// (MAG-4909, MAG-5121). On JSON-RPC and Tendermint RPC (MAG-5232): "unknown" when a copy may
+	// have run, "rejected" when every copy was refused by status (401, 402, 403, 429), and
+	// "not_sent" when no byte of it left the router. A node's 2xx reply carries none, until the
+	// chain's write rows ship. Absent on a read and on a REST write (MAG-5256).
+	WRITE_OUTCOME_HEADER_NAME = "Lava-Write-Outcome"
+	// TX_HASH_HEADER_NAME carries the transaction's hash beside Lava-Write-Outcome, when the router
+	// can compute it from the request with the chain's formula (MAG-5232): EVM's keccak-256 of the
+	// raw transaction, Solana's first signature.
+	TX_HASH_HEADER_NAME              = "Lava-Tx-Hash"
 	IDENTIFIED_NODE_ERROR_HEADER     = "lava-identified-node-error"
 	HEDGE_TRIGGERED_HEADER           = "lava-hedge-triggered"
 	SMART_ROUTER_VERSION_HEADER_NAME = "Smart-Router-Version"

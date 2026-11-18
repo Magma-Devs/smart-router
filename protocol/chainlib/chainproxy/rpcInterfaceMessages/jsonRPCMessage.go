@@ -386,3 +386,39 @@ func checkResponseErrorForBatch(data []byte, httpStatusCode int, elementCheck fu
 	}
 	return true, aggregated.String()
 }
+
+// IsJsonrpcReply reports whether data is a reply in JSON-RPC's own format: an object whose error
+// member is an error object, or that carries a result, or a non-empty batch of such objects. A web
+// page, an empty or text body, a null, or JSON that is not JSON-RPC (no result and no error, or an
+// error that is a string) is not, which is how a gateway in front of the node answers, never the
+// node itself: a JSON-RPC node always answers in JSON-RPC (MAG-5072).
+//
+// A result counts because some chains report an error inside one: Tendermint's
+// result.response.code, XRPL's "status":"error" and engine results. A batch is judged element by
+// element, as cacheformat.IsRestorableJSONRPCReply judges one, so one good element does not vouch
+// for a sibling that is not a reply.
+func IsJsonrpcReply(data []byte) bool {
+	pos := SkipJSONWhitespace(data, 0)
+	if pos >= len(data) || data[pos] != '[' {
+		return isJsonrpcReplyObject(data)
+	}
+	elements, allReplies := 0, true
+	err := scanJsonrpcBatchElements(data, func(element []byte) bool {
+		elements++
+		allReplies = isJsonrpcReplyObject(element)
+		return allReplies
+	})
+	return err == nil && elements > 0 && allReplies
+}
+
+// isJsonrpcReplyObject is IsJsonrpcReply for one object.
+func isJsonrpcReplyObject(data []byte) bool {
+	scan, err := scanJsonrpcEnvelope(data)
+	if err != nil {
+		return false
+	}
+	if scan.hasError && !isJSONNull(scan.errorBytes) {
+		return len(scan.errorBytes) > 0 && scan.errorBytes[0] == '{'
+	}
+	return scan.hasResult
+}

@@ -52,13 +52,13 @@ type restWriteUpstream struct {
 	body   string
 }
 
-// shortenLAVAWriteWindow makes the LAVA REST write's own window short enough for a test that waits
-// out a write's budget. A write ignores lava-relay-timeout (MAG-5232), so the window is its own: its
-// compute units plus twice the block time, as it is a hanging api. A short block time keeps it under
-// the 6 x common.DefaultTimeout stateful budget the test sets.
-func shortenLAVAWriteWindow(t *testing.T, parser chainlib.ChainParser) {
+// shortenWriteWindow makes chainID's write window short enough for a test that waits out a write's
+// budget. A write ignores lava-relay-timeout (MAG-5232), so the window is its own: its compute units
+// plus twice the block time, as it is a hanging api. A short block time keeps it under the 6 x
+// common.DefaultTimeout stateful budget the test sets.
+func shortenWriteWindow(t *testing.T, parser chainlib.ChainParser, chainID string) {
 	t.Helper()
-	spec, err := specutils.GetSpecFromLocalDirs([]string{"../../specs/"}, "LAVA")
+	spec, err := specutils.GetSpecFromLocalDirs([]string{"../../specs/"}, chainID)
 	require.NoError(t, err)
 	spec.AverageBlockTime = 50
 	parser.SetSpec(spec)
@@ -109,7 +109,7 @@ func sendRESTWriteThroughListener(t *testing.T, upstreams []restWriteUpstream) r
 	require.NoError(t, err)
 	t.Cleanup(closeServer)
 	if anyHang {
-		shortenLAVAWriteWindow(t, parser)
+		shortenWriteWindow(t, parser, "LAVA")
 	}
 
 	releases := []func(){}

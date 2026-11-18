@@ -1653,22 +1653,12 @@ func unclearWriteReason(answered, dispatched int, cutOffs writeCutOffs) *unclear
 	}
 }
 
-// graphQLWriteOutcomeAccepted and graphQLWriteOutcomeUnknown are the Lava-Write-Outcome values this
-// router can state for a GraphQL write today (MAG-5122, Part I R-L point 4: accepted > unknown >
-// rejected > not_sent). accepted is the chain's success row only (appendGraphQLWriteAcceptedHeader),
-// unknown comes from each copy's status and transport (unclearWriteOutcomeFor). rejected and
-// not_sent read from a node's reply need the chain's refusal rows (MAG-4909, MAG-5121); the
-// router's own refusal of a write before any provider is asked says not_sent (MAG-3800). Any other
-// reply keeps the ticket's rule for a chain without those rows: the node's body is forwarded as
-// is, with no header.
-const (
-	graphQLWriteOutcomeAccepted = "accepted"
-	graphQLWriteOutcomeUnknown  = "unknown"
-)
-
-// isGraphQLWrite reports whether protocolMessage is a GraphQL write. MAG-5122 scopes its write-
-// outcome behaviour — the HTTP 200 unclear-write reply and the Lava-Write-Outcome header — to this
-// interface only.
+// isGraphQLWrite reports whether protocolMessage is a GraphQL write. MAG-5122 states its write
+// outcome on its own rows: the HTTP 200 unclear-write reply, and Lava-Write-Outcome accepted on the
+// chain's success row and unknown when unclearWriteOutcomeFor could not settle it; rejected and
+// not_sent read from a node's reply need the chain's refusal rows (MAG-4909, MAG-5121), and the
+// router's own refusal of a write before any provider is asked says not_sent (MAG-3800). JSON-RPC
+// and Tendermint RPC state theirs in write_outcome.go (MAG-5232).
 func isGraphQLWrite(protocolMessage chainlib.ProtocolMessage) bool {
 	if chainlib.GetStateful(protocolMessage) != common.CONSISTENCY_SELECT_ALL_PROVIDERS {
 		return false
@@ -1700,7 +1690,7 @@ func (rpcss *RPCSmartRouterServer) appendGraphQLWriteOutcomeHeader(result *commo
 	if result == nil || unclear == nil || !isGraphQLWrite(protocolMessage) {
 		return
 	}
-	ensureWriteOutcomeHeader(result, graphQLWriteOutcomeUnknown)
+	ensureWriteOutcomeHeader(result, writeOutcomeUnknown)
 }
 
 // appendGraphQLWriteAcceptedHeader adds Lava-Write-Outcome: accepted (MAG-5122) to a served GraphQL
@@ -1718,7 +1708,7 @@ func (rpcss *RPCSmartRouterServer) appendGraphQLWriteAcceptedHeader(result *comm
 		return
 	}
 	if _, status, _ := suiGraphQLExecution(result.Reply.Data); status == relayEndTxSuccess || status == relayEndTxFailure {
-		ensureWriteOutcomeHeader(result, graphQLWriteOutcomeAccepted)
+		ensureWriteOutcomeHeader(result, writeOutcomeAccepted)
 	}
 }
 
@@ -1747,17 +1737,13 @@ func (rpcss *RPCSmartRouterServer) graphQLUnclearWriteStatus(ctx context.Context
 		result = &common.RelayResult{}
 	}
 	stamped := *result
-	guidStr := ""
-	if guid, found := utils.GetUniqueIdentifier(ctx); found && guid != 0 {
-		guidStr = strconv.FormatUint(guid, 10)
-	}
 	stamped.StatusCode = http.StatusOK
 	// Router-authored, not an upstream's bytes: UpstreamStatus/Body/ContentType is the one channel
 	// the listener forwards verbatim — status included, no masking (chainlib.buildFailedRelayReply)
 	// — so it is reused here to carry this router-written GraphQL document.
 	stamped.ClientFacing = &common.ClientFacingError{
 		UpstreamStatus:      http.StatusOK,
-		UpstreamBody:        chainlib.ConvertToGraphQLWriteOutcomeError(graphQLUnknownWriteMessage, guidStr, graphQLWriteOutcomeUnknown, ""),
+		UpstreamBody:        chainlib.ConvertToGraphQLWriteOutcomeError(graphQLUnknownWriteMessage, requestGUID(ctx), writeOutcomeUnknown, ""),
 		UpstreamContentType: common.JSONContentType,
 	}
 	return &stamped
@@ -1866,6 +1852,17 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 		})
 		return unknownWriteAnswer
 	}
+	// A JSON-RPC or Tendermint RPC write states its verdict itself (MAG-5232, write_outcome.go), in
+	// place of unknownWrite, which stays REST's and GraphQL's.
+	var writeVerdictOnce sync.Once
+	var writeVerdictAnswer writeVerdict
+	var hasWriteVerdict bool
+	verdictOfWrite := func() (writeVerdict, bool) {
+		writeVerdictOnce.Do(func() {
+			writeVerdictAnswer, hasWriteVerdict = writeVerdictFor(protocolMessage, relayProcessor)
+		})
+		return writeVerdictAnswer, hasWriteVerdict
+	}
 	if err != nil && (relayProcessor == nil || !relayProcessor.HasResults()) {
 		// we can't send anymore, and we don't have any responses
 		cause = err
@@ -1889,6 +1886,26 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 		// failure hardest to diagnose, a silent upstream, and no Lava-Retries or
 		// Lava-Provider-Address to say what was tried. unknownWrite is true only for a processor
 		// that dispatched, so the processor is never nil there.
+		//
+		// A write pinned to a lava-select-provider name the router does not have is refused before
+		// any provider is asked, so its reply says the write was never sent, as the listener's other
+		// refusals of a GraphQL write do (MAG-3800; Part I R-Q, Part II Q8). The listener writes the
+		// refusal, REQUEST_REFUSED, the one router reply to a write that is not HTTP 200 (MAG-5232),
+		// and passes this reply's headers on; only this function knows the request is a write.
+		if (isGraphQLWrite(protocolMessage) || statesWriteOutcome(protocolMessage)) && errors.Is(err, routersession.SelectedProviderNotConfiguredError) {
+			refused := &common.RelayResult{}
+			ensureWriteOutcomeHeader(refused, writeOutcomeNotSent)
+			return refused, err
+		}
+
+		// A JSON-RPC or Tendermint RPC write gets the router's reply that states its verdict: unknown
+		// when a copy it dispatched is still silent, not sent when none was dispatched (MAG-5232).
+		if verdict, ok := verdictOfWrite(); ok {
+			reply, txHash := rpcss.writeOutcomeReply(requestGUID(ctx), protocolMessage, nil, verdict, err, relayProcessor.GetUsedProviders().SessionsDispatched())
+			rpcss.appendHeadersToRelayResult(ctx, reply, relayProcessor.ProtocolErrors(), relayProcessor, protocolMessage, protocolMessage.GetApi().GetName(), analytics, false)
+			stampWriteOutcome(reply, verdict.outcome, txHash)
+			return reply, writeOutcomeReplyError(verdict, err)
+		}
 		if unclear := unknownWrite(); unclear != nil {
 			var unclearResult *common.RelayResult
 			if isGraphQLWrite(protocolMessage) {
@@ -1926,16 +1943,6 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 			return timedOut, err
 		}
 
-		// A GraphQL write pinned to a lava-select-provider name the router does not have is refused
-		// before any provider is asked, so its reply says the write was never sent, as the
-		// listener's other refusals of a GraphQL write do (MAG-3800; Part I R-Q, Part II Q8). The
-		// listener writes the refusal and passes this reply's headers on; only this function knows
-		// the request is a write.
-		if isGraphQLWrite(protocolMessage) && errors.Is(err, routersession.SelectedProviderNotConfiguredError) {
-			refused := &common.RelayResult{}
-			ensureWriteOutcomeHeader(refused, rpcInterfaceMessages.GraphQLWriteOutcomeNotSent)
-			return refused, err
-		}
 		return nil, err
 	}
 
@@ -2002,7 +2009,22 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 	//
 	// Safe to hoist: writeOutcomeIsUnknown returns false unless this is a stateful relay with no
 	// successes, so a served write and every read are unaffected.
-	if unclear := unknownWrite(); unclear != nil {
+	//
+	// A JSON-RPC or Tendermint RPC write states its verdict (MAG-5232): an unknown or not-sent write
+	// gets the router's reply, and a rejected one the node's best-ranked reply as it came, with
+	// Lava-Write-Outcome and Lava-Tx-Hash.
+	if verdict, ok := verdictOfWrite(); ok {
+		if verdict.outcome == writeOutcomeRejected {
+			stampWriteOutcome(returnedResult, writeOutcomeRejected, rpcss.writeTxHash(protocolMessage))
+		} else {
+			if analytics != nil {
+				analytics.Success = false
+			}
+			reply, txHash := rpcss.writeOutcomeReply(requestGUID(ctx), protocolMessage, returnedResult, verdict, err, relayProcessor.GetUsedProviders().SessionsDispatched())
+			stampWriteOutcome(reply, verdict.outcome, txHash)
+			return reply, writeOutcomeReplyError(verdict, err)
+		}
+	} else if unclear := unknownWrite(); unclear != nil {
 		if analytics != nil {
 			analytics.Success = false
 		}
