@@ -615,9 +615,39 @@
       "transport": "jsonrpc",
       "error_code": -8,
       "error_message": "Block height out of range",
-      "expected_error_code": 0,
-      "expected_name": "UNKNOWN_ERROR",
-      "_note": "Bitcoin -8 (RPC_INVALID_PARAMETER) not mapped — falls to unknown"
+      "expected_error_code": 3201,
+      "expected_name": "CHAIN_BLOCK_NOT_FOUND",
+      "_note": "Bitcoin -8 (RPC_INVALID_PARAMETER) for a height above this node's tip: the behind row, another provider is asked (MAG-4448, rulebook Reference Q146)"
+    },
+    {
+      "name": "bitcoin_invalid_parameter",
+      "chain_family": "Bitcoin",
+      "transport": "jsonrpc",
+      "error_code": -8,
+      "error_message": "Invalid parameter, vout cannot be negative",
+      "expected_error_code": 3345,
+      "expected_name": "CHAIN_BITCOIN_INVALID_PARAMETER",
+      "_note": "Bitcoin -8 that no narrower row reads: another provider is asked, the endpoint is not blamed (MAG-4448)"
+    },
+    {
+      "name": "bitcoin_no_txindex",
+      "chain_family": "Bitcoin",
+      "transport": "jsonrpc",
+      "error_code": -5,
+      "error_message": "No such mempool transaction. Use -txindex or provide a block hash to enable blockchain transaction queries. Use gettransaction for wallet transactions.",
+      "expected_error_code": 2017,
+      "expected_name": "NODE_DATA_NOT_HELD",
+      "_note": "Bitcoin -5 (RPC_INVALID_ADDRESS_OR_KEY) from a node without -txindex: a node with it may answer (MAG-4448)"
+    },
+    {
+      "name": "bitcoin_transaction_not_found",
+      "chain_family": "Bitcoin",
+      "transport": "jsonrpc",
+      "error_code": -5,
+      "error_message": "No such mempool or blockchain transaction. Use gettransaction for wallet transactions.",
+      "expected_error_code": 2012,
+      "expected_name": "NODE_RESOURCE_NOT_FOUND",
+      "_note": "Bitcoin -5 that no narrower row reads: not found on this node (MAG-4448)"
     },
 
     {
