@@ -291,7 +291,8 @@ func TestClassifyDirectRPCError_ABitcoindMinus8OrMinus5InsideA500FailsOverWithou
 		{"-8 a parameter", `{"result":null,"error":{"code":-8,"message":"Invalid parameter, vout cannot be negative"},"id":7}`, common.RouterErrorChainBitcoinInvalidParameter},
 		{"-5 no txindex", `{"result":null,"error":{"code":-5,"message":"No such mempool transaction. Use -txindex or provide a block hash to enable blockchain transaction queries. Use gettransaction for wallet transactions."},"id":7}`, common.RouterErrorNodeDataNotHeld},
 		{"-5 block not found", `{"result":null,"error":{"code":-5,"message":"Block not found"},"id":7}`, common.RouterErrorChainBlockNotFound},
-		{"-5 transaction not found", `{"result":null,"error":{"code":-5,"message":"No such mempool or blockchain transaction. Use gettransaction for wallet transactions."},"id":7}`, common.RouterErrorNodeResourceNotFound},
+		{"-5 transaction not found", `{"result":null,"error":{"code":-5,"message":"No such mempool or blockchain transaction. Use gettransaction for wallet transactions."},"id":7}`, common.RouterErrorChainTxNotFound},
+		{"-5 a key or descriptor", `{"result":null,"error":{"code":-5,"message":"Unknown filtertype"},"id":7}`, common.RouterErrorChainBitcoinInvalidAddressOrKey},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -7418,11 +7418,34 @@ func isRateLimitedRelayOutcome(err error, relayResult *common.RelayResult) bool 
 }
 
 // isDataScopeRelayOutcome reports an answer that the endpoint does not hold the requested data
-// (SubCategoryDataScope: block not found, pruned state, unknown transaction). Only answers the
-// availability gate already keeps off the failure path qualify, so a 5xx stays a failure.
+// (SubCategoryDataScope: block not found, pruned state, unknown transaction), in either shape it
+// arrives:
+//   - a node error the availability gate already keeps off the failure path, such as one inside a
+//     2xx;
+//   - a 5xx whose JSON-RPC body the classifier read as data scope (statusErrorBodyIsDataScope).
+//
+// Any other 5xx stays a failure.
 func isDataScopeRelayOutcome(err error, relayResult *common.RelayResult) bool {
-	return relayResult != nil && relayResult.IsNodeError && relayResult.IsDataScope &&
-		!shouldFailSessionForResult(err, relayResult)
+	if relayResult != nil && relayResult.IsNodeError && relayResult.IsDataScope &&
+		!shouldFailSessionForResult(err, relayResult) {
+		return true
+	}
+	return statusErrorBodyIsDataScope(err)
+}
+
+// statusErrorBodyIsDataScope reports whether err is a JSON-RPC sender's status error whose body the
+// classifier read as data scope. The body decides it, as it decides the endpoint's health
+// (healthVerdict) and the retry (retryVerdict), so the same answer scores the same inside a 5xx as
+// inside a 200 (rulebook Part IV, 3.1 P5 and test T13). bitcoind answers a JSON-RPC 1.0 request's
+// error with 500, and its -8 and -5 are data scope (MAG-4448). The verdict err carries is the body's
+// whenever the body's is retryable, which every data-scope code is (retryVerdict).
+func statusErrorBodyIsDataScope(err error) bool {
+	var httpErr *routersession.HTTPStatusError
+	if err == nil || !errors.As(err, &httpErr) || httpErr == nil || len(httpErr.Body) == 0 {
+		return false
+	}
+	verdict := common.AsRouterError(err)
+	return verdict != nil && verdict.SubCategory.IsDataScope()
 }
 
 // httpStatusRelayError is the error relayInnerDirect fails a relay with when the upstream

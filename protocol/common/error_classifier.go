@@ -58,8 +58,10 @@ var chainErrorMappings = map[ChainFamily][]errorMapping{
 		// whatever the HTTP status (bitcoind answers a JSON-RPC 1.0 request's error with 500). A row
 		// that makes one of their messages the caller's needs a production example (rulebook Q229).
 		//
-		// A height above this node's own tip: the "behind" row (rulebook Reference Q146). A node that
-		// is behind says it, and so does every node for a height past the chain's tip.
+		// A height this node does not have: the "behind" row (rulebook Reference Q146). A node that
+		// is behind says it, and so does every node for a height past the chain's tip. getblockhash
+		// gives the same message to a negative height, which every node refuses, so the ticket's
+		// getblockhash -1 reaches each provider up to the error limit; no endpoint is blamed for it.
 		{CodeAndMessage(-8, "block height out of range"), RouterErrorChainBlockNotFound}, // getblockhash
 		{CodeAndMessage(-8, "after current tip"), RouterErrorChainBlockNotFound},         // the hash_or_height RPCs
 		{CodeEquals(-8), RouterErrorChainBitcoinInvalidParameter},
@@ -68,7 +70,13 @@ var chainErrorMappings = map[ChainFamily][]errorMapping{
 		{CodeAndMessage(-5, "use -txindex"), RouterErrorNodeDataNotHeld},
 		{CodeAndMessage(-5, "still in the process of being indexed"), RouterErrorNodeDataNotHeld},
 		{CodeAndMessage(-5, "block not found"), RouterErrorChainBlockNotFound},
-		{CodeEquals(-5), RouterErrorNodeResourceNotFound}, // a transaction, a mempool entry, a filter
+		{CodeAndMessage(-5, "block hash not found"), RouterErrorChainBlockNotFound}, // getrawtransaction with a block hash
+		{CodeAndMessage(-5, "no such"), RouterErrorChainTxNotFound},                 // getrawtransaction
+		{CodeAndMessage(-5, "transaction not in mempool"), RouterErrorChainTxNotFound},
+		// The one -5 the generic table already read as the caller's ("invalid address", e.g.
+		// verifymessage), kept as it was so this row changes nothing for it.
+		{CodeAndMessage(-5, "invalid address"), RouterErrorUserInvalidAddress},
+		{CodeEquals(-5), RouterErrorChainBitcoinInvalidAddressOrKey},
 		// Message-based: UTXO already spent / double-spend detection.
 		// Bitcoin Core returns these through sendrawtransaction rejections.
 		{MessageContains("already spent"), RouterErrorChainDoubleSpend},

@@ -645,9 +645,19 @@
       "transport": "jsonrpc",
       "error_code": -5,
       "error_message": "No such mempool or blockchain transaction. Use gettransaction for wallet transactions.",
-      "expected_error_code": 2012,
-      "expected_name": "NODE_RESOURCE_NOT_FOUND",
-      "_note": "Bitcoin -5 that no narrower row reads: not found on this node (MAG-4448)"
+      "expected_error_code": 3202,
+      "expected_name": "CHAIN_TX_NOT_FOUND",
+      "_note": "Bitcoin -5 (getrawtransaction): not found on this node (MAG-4448)"
+    },
+    {
+      "name": "bitcoin_invalid_address_or_key",
+      "chain_family": "Bitcoin",
+      "transport": "jsonrpc",
+      "error_code": -5,
+      "error_message": "Unknown filtertype",
+      "expected_error_code": 3346,
+      "expected_name": "CHAIN_BITCOIN_INVALID_ADDRESS_OR_KEY",
+      "_note": "Bitcoin -5 that no narrower row reads: another provider is asked, the endpoint is not blamed (MAG-4448)"
     },
 
     {

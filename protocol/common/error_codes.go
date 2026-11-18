@@ -710,6 +710,17 @@ var (
 		SubCategory: SubCategoryDataScope,
 		Description: "Invalid parameter, or a parameter this node cannot serve (RPC_INVALID_PARAMETER, Bitcoin -8); another provider may answer", Retryable: true,
 	})
+	// CHAIN_BITCOIN_INVALID_ADDRESS_OR_KEY: an RPC_INVALID_ADDRESS_OR_KEY (-5) that no narrower
+	// Bitcoin row reads (MAG-4448). bitcoind raises -5 for a key or descriptor the caller got wrong
+	// and for an object this node does not hold, so it is read as -8 is: another provider is asked
+	// and the endpoint is not blamed. Its Description must not hold a phrase a caller's-mistake text
+	// row matches ("invalid address"): ShouldRetryError re-reads a wrapped error's text, which
+	// carries the Description, and would end the relay.
+	RouterErrorChainBitcoinInvalidAddressOrKey = registerError(&RouterError{
+		Code: 3346, Name: "CHAIN_BITCOIN_INVALID_ADDRESS_OR_KEY", Category: CategoryExternal,
+		SubCategory: SubCategoryDataScope,
+		Description: "A key, address or object this node rejects or does not hold (RPC_INVALID_ADDRESS_OR_KEY, Bitcoin -5); another provider may answer", Retryable: true,
+	})
 
 	// NEAR-specific (3360-3379) — Tier 2
 	// Source: NEAR RPC docs (error names in JSON-RPC error.cause.name)

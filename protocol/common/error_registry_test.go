@@ -931,8 +931,12 @@ func TestClassifyError_ChainSpecificMappings(t *testing.T) {
 		{"Bitcoin -5 no txindex", ChainFamilyBitcoin, -5, "No such mempool transaction. Use -txindex or provide a block hash to enable blockchain transaction queries. Use gettransaction for wallet transactions.", RouterErrorNodeDataNotHeld},
 		{"Bitcoin -5 txindex still building", ChainFamilyBitcoin, -5, "No such mempool transaction. Blockchain transactions are still in the process of being indexed. Use gettransaction for wallet transactions.", RouterErrorNodeDataNotHeld},
 		{"Bitcoin -5 block not found", ChainFamilyBitcoin, -5, "Block not found", RouterErrorChainBlockNotFound},
-		{"Bitcoin -5 transaction not found", ChainFamilyBitcoin, -5, "No such mempool or blockchain transaction. Use gettransaction for wallet transactions.", RouterErrorNodeResourceNotFound},
-		{"Bitcoin -5 not in mempool", ChainFamilyBitcoin, -5, "Transaction not in mempool", RouterErrorNodeResourceNotFound},
+		{"Bitcoin -5 block hash not found", ChainFamilyBitcoin, -5, "Block hash not found", RouterErrorChainBlockNotFound},
+		{"Bitcoin -5 transaction not found", ChainFamilyBitcoin, -5, "No such mempool or blockchain transaction. Use gettransaction for wallet transactions.", RouterErrorChainTxNotFound},
+		{"Bitcoin -5 not in mempool", ChainFamilyBitcoin, -5, "Transaction not in mempool", RouterErrorChainTxNotFound},
+		{"Bitcoin -5 invalid address stays the caller's", ChainFamilyBitcoin, -5, "Invalid address", RouterErrorUserInvalidAddress},
+		{"Bitcoin -5 a key or descriptor", ChainFamilyBitcoin, -5, "Unknown filtertype", RouterErrorChainBitcoinInvalidAddressOrKey},
+		{"Bitcoin -5 with no message", ChainFamilyBitcoin, -5, "", RouterErrorChainBitcoinInvalidAddressOrKey},
 		// The rows are Bitcoin's: on another family -8 and -5 stay unread.
 		{"EVM -8 is not a Bitcoin row", ChainFamilyEVM, -8, "Block height out of range", RouterErrorUnknown},
 		// Starknet Tier 2
