@@ -19,8 +19,10 @@ import (
 	"github.com/magma-Devs/smart-router/utils/rand"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
@@ -133,12 +135,17 @@ func TestRelayEnd_GRPCListener(t *testing.T) {
 				callCtx = metadata.AppendToOutgoingContext(callCtx, common.SELECT_PROVIDER_HEADER_NAME, tc.pin)
 			}
 			reply := &wrapperspb.Int64Value{}
-			err := client.Invoke(callCtx, "/"+relayEndGRPCMethod, wrapperspb.Int64(5), reply)
+			var trailer metadata.MD
+			err := client.Invoke(callCtx, "/"+relayEndGRPCMethod, wrapperspb.Int64(5), reply, grpc.Trailer(&trailer))
 			if tc.outcome == relayOutcomeOK {
 				require.NoError(t, err)
 				require.Equal(t, int64(1), reply.GetValue(), "the node's answer reached the client")
 			} else {
 				require.Error(t, err)
+				// A name no provider of the router carries is the caller's to fix (MAG-3800).
+				require.Equal(t, codes.InvalidArgument, status.Code(err), "%v", err)
+				require.Equal(t, routersession.SelectedProviderNotConfiguredError.Error(), status.Convert(err).Message())
+				require.NotEmpty(t, trailer.Get(common.GUID_HEADER_NAME), "the refusal carries the request id")
 			}
 
 			events := newRelayEndsSince(read, seen)
@@ -186,6 +193,7 @@ func startRelayEndGRPCRouter(t *testing.T, apis, nodeAddr string) *grpc.ClientCo
 	provider := routersession.NewConsumerSessionWithProvider("grpc-node", []*routersession.Endpoint{{NetworkAddress: nodeUrl.Url, Enabled: true, DirectConnections: []routersession.DirectRPCConnection{connection}}}, 100000, 1, 1)
 	provider.StaticProvider = true
 	require.NoError(t, csm.UpdateAllProviders(1, map[uint64]*routersession.ConsumerSessionsWithProvider{0: provider}, map[uint64]*routersession.ConsumerSessionsWithProvider{}))
+	csm.SetConfiguredProviderNames([]string{"grpc-node"})
 	logs, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
 	require.NoError(t, err)
 	server := &RPCSmartRouterServer{
