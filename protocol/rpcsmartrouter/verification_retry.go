@@ -389,8 +389,8 @@ func (rpsr *RPCSmartRouter) pairedProvidersOf(chainKey string, due dueChecks) (s
 // service or url, a url on its first strike, a failed pass under the demote grace — and
 // applies the verdicts as the epoch pass does, without waiting for it. Each provider
 // re-runs only its checks in due, and keeps its other verdicts. The probes run
-// without the router lock, which an epoch pass holds across its own: at a retry's
-// cadence that would stall every chain behind one provider's timeout. The verdicts are
+// without the router lock, as the epoch pass's do: at a retry's cadence holding it
+// would stall every chain behind one provider's timeout. The verdicts are
 // applied under it (decideReverification), and the pairing is pushed only when it moved:
 // UpdateAllProviders resets the session manager's per-epoch state.
 func (rpsr *RPCSmartRouter) retryPaired(ctx context.Context, chainKey string, static, backup []*routersession.RPCStaticProviderEndpoint, due dueChecks) {
