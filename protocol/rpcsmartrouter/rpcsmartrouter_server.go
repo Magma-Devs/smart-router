@@ -1434,6 +1434,11 @@ var (
 	// at least one connection broke after it was established (a reset, an EOF, a gateway's 502), so
 	// that node may have executed the transaction and its answer was lost. Nothing timed out.
 	errUnclearWriteAnswerLost = &unclearWriteError{reason: "a node's answer was lost after the transaction was sent"}
+	// errUnclearWriteMayHaveRun: every endpoint came back before a deadline, none with an answer,
+	// and at least one answered with an error that the chain's write rows read as "may have run"
+	// (MAG-4909): the network refused it after submission, two transactions competed for an object,
+	// or the node failed after it may have sent it. Nothing timed out and no connection broke.
+	errUnclearWriteMayHaveRun = &unclearWriteError{reason: "a node's answer does not show whether the transaction ran"}
 	// errUnclearWriteNoAnswer: every endpoint came back before a deadline, none with an answer, and
 	// what leaves the outcome open is neither a timeout nor a broken connection: a cancellation, or
 	// an error nothing classifies. It claims neither a timeout nor a delivery.
@@ -1495,6 +1500,21 @@ func unclearWriteOutcomeFor(protocolMessage chainlib.ProtocolMessage, relayProce
 			cutOffMidDelivery = true
 		}
 		cutOffs.add(protocolError, ranOutOfRoad)
+		// A status the relay failed (a 5xx with no GraphQL body) is a reply too, and the chain's
+		// write rows may read it as "may have run".
+		var httpErr *routersession.HTTPStatusError
+		if errors.As(protocolError.Err, &httpErr) && writeCopyMayHaveRun(protocolMessage, httpErr.Body, httpErr.StatusCode) {
+			cutOffMidDelivery = true
+			cutOffs.mayHaveRun++
+		}
+	}
+	// A node error settles its endpoint unless the chain's write rows say the transaction may have
+	// run through that copy (MAG-4909): a reply came back, but it does not say whether it ran.
+	for _, nodeError := range nodeErrors {
+		if nodeError.Reply != nil && writeCopyMayHaveRun(protocolMessage, nodeError.Reply.Data, nodeError.StatusCode) {
+			cutOffMidDelivery = true
+			cutOffs.mayHaveRun++
+		}
 	}
 
 	if !unknownWriteOutcome(len(successResults), answered, dispatched, ranOutOfRoad, cutOffMidDelivery) {
@@ -1574,11 +1594,33 @@ func unknownWriteOutcome(successes, answered, dispatched int, ranOutOfRoad, cutO
 		return true // someone we asked is still silent, however loudly the others failed
 	}
 	// Everyone came back — but "came back" is not the same as answered. A connection that died
-	// after the request went out settles nothing about whether the node received it.
+	// after the request went out settles nothing about whether the node received it, and neither
+	// does a reply the chain's write rows read as "may have run".
 	return cutOffMidDelivery
 }
 
-// writeCutOffs counts the transport failures of a write that its unclear reason tells apart.
+// writeCopyMayHaveRun reports whether one copy's reply to a write is one the chain's write rows read
+// as "may have run" (MAG-4909). A write on a chain with no write rows, and every other interface's
+// write, keep today's rule: a reply settles its endpoint.
+func writeCopyMayHaveRun(message chainlib.ChainMessageForSend, body []byte, statusCode int) bool {
+	outcome, known := graphQLWriteCopyOutcome(message, body, statusCode)
+	return known && outcome == rpcInterfaceMessages.GraphQLWriteMayHaveRun
+}
+
+// graphQLWriteCopyOutcome is one copy's outcome by the chain's write rows. known is false for a
+// read, a write on a chain without write rows, and every other interface.
+func graphQLWriteCopyOutcome(message chainlib.ChainMessageForSend, body []byte, statusCode int) (rpcInterfaceMessages.GraphQLWriteOutcome, bool) {
+	if message == nil {
+		return 0, false
+	}
+	graphQLMessage, ok := message.GetRPCMessage().(*rpcInterfaceMessages.GraphQLMessage)
+	if !ok || graphQLMessage == nil {
+		return 0, false
+	}
+	return graphQLMessage.WriteOutcome(body, statusCode)
+}
+
+// writeCutOffs counts the failures of a write that its unclear reason tells apart.
 type writeCutOffs struct {
 	// timedOut: the endpoint did not answer before a deadline, whichever one ended it. That is what
 	// relay_end calls a timeout (the budget, the attempt's deadline, a dial or a response that timed
@@ -1587,6 +1629,9 @@ type writeCutOffs struct {
 	// lost: the connection broke after it was established — a reset, an EOF, a gateway's 502 — so
 	// the node may hold the transaction and its answer did not come back.
 	lost int
+	// mayHaveRun: the endpoint answered with an error the chain's write rows read as "may have run"
+	// (writeCopyMayHaveRun).
+	mayHaveRun int
 }
 
 func (c *writeCutOffs) add(protocolError relaycore.RelayError, ranOutOfRoad bool) {
@@ -1611,6 +1656,7 @@ func (c *writeCutOffs) add(protocolError relaycore.RelayError, ranOutOfRoad bool
 //     answer: the request spent its time waiting on the node that never answered, which is what
 //     the client lived through, and the advice is the same either way;
 //   - a connection broke after it was established: errUnclearWriteAnswerLost;
+//   - a node answered with an error its chain reads as "may have run": errUnclearWriteMayHaveRun;
 //   - anything else, a cancellation or an error nothing classifies: errUnclearWriteNoAnswer.
 func unclearWriteReason(answered, dispatched int, cutOffs writeCutOffs) *unclearWriteError {
 	notAnswered := min(max(dispatched-answered+cutOffs.timedOut, 0), dispatched)
@@ -1621,6 +1667,8 @@ func unclearWriteReason(answered, dispatched int, cutOffs writeCutOffs) *unclear
 		return errUnclearWriteNodeSilent
 	case cutOffs.lost > 0:
 		return errUnclearWriteAnswerLost
+	case cutOffs.mayHaveRun > 0:
+		return errUnclearWriteMayHaveRun
 	default:
 		return errUnclearWriteNoAnswer
 	}
@@ -1628,10 +1676,10 @@ func unclearWriteReason(answered, dispatched int, cutOffs writeCutOffs) *unclear
 
 // graphQLWriteOutcomeAccepted and graphQLWriteOutcomeUnknown are the Lava-Write-Outcome values this
 // router can state for a GraphQL write today (MAG-5122, Part I R-L point 4: accepted > unknown >
-// rejected > not_sent). accepted is the chain's success row only (appendGraphQLWriteAcceptedHeader),
-// unknown comes from each copy's status and transport (unclearWriteOutcomeFor). rejected and
-// not_sent need the chain's refusal rows (MAG-4909, MAG-5121). Any other reply keeps the ticket's
-// rule for a chain without those rows: the node's body is forwarded as is, with no header.
+// rejected > not_sent). accepted comes from the chain's write rows (appendGraphQLWriteAcceptedHeader),
+// unknown from each copy's status, transport and write rows (unclearWriteOutcomeFor). The
+// rejected and not_sent values are not stated yet (MAG-5122): a write whose copies were all refused
+// keeps the node's body as is, with no header.
 const (
 	graphQLWriteOutcomeAccepted = "accepted"
 	graphQLWriteOutcomeUnknown  = "unknown"
@@ -1676,32 +1724,40 @@ func (rpcss *RPCSmartRouterServer) appendGraphQLWriteOutcomeHeader(result *commo
 }
 
 // appendGraphQLWriteAcceptedHeader adds Lava-Write-Outcome: accepted (MAG-5122) to a served GraphQL
-// write whose reply is the chain's success row: Sui's executeTransaction field carries effects with
-// a status, SUCCESS or FAILURE (a transaction that ran and paid gas counts as accepted, MAG-4742).
-// relay_end reads the same fields for tx_status, with suiGraphQLExecution. No other reply gets the
-// header: not a node error (a rejected transaction answers with a GraphQL error inside a 200, which
-// still returns err == nil), not a reply without effects, and not effects: null, which may have run
-// (MAG-4518).
+// write whose reply the chain's write rows read as accepted (MAG-4909): on Sui, the write field ran
+// (W1: effects with SUCCESS or FAILURE, a transaction that ran and paid gas counting as accepted,
+// MAG-4742), with or without errors beside it and under any status, or an error below it (W2). No
+// other reply gets the header: not a node error (a refused transaction answers with a GraphQL error
+// inside a 200, which still returns err == nil), and no write on a chain without write rows.
 func (rpcss *RPCSmartRouterServer) appendGraphQLWriteAcceptedHeader(result *common.RelayResult, protocolMessage chainlib.ProtocolMessage) {
 	if result == nil || result.IsNodeError || result.Reply == nil || !isGraphQLWrite(protocolMessage) {
 		return
 	}
-	if api := protocolMessage.GetApi(); api == nil || api.Name != suiGraphQLExecuteRootField || len(result.Reply.Data) > relayEndTxReplyLimit {
-		return
-	}
-	if _, status, _ := suiGraphQLExecution(result.Reply.Data); status == relayEndTxSuccess || status == relayEndTxFailure {
+	if outcome, known := graphQLWriteCopyOutcome(protocolMessage, result.Reply.Data, result.StatusCode); known && outcome == rpcInterfaceMessages.GraphQLWriteAccepted {
 		ensureWriteOutcomeHeader(result, graphQLWriteOutcomeAccepted)
 	}
 }
 
 // graphQLUnknownWriteMessage is the ticket's required wording (MAG-5122, GraphQL interface
-// chapter section 5, point 2): the digest sentence, then the chain's own sentence. tx_hash is
-// always empty today (see graphQLUnclearWriteStatus), so this is the "can't be computed" variant
-// the ticket itself provides for that case, and the chain sentence is Sui's — the only chain this
-// interface serves right now.
-const graphQLUnknownWriteMessage = "Status unknown - this transaction may have been broadcast. " +
-	"Look up the transaction on chain before signing anything new. " +
-	"Re-sending the same signed bytes is safe. If you replace it, reuse the same input objects."
+// chapter section 5, point 2): the digest sentence, then the chain's own sentence, which is Sui's —
+// the only chain this interface serves right now. graphQLUnknownWriteLookUp is the digest sentence
+// when the digest is known; without it, the sentence says how to look the transaction up anyway.
+const (
+	graphQLUnknownWriteOpening   = "Status unknown - this transaction may have been broadcast. "
+	graphQLUnknownWriteLookUp    = "Look up %s before signing anything new. "
+	graphQLUnknownWriteNoDigest  = "Look up the transaction on chain before signing anything new. "
+	graphQLUnknownWriteSuiAdvice = "Re-sending the same signed bytes is safe. If you replace it, reuse the same input objects."
+)
+
+// graphQLUnknownWriteMessage is the unknown reply's message for a write whose transaction digest is
+// digest, or "" when it cannot be computed.
+func graphQLUnknownWriteMessage(digest string) string {
+	lookUp := graphQLUnknownWriteNoDigest
+	if digest != "" {
+		lookUp = fmt.Sprintf(graphQLUnknownWriteLookUp, digest)
+	}
+	return graphQLUnknownWriteOpening + lookUp + graphQLUnknownWriteSuiAdvice
+}
 
 // graphQLUnclearWriteStatus answers a GraphQL write whose outcome unclearWriteOutcomeFor could not
 // settle with HTTP 200 and a GraphQL error document, not withUnclearWriteStatus's 500 (MAG-5122,
@@ -1711,10 +1767,11 @@ const graphQLUnknownWriteMessage = "Status unknown - this transaction may have b
 // none to copy); the Lava-Write-Outcome header is appendGraphQLWriteOutcomeHeader's job at the call
 // site, not this function's.
 //
-// extensions.tx_hash is left out: computing a Sui digest from the request's transaction bytes needs
-// the formula MAG-4909 delivers, which is not in the router yet. Omitting it is the ticket's own
-// fallback for "if it can't be computed".
-func (rpcss *RPCSmartRouterServer) graphQLUnclearWriteStatus(ctx context.Context, result *common.RelayResult) *common.RelayResult {
+// extensions.tx_hash is the transaction's digest by the chain's formula, computed from the
+// transaction bytes in the request (MAG-4909, Sui data 3), so the client can look the transaction up.
+// When the request does not let it be computed, tx_hash is left out and the message says how to look
+// the transaction up without it: the ticket's own fallback.
+func (rpcss *RPCSmartRouterServer) graphQLUnclearWriteStatus(ctx context.Context, result *common.RelayResult, protocolMessage chainlib.ProtocolMessage) *common.RelayResult {
 	if result == nil {
 		result = &common.RelayResult{}
 	}
@@ -1727,12 +1784,26 @@ func (rpcss *RPCSmartRouterServer) graphQLUnclearWriteStatus(ctx context.Context
 	// Router-authored, not an upstream's bytes: UpstreamStatus/Body/ContentType is the one channel
 	// the listener forwards verbatim — status included, no masking (chainlib.buildFailedRelayReply)
 	// — so it is reused here to carry this router-written GraphQL document.
+	digest := graphQLWriteDigest(protocolMessage)
 	stamped.ClientFacing = &common.ClientFacingError{
 		UpstreamStatus:      http.StatusOK,
-		UpstreamBody:        chainlib.ConvertToGraphQLWriteOutcomeError(graphQLUnknownWriteMessage, guidStr, graphQLWriteOutcomeUnknown, ""),
+		UpstreamBody:        chainlib.ConvertToGraphQLWriteOutcomeError(graphQLUnknownWriteMessage(digest), guidStr, graphQLWriteOutcomeUnknown, digest),
 		UpstreamContentType: common.JSONContentType,
 	}
 	return &stamped
+}
+
+// graphQLWriteDigest is the digest of the transaction a GraphQL write carries, by its chain's
+// formula, or "" when it cannot be computed.
+func graphQLWriteDigest(protocolMessage chainlib.ProtocolMessage) string {
+	if protocolMessage == nil {
+		return ""
+	}
+	graphQLMessage, ok := protocolMessage.GetRPCMessage().(*rpcInterfaceMessages.GraphQLMessage)
+	if !ok || graphQLMessage == nil {
+		return ""
+	}
+	return graphQLMessage.TransactionDigest()
 }
 
 // wakeWaitCap bounds how long a client relay that ends an idle period (or arrives while the wake
@@ -1862,7 +1933,7 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 		if unclear := unknownWrite(); unclear != nil {
 			var unclearResult *common.RelayResult
 			if isGraphQLWrite(protocolMessage) {
-				unclearResult = rpcss.graphQLUnclearWriteStatus(ctx, nil)
+				unclearResult = rpcss.graphQLUnclearWriteStatus(ctx, nil, protocolMessage)
 			} else {
 				unclearResult = withUnclearWriteStatus(&common.RelayResult{})
 			}
@@ -1975,7 +2046,7 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 		// (MAG-5122): a GraphQL client's retry link re-sends a mutation on a 5xx, which would
 		// double-send the write this subtask exists to protect against.
 		if isGraphQLWrite(protocolMessage) {
-			unclearResult := rpcss.graphQLUnclearWriteStatus(ctx, returnedResult)
+			unclearResult := rpcss.graphQLUnclearWriteStatus(ctx, returnedResult, protocolMessage)
 			rpcss.appendGraphQLWriteOutcomeHeader(unclearResult, protocolMessage, unclear)
 			return unclearResult, unclear
 		}
@@ -6084,9 +6155,19 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	// read is still retried, and the endpoint is still marked unhealthy and scored, through the
 	// IsNodeAtFault arm and the availability gate. result.IsNodeError is true only for a REST
 	// reply here (the JSON-RPC sender returns every 5xx as an error before this point).
+	//
+	// A write copy the chain's write rows read as run is excluded too, whatever its status (MAG-4909
+	// W1, W2): it is the write's answer, and failing it here would turn a transaction that ran into an
+	// unknown outcome.
 	statusCode := result.StatusCode
 	carriesNodeReply := result.IsNodeError && rpcInterfaceMessages.ServerErrorIsNodeReply(statusCode, result.Reply.GetData())
-	if (statusCode >= 500 && statusCode != http.StatusNotImplemented && !carriesNodeReply) || statusCode == 429 {
+	failsByStatus := (statusCode >= 500 && statusCode != http.StatusNotImplemented && !carriesNodeReply) || statusCode == 429
+	if failsByStatus && !result.IsNodeError && result.Reply != nil {
+		if outcome, known := graphQLWriteCopyOutcome(chainMessage, result.Reply.Data, statusCode); known && outcome == rpcInterfaceMessages.GraphQLWriteAccepted {
+			failsByStatus = false
+		}
+	}
+	if failsByStatus {
 		// Classify the status through the registry rather than deciding from the raw code. This
 		// branch is reached when the sender returned (result, nil) with an error status — REST's
 		// shape. The JSON-RPC sender wraps the same status into an HTTPStatusError that reaches the

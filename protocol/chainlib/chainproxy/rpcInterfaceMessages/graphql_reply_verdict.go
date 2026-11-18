@@ -80,6 +80,13 @@ type graphQLReplyError struct {
 	message string
 	code    string
 	hasPath bool
+	// pathHead is the path's first element when it is text: the response key of the root field the
+	// error is on. pathLength counts the path's elements; above 1, the error is below that field.
+	pathHead   string
+	pathLength int
+	// chain is extensions.chain, the causes under the message, as Sui writes an internal error's
+	// (sui-indexer-alt-graphql, error.rs). Entries that are not text are left out.
+	chain []string
 }
 
 // graphQLReply is a decoded GraphQL-over-HTTP response body. data is kept raw so a null data is
@@ -118,17 +125,27 @@ func readGraphQLReplyError(raw json.RawMessage) graphQLReplyError {
 	if err := json.Unmarshal(raw, &entry); err != nil {
 		return graphQLReplyError{message: string(raw)}
 	}
-	read := graphQLReplyError{
-		message: jsonTextOrRaw(entry.Message),
-		hasPath: graphQLPathIsPresent(entry.Path),
-	}
+	read := graphQLReplyError{message: jsonTextOrRaw(entry.Message)}
+	read.pathHead, read.pathLength = readGraphQLPath(entry.Path)
+	read.hasPath = read.pathLength > 0
+	// Each member is read on its own, so a chain that is not a list cannot cost the error its code.
 	var extensions struct {
-		Code json.RawMessage `json:"code"`
+		Code  json.RawMessage `json:"code"`
+		Chain json.RawMessage `json:"chain"`
 	}
 	if err := json.Unmarshal(entry.Extensions, &extensions); err == nil {
 		var code string
 		if err := json.Unmarshal(extensions.Code, &code); err == nil {
 			read.code = code
+		}
+		var causes []json.RawMessage
+		if err := json.Unmarshal(extensions.Chain, &causes); err == nil {
+			for _, rawCause := range causes {
+				var cause string
+				if err := json.Unmarshal(rawCause, &cause); err == nil {
+					read.chain = append(read.chain, cause)
+				}
+			}
 		}
 	}
 	return read
@@ -146,14 +163,16 @@ func jsonTextOrRaw(raw json.RawMessage) string {
 	return string(raw)
 }
 
-// graphQLPathIsPresent reports whether an error names a field: a non-empty path list. An absent
-// path, a null and an empty list all apply the error to the whole reply.
-func graphQLPathIsPresent(raw json.RawMessage) bool {
+// readGraphQLPath reads an error's path: its first element when that is text, and its length. An
+// error names a field only with a non-empty path list; an absent path, a null and an empty list
+// all apply the error to the whole reply (length 0).
+func readGraphQLPath(raw json.RawMessage) (head string, length int) {
 	var path []json.RawMessage
-	if err := json.Unmarshal(raw, &path); err != nil {
-		return false
+	if err := json.Unmarshal(raw, &path); err != nil || len(path) == 0 {
+		return "", 0
 	}
-	return len(path) > 0
+	_ = json.Unmarshal(path[0], &head)
+	return head, len(path)
 }
 
 // graphQLDataIsObject reports whether a response's raw data member holds an object. An absent
@@ -271,7 +290,8 @@ func graphQLKindOfStatus(status int) graphQLVerdictKind {
 //	P3  HTTP 401, 402, 403: the provider refuses us, whatever the body says.
 //	P4  a 2xx that is not a GraphQL response: a provider fault (a gateway answering in the
 //	    node's place).
-//	P5  an errors list, under any status: each error through the rows. An error no row matches
+//	P5  an errors list, under any status: each error through the chain's rows (the request's
+//	    chain list, MAG-4909), then the default rows. An error no row matches
 //	    is throttled when its message is a quota text (graphQLQuotaTexts) under a 2xx or a
 //	    4xx; otherwise unknown under a 2xx, and the status table under any other status.
 //	P6  a 2xx with data and no errors: the answer.
@@ -286,8 +306,9 @@ func graphQLKindOfStatus(status int) graphQLVerdictKind {
 // `{"data":{"checkpoint":null}}` and no errors, for a checkpoint that never existed, one past the
 // tip, an unknown transaction or an unknown object alike (both public operators, 2026-10-18).
 //
-// A status of 0 is "not set" and reads as 2xx.
-func readVerdict(body []byte, httpStatusCode int) (verdict graphQLVerdict, isError bool) {
+// A status of 0 is "not set" and reads as 2xx. request is the read the reply answers; its chain's
+// rows are tried first, and a request with no chain rows (or nil) is read by the default rows alone.
+func readVerdict(body []byte, httpStatusCode int, request *GraphQLMessage) (verdict graphQLVerdict, isError bool) {
 	is2xx := httpStatusCode == 0 || (httpStatusCode >= 200 && httpStatusCode < 300)
 	if !is2xx {
 		switch httpStatusCode {
@@ -316,7 +337,10 @@ func readVerdict(body []byte, httpStatusCode int) (verdict graphQLVerdict, isErr
 	}
 
 	for index, replyError := range reply.errors {
-		errorVerdict, matched := readErrorVerdict(replyError)
+		errorVerdict, matched := request.chainReadError(replyError)
+		if !matched {
+			errorVerdict, matched = readErrorVerdict(replyError)
+		}
 		if !matched {
 			switch {
 			case httpStatusCode < 500 && isGraphQLQuotaText(replyError.message):

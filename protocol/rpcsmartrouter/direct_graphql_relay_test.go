@@ -102,12 +102,13 @@ func TestGraphQLDirectRelay(t *testing.T) {
 			wantCapability: true,
 		},
 		{
-			// A limit on one field, not a vendor quota: no pause.
-			name:           "RESOURCE_EXHAUSTED with a path is unknown, not a rate limit",
-			status:         http.StatusOK,
-			reply:          `{"data":null,"errors":[{"message":"Display output too large","path":["object"],"extensions":{"code":"RESOURCE_EXHAUSTED"}}]}`,
-			wantNodeError:  true,
-			wantCapability: true,
+			// A limit inside the on-chain data, the same on every provider: Sui's R16 (MAG-4909), the
+			// caller's. Not a vendor quota, so no pause.
+			name:            "RESOURCE_EXHAUSTED with a path is the caller's on Sui, not a rate limit",
+			status:          http.StatusOK,
+			reply:           `{"data":null,"errors":[{"message":"Display output too large","path":["object"],"extensions":{"code":"RESOURCE_EXHAUSTED"}}]}`,
+			wantNodeError:   true,
+			wantNonRetrying: true,
 		},
 		{
 			name:          "a server-fault code inside a 200 is the node's",
@@ -132,12 +133,13 @@ func TestGraphQLDirectRelay(t *testing.T) {
 			wantRateLimited: true,
 		},
 		{
-			// Sui answers a query timeout inside an ordinary response: retried, and the endpoint's.
-			name:          "REQUEST_TIMEOUT inside a 200 is the node's",
-			status:        http.StatusOK,
-			reply:         `{"data":null,"errors":[{"message":"Request timed out","extensions":{"code":"REQUEST_TIMEOUT"}}]}`,
-			wantNodeError: true,
-			wantAtFault:   true,
+			// Sui answers a query timeout inside an ordinary response. Its limit is an operator
+			// setting (query_timeout_ms), so it is Sui's R20 (MAG-4909): retried elsewhere, not blamed.
+			name:           "REQUEST_TIMEOUT inside a 200 is this operator's limit on Sui",
+			status:         http.StatusOK,
+			reply:          `{"data":null,"errors":[{"message":"Query timed out after 40.00s","extensions":{"code":"REQUEST_TIMEOUT"}}]}`,
+			wantNodeError:  true,
+			wantCapability: true,
 		},
 		{
 			// This operator lacks the store the query needs: retried elsewhere, not scored.
@@ -148,13 +150,25 @@ func TestGraphQLDirectRelay(t *testing.T) {
 			wantCapability: true,
 		},
 		{
-			// A rejected write must not end the broadcast as a success, and is the caller's.
-			name:            "a rejected mutation is a node error filed as the caller's",
+			// A refused write must not end the broadcast as a success. Sui's W9 (MAG-4909): the
+			// network refused this copy, which is the caller's, not the provider's. The reply is Sui's
+			// own (sui-indexer-alt-e2e-tests, execute_transaction_grpc_error.snap).
+			name:            "a refused mutation is a node error filed as the caller's",
 			request:         mutationBody,
 			status:          http.StatusOK,
-			reply:           `{"data":null,"errors":[{"message":"Invalid user signature"}]}`,
+			reply:           `{"data":null,"errors":[{"message":"Invalid argument: Invalid user signature: Signature is not valid: Fail to verify user sig Invalid signature was given to the function","path":["executeTransaction"],"extensions":{"code":"BAD_USER_INPUT"}}]}`,
 			wantNodeError:   true,
 			wantNonRetrying: true,
+		},
+		{
+			// Sui's W11: a codeless error on a write tells nothing, so the copy may have run. Filed
+			// as unknown: not blamed. A write is never re-sent, whatever the registry says.
+			name:           "a codeless error on a mutation is unknown",
+			request:        mutationBody,
+			status:         http.StatusOK,
+			reply:          `{"data":null,"errors":[{"message":"Invalid user signature"}]}`,
+			wantNodeError:  true,
+			wantCapability: true,
 		},
 		// A 2xx carrying neither data nor errors is not a GraphQL response (MAG-4369): a gateway
 		// answered, not the node. Retried on another provider and blamed on the endpoint, as a 502.

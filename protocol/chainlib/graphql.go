@@ -120,6 +120,7 @@ func (apip *GraphQLChainParser) CraftMessage(parsing *spectypes.ParseDirective, 
 			utils.LogAttr("functionTemplate", parsing.FunctionTemplate),
 		)
 	}
+	graphqlMessage.SetChainFamily(apip.chainFamily())
 	graphqlMessage.BaseMessage = chainproxy.BaseMessage{Headers: metadata}
 
 	parsedInput := parser.NewParsedInput()
@@ -150,6 +151,8 @@ func (apip *GraphQLChainParser) ParseMsg(url string, data []byte, connectionType
 	if err != nil {
 		return nil, err
 	}
+	// The chain's list reads the replies (MAG-4909): what a Sui error means is Sui's to say.
+	graphqlMessage.SetChainFamily(apip.chainFamily())
 
 	internalPath := ""
 	if apip.isValidInternalPath(url) {
