@@ -934,6 +934,8 @@ func TestClassifyError_GRPCRequestTheNodeCannotDecodeIsTheCallers(t *testing.T) 
 		"grpc: error unmarshalling request: unexpected EOF",                                            // grpc-go up to v1.82
 		"grpc: failed to unmarshal the received message: proto: cannot parse invalid wire-format data", // grpc-go from v1.82
 		"GRPC: Failed To Unmarshal The Received Message: string field contains invalid UTF-8",          // matched case-insensitively
+		"failed to decode Protobuf message: buffer underflow",                                          // tonic, a Sui fullnode
+		"failed to decode Protobuf message: invalid wire type value: 7",                                // tonic, a Sui fullnode
 	} {
 		result := ClassifyError(nil, ChainFamilyCosmosSDK, TransportGRPC, 13, message)
 		assert.Equal(t, RouterErrorUserInvalidRequest, result, message)

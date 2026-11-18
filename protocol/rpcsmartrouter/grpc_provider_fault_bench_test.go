@@ -220,3 +220,29 @@ func TestRelayInnerDirect_GRPCRequestTheNodeCannotDecodeLeavesTheEndpointOn(t *t
 	require.False(t, result.IsNodeError)
 	require.True(t, enabled)
 }
+
+// tonic, the gRPC server of Sui and Concordium nodes, answers a request it cannot decode with
+// INTERNAL and prost's decode error. That answer is about the request's bytes too: the caller's, not
+// retried and never counted. The texts are the ones a Sui fullnode sent.
+func TestRelayInnerDirect_GRPCTonicDecodeErrorLeavesTheEndpointOn(t *testing.T) {
+	for _, message := range []string{
+		"failed to decode Protobuf message: buffer underflow",
+		"failed to decode Protobuf message: invalid wire type value: 7",
+	} {
+		t.Run(message, func(t *testing.T) {
+			benchAfter(t, 3)
+			node := startGRPCNode(t, func(grpc.ServerStream) error {
+				return status.Error(codes.Internal, message)
+			})
+			h := newGRPCBenchHarness(t, node)
+			for i := 0; i < 5; i++ {
+				result, refusals, enabled := h.relayRequest(t, "sui.rpc.v2.LedgerService/GetServiceInfo", []byte{0x0a, 0x05, 0x61})
+				require.Equal(t, int(codes.Internal), result.StatusCode, "relay #%d", i)
+				require.True(t, result.IsNonRetryable, "relay #%d: every provider refuses the same bytes", i)
+				require.False(t, result.IsNodeAtFault, "relay #%d", i)
+				require.Zero(t, refusals, "relay #%d", i)
+				require.True(t, enabled, "relay #%d", i)
+			}
+		})
+	}
+}
