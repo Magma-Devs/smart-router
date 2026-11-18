@@ -887,6 +887,35 @@ func TestEpochTransition_AReportedProviderThatPassesItsProbeIsReleased(t *testin
 		"the gate is a routability check, not a quarantine: a provider that can serve must come back")
 }
 
+// A release pass belongs to the pairing update that started it. A later update carries its own set
+// over and starts its own pass, so an earlier pass, still running or not yet started, must neither
+// act on that set nor clear it. It used to clear it, which left the later pass nothing to release:
+// a reported provider that passes its probe stayed blocked, and
+// TestEpochTransition_AReportedProviderThatPassesItsProbeIsReleased failed now and then (MAG-4919).
+func TestEpochTransition_AnEarlierPassLeavesALaterUpdatesSetAlone(t *testing.T) {
+	const address = "provider-healthy"
+	csm := CreateConsumerSessionManager()
+	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, epochPairing(t, address, true), nil))
+	require.NoError(t, csm.blockProvider(context.Background(), address, BlockReasonAllEndpointsDisabled,
+		true, csm.atomicReadCurrentEpoch(), MaxConsecutiveConnectionAttempts, 0, nil))
+
+	// A later update in the same epoch, as the failed-provider readmit pushes one, with the set it
+	// carried over. Written by hand so that no pass of its own runs while the test reads the set.
+	csm.lock.Lock()
+	earlier := csm.pairingGeneration
+	csm.pairingGeneration++
+	csm.previousEpochBlockedProviders = map[string]BlockRecord{address: csm.blockedProviderRecords[address]}
+	csm.lock.Unlock()
+
+	csm.checkAndUnblockHealthyReBlockedProviders(context.Background(), firstEpochHeight, earlier)
+
+	csm.lock.RLock()
+	_, carried := csm.previousEpochBlockedProviders[address]
+	csm.lock.RUnlock()
+	require.True(t, carried, "the later update's own pass still has to read its set")
+	require.False(t, isValidAddress(csm, address), "the earlier pass does not act on the later update's set")
+}
+
 // An unknown record must not be read as "never reported". That field decides whether a provider has
 // to prove itself, and its zero value would hand a free pass to exactly the case where we have lost
 // track of why the provider is out.
