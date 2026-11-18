@@ -413,13 +413,7 @@ func (rpsr *RPCSmartRouter) Start(ctx context.Context, options *rpcSmartRouterSt
 	// Start optional debug HTTP server for integration tests.
 	// Only starts when --debug-address flag is provided. Off by default.
 	if options.cmdFlags.DebugAddress != "" {
-		// Debug-mode-only: enable the in-memory ring-buffer log sink so the
-		// /debug/logs endpoint can serve recent logs to the test harness.
-		utils.EnableDebugLogBuffer(50000)
-		// Debug-mode-only, same reasoning: start recording cross-validation dissent so
-		// /debug/cross-validation-events can serve it (MAG-2772). Until this call the recorder is a
-		// nil check on the relay path, so a production router stores nothing.
-		enableCrossValidationEventRing(crossValidationEventRingCapacity)
+		enableDebugRecorders()
 		var currentOffsetNano atomic.Int64
 		debugMux := buildDebugMux(debugMuxDeps{
 			optimizers: optimizers,
@@ -1214,6 +1208,20 @@ func sharedStickyReason(wired, requested bool) string {
 	}
 }
 
+// enableDebugRecorders installs what the debug server reads and a router without --debug-address
+// never keeps. Start calls it with the debug server. TestEnableDebugRecorders_InstallsTheRelayEndStore
+// pins what it installs; that Start calls it is exercised only where a router boots with
+// --debug-address (k3d), since no unit test runs Start.
+//   - The in-memory ring-buffer log sink, so /debug/logs can serve recent logs to the test harness.
+//   - Cross-validation dissent, so /debug/cross-validation-events can serve it (MAG-2772). Until this
+//     call the recorder is a nil check on the relay path, so a production router stores nothing.
+//   - Each relay's relay_end, for /debug/relay-end (MAG-4899), on the same terms.
+func enableDebugRecorders() {
+	utils.EnableDebugLogBuffer(debugLogBufferCapacity)
+	enableCrossValidationEventRing(crossValidationEventRingCapacity)
+	enableRelayEndStore(debugLogBufferCapacity, relayEndStoreByteBudget)
+}
+
 // buildDebugMux builds every /debug/* route the --debug-address server serves. Each
 // route is documented on its handler.
 func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
@@ -1543,7 +1551,7 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 	// GET /debug/logs — return recent in-memory log records, optionally scoped
 	// by request_id and/or a [from,to] time window, so an external test harness
 	// can attach the router's logs to failing tests. The ring buffer is enabled
-	// only in debug mode (see EnableDebugLogBuffer in Start); when it was never
+	// only in debug mode (see enableDebugRecorders); when it was never
 	// enabled this returns an empty set. Each line is an already-valid JSON
 	// object (zerolog JSON record); we assemble the array by joining the raw
 	// bytes with commas rather than re-marshalling.
@@ -1564,16 +1572,14 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 			}
 		}
 
-		// limit defaults to 5000, capped at the ring capacity (50000).
+		// limit defaults to 5000, capped at the ring capacity.
 		limit := 5000
 		if v := q.Get("limit"); v != "" {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 {
 				limit = n
 			}
 		}
-		if limit > 50000 {
-			limit = 50000
-		}
+		limit = min(limit, debugLogBufferCapacity)
 
 		lines := utils.ReadDebugLogBuffer(requestID, from, to, limit)
 
@@ -1594,6 +1600,37 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 	mux.HandleFunc("/debug/logs/clear", debugMethod(http.MethodPost, func(w http.ResponseWriter, r *http.Request) {
 		utils.ClearDebugLogBuffer()
 		writeDebugJSONf(w, `{"cleared":true}`)
+	}))
+
+	// GET /debug/relay-end?guid=<Lava-Guid> — the relay_end event of one request (MAG-4899), the object
+	// its log line carries (docs/RELAY-END-EVENT.md), so a test asserts on the router's record of the
+	// request it sent rather than searching the log. guid is the decimal Lava-Guid of the reply.
+	// X-Relay-End-Records says how many events were written with that GUID: 1 for every relay, a
+	// retried one included, so a higher count is the router breaking that contract, and the body is
+	// then the last of them. The store keeps the newest GUIDs, up to debugLogBufferCapacity of them and
+	// relayEndStoreByteBudget bytes of records.
+	//   200  the record
+	//   400  no guid
+	//   404  a GUID the store does not hold: never written, or dropped as older than the rest
+	//   503  the store is not installed, which a router serving this mux never is
+	mux.HandleFunc("/debug/relay-end", debugMethod(http.MethodGet, func(w http.ResponseWriter, r *http.Request) {
+		guid := r.URL.Query().Get("guid")
+		if guid == "" {
+			http.Error(w, "guid is required: the Lava-Guid of a reply", http.StatusBadRequest)
+			return
+		}
+		line, writes, enabled := readRelayEnd(guid)
+		if !enabled {
+			http.Error(w, "relay_end records are not kept on this router", http.StatusServiceUnavailable)
+			return
+		}
+		if writes == 0 {
+			http.Error(w, "no relay_end record for guid "+guid, http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Relay-End-Records", strconv.Itoa(writes))
+		_, _ = w.Write(line)
 	}))
 
 	// GET /debug/endpoint-state — per-endpoint poll-health + enable/recovery state (MAG-2202 endpoint 1).
