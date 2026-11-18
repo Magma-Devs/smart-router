@@ -240,7 +240,9 @@ on regardless of `--log-level` — see
     for the next block.
 - **Cost & latency.** N relays per request. Scope policies to the methods that warrant it.
 - **A group smaller than the agreement threshold is an availability risk.** Cross-validation
-  does not retry, hedge or use backups. With `min-groups: 2` and a group of one provider,
+  does not retry or hedge, and a backup joins a request only when it is selected (see
+  `max-participants: all` above): none stands in for a provider that goes quiet. With
+  `min-groups: 2` and a group of one provider,
   that provider going quiet can leave the quorum only group diversity short. When the
   attempt window expires with the agreement count met, and only providers from groups
   smaller than the threshold could still complete a quorum, the request fails
