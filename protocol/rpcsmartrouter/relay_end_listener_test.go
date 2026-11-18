@@ -146,6 +146,8 @@ func TestRelayEnd_GRPCListener(t *testing.T) {
 				require.Equal(t, codes.InvalidArgument, status.Code(err), "%v", err)
 				require.Equal(t, routersession.SelectedProviderNotConfiguredError.Error(), status.Convert(err).Message())
 				require.NotEmpty(t, trailer.Get(common.GUID_HEADER_NAME), "the refusal carries the request id")
+				// The refusal is this request's reply, so it carries the request's headers (MAG-5076).
+				require.Equal(t, []string{relayEndGRPCMethod}, trailer.Get(common.USER_REQUEST_TYPE), "trailer=%v", trailer)
 			}
 
 			events := newRelayEndsSince(read, seen)
