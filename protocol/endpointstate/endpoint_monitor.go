@@ -494,19 +494,12 @@ func (m *EndpointMonitor) GetOrCreateTracker(
 		)
 		return nil, nil
 	}
-	if untracked {
-		// The url was held as not tracked for an endpoint that serves only add-on collections,
-		// and this endpoint can read the head on the same url: two providers list one url, one
-		// of them as a base url. The decision is per url, so it follows the endpoint that has a
-		// head; otherwise the base provider would lose its block height to the other's opt-out.
-		delete(m.untracked, endpointURL)
-		delete(m.trackerStates, endpointURL)
-		utils.FormatInfo("creating ChainTracker for a url that was held as not tracked: another provider on the same url serves a collection with a head",
-			utils.LogAttr("endpoint", endpointURL),
-			utils.LogAttr("chainID", m.chainID),
-			utils.LogAttr("apiInterface", m.apiInterface),
-		)
-	}
+	// untracked here means: the url was held as not tracked for an endpoint that serves only
+	// add-on collections, and this endpoint can read the head on the same url (two providers
+	// list one url, one of them as a base url). The decision is per url, so it follows the
+	// endpoint that has a head; otherwise the base provider would lose its block height to the
+	// other's opt-out. The "not tracked" entry is dropped below, once the tracker is stored: if
+	// creating it fails, the url must keep the decision it has rather than be left with neither.
 
 	// Create the chain fetcher
 	fetcher := NewEndpointPoller(
@@ -663,6 +656,14 @@ func (m *EndpointMonitor) GetOrCreateTracker(
 	m.cancelFuncs[endpointURL] = trackerCancel
 	m.trackerStates[endpointURL] = EndpointChainTrackerNoBlockYet
 	delete(m.trackerLastErrors, endpointURL)
+	if untracked {
+		delete(m.untracked, endpointURL)
+		utils.FormatInfo("created ChainTracker for a url that was held as not tracked: another provider on the same url serves a collection with a head",
+			utils.LogAttr("endpoint", endpointURL),
+			utils.LogAttr("chainID", m.chainID),
+			utils.LogAttr("apiInterface", m.apiInterface),
+		)
+	}
 
 	// Start the tracker after registration. If startup probing fails, keep retrying
 	// until the endpoint recovers or this tracker is removed/stopped.

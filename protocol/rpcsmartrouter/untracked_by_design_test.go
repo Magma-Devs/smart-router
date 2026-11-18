@@ -130,8 +130,7 @@ func TestReconcileChainTrackers_UntrackedByDesignURLIsSettledOnce(t *testing.T) 
 	require.True(t, f.monitor.IsUntrackedByDesign(url))
 
 	fingerprint := metrics.URLFingerprint(url)
-	require.Equal(t, map[string]float64{fingerprint: 0}, gatherSeries(t, "rpc_endpoint_url_block_tracking", provider),
-		"the per-url series says the url is not tracked by design")
+	requireTrackingFlag(t, provider, url, 0, "the per-url series says the url is not tracked by design")
 
 	// A relay it served is counted on its url series and stays counted. The check that undoes
 	// a write for a REMOVED url must not take this url for one: it has no tracker either.
@@ -141,7 +140,7 @@ func TestReconcileChainTrackers_UntrackedByDesignURLIsSettledOnce(t *testing.T) 
 	f.server.countURLRelayServiced(provider, url)
 	f.server.countURLRelayServiced(provider, url)
 	require.Equal(t, map[string]float64{fingerprint: servedBefore + 2}, gatherSeries(t, "rpc_endpoint_url_relays_serviced_total", provider))
-	require.Equal(t, map[string]float64{fingerprint: 0}, gatherSeries(t, "rpc_endpoint_url_block_tracking", provider))
+	requireTrackingFlag(t, provider, url, 0, "counting a relay leaves the flag as it was")
 
 	// The relay path asks for the url's tracker on every relay: still none, still settled.
 	for _, e := range f.csm.GetAllDirectRPCEndpoints() {
@@ -166,7 +165,7 @@ func TestReconcileChainTrackers_TrackedURLReadsTracked(t *testing.T) {
 	created, _, failed := f.server.reconcileChainTrackers(ctx, true)
 	require.Equal(t, 1, created)
 	require.Zero(t, failed)
-	require.Equal(t, map[string]float64{metrics.URLFingerprint(url): 1}, gatherSeries(t, "rpc_endpoint_url_block_tracking", "provider-0"))
+	requireTrackingFlag(t, "provider-0", url, 1, "a tracked url reads 1")
 }
 
 // Two providers list one url: "addon-provider" as a standalone `bundler` url with no head,
@@ -216,10 +215,8 @@ func TestReconcileChainTrackers_URLSharedWithABaseProviderIsTracked(t *testing.T
 	require.True(t, f.hasTracker(url), "the base provider's endpoint gives the url its tracker")
 	require.False(t, f.monitor.IsUntrackedByDesign(url))
 
-	fingerprint := metrics.URLFingerprint(url)
 	for _, provider := range []string{"addon-provider", "base-provider"} {
-		require.Equal(t, map[string]float64{fingerprint: 1}, gatherSeries(t, "rpc_endpoint_url_block_tracking", provider),
-			"%s: the url reads as tracked", provider)
+		requireTrackingFlag(t, provider, url, 1, provider+": the url reads as tracked")
 	}
 
 	// Settled: a later pass creates nothing and the relay path changes nothing.
@@ -230,4 +227,139 @@ func TestReconcileChainTrackers_URLSharedWithABaseProviderIsTracked(t *testing.T
 		f.server.ensureEndpointChainTracker(e.ProviderAddress, e.Endpoint, e.DirectConnection)
 	}
 	require.True(t, f.hasTracker(url))
+}
+
+// The probe cycle itself, not its helpers: a provider whose only url is not tracked by design
+// must get no probe sample. Scored, it would be fed availability 0 on every cycle.
+func TestRunProbeCycle_LeavesOutAnUntrackedByDesignURL(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f := newReconcileFixture(t, ctx)
+
+	const url = "http://127.0.0.1:1/mag5349-probe-cycle"
+	f.admitStandaloneBundler(t, ctx, url)
+	f.server.reconcileChainTrackers(ctx, true)
+	require.True(t, f.monitor.IsUntrackedByDesign(url))
+
+	appender := &recordingAppender{}
+	f.server.runProbeCycle(appender, probeCfg())
+	require.Empty(t, appender.calls, "a url with no block polls by design is not judged by them")
+
+	// The same cycle does judge a url that should have polls and has none: the rule is narrow.
+	const tracked = "http://127.0.0.1:1/mag5349-probe-cycle-tracked"
+	f.admit(t, ctx, tracked)
+	f.server.reconcileChainTrackers(ctx, false)
+	appender = &recordingAppender{}
+	f.server.runProbeCycle(appender, probeCfg())
+	require.Len(t, appender.calls, 1)
+	require.Equal(t, "provider-0", appender.calls[0].provider)
+	require.Zero(t, appender.calls[0].availability)
+}
+
+// The relay path can be the first to meet a url (a relay routed before the reconcile pass). It
+// makes the decision, so it writes the flag: without it the dashboard reads the url as unknown
+// until the next pass.
+func TestEnsureEndpointChainTracker_WritesTheTrackingFlag(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f := newReconcileFixture(t, ctx)
+	mm := metrics.NewSmartRouterMetricsManager(metrics.SmartRouterMetricsManagerOptions{})
+	require.NotNil(t, mm)
+	f.server.smartRouterEndpointMetrics = mm
+
+	relayPath := func() {
+		for _, e := range f.csm.GetAllDirectRPCEndpoints() {
+			f.server.ensureEndpointChainTracker(e.ProviderAddress, e.Endpoint, e.DirectConnection)
+		}
+	}
+
+	const headless = "http://127.0.0.1:1/mag5349-relay-path-headless"
+	mm.RegisterEndpoint("ETH1", "jsonrpc", headless, "bundler-provider")
+	f.admitStandaloneBundler(t, ctx, headless)
+	relayPath()
+	requireTrackingFlag(t, "bundler-provider", headless, 0, "the relay path decided the url is not tracked")
+
+	const tracked = "http://127.0.0.1:1/mag5349-relay-path-tracked"
+	mm.RegisterEndpoint("ETH1", "jsonrpc", tracked, "provider-0")
+	f.admit(t, ctx, tracked)
+	relayPath()
+	require.True(t, f.hasTracker(tracked))
+	requireTrackingFlag(t, "provider-0", tracked, 1, "the relay path gave the url its tracker")
+}
+
+// A url's series are deleted when it leaves the pairing. Whatever brings it back must write the
+// flag again, or the url has no series until the pod restarts: the reconcile pass writes it for
+// every url on every pass, and /debug/reset-chaintracker-rows writes it for the rows it restores.
+func TestBlockTrackingFlag_IsWrittenAgainAfterItsSeriesWereDeleted(t *testing.T) {
+	for _, headless := range []bool{true, false} {
+		name, provider, want := "tracked url", "provider-0", 1.0
+		if headless {
+			name, provider, want = "url not tracked by design", "bundler-provider", 0.0
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			f := newReconcileFixture(t, ctx)
+			mm := metrics.NewSmartRouterMetricsManager(metrics.SmartRouterMetricsManagerOptions{})
+			require.NotNil(t, mm)
+			f.server.smartRouterEndpointMetrics = mm
+
+			url := "http://127.0.0.1:1/mag5349-rewrite-" + provider
+			mm.RegisterEndpoint("ETH1", "jsonrpc", url, provider)
+			if headless {
+				f.admitStandaloneBundler(t, ctx, url)
+			} else {
+				f.admit(t, ctx, url)
+			}
+			router := &RPCSmartRouter{
+				rpcServers:      map[string]*RPCSmartRouterServer{"ETH1-jsonrpc": f.server},
+				sessionManagers: map[string]*routersession.ConsumerSessionManager{"ETH1-jsonrpc": f.csm},
+			}
+
+			f.server.reconcileChainTrackers(ctx, true)
+			requireTrackingFlag(t, provider, url, want, "first pass")
+
+			// The series is lost while the url keeps its row: the next pass writes it again.
+			mm.ForgetEndpointURLLatestBlock("ETH1", "jsonrpc", url)
+			requireNoTrackingFlag(t, provider, url)
+			f.server.reconcileChainTrackers(ctx, false)
+			requireTrackingFlag(t, provider, url, want, "the reconcile pass writes the flag for a url it has nothing else to do for")
+
+			// The epoch cleanup drops the row and the series; the reset brings the row back
+			// before any reconcile pass runs.
+			f.monitor.RemoveTracker(url)
+			mm.ForgetEndpointURLLatestBlock("ETH1", "jsonrpc", url)
+			requireNoTrackingFlag(t, provider, url)
+			ensured, created := reregisterChainTrackerRowsLocked(router)
+			require.Equal(t, 1, ensured)
+			requireTrackingFlag(t, provider, url, want, "the reset writes the flag for the row it restored")
+			if headless {
+				require.Zero(t, created, "a url with no tracker by design has no row to create")
+				require.True(t, f.monitor.IsUntrackedByDesign(url))
+			} else {
+				require.Equal(t, 1, created)
+			}
+		})
+	}
+}
+
+// trackingFlag reads one url's rpc_endpoint_url_block_tracking series. The registry is shared by
+// the whole test process and the fixtures reuse provider names, so a test asks for its own url.
+func trackingFlag(t *testing.T, provider, url string) (value float64, written bool) {
+	t.Helper()
+	value, written = gatherSeries(t, "rpc_endpoint_url_block_tracking", provider)[metrics.URLFingerprint(url)]
+	return value, written
+}
+
+func requireTrackingFlag(t *testing.T, provider, url string, want float64, msg string) {
+	t.Helper()
+	got, written := trackingFlag(t, provider, url)
+	require.True(t, written, "no series for the url: %s", msg)
+	require.Equal(t, want, got, msg)
+}
+
+func requireNoTrackingFlag(t *testing.T, provider, url string) {
+	t.Helper()
+	_, written := trackingFlag(t, provider, url)
+	require.False(t, written, "precondition: the url's series is gone")
 }

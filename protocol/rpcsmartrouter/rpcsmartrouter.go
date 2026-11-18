@@ -686,14 +686,19 @@ func reregisterChainTrackerRowsLocked(router *RPCSmartRouter) (ensured, created 
 				continue
 			}
 			ensured++
-			if _, err := server.endpointChainTrackerManager.GetOrCreateTracker(ep.ProviderAddress, ep.Endpoint, ep.DirectConnection); err != nil {
+			tracker, err := server.endpointChainTrackerManager.GetOrCreateTracker(ep.ProviderAddress, ep.Endpoint, ep.DirectConnection)
+			if err != nil {
 				utils.FormatWarning("reset-chaintracker-rows: failed to re-register endpoint", err,
 					utils.LogAttr("endpoint", ep.Endpoint.NetworkAddress),
 					utils.LogAttr("chainKey", chainKey),
 				)
 				continue
 			}
-			if !existing[ep.Endpoint.NetworkAddress] {
+			// The url's series were deleted with its row; the tracking flag is written here, as
+			// on the other two paths that bring a url back (MAG-5349).
+			server.publishBlockTracking(ep.Endpoint.NetworkAddress)
+			// A url held as not tracked by design has no row to create: it is not counted.
+			if tracker != nil && !existing[ep.Endpoint.NetworkAddress] {
 				created++
 				existing[ep.Endpoint.NetworkAddress] = true
 			}

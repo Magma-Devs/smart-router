@@ -269,3 +269,38 @@ func TestUntrackedByDesign_SharedURL_TwoHeadlessEndpointsStayUntracked(t *testin
 	require.True(t, m.IsSettledUntracked(debug))
 	require.Equal(t, int32(2), parser.lookups.Load(), "one lookup per endpoint shape, not per call")
 }
+
+// A url held as not tracked keeps that decision when the tracker a base endpoint asks for
+// cannot be created: left with neither, the next headless endpoint would be decided and logged
+// again, and a relay counted in between would read the url as removed.
+func TestUntrackedByDesign_SharedURL_KeepsTheDecisionWhenTheTrackerCannotBeCreated(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	parser := &headLookupCountingParser{ChainParser: newRealChainParser(t, "ETH1", spectypes.APIInterfaceJsonRPC)}
+	m := newETHMonitor(t, ctx, parser, "ETH1")
+	// The monitor never builds a config the ChainTracker refuses, so the test reaches in for
+	// one: with no blocks to save, every creation fails.
+	m.blocksToSave = 0
+
+	const url = "http://shared-node:8545"
+	conn := &mockDirectRPCConnection{url: url}
+	standalone := bundlerEndpoint(url, true)
+	_, err := m.GetOrCreateTracker("addon-provider", standalone, conn)
+	require.NoError(t, err)
+	require.True(t, m.IsUntrackedByDesign(url))
+
+	tracker, err := m.GetOrCreateTracker("base-provider", &routersession.Endpoint{NetworkAddress: url, Enabled: true}, conn)
+	require.Error(t, err, "precondition: the tracker cannot be created")
+	require.Nil(t, tracker)
+
+	require.True(t, m.IsUntrackedByDesign(url), "the url keeps the decision it had")
+	require.True(t, m.IsSettledUntracked(standalone))
+	state, _, _ := m.GetTrackerState(url)
+	require.Equal(t, EndpointChainTrackerNotTrackedByDesign, state)
+	_, hasGeneration := m.ObservationGeneration(url)
+	require.False(t, hasGeneration)
+	lookups := parser.lookups.Load()
+	_, err = m.GetOrCreateTracker("addon-provider", standalone, conn)
+	require.NoError(t, err)
+	require.Equal(t, lookups, parser.lookups.Load(), "the headless endpoint is not decided, or logged, again")
+}
