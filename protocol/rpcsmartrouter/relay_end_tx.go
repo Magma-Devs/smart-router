@@ -100,7 +100,7 @@ func (e *relayEnd) readTransaction(protocolMessage chainlib.ProtocolMessage, rep
 		}
 	case spectypes.APIInterfaceGrpc:
 		// Each submit has a method of its own, so the name says it is one. Sui's ExecuteTransaction
-		// is not read yet: it ships with Sui's write rows (MAG-5128).
+		// is not read yet: it ships with Sui's write rows (MAG-5186).
 		switch strings.TrimPrefix(api.Name, "/") {
 		case cosmosGRPCBroadcastMethod:
 			tx, found := cosmosGRPCBroadcast(reply)
