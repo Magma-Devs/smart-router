@@ -42,7 +42,7 @@ func classifyDirectRPCError(err error, chainFamily common.ChainFamily, transport
 // a body that would end the relay where its status alone would not. Such an attempt keeps its
 // status's verdict, so the relay still fails over to the next provider, which may answer: a node's
 // own limit or index, a parse error or an invalid request from a node, a code whose meaning the
-// chain rows have not settled (review of #613, 613-1).
+// chain rows have not settled, a verdict read from the message text alone (review of #613, 613-1).
 //
 // The exception is the caller's own malformed request (callersMistake) inside a status the node
 // itself answered with: every provider answers it the same, so the relay ends and the client gets
@@ -65,16 +65,19 @@ func retryVerdict(err error, classified *common.RouterError, chainFamily common.
 	return statusOnly
 }
 
-// callersMistake holds the body verdicts that are the caller's own malformed request: a parameter,
-// a block number, an address or hex that no provider can accept. Inside a node's 5xx they end the
-// relay. USER_PARSE_ERROR and USER_INVALID_REQUEST are left out on purpose: from a node they are not
+// callersMistake holds the body verdicts that are the caller's own malformed request, which no
+// provider can accept. Inside a node's 5xx they end the relay. USER_INVALID_PARAMS is the one: the
+// JSON-RPC table gives it by code (-32602) and by chain rows, and the rulebook makes -32602 the
+// caller's (Part IV, 3.2).
+//
+// USER_INVALID_BLOCK_FORMAT, USER_INVALID_ADDRESS and USER_INVALID_HEX are left out: the JSON-RPC
+// table gives them by message text alone, mostly under -32000, and wording decides only through a
+// chain row. Under a non-2xx status, -32000 with no chain row is decided by the status (Part IV,
+// 3.2 and 3.3). USER_PARSE_ERROR and USER_INVALID_REQUEST are left out too: from a node they are not
 // the caller's mistake, since the router sent the node a well-formed request (row 13). So is
 // USER_REQUEST_TOO_LARGE, which is a node's own size limit that another provider may not share.
 var callersMistake = map[*common.RouterError]bool{
-	common.RouterErrorUserInvalidParams:      true,
-	common.RouterErrorUserInvalidBlockFormat: true,
-	common.RouterErrorUserInvalidAddress:     true,
-	common.RouterErrorUserInvalidHex:         true,
+	common.RouterErrorUserInvalidParams: true,
 }
 
 // endsRelay reports whether an attempt failing with err under verdict stops the relay: the

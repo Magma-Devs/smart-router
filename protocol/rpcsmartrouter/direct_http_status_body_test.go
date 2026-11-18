@@ -86,9 +86,7 @@ func TestClassifyDirectRPCError_A5xxAroundTheCallersMistakeEndsTheRelay(t *testi
 		want   *common.RouterError
 	}{
 		{"invalid params", common.ChainFamilyUnknown, 503, `{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"invalid argument 0: hex string has length 3"}}`, common.RouterErrorUserInvalidParams},
-		{"invalid block number", common.ChainFamilyEVM, 500, `{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"invalid block number"}}`, common.RouterErrorUserInvalidBlockFormat},
-		{"invalid address", common.ChainFamilyEVM, 500, `{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"invalid address"}}`, common.RouterErrorUserInvalidAddress},
-		{"invalid hex", common.ChainFamilyEVM, 500, `{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"hex string has odd length"}}`, common.RouterErrorUserInvalidHex},
+		{"invalid params whose text names an address", common.ChainFamilyEVM, 500, `{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"invalid address"}}`, common.RouterErrorUserInvalidParams},
 		{"bitcoind invalid params", common.ChainFamilyBitcoin, 500, `{"result":null,"error":{"code":-32602,"message":"Invalid params"},"id":7}`, common.RouterErrorUserInvalidParams},
 	}
 	for _, tc := range cases {
@@ -109,9 +107,10 @@ func TestClassifyDirectRPCError_A5xxAroundTheCallersMistakeEndsTheRelay(t *testi
 }
 
 // Every other body verdict that would end the relay keeps the status's verdict inside a 5xx, so the
-// relay still fails over, as before the body was read: another provider may answer, or the chain
-// rows have not settled what the code means. Writes never fail over anyway. The body still decides
-// the endpoint's health.
+// relay still fails over, as before the body was read: another provider may answer, the chain rows
+// have not settled what the code means, or only the message text names the caller's mistake (under
+// a non-2xx, -32000 with no chain row is decided by the status, rulebook Part IV 3.2). Writes never
+// fail over anyway. The body still decides the endpoint's health.
 func TestClassifyDirectRPCError_A5xxWithAnErrorAnotherProviderMayAnswerStillFailsOver(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -128,6 +127,9 @@ func TestClassifyDirectRPCError_A5xxWithAnErrorAnotherProviderMayAnswerStillFail
 		{"EIP-1474 transaction rejected", common.ChainFamilyEVM, 503, `{"jsonrpc":"2.0","id":1,"error":{"code":-32003,"message":"transaction rejected"}}`},
 		{"execution reverted", common.ChainFamilyEVM, 503, `{"jsonrpc":"2.0","id":1,"error":{"code":3,"message":"execution reverted"}}`},
 		{"nonce too low", common.ChainFamilyEVM, 503, `{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"nonce too low"}}`},
+		{"invalid block number by text alone", common.ChainFamilyEVM, 500, `{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"invalid block number"}}`},
+		{"invalid address by text alone", common.ChainFamilyEVM, 500, `{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"invalid address"}}`},
+		{"invalid hex by text alone", common.ChainFamilyEVM, 500, `{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"hex string has odd length"}}`},
 		{"bitcoind transaction rejected", common.ChainFamilyBitcoin, 500, `{"result":null,"error":{"code":-26,"message":"mandatory-script-verify-flag-failed"},"id":7}`},
 	}
 	for _, tc := range cases {
