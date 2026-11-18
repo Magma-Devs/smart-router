@@ -223,6 +223,14 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 
 		// --- Message-based matchers (for -32000 catch-all and codeless errors) ---
 
+		// A revert first. Its message carries the contract's own reason string ("execution reverted:
+		// <reason>"), and that reason can say anything: "rate limit exceeded", "method not found",
+		// "node is syncing". Read by any row below, the contract's words became the node's verdict:
+		// a revert whose reason mentioned a rate limit was filed as the provider rate-limiting us,
+		// so a healthy provider was held off and the request retried elsewhere (MAG-5385). The code
+		// rows above still decide first: a node that answers with one of those codes said so itself.
+		{MessageContains("execution reverted"), RouterErrorChainExecutionReverted},
+
 		// Unsupported methods (message-based fallback for nodes that use -32000).
 		// Matchers here must be tightly scoped: NodeMethodNotFound is a node
 		// refusal, retried on another provider and kept off the endpoint's score
@@ -335,8 +343,7 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 		{MessageContains("invalid signature"), RouterErrorChainInvalidSignature},
 		{MessageContains("signature verification failed"), RouterErrorChainInvalidSignature},
 
-		// Chain execution errors
-		{MessageContains("execution reverted"), RouterErrorChainExecutionReverted},
+		// Chain execution errors ("execution reverted" is read first, above the other message rows)
 		{MessageContains("out of gas"), RouterErrorChainOutOfGas},
 		{MessageContains("stack limit reached"), RouterErrorChainStackOverflow},
 		{MessageContains("invalid opcode"), RouterErrorChainInvalidOpcode},
