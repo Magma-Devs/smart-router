@@ -61,12 +61,17 @@ func TestSuiGraphQLReadRows(t *testing.T) {
 		{"R5 a checkpoint in the future (checkpoints/query.snap)", read, 200, `{"data":{"checkpoint":null},"errors":[{"message":"Checkpoint 4 in the future","path":["checkpoint"],"extensions":{"code":"BAD_USER_INPUT"}}]}`, effectElsewhere},
 		{"R5 outside the consistent range", read, 200, `{"data":null,"errors":[{"message":"Request is outside consistent range","path":["object"],"extensions":{"code":"BAD_USER_INPUT"}}]}`, effectElsewhere},
 		{"R5 a page larger than this provider's max", read, 200, `{"data":null,"errors":[{"message":"Page size of 100 exceeds max of 50 for connection","path":["checkpoints"],"extensions":{"code":"BAD_USER_INPUT"}}]}`, effectElsewhere},
+		// Omer's ruling (17 Nov, point 3): Checkpoint.query's internal error with no number is R5, not R19.
+		{"R5 a checkpoint in the future with no number, an internal error (checkpoint/mod.rs)", read, 200, `{"data":{"checkpoint":{"query":null}},"errors":[{"message":"Checkpoint in the future","path":["checkpoint","query"],"extensions":{"code":"INTERNAL_SERVER_ERROR"}}]}`, effectElsewhere},
 		// R6 over R7: the full node has not applied the client's last transaction.
 		{"R6 simulate names an object not applied yet (v1.82 and later)", simulate, 200, `{"data":null,"errors":[{"message":"Invalid argument: Error checking transaction input objects: Could not find the referenced object 0x5 at version None","path":["simulateTransaction"],"extensions":{"code":"BAD_USER_INPUT"}}]}`, effectElsewhere},
 		{"R6 simulate names an object not applied yet (v1.71, in the chain)", simulate, 200, `{"data":null,"errors":[{"message":"Failed to simulate transaction","path":["simulateTransaction"],"extensions":{"code":"INTERNAL_SERVER_ERROR","chain":["code: 'Internal error', message: \"Error checking transaction input objects: Could not find the referenced object 0x5 at version None\""]}}]}`, effectElsewhere},
+		// Omer's ruling (17 Nov, point 4): an input the full node cannot find is R6 on a simulate.
+		{"R6 simulate names an input the full node cannot find", simulate, 200, `{"data":null,"errors":[{"message":"Invalid argument: Object 0x5 not found","path":["simulateTransaction"],"extensions":{"code":"BAD_USER_INPUT"}}]}`, effectElsewhere},
+		{"R6 simulate names an input version the full node cannot find", simulate, 200, `{"data":null,"errors":[{"message":"Invalid argument: Object 0x5 with version 7 not found","path":["simulateTransaction"],"extensions":{"code":"BAD_USER_INPUT"}}]}`, effectElsewhere},
 		{"R6 only on simulateTransaction: the same text on a read is R7", read, 200, `{"data":null,"errors":[{"message":"Could not find the referenced object 0x5","path":["checkpoint"],"extensions":{"code":"BAD_USER_INPUT"}}]}`, effectCaller},
 		// R7: the caller's mistake.
-		{"R7 any other bad input", read, 200, `{"data":null,"errors":[{"message":"Invalid argument: Object 0x5 not found","path":["simulateTransaction"],"extensions":{"code":"BAD_USER_INPUT"}}]}`, effectCaller},
+		{"R7 an object not found on a request that selects no simulate", read, 200, `{"data":null,"errors":[{"message":"Invalid argument: Object 0x5 not found","path":["simulateTransaction"],"extensions":{"code":"BAD_USER_INPUT"}}]}`, effectCaller},
 		{"R7 a bad simulate is the caller's", simulate, 200, `{"data":null,"errors":[{"message":"Invalid argument: invalid transaction: missing gas payment","path":["simulateTransaction"],"extensions":{"code":"BAD_USER_INPUT"}}]}`, effectCaller},
 		// R8: this provider's operator limit (query_limits/error.rs).
 		{"R8 nesting", read, 200, `{"data":null,"errors":[{"message":"Query nesting is over 20","path":["checkpoint"],"extensions":{"code":"GRAPHQL_VALIDATION_FAILED"}}]}`, effectElsewhere},

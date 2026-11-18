@@ -47,9 +47,25 @@ const (
 // move_package.rs), "Request is outside consistent range" (object.rs, balance.rs) and "Page size
 // of {limit} exceeds max of {max} for connection" (pagination.rs), all BAD_USER_INPUT.
 func suiProviderBehind(message string) bool {
-	return (strings.HasPrefix(message, "Checkpoint ") && strings.HasSuffix(message, " in the future")) ||
+	return suiCheckpointInTheFuture(message) ||
 		strings.HasPrefix(message, "Request is outside consistent range") ||
 		(strings.HasPrefix(message, "Page size of ") && strings.Contains(message, " exceeds max of "))
+}
+
+// suiCheckpointInTheFuture is R5's checkpoint text, with or without its number: BAD_USER_INPUT
+// "Checkpoint {N} in the future", and the INTERNAL_SERVER_ERROR "Checkpoint in the future" that
+// Checkpoint.query raises with no number (checkpoint/mod.rs). Both mean this provider has not
+// reached the checkpoint; Omer ruled the second one R5 too (MAG-4909, 17 Nov, point 3).
+func suiCheckpointInTheFuture(message string) bool {
+	return strings.HasPrefix(message, "Checkpoint ") && strings.HasSuffix(message, " in the future")
+}
+
+// suiSimulateInputNotFound is R6's other text (Omer's ruling, MAG-4909, 17 Nov, point 4): the full
+// node cannot resolve an input object of a simulate, and simulateTransaction passes its NotFound on
+// as BAD_USER_INPUT "Invalid argument: Object {id} not found", or "... with version {v} not found"
+// (sui-rpc-api error.rs, ObjectNotFoundError; api/query.rs, the same at v1.71.1 and main).
+func suiSimulateInputNotFound(message string) bool {
+	return strings.HasPrefix(message, suiWriteInvalidArgument+"Object ") && strings.HasSuffix(message, " not found")
 }
 
 // suiOperatorLimitTexts are R8 and W5: a limit each operator sets for itself
@@ -145,7 +161,10 @@ func suiReadError(request *GraphQLMessage, replyError graphQLReplyError) (graphQ
 		}
 		return suiCaller(message), true // R7
 	case suiCodeInternalServerError:
-		if suiSimulateObjectNotYetApplied(request, replyError) { // R6
+		switch {
+		case suiSimulateObjectNotYetApplied(request, replyError): // R6
+			return suiElsewhere(message), true
+		case suiCheckpointInTheFuture(message): // R5, with no number
 			return suiElsewhere(message), true
 		}
 		return suiFault(message, http.StatusInternalServerError), true // R19
@@ -196,8 +215,12 @@ func suiProviderRefusedTheRequest(message string) bool {
 // suiSimulateObjectNotYetApplied is R6: a simulateTransaction that names an object this provider's
 // full node does not have yet, because it has not applied the client's last transaction. The error
 // is on simulateTransaction: its path starts at that field, or, with no path, the request selects it.
+// A real typo gets the same answer from every provider, and is then served as is.
 func suiSimulateObjectNotYetApplied(request *GraphQLMessage, replyError graphQLReplyError) bool {
-	if !strings.Contains(replyError.message, suiSimulateObjectNotApplied) && !containsAnyEntry(replyError.chain, suiSimulateObjectNotApplied) {
+	namesAnObject := strings.Contains(replyError.message, suiSimulateObjectNotApplied) ||
+		containsAnyEntry(replyError.chain, suiSimulateObjectNotApplied) ||
+		suiSimulateInputNotFound(replyError.message)
+	if !namesAnObject {
 		return false
 	}
 	for _, rootField := range request.RootFields {
