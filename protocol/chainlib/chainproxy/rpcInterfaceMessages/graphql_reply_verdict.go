@@ -183,55 +183,6 @@ func readErrorVerdict(replyError graphQLReplyError) (verdict graphQLVerdict, mat
 	return row, true
 }
 
-// graphQLQuotaTexts are the wordings that make an error no row matches a vendor quota on our
-// traffic: the provider is paused, as on an HTTP 429 (MAG-5121, Change 12). Each is long enough
-// to say only that. "rate limit" alone is not one ("Rate limit settings could not be loaded"),
-// nor is "too many" ("too many keys supplied" is the caller's) or "quota" (a field name, and a
-// monthly quota does not clear in a pause). Lower case: matched without regard to letter case.
-var graphQLQuotaTexts = []string{"too many requests", "rate limit exceeded"}
-
-// graphQLQuotaTextScanLimit bounds how much of one error message is searched for a quota text,
-// so a node that sends a huge message costs a fixed amount to read. Every wording seen sits at
-// the start of a short message.
-const graphQLQuotaTextScanLimit = 512
-
-// isGraphQLQuotaText reports whether a message carries one of graphQLQuotaTexts within its first
-// graphQLQuotaTextScanLimit bytes. It compares without regard to ASCII letter case and allocates
-// nothing.
-func isGraphQLQuotaText(message string) bool {
-	if len(message) > graphQLQuotaTextScanLimit {
-		message = message[:graphQLQuotaTextScanLimit]
-	}
-	for _, text := range graphQLQuotaTexts {
-		if containsFoldASCII(message, text) {
-			return true
-		}
-	}
-	return false
-}
-
-// containsFoldASCII reports whether s contains lowerNeedle, an all-lower-case ASCII string,
-// ignoring ASCII letter case in s.
-func containsFoldASCII(s, lowerNeedle string) bool {
-	for start := 0; start+len(lowerNeedle) <= len(s); start++ {
-		matched := true
-		for i := 0; i < len(lowerNeedle); i++ {
-			c := s[start+i]
-			if 'A' <= c && c <= 'Z' {
-				c += 'a' - 'A'
-			}
-			if c != lowerNeedle[i] {
-				matched = false
-				break
-			}
-		}
-		if matched {
-			return true
-		}
-	}
-	return false
-}
-
 // unknownVerdict is what an error no row matches means inside a 2xx: the router cannot tell, so
 // it retries without blame.
 func unknownVerdict(message string) graphQLVerdict {
@@ -272,8 +223,7 @@ func graphQLKindOfStatus(status int) graphQLVerdictKind {
 //	P4  a 2xx that is not a GraphQL response: a provider fault (a gateway answering in the
 //	    node's place).
 //	P5  an errors list, under any status: each error through the rows. An error no row matches
-//	    is throttled when its message is a quota text (graphQLQuotaTexts) under a 2xx or a
-//	    4xx; otherwise unknown under a 2xx, and the status table under any other status.
+//	    is unknown under a 2xx, and the status table under any other status.
 //	P6  a 2xx with data and no errors: the answer.
 //	P7  any other status with no GraphQL body: the status table.
 //
@@ -318,14 +268,9 @@ func readVerdict(body []byte, httpStatusCode int) (verdict graphQLVerdict, isErr
 	for index, replyError := range reply.errors {
 		errorVerdict, matched := readErrorVerdict(replyError)
 		if !matched {
-			switch {
-			case httpStatusCode < 500 && isGraphQLQuotaText(replyError.message):
-				// A vendor quota in words, under a 2xx or a 4xx. A 5xx stays the status's: a
-				// failing server, whatever its text says.
-				errorVerdict = graphQLVerdict{kind: graphQLVerdictThrottled, status: http.StatusTooManyRequests, message: replyError.message}
-			case is2xx:
+			if is2xx {
 				errorVerdict = unknownVerdict(replyError.message)
-			default:
+			} else {
 				errorVerdict = statusTableVerdict(body, httpStatusCode, replyError.message)
 			}
 		}

@@ -35,7 +35,7 @@ func TestGraphQLRelay_ReadVerdictsDecideThePeer(t *testing.T) {
 		{"an unknown code goes to the peer", `{"data":null,"errors":[{"message":"connection error","extensions":{"code":"postgres-error"}}]}`, true},
 		{"a numeric code goes to the peer", `{"data":null,"errors":[{"message":"bad","extensions":{"code":400}}]}`, true},
 		{"RESOURCE_EXHAUSTED with a path goes to the peer", `{"data":null,"errors":[{"message":"Exceeded the maximum number","path":["chainIdentifier"],"extensions":{"code":"RESOURCE_EXHAUSTED"}}]}`, true},
-		{"a quota in words goes to the peer", `{"data":null,"errors":[{"message":"Too many requests"}]}`, true},
+		{"a codeless 'Too many requests' goes to the peer", `{"data":null,"errors":[{"message":"Too many requests"}]}`, true},
 		{"a provider fault goes to the peer", `{"data":null,"errors":[{"message":"boom","extensions":{"code":"INTERNAL_SERVER_ERROR"}}]}`, true},
 		{"the caller's error beside a provider fault goes to the peer", `{"data":null,"errors":[{"message":"bad","extensions":{"code":"BAD_USER_INPUT"}},{"message":"boom","extensions":{"code":"INTERNAL_SERVER_ERROR"}}]}`, true},
 		{"a validation failure is served as is", `{"data":null,"errors":[{"message":"Unknown field","extensions":{"code":"GRAPHQL_VALIDATION_FAILED"}}]}`, false},
