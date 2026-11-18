@@ -115,6 +115,9 @@ func TestSuiGraphQLReadRows(t *testing.T) {
 		{"R18 a feature this provider has off", read, 200, `{"data":null,"errors":[{"message":"querying checkpoints not available","path":["checkpoint"],"extensions":{"code":"FEATURE_UNAVAILABLE"}}]}`, effectElsewhere},
 		// R19: the provider broke.
 		{"R19 an internal error", read, 200, `{"data":null,"errors":[{"message":"Failed to fetch checkpoint","path":["checkpoint"],"extensions":{"code":"INTERNAL_SERVER_ERROR","chain":["connection refused"]}}]}`, effectFault},
+		// A chain that is not a list is left out; the error keeps its code.
+		{"R19 with a chain written as text", read, 200, `{"data":null,"errors":[{"message":"Failed to fetch checkpoint","path":["checkpoint"],"extensions":{"code":"INTERNAL_SERVER_ERROR","chain":"connection refused"}}]}`, effectFault},
+		{"R19 with a chain written as an object", read, 200, `{"data":null,"errors":[{"message":"Failed to fetch checkpoint","path":["checkpoint"],"extensions":{"code":"INTERNAL_SERVER_ERROR","chain":{"cause":"connection refused"}}}]}`, effectFault},
 		// R20 (Omer, 8 Nov): the query timeout is the operator's setting.
 		{"R20 a query timeout", read, 200, `{"errors":[{"message":"Query timed out after 40.00s","extensions":{"code":"REQUEST_TIMEOUT"}}]}`, effectElsewhere},
 

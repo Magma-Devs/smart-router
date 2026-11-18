@@ -128,19 +128,23 @@ func readGraphQLReplyError(raw json.RawMessage) graphQLReplyError {
 	read := graphQLReplyError{message: jsonTextOrRaw(entry.Message)}
 	read.pathHead, read.pathLength = readGraphQLPath(entry.Path)
 	read.hasPath = read.pathLength > 0
+	// Each member is read on its own, so a chain that is not a list cannot cost the error its code.
 	var extensions struct {
-		Code  json.RawMessage   `json:"code"`
-		Chain []json.RawMessage `json:"chain"`
+		Code  json.RawMessage `json:"code"`
+		Chain json.RawMessage `json:"chain"`
 	}
 	if err := json.Unmarshal(entry.Extensions, &extensions); err == nil {
 		var code string
 		if err := json.Unmarshal(extensions.Code, &code); err == nil {
 			read.code = code
 		}
-		for _, rawCause := range extensions.Chain {
-			var cause string
-			if err := json.Unmarshal(rawCause, &cause); err == nil {
-				read.chain = append(read.chain, cause)
+		var causes []json.RawMessage
+		if err := json.Unmarshal(extensions.Chain, &causes); err == nil {
+			for _, rawCause := range causes {
+				var cause string
+				if err := json.Unmarshal(rawCause, &cause); err == nil {
+					read.chain = append(read.chain, cause)
+				}
 			}
 		}
 	}
