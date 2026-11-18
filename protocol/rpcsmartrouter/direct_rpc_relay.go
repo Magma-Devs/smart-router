@@ -1208,6 +1208,12 @@ func (d *DirectRPCRelaySender) sendGRPCRelay(
 				if grpcErr.RateLimited() && common.ClassifyError(nil, d.chainFamily, common.TransportGRPC, response.StatusCode, errorMessage) == common.RouterErrorUnknown {
 					result.ApplyRouterErrorClassification(common.RouterErrorNodeRateLimited)
 				}
+				// A copy of the chain's write is read by the chain's own list (MAG-5186), which files
+				// some statuses unlike the status table: on Sui, RESOURCE_EXHAUSTED is a throttle with
+				// or without a wait, and FAILED_PRECONDITION is a lock conflict the caller caused.
+				if copyReading, known := grpcMessage.WriteCopy(grpcErr.Code, grpcErr.Message); known && copyReading.Verdict != nil {
+					result.ApplyRouterErrorClassification(copyReading.Verdict)
+				}
 				// The wait the node asked for rides on err, which this branch does not return, so the
 				// hold-off read 0 and held the endpoint off for its default whatever was asked: a vendor
 				// that asked for ten minutes was asked again after about 30 s (MAG-4914).

@@ -327,7 +327,22 @@ func (sm *UnifiedRelayStateMachine) buildDecisionInput(isTickerHedge bool) Decis
 		IsDefaultApi:   sm.protocolMessage.IsDefaultApi(),
 		Pinned:         PinnedByDirectives(sm.protocolMessage.GetDirectiveHeaders()),
 		IsGraphQLWrite: sm.selection == Stateful && isGraphQLMessage(sm.protocolMessage),
+		// The chain's own write (MAG-5186): sent to every provider at once, so Stateful too.
+		IsChainListWrite: sm.selection == Stateful && isChainListWrite(sm.protocolMessage),
 	}
+}
+
+// chainListWrite is a request that can say whether it is its chain's write on a chain whose list
+// reads each copy (rpcInterfaceMessages.GrpcMessage, MAG-5186).
+type chainListWrite interface {
+	IsChainListWrite() bool
+}
+
+// isChainListWrite reports whether protocolMessage is its chain's write on a chain whose list reads
+// each copy (MAG-5186).
+func isChainListWrite(protocolMessage chainlib.ProtocolMessage) bool {
+	write, ok := protocolMessage.GetRPCMessage().(chainListWrite)
+	return ok && write.IsChainListWrite()
 }
 
 // isGraphQLMessage reports whether protocolMessage's interface is GraphQL (MAG-5122).
