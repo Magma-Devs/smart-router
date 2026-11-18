@@ -274,7 +274,7 @@ var _ chainlib.RelayRejectionReporter = (*RPCSmartRouterServer)(nil)
 
 // writeRelayEnd writes the relay's relay_end event. Each exit calls it once.
 func (rpcss *RPCSmartRouterServer) writeRelayEnd(ctx context.Context, in relayEndInput) {
-	utils.LogEvent(relayEndEvent, rpcss.buildRelayEnd(ctx, in))
+	emitRelayEnd(rpcss.buildRelayEnd(ctx, in))
 }
 
 // ReportRejectedRelay writes the relay_end of a request a listener parsed itself and could not hand

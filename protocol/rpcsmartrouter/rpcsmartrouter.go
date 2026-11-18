@@ -415,11 +415,13 @@ func (rpsr *RPCSmartRouter) Start(ctx context.Context, options *rpcSmartRouterSt
 	if options.cmdFlags.DebugAddress != "" {
 		// Debug-mode-only: enable the in-memory ring-buffer log sink so the
 		// /debug/logs endpoint can serve recent logs to the test harness.
-		utils.EnableDebugLogBuffer(50000)
+		utils.EnableDebugLogBuffer(debugLogBufferCapacity)
 		// Debug-mode-only, same reasoning: start recording cross-validation dissent so
 		// /debug/cross-validation-events can serve it (MAG-2772). Until this call the recorder is a
 		// nil check on the relay path, so a production router stores nothing.
 		enableCrossValidationEventRing(crossValidationEventRingCapacity)
+		// And keep each relay's relay_end for /debug/relay-end (MAG-4899), on the same terms.
+		enableRelayEndStore(debugLogBufferCapacity)
 		var currentOffsetNano atomic.Int64
 		debugMux := buildDebugMux(debugMuxDeps{
 			optimizers: optimizers,
@@ -1564,16 +1566,14 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 			}
 		}
 
-		// limit defaults to 5000, capped at the ring capacity (50000).
+		// limit defaults to 5000, capped at the ring capacity.
 		limit := 5000
 		if v := q.Get("limit"); v != "" {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 {
 				limit = n
 			}
 		}
-		if limit > 50000 {
-			limit = 50000
-		}
+		limit = min(limit, debugLogBufferCapacity)
 
 		lines := utils.ReadDebugLogBuffer(requestID, from, to, limit)
 
@@ -1594,6 +1594,36 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 	mux.HandleFunc("/debug/logs/clear", debugMethod(http.MethodPost, func(w http.ResponseWriter, r *http.Request) {
 		utils.ClearDebugLogBuffer()
 		writeDebugJSONf(w, `{"cleared":true}`)
+	}))
+
+	// GET /debug/relay-end?guid=<Lava-Guid> — the relay_end event of one request (MAG-4899), the object
+	// its log line carries (docs/RELAY-END-EVENT.md), so a test asserts on the router's record of the
+	// request it sent rather than searching the log. guid is the decimal Lava-Guid of the reply.
+	// X-Relay-End-Records says how many events were written with that GUID: 1 for every relay, a
+	// retried one included, so a higher count is the router breaking that contract, and the body is
+	// then the last of them. The store keeps the newest debugLogBufferCapacity GUIDs.
+	//   200  the record
+	//   400  no guid
+	//   404  a GUID the store does not hold: never written, or dropped as older than the rest
+	//   503  the store is not installed, which a router serving this mux never is
+	mux.HandleFunc("/debug/relay-end", debugMethod(http.MethodGet, func(w http.ResponseWriter, r *http.Request) {
+		guid := r.URL.Query().Get("guid")
+		if guid == "" {
+			http.Error(w, "guid is required: the Lava-Guid of a reply", http.StatusBadRequest)
+			return
+		}
+		line, writes, enabled := readRelayEnd(guid)
+		if !enabled {
+			http.Error(w, "relay_end records are not kept on this router", http.StatusServiceUnavailable)
+			return
+		}
+		if writes == 0 {
+			http.Error(w, "no relay_end record for guid "+guid, http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Relay-End-Records", strconv.Itoa(writes))
+		_, _ = w.Write(line)
 	}))
 
 	// GET /debug/endpoint-state — per-endpoint poll-health + enable/recovery state (MAG-2202 endpoint 1).

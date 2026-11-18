@@ -474,6 +474,11 @@ read, so messages sent over a WebSocket carry no caller ids today. Reading the u
 would not be the same fix: one socket multiplexes many subscriptions and requests, so those ids
 would label every request on the connection rather than the one the caller tagged.
 
+A request needs no caller id to be found again: the router names it by its GUID, in the reply's
+`Lava-Guid` header, or in the error id of an error reply without one. In debug mode,
+`/debug/relay-end?guid=<GUID>` returns that request's `relay_end` event as one JSON object
+([docs/RELAY-END-EVENT.md](../../docs/RELAY-END-EVENT.md#reading-one-requests-event)).
+
 ### Usage telemetry (OTel)
 
 Off by default. When enabled, the smart router emits two event types as

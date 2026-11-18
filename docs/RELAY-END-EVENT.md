@@ -202,6 +202,25 @@ The upstream is named by provider, as on every relay; the manager picks it by no
 carry a credential. The messages a subscription pushes afterwards, and a subscription restored after
 its upstream connection drops, write no event.
 
+## Reading one request's event
+
+In debug mode (`--debug-address`), `GET /debug/relay-end?guid=<GUID>` returns the event of one
+request, so a test asserts on the router's record of the request it sent instead of searching the
+log (MAG-4899). `guid` is the event's `GUID`: the reply's `Lava-Guid` header, or the error id of an
+error reply without one.
+
+| Status | When |
+| --- | --- |
+| `200` | The event, as one JSON object: the object its log line carries, the same fields, with `time` set when it was kept. `X-Relay-End-Records` says how many events were written with that GUID: `1` for every relay, a retried one included. Above `1` the router broke the one-event-per-relay rule, and the body is the last of them. |
+| `400` | No `guid`. |
+| `404` | A GUID the router does not hold: never written, or dropped as older than the rest. |
+| `405` | Any method but `GET`. |
+| `503` | The router keeps no events. `--debug-address` installs the store with the route, so a router never answers this; it is not a `404` so that "not kept" cannot read as "never written". |
+
+The router keeps the events of its 50 000 newest GUIDs, as many as the `/debug/logs` buffer holds
+lines, and drops the oldest GUID first. An event is kept as it is written, so a request's event is
+kept before its HTTP or gRPC reply leaves the router. An event without a GUID is not kept.
+
 ## Collector
 
 The fleet's log collector rewrites any value that starts with `/` after a quote, space, `=` or `(`
