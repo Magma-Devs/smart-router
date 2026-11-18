@@ -58,8 +58,8 @@ LOG_FILE="$LOGS_DIR/SMARTROUTER_CV_EVENTS.log"
 SIM_LOG="$LOGS_DIR/CV_EVENTS_SIM.log"
 rm -f "$LOG_FILE" "$SIM_LOG" 2>/dev/null || true
 
-# --- Ports. Deliberately distinct from init_smartrouter_eth.sh (3360/7779) and
-# --- test_uc4_smartrouter_sim.sh (3392/7798) so this can run alongside them.
+# --- Ports. Deliberately distinct from init_smartrouter_eth.sh (3360/7779) so
+# --- this can run alongside it.
 ETH_PORT=3371          # router JSON-RPC listener
 METRICS_PORT=7797      # prometheus (NOT scraped by this script — that is the point)
 DEBUG_PORT=6767        # --debug-address: where /debug/cross-validation-events lives
