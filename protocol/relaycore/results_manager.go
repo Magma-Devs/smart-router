@@ -5,6 +5,8 @@ import (
 	"strings"
 	"sync"
 
+	"google.golang.org/grpc/codes"
+
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	common "github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/parser"
@@ -180,6 +182,12 @@ func (rp *ResultsManagerInst) setValidResponse(response *RelayResponse, protocol
 				errorCode, jsonRPCErrorCode = code, code
 			}
 		}
+		// A gRPC node error's status code is the status the node sent (handleGRPCError). Outside
+		// 1..16 it is the router's own stand-in for a failure that carried no status.
+		grpcStatus := 0
+		if transport == common.TransportGRPC && errorCode >= int(codes.Canceled) && errorCode <= int(codes.Unauthenticated) {
+			grpcStatus = errorCode
+		}
 		// GraphQL answers its node faults inside a 200 as well, so the status says nothing there
 		// either. The message's own rule maps the error's code onto the status the registry's
 		// rows know (RESOURCE_EXHAUSTED a 429, INTERNAL_SERVER_ERROR a 500, a caller's error on a
@@ -218,7 +226,7 @@ func (rp *ResultsManagerInst) setValidResponse(response *RelayResponse, protocol
 			utils.LogAttr("requestPayload", parser.CapStringLen(reqPayload)),
 			utils.LogAttr("requestHeaders", reqHeaders),
 		)
-		rp.nodeResponseErrors.AddError(RelayError{Err: err, ProviderInfo: response.RelayResult.ProviderInfo, Response: response, RouterError: nodeClassified, JSONRPCErrorCode: jsonRPCErrorCode})
+		rp.nodeResponseErrors.AddError(RelayError{Err: err, ProviderInfo: response.RelayResult.ProviderInfo, Response: response, RouterError: nodeClassified, JSONRPCErrorCode: jsonRPCErrorCode, GRPCStatus: grpcStatus})
 		return err
 	}
 	rp.successResults = append(rp.successResults, response.RelayResult)
