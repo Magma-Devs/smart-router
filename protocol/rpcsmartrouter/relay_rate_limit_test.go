@@ -13,11 +13,17 @@ import (
 // duration of a test, restoring the shared instance on cleanup.
 func withFreshRelayHoldoff(t *testing.T) *holdoff.Registry {
 	t.Helper()
-	restore := relayHoldoff
 	reg := holdoff.NewRegistry()
-	relayHoldoff = reg
-	t.Cleanup(func() { relayHoldoff = restore })
+	swapRelayHoldoff(t, reg)
 	return reg
+}
+
+// swapRelayHoldoff makes reg the hold-off registry relays read and record into until the test
+// ends, then puts back whatever was there before.
+func swapRelayHoldoff(t *testing.T, reg *holdoff.Registry) {
+	t.Helper()
+	restore := relayHoldoffOverride.Swap(reg)
+	t.Cleanup(func() { relayHoldoffOverride.Store(restore) })
 }
 
 // The session-release decision keys on this: a rate-limit in either arriving shape must

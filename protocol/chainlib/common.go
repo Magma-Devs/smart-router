@@ -926,7 +926,10 @@ func (apil *chainListenerBase) GetListeningAddress() string {
 // websocket upgrade. Only those listeners may hand an upgrade on the health path
 // past the health handler; see the health route below for why the distinction has
 // to be explicit rather than inferred.
-func createAndSetupBaseAppListener(cmdFlags common.ConsumerCmdFlags, healthCheckPath string, healthReporter HealthReporter, servesWebSocketUpgrades bool) *fiber.App {
+// routesDelete is true for a listener whose own routes answer a DELETE: GraphQL refuses it with 405
+// and Allow: POST like every method it does not serve (MAG-4524). The other listeners still get the
+// shared 204 below, before any route runs, until their own refusal is built (MAG-5061 item 7).
+func createAndSetupBaseAppListener(cmdFlags common.ConsumerCmdFlags, healthCheckPath string, healthReporter HealthReporter, servesWebSocketUpgrades, routesDelete bool) *fiber.App {
 	app := fiber.New(fiber.Config{
 		JSONEncoder: json.Marshal,
 		JSONDecoder: json.Unmarshal,
@@ -968,7 +971,7 @@ func createAndSetupBaseAppListener(cmdFlags common.ConsumerCmdFlags, healthCheck
 			c.Set("Access-Control-Max-Age", cmdFlags.CDNCacheDuration)
 			return c.SendStatus(fiber.StatusNoContent)
 		}
-		if c.Method() == "DELETE" {
+		if c.Method() == "DELETE" && !routesDelete {
 			return c.SendStatus(fiber.StatusNoContent)
 		}
 		return c.Next()

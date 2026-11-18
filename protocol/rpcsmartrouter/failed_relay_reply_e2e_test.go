@@ -40,6 +40,9 @@ type failedReplyInterface struct {
 	body         string
 	// jsonRpcShape: the router's own error is a JSON-RPC error object; otherwise {"error": "..."}.
 	jsonRpcShape bool
+	// graphQLShape: the router's own error is a GraphQL error with the code NO_PROVIDER_ANSWER, its
+	// guid equal to Lava-Guid, and a sentence that names no provider (MAG-5119).
+	graphQLShape bool
 	// headers are request headers sent on top of the ones every request here sends.
 	headers map[string]string
 	// upstreamTimeout is the node-url timeout of every upstream, which lengthens each attempt's
@@ -75,7 +78,7 @@ func failedReplyInterfaces() []failedReplyInterface {
 		},
 		{
 			name: "graphql", chainID: "SUI", apiInterface: spectypes.APIInterfaceGraphQL, parser: newGatewayTestGraphQLParser,
-			method: http.MethodPost, path: "/", body: gatewayTestQuery,
+			method: http.MethodPost, path: "/", body: gatewayTestQuery, graphQLShape: true,
 		},
 	}
 }
@@ -208,6 +211,22 @@ func hangingUpstream(t *testing.T, arrivals *atomic.Int32) string {
 // routerErrorMessage reads the sentence from the router's own error body in the listener's shape.
 func routerErrorMessage(t *testing.T, iface failedReplyInterface, body string) string {
 	t.Helper()
+	if iface.graphQLShape {
+		var fields map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal([]byte(body), &fields), body)
+		require.NotContains(t, fields, "data", "the router's own GraphQL reply has no data key")
+		var reply struct {
+			Errors []struct {
+				Message    string            `json:"message"`
+				Extensions map[string]string `json:"extensions"`
+			} `json:"errors"`
+		}
+		require.NoError(t, json.Unmarshal([]byte(body), &reply), body)
+		require.Len(t, reply.Errors, 1, body)
+		require.Equal(t, "NO_PROVIDER_ANSWER", reply.Errors[0].Extensions["code"], body)
+		require.NotEmpty(t, reply.Errors[0].Extensions["guid"], body)
+		return reply.Errors[0].Message
+	}
 	if iface.jsonRpcShape {
 		var envelope struct {
 			JSONRPC string          `json:"jsonrpc"`
@@ -287,6 +306,15 @@ func TestFailedRelayReply_EndToEnd_MAG4481(t *testing.T) {
 				read := startFailedReplyRouter(t, iface, refusingUpstream(t))()
 				require.Equal(t, http.StatusBadGateway, read.status)
 				message := routerErrorMessage(t, iface, read.body)
+				if iface.graphQLShape {
+					// The router's own sentence names no provider, address or transport error: the
+					// cause stays in its log line (MAG-5119).
+					require.Equal(t, "no provider answered the request", message)
+					require.NotContains(t, read.body, "connection refused")
+					require.NotContains(t, read.body, "127.0.0.1")
+					require.Contains(t, read.body, `"guid":"`+read.guid+`"`, "Lava-Guid equals extensions.guid")
+					return
+				}
 				require.True(t, strings.HasPrefix(message, "no answer from upstream: "), message)
 				require.Contains(t, message, "connection refused")
 			})
@@ -295,7 +323,12 @@ func TestFailedRelayReply_EndToEnd_MAG4481(t *testing.T) {
 				read := startFailedReplyRouter(t, iface, hangingUpstream(t, nil))()
 				require.Equal(t, http.StatusGatewayTimeout, read.status, read.body)
 				message := routerErrorMessage(t, iface, read.body)
-				require.True(t, strings.HasPrefix(message, "no answer from upstream within "), message)
+				if iface.graphQLShape {
+					require.True(t, strings.HasPrefix(message, "no provider answered within "), message)
+					require.Contains(t, read.body, `"guid":"`+read.guid+`"`, "Lava-Guid equals extensions.guid")
+				} else {
+					require.True(t, strings.HasPrefix(message, "no answer from upstream within "), message)
+				}
 				require.NotContains(t, message, "context deadline exceeded")
 				// MAG-3980: the router's own 504 carries the request's headers, as a reply an
 				// upstream produced does: the GUID, and the upstream it asked. One attempt went out,

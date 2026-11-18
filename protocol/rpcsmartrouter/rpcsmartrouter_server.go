@@ -3405,7 +3405,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 					// wait; the result carries it instead (MAG-4914).
 					retryAfter = localRelayResult.RetryAfter
 				}
-				heldFor := relayHoldoff.RecordRateLimit(holdoffProvider, holdoffURL, retryAfter)
+				heldFor := relayHoldoff().RecordRateLimit(holdoffProvider, holdoffURL, retryAfter)
 				releaseErr := err
 				if releaseErr == nil {
 					releaseErr = fmt.Errorf("upstream rate-limited the relay (HTTP %d)", statusCode)
@@ -3424,7 +3424,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 				// "I do not hold this data" is neither failure nor success. It comes back fast, so
 				// OnSessionDone would reward a lagging or pruned node with availability and latency
 				// for data it did not serve. The request still fails over; only the endpoint's tip is scored.
-				relayHoldoff.RecordAnswer(holdoffProvider, holdoffURL)
+				relayHoldoff().RecordAnswer(holdoffProvider, holdoffURL)
 				releaseErr := fmt.Errorf("upstream does not hold the requested data (status %d)", statusCode)
 				if errSession := rpcss.sessionManager.OnSessionDataNotHeld(singleConsumerSession, releaseErr); errSession != nil {
 					utils.FormatWarning("OnSessionDataNotHeld failed for direct RPC", errSession,
@@ -3434,7 +3434,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 			} else if !shouldFailSession {
 				// The endpoint answered for real — success or a plain client error — so any
 				// standing rate-limit hold-off for it is stale.
-				relayHoldoff.RecordAnswer(holdoffProvider, holdoffURL)
+				relayHoldoff().RecordAnswer(holdoffProvider, holdoffURL)
 				// Success or client error (4xx except 429) - update session as success.
 				// targetEndpoint / directConn were resolved and the tracker ensured before
 				// dispatch (above), so harvestGen is the generation captured pre-relay.
@@ -4197,7 +4197,7 @@ func probeAppenderUnlessIdle(appender probeQoSAppender, idle bool) probeQoSAppen
 // constructed endpoints + a fake observation getter + a fake appender. For every endpoint it renders
 // a verdict, applies the proactive re-enable, then feeds ONE aggregated QoS sample per provider
 // (rule E2). A nil appender still performs the re-enable (QoS feed simply skipped). The one shared
-// state it reads is the rate-limit hold-off registry (relayHoldoff, which tests swap): a stale
+// state it reads is the rate-limit hold-off registry (relayHoldoff(), which tests swap): a stale
 // endpoint whose url is held off is left out of its provider's sample rather than scored dead.
 //
 // Returns the per-cycle telemetry for /debug/probe-loop (MAG-2202 endpoint 4): scored = endpoints
@@ -4268,7 +4268,7 @@ func runProbeCycleCore(
 		// sends no sample this cycle. A fresh observation is judged as usual, held off or not; the
 		// re-enable pass above is unaffected.
 		if !verdict.Alive {
-			if readyAt := relayHoldoff.URLReadyAt(ep.HoldoffKey, ep.Endpoint.NetworkAddress); !readyAt.IsZero() {
+			if readyAt := relayHoldoff().URLReadyAt(ep.HoldoffKey, ep.Endpoint.NetworkAddress); !readyAt.IsZero() {
 				utils.FormatDebug("probe leaves a rate-limited endpoint out of its provider's sample",
 					utils.LogAttr("endpoint", ep.Endpoint.NetworkAddress),
 					utils.LogAttr("provider", ep.ProviderAddress),
@@ -5009,7 +5009,7 @@ func skipCacheWriteAfterDegrade(ctx context.Context, relayProcessor *relaycore.R
 // - Response is a node error
 // - Response body is larger than cacheMaxEntryBytes (--cache-max-entry-bytes)
 // - Requested block is NOT_APPLICABLE
-// - Reply is a null for a concrete block at or below the router's tip (nullForBlockAtOrBelowTip)
+// - Reply answers nothing (a null, {}, an error document) for a concrete block at or below the router's tip (noAnswerForBlockAtOrBelowTip)
 // - Reply is a GraphQL reply with an error, or with a root field that is null or [] (graphQLReplyCacheExclusion)
 // - Requested block is a tag the resolution above leaves negative (EARLIEST/PENDING/SAFE/FINALIZED)
 func (rpcss *RPCSmartRouterServer) tryCacheWrite(
@@ -5121,11 +5121,12 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 		return
 	}
 
-	// A null for a block the router knows exists is one lagging node's answer, not the chain's.
-	// Written, it would be replayed to every caller of that block as a gap (MAG-4124). The caller
-	// that drew it still gets it; only the replay is refused.
-	if tip := int64(rpcss.getLatestBlock()); nullForBlockAtOrBelowTip(requestedBlock, tip, relayResult.Reply.Data) {
-		utils.FormatDebug("cache write skipped: a null for a block at or below the tip",
+	// No answer for a block the router knows exists (a JSON-RPC null, a REST {} or error document)
+	// is one node's answer, not the chain's. Written, it would be replayed to every caller of that
+	// block as a gap (MAG-4124, MAG-5307). The caller that drew it still gets it; only the replay is
+	// refused.
+	if tip := int64(rpcss.getLatestBlock()); noAnswerForBlockAtOrBelowTip(requestedBlock, tip, relayResult.Reply.Data) {
+		utils.FormatDebug("cache write skipped: no answer for a block at or below the tip",
 			utils.LogAttr("chainId", chainId),
 			utils.LogAttr("api", apiName),
 			utils.LogAttr("requestedBlock", requestedBlock),
@@ -7379,10 +7380,23 @@ func classifyHTTPStatus(code int, classified *common.RouterError) (shouldMarkUnh
 	return classifyEndpointHealth(classified, false)
 }
 
-// relayHoldoff is the hot path's handle on the process-wide
-// rate-limit hold-off registry (docs/RATE-LIMIT-HOLDOFF.md). A package variable rather
-// than a server field so tests can swap in a clock-pinned registry and restore it.
-var relayHoldoff = holdoff.Shared
+// relayHoldoffOverride, when set, replaces the process-wide rate-limit hold-off registry
+// (docs/RATE-LIMIT-HOLDOFF.md) on the hot path. It is a package variable rather than a server
+// field so tests can swap in a clock-pinned registry and restore it, and it is atomic because a
+// relay can outlive the call that started it: a stateful broadcast's other delivery keeps running
+// for up to statefulDeliveryLinger after the answer (MAG-4032) and records its outcome here while
+// the next test may already be swapping the registry. As a plain variable, that swap was a data
+// race the race detector reported on pull requests that never touched this code.
+var relayHoldoffOverride atomic.Pointer[holdoff.Registry]
+
+// relayHoldoff is the hot path's handle on the rate-limit hold-off registry: a test's override
+// when one is set, the process-wide registry otherwise.
+func relayHoldoff() *holdoff.Registry {
+	if registry := relayHoldoffOverride.Load(); registry != nil {
+		return registry
+	}
+	return holdoff.Shared
+}
 
 // holdoffProviderKey is the hold-off registry key of a provider on this server's chain and
 // api-interface (holdoff.ProviderKey), the key relay selection reads.
