@@ -119,10 +119,54 @@ func TestRelayEnd_JSONRPCListener_HTTPAndWebSocket(t *testing.T) {
 const relayEndGRPCMethod = "test.v1.Node/Call"
 
 func TestRelayEnd_GRPCListener(t *testing.T) {
+	read := captureRelayEnds(t)
+	// The node answers every method with the same bytes; its reflection service never answers.
+	client := startRelayEndGRPCRouter(t, `{"name": "`+relayEndGRPCMethod+`", "enabled": true, "compute_units": 10, "category": {"deterministic": false, "stateful": 0}}`, startStalledReflectionNode(t))
+
+	for _, tc := range []struct{ name, pin, outcome string }{
+		{"grpc_ok", "", relayOutcomeOK},
+		{"grpc_rejected_pinned_provider_unavailable", "node-z", relayOutcomeRejectedBeforeDispatch},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			seen := len(read())
+			callCtx, callCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer callCancel()
+			if tc.pin != "" {
+				callCtx = metadata.AppendToOutgoingContext(callCtx, common.SELECT_PROVIDER_HEADER_NAME, tc.pin)
+			}
+			reply := &wrapperspb.Int64Value{}
+			var trailer metadata.MD
+			err := client.Invoke(callCtx, "/"+relayEndGRPCMethod, wrapperspb.Int64(5), reply, grpc.Trailer(&trailer))
+			if tc.outcome == relayOutcomeOK {
+				require.NoError(t, err)
+				require.Equal(t, int64(1), reply.GetValue(), "the node's answer reached the client")
+			} else {
+				require.Error(t, err)
+				// A name no provider of the router carries is the caller's to fix (MAG-3800).
+				require.Equal(t, codes.InvalidArgument, status.Code(err), "%v", err)
+				require.Equal(t, routersession.SelectedProviderNotConfiguredError.Error(), status.Convert(err).Message())
+				require.NotEmpty(t, trailer.Get(common.GUID_HEADER_NAME), "the refusal carries the request id")
+			}
+
+			events := newRelayEndsSince(read, seen)
+			require.Len(t, events, 1, "one relay_end per gRPC call")
+			t.Logf("relay_end: %s", events[0])
+			event := normalizeRelayEnd(t, events[0], false)
+			require.NotEmpty(t, event["GUID"])
+			event["GUID"] = "<minted by the listener>"
+			requireRelayEndGolden(t, tc.name, event)
+		})
+	}
+}
+
+// startRelayEndGRPCRouter starts a router whose gRPC listener serves chain GRPCTEST, with the given
+// apis (the spec's JSON entries, comma-separated), over one upstream, grpc-node, at nodeAddr. It
+// returns a client of the listener.
+func startRelayEndGRPCRouter(t *testing.T, apis, nodeAddr string) *grpc.ClientConn {
+	t.Helper()
 	if !rand.Initialized() {
 		rand.InitRandomSeed()
 	}
-	read := captureRelayEnds(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
@@ -132,15 +176,14 @@ func TestRelayEnd_GRPCListener(t *testing.T) {
       "api_collections": [{
         "enabled": true,
         "collection_data": {"api_interface": "grpc", "internal_path": "", "type": "", "add_on": ""},
-        "apis": [{"name": "`+relayEndGRPCMethod+`", "enabled": true, "compute_units": 10, "category": {"deterministic": false, "stateful": 0}}]
+        "apis": [`+apis+`]
       }]
     }`), &spec))
 	parser, err := chainlib.NewGrpcChainParser()
 	require.NoError(t, err)
 	parser.SetSpec(spec)
 
-	// The node answers every method with the same bytes; its reflection service never answers.
-	nodeUrl := common.NodeUrl{Url: "grpc://" + startStalledReflectionNode(t), GrpcConfig: common.GrpcConfig{AllowInsecure: true, ReflectionTimeout: time.Second}}
+	nodeUrl := common.NodeUrl{Url: "grpc://" + nodeAddr, GrpcConfig: common.GrpcConfig{AllowInsecure: true, ReflectionTimeout: time.Second}}
 	connection, err := routersession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = connection.Close() })
@@ -178,39 +221,5 @@ func TestRelayEnd_GRPCListener(t *testing.T) {
 	client, err := grpc.NewClient(listener.GetListeningAddress(), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = client.Close() })
-
-	for _, tc := range []struct{ name, pin, outcome string }{
-		{"grpc_ok", "", relayOutcomeOK},
-		{"grpc_rejected_pinned_provider_unavailable", "node-z", relayOutcomeRejectedBeforeDispatch},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			seen := len(read())
-			callCtx, callCancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer callCancel()
-			if tc.pin != "" {
-				callCtx = metadata.AppendToOutgoingContext(callCtx, common.SELECT_PROVIDER_HEADER_NAME, tc.pin)
-			}
-			reply := &wrapperspb.Int64Value{}
-			var trailer metadata.MD
-			err := client.Invoke(callCtx, "/"+relayEndGRPCMethod, wrapperspb.Int64(5), reply, grpc.Trailer(&trailer))
-			if tc.outcome == relayOutcomeOK {
-				require.NoError(t, err)
-				require.Equal(t, int64(1), reply.GetValue(), "the node's answer reached the client")
-			} else {
-				require.Error(t, err)
-				// A name no provider of the router carries is the caller's to fix (MAG-3800).
-				require.Equal(t, codes.InvalidArgument, status.Code(err), "%v", err)
-				require.Equal(t, routersession.SelectedProviderNotConfiguredError.Error(), status.Convert(err).Message())
-				require.NotEmpty(t, trailer.Get(common.GUID_HEADER_NAME), "the refusal carries the request id")
-			}
-
-			events := newRelayEndsSince(read, seen)
-			require.Len(t, events, 1, "one relay_end per gRPC call")
-			t.Logf("relay_end: %s", events[0])
-			event := normalizeRelayEnd(t, events[0], false)
-			require.NotEmpty(t, event["GUID"])
-			event["GUID"] = "<minted by the listener>"
-			requireRelayEndGolden(t, tc.name, event)
-		})
-	}
+	return client
 }
