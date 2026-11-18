@@ -162,13 +162,16 @@ func TestRegisterChainFamiliesWhileClassifying(t *testing.T) {
 //   - a spec is Bitcoin exactly when it is BTC or imports it. Those chains' replies are reshaped to
 //     JSON-RPC 1.0 (chainlib isUTXOFamily), which is right only for a Bitcoin Core derivative.
 //
-// LAVA_SPECS_DIR names a lava-specs checkout. The unit-tests workflow checks out lava-specs main for
-// it, so a spec merged there without a family fails the next run (MAG-5246). Without the variable the
-// test skips, except under CI, where a missing checkout must not pass unnoticed.
+// LAVA_SPECS_DIR names a lava-specs checkout. The lava-specs chain families workflow checks out
+// lava-specs main for it on every PR, on main and nightly, so a spec merged there without a family
+// fails the next run (MAG-5246). That check is not required: lava-specs main moves on its own, and a
+// required check reading it would block every smart-router merge until the new root got a family.
+// Without the variable the test skips, as it does in the required unit-tests; the workflow sets
+// LAVA_SPECS_REQUIRED, so there a missing checkout fails instead of passing unnoticed.
 func TestEveryLavaSpecHasAChainFamily(t *testing.T) {
 	dir := os.Getenv("LAVA_SPECS_DIR")
 	if dir == "" {
-		require.Empty(t, os.Getenv("CI"), "LAVA_SPECS_DIR is unset: the unit-tests workflow checks lava-specs out for this test")
+		require.Empty(t, os.Getenv("LAVA_SPECS_REQUIRED"), "LAVA_SPECS_DIR is unset: the lava-specs chain families workflow checks lava-specs out for this test")
 		t.Skip("LAVA_SPECS_DIR is unset; point it at a lava-specs checkout to check its specs")
 	}
 	// The files the router fetches from the repository: the .json files at its top, not the test

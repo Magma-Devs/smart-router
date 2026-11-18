@@ -215,7 +215,7 @@ A chain's family comes from its spec's imports. `protocol/common/error_registry.
 
 `GetChainFamilyOrDefault` returns `ChainFamilyUnknown` (a dedicated sentinel, NOT `EVM`) when a chain has no family — Tier-2 lookups against the sentinel intentionally miss so classification falls through to transport-scoped Tier-1 matchers rather than silently inheriting another family's semantics.
 
-`common.IsSolanaFamily` and chainlib's `isUTXOFamily` (the JSON-RPC 1.0 reply fixup) read the same families, so there is a single source of truth. `TestEveryLavaSpecHasAChainFamily` reads lava-specs main in the unit-tests check and fails when a spec gets no family, when a spec with imports is listed in `rootChainFamilies`, or when a chain is `Bitcoin` without importing BTC.
+`common.IsSolanaFamily` and chainlib's `isUTXOFamily` (the JSON-RPC 1.0 reply fixup) read the same families, so there is a single source of truth. `TestEveryLavaSpecHasAChainFamily` reads lava-specs main in the `lava-specs chain families` check (on every PR, on main and nightly) and fails when a spec gets no family, when a spec with imports is listed in `rootChainFamilies`, or when a chain is `Bitcoin` without importing BTC. That check is not required, so a spec merged in lava-specs never blocks a smart-router merge; the required unit-tests skip the test.
 
 | ChainFamily | Root specs (every spec importing one takes its family) |
 |-------------|-----------|
@@ -404,7 +404,7 @@ var GenericErrorMappings = map[TransportType][]GenericMapping{
 ```
 
 ### Adding a New Chain
-1. **If its spec imports one that has a family (an EVM chain importing ETH1, say):** it takes that family when the router loads the catalog. Zero code changes. **If its spec imports nothing:** name its family in `rootChainFamilies`; the unit-tests check fails until it has one.
+1. **If its spec imports one that has a family (an EVM chain importing ETH1, say):** it takes that family when the router loads the catalog. Zero code changes. **If its spec imports nothing:** name its family in `rootChainFamilies`; the `lava-specs chain families` check fails until it has one.
 2. **If it has unique errors with different retryability:** Add entries to `ChainErrorMappings` and define new `RouterError` constants in the registry.
 
 ---
