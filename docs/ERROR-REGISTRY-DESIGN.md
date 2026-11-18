@@ -742,8 +742,8 @@ reading was the wrong one.
 1. **401/403 are not at fault.** Retryable, node-capability. See the first rule in 9.1.
 2. **A 500 that is the caller's answer is not at fault** — but only the probed shapes, not every
    500. See the second rule in 9.1.
-3. **A 404 is retried.** It keeps the lagging-node and gateway case working, at up to 3 upstream
-   calls per not-found read, which is the dominant REST read pattern (a client polling for an
+3. **A 404 is retried.** It keeps the lagging-node and gateway case working, at up to 4 upstream
+   calls per not-found read at the default retry limit of 3 (3 when the limit was 2), which is the dominant REST read pattern (a client polling for an
    unmined transaction). Accepted together with 6, which is what makes the cost bearable.
 4. **400, 409, 413 and 422 are not retried.** The research doc made every blockchain
    error retryable only because it deferred retry-worthiness to a later step; the probe data
