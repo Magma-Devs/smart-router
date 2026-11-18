@@ -212,6 +212,65 @@ func TestStallCycleThreshold(t *testing.T) {
 	require.Equal(t, 20, newObsMonitor(t).StallCycleThreshold(), "a monitor with no divisor uses the default")
 }
 
+// MAG-5243 — the time a url's highest block was reached is the clock of the head-stall grace. Only
+// a NEW highest block moves it, from a poll or from a relay; a repeat, a lower answer, a failed poll,
+// a relay-covered cycle and the operator reset leave it where it was.
+func TestStallEvidence_HighestBlockSinceMovesOnlyOnANewHighestBlock(t *testing.T) {
+	freshness := time.Hour
+	m := newGatedMonitor(t, freshness)
+	const url = "https://stall-since.example"
+	gen := m.registerGenForTest(url)
+	since := func() time.Time { return obsOf(t, m, url).HighestBlockSince }
+	at := func(sec int) time.Time { return stallBase.Add(time.Duration(sec) * time.Second) }
+
+	m.recordPollObservation(url, gen, 100, time.Millisecond, nil, at(0))
+	require.Equal(t, at(0), since(), "the first answer starts the clock")
+
+	m.recordPollObservation(url, gen, 100, time.Millisecond, nil, at(1))
+	m.recordPollObservation(url, gen, 99, time.Millisecond, nil, at(2))
+	m.recordPollObservation(url, gen, 0, time.Millisecond, errors.New("timeout"), at(3))
+	require.True(t, m.RecordRelayObservation(url, gen, 100, at(4)))
+	tip, ok := m.freshRelayTip(url, at(5))
+	require.True(t, ok)
+	m.countRelayCoveredCycle(url, gen, tip)
+	m.recordPeerObservation(url, gen, 500, at(6))
+	m.ResetStallCounters()
+	require.Equal(t, at(0), since(), "nothing but a new highest block from this pod moves the clock")
+
+	m.recordPollObservation(url, gen, 101, time.Millisecond, nil, at(7))
+	require.Equal(t, at(7), since(), "a poll with a new highest block")
+
+	require.True(t, m.RecordRelayObservation(url, gen, 600, at(8)))
+	require.Equal(t, at(8), since(), "a relay with a new highest block")
+}
+
+// The grace is 6 block times and never under 30 seconds. One rule: it does not read the poll
+// divisor, so the 60-second cap on the tracker tick cannot shorten it.
+func TestStallGrace(t *testing.T) {
+	for _, c := range []struct {
+		chain     string
+		blockTime time.Duration
+		want      time.Duration
+	}{
+		{"Solana", 400 * time.Millisecond, 30 * time.Second},
+		{"a 5 s chain sits exactly on the floor", 5 * time.Second, 30 * time.Second},
+		{"a 6 s chain is the first above it", 6 * time.Second, 36 * time.Second},
+		{"Ethereum", 12 * time.Second, 72 * time.Second},
+		{"Bitcoin", 10 * time.Minute, 60 * time.Minute},
+	} {
+		for _, divisor := range []float64{0.25, 0.5, 2, 8} {
+			ctx, cancel := context.WithCancel(context.Background())
+			m := NewEndpointMonitor(ctx, EndpointChainTrackerConfig{
+				ChainID: "X", ApiInterface: "jsonrpc", AverageBlockTime: c.blockTime, BlocksToSave: 10,
+				PollIntervalDivisor: divisor,
+			})
+			require.Equal(t, c.want, m.StallGrace(), "%s, divisor %v", c.chain, divisor)
+			m.Stop()
+			cancel()
+		}
+	}
+}
+
 type repeatCall struct {
 	url    string
 	block  int64
