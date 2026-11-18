@@ -441,11 +441,7 @@ func sharedClaimPrimaryOutage(t *testing.T) (csm *ConsumerSessionManager, store 
 	require.Contains(t, claimOutagePrimaries, claimed, "claims only ever name primaries")
 
 	for _, primary := range primaries {
-		for _, endpoint := range primary.Endpoints {
-			for i := uint64(0); i < MaxConsecutiveConnectionAttempts; i++ {
-				endpoint.MarkUnhealthy(EndpointDisableNodeError)
-			}
-		}
+		disableEveryEndpoint(t, primary)
 		require.NoError(t, csm.blockProvider(context.Background(), primary.PublicAddress, BlockReasonAllEndpointsDisabled, true,
 			csm.atomicReadCurrentEpoch(), MaxConsecutiveConnectionAttempts, 0, nil))
 	}
@@ -453,6 +449,68 @@ func sharedClaimPrimaryOutage(t *testing.T) (csm *ConsumerSessionManager, store 
 	require.Contains(t, claimOutageBackups, resolvedProvider(t, csm, ""),
 		"with every primary down, a request without a sticky id is served by backup")
 	return csm, store, claimed
+}
+
+// disableEveryEndpoint takes a provider out of rotation the way the relay path's failure counter
+// does, and does nothing else: blocking it is left to the caller.
+func disableEveryEndpoint(t *testing.T, provider *ConsumerSessionsWithProvider) {
+	t.Helper()
+	for _, endpoint := range provider.Endpoints {
+		for i := uint64(0); i < MaxConsecutiveConnectionAttempts; i++ {
+			endpoint.MarkUnhealthy(EndpointDisableNodeError)
+		}
+	}
+	require.False(t, provider.inRotation(), "%s still has a usable url", provider.PublicAddress)
+}
+
+// primaryOutageNotYetBlocked takes the given primaries out of rotation and leaves them unblocked:
+// their urls are disabled, but no request has picked them since, so they are still valid addresses.
+func primaryOutageNotYetBlocked(t *testing.T, dead ...string) (csm *ConsumerSessionManager, store *fakeSharedSticky) {
+	t.Helper()
+	store = newFakeSharedSticky()
+	csm = CreateConsumerSessionManager()
+	csm.SetSharedStickyStore(store, common.StandaloneEpochDuration)
+	primaries := createNamedPairingList(claimOutagePrimaries...)
+	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, primaries, createNamedPairingList(claimOutageBackups...)))
+	for _, primary := range primaries {
+		if slices.Contains(dead, primary.PublicAddress) {
+			disableEveryEndpoint(t, primary)
+		}
+	}
+	csm.lock.RLock()
+	defer csm.lock.RUnlock()
+	require.ElementsMatch(t, claimOutagePrimaries, csm.validAddresses, "no request has blocked a primary yet")
+	return csm, store
+}
+
+// A new sticky session is never claimed to a primary with no usable url, even before any request has
+// blocked it (MAG-5078). The claim binds the session on every replica for two epochs, and a sticky
+// request is answered by its node or fails, so a claim on a dead primary failed the session until it
+// expired. Eight ids, because the pick between two live-looking primaries spreads them.
+func TestSharedSticky_NewSessionIsNotClaimedToAPrimaryWithNoUsableURL(t *testing.T) {
+	csm, store := primaryOutageNotYetBlocked(t, "primaryA")
+
+	scope := StickyServiceScope("", nil)
+	for _, id := range []string{"s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8"} {
+		sessions, err := csm.GetSessions(context.Background(), 1, cuForFirstRequest, NewUsedProviders(nil), servicedBlockNumber, "", nil, common.NO_STATE, 0, id, "")
+		require.NoErrorf(t, err, "session %s was claimed to the primary with no usable url", id)
+		require.Len(t, sessions, 1)
+		for provider := range sessions {
+			require.Equal(t, "primaryB", provider)
+		}
+		claimed, _, found, fetchErr := store.Fetch(context.Background(), csm.rpcEndpoint.ChainID, csm.rpcEndpoint.ApiInterface, scope, StickyIDDigest(id))
+		require.NoError(t, fetchErr)
+		require.True(t, found, "a live primary is there to claim")
+		require.Equal(t, "primaryB", claimed)
+	}
+}
+
+// With every primary out of rotation and none blocked yet, there is nothing to claim: a new session
+// is served by backup, unclaimed, as it is once the primaries are blocked
+// (TestVerify_B_SharedNewIdDuringOutage_Clean).
+func TestSharedSticky_NewSessionDuringAnUnblockedPrimaryOutageIsServedUnclaimed(t *testing.T) {
+	csm, store := primaryOutageNotYetBlocked(t, claimOutagePrimaries...)
+	requireNewSessionServedByBackupUnclaimed(t, csm, store, "s-new")
 }
 
 // requireNewSessionServedByBackupUnclaimed sends the first request of a sticky session the fleet has
