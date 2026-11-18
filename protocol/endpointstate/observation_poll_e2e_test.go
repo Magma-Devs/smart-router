@@ -32,7 +32,7 @@ func ensureRandSeeded() {
 }
 
 // newRealChainParser builds a real ChainParser from the on-disk spec. It is the
-// lightweight subset of chainlib.CreateChainLibMocks (load spec, NewChainParser,
+// lightweight subset of chainlibtest.CreateChainLibMocks (load spec, NewChainParser,
 // SetSpec) WITHOUT the HTTP server/connector that helper also spins up — the connector's
 // background goroutine + the helper's SetGlobalLoggingLevel write otherwise data-race
 // with each other across tests under -race. We only need a parser, so we build just one.

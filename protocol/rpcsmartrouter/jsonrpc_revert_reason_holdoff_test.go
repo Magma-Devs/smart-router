@@ -5,9 +5,10 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/magma-Devs/smart-router/protocol/chainlibtest"
+
 	"github.com/stretchr/testify/require"
 
-	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
@@ -25,7 +26,7 @@ func TestJSONRPCRelay_ARevertThatMentionsARateLimitHoldsNoProviderOff(t *testing
 	require.NoError(t, err)
 
 	noop := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
-	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, "ETH1", spectypes.APIInterfaceJsonRPC, noop, nil, "../../", nil)
+	chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, "ETH1", spectypes.APIInterfaceJsonRPC, noop, nil, "../../", nil)
 	if closeServer != nil {
 		defer closeServer()
 	}

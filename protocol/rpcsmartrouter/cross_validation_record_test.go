@@ -472,7 +472,7 @@ func TestPatchCrossValidationRecordStraggler_NotReceivedKeepsNoGroup(t *testing.
 // withheld, as relay_end withholds it.
 func TestCrossValidationRecordMethod_SurvivesTheCollector(t *testing.T) {
 	noop := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
-	restParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(context.Background(), "COSMOSHUB", spectypes.APIInterfaceRest, noop, nil, "../../", nil)
+	restParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(context.Background(), "COSMOSHUB", spectypes.APIInterfaceRest, noop, nil, "../../", nil)
 	if closeServer != nil {
 		t.Cleanup(closeServer)
 	}

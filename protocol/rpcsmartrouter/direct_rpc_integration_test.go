@@ -737,12 +737,12 @@ func TestDirectRPCSession_IsDirectRPC(t *testing.T) {
 }
 
 // createMockChainMessage creates a mock ChainMessage for testing
-// This is a simplified mock - real implementation would use chainlib.CreateChainLibMocks
+// This is a simplified mock - real implementation would use chainlibtest.CreateChainLibMocks
 func createMockChainMessage(t *testing.T, requestData string) chainlib.ChainMessage {
 	t.Helper()
 
 	// For now, return a basic mock that implements the minimal interface
-	// In real integration tests, use chainlib.CreateChainLibMocks
+	// In real integration tests, use chainlibtest.CreateChainLibMocks
 	return &mockChainMessage{
 		requestData: []byte(requestData),
 	}
