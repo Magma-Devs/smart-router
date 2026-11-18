@@ -79,6 +79,10 @@ type RelayProcessor struct {
 	// from "the request is over and nothing will ever read this". Read-only after construction, so
 	// it needs no lock. See SetResponse.
 	ctx context.Context
+
+	// startedAt is when the request's relay processing started, the zero of an answer's Elapsed on
+	// the debug answer record. Read-only after construction.
+	startedAt time.Time
 }
 
 // quorumStat is the per-hash agreement tally for cross-validation: how many providers returned this exact
@@ -147,6 +151,7 @@ func NewRelayProcessor(
 	chainID, _ := chainIdAndApiInterfaceGetter.GetChainIdAndApiInterface()
 	relayProcessor := &RelayProcessor{
 		ctx:                          ctx,
+		startedAt:                    time.Now(),
 		crossValidationParams:        crossValidationParams,
 		responses:                    make(chan *RelayResponse, responseBufferSize(selection, crossValidationParams)), // buffered to prevent blocking
 		ResultsManager:               NewResultsManager(guid, chainID),
@@ -557,6 +562,7 @@ func (rp *RelayProcessor) SetResponse(response *RelayResponse) {
 	if response == nil {
 		return
 	}
+	rp.recordAnswer(response)
 	select {
 	case rp.responses <- response:
 		return
@@ -813,6 +819,9 @@ func (rp *RelayProcessor) handleResponse(response *RelayResponse) {
 	}
 
 	nodeError := rp.ResultsManager.SetResponse(response, rp.RelayStateMachine.GetProtocolMessage())
+	if response != nil {
+		recordAnswerOutcome(response, nodeError)
+	}
 
 	// send relay error metrics only on non stateful queries, as stateful queries always return X-1/X errors.
 	if nodeError != nil && rp.selection != Stateful {

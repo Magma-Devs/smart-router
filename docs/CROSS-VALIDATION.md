@@ -224,9 +224,25 @@ on regardless of `--log-level` — see
   groups leaves it 200 while requests for *that* method are refused with `insufficient-capacity`.
   That is deliberate: gating a whole chain and interface on one method's quorum is the over-coupling
   MAG-3746 was. Alert on the cross-validation failure series for policy capacity, not on readiness.
+- **A cross-validated request goes only to providers the router trusts to hold its answer.**
+  - **Never a blocked provider (MAG-2785).** When selection runs out of providers, an ordinary
+    request ends the failover cascade on the blocked list. A cross-validated one stops before it
+    and fails `insufficient-capacity`: a blocked provider's answer would count as a vote.
+  - **Never a provider known to be below the block it names (MAG-2786).** A node asked for a
+    block it does not have answers as if the block did not exist (`{"result": null}` on EVM, with
+    no error). So two lagging providers used to agree on "not found" and outvote the one that held
+    the block. A request for an explicit height now goes only to providers whose last known block,
+    or one of whose urls' own poll, reaches it. A provider whose block is unknown stays eligible.
+    `latest` and the other tags are not held to a height, and historical reads still use
+    providers behind the tip.
+  - **A block no provider has reached yet fails `insufficient-capacity`**, until one does. A
+    client following the head under cross-validation gets that failure, not a validated `null`,
+    for the next block.
 - **Cost & latency.** N relays per request. Scope policies to the methods that warrant it.
 - **A group smaller than the agreement threshold is an availability risk.** Cross-validation
-  does not retry, hedge or use backups. With `min-groups: 2` and a group of one provider,
+  does not retry or hedge, and a backup joins a request only when it is selected (see
+  `max-participants: all` above): none stands in for a provider that goes quiet. With
+  `min-groups: 2` and a group of one provider,
   that provider going quiet can leave the quorum only group diversity short. When the
   attempt window expires with the agreement count met, and only providers from groups
   smaller than the threshold could still complete a quorum, the request fails
@@ -506,9 +522,10 @@ The split in the reason enum is the client's decision procedure. A **quorum-time
 (`no-agreement`, `insufficient-responses`, `diversity-unmet`, `group-quorum-unmet`) means
 responses came back and did not agree — a retry against a different set may help. A
 **request-time structural** reason (`insufficient-capacity`, `insufficient-groups`) means the
-candidate set could not even be assembled, so retrying this router will not help and the client
-should fall back. The structural case carries no provider lists precisely because no provider
-was queried; `failure-reason` is the whole signal.
+candidate set could not even be assembled, so the client should fall back. Retrying this router
+helps only once the set can be assembled: a blocked provider is re-admitted, or a provider reaches
+the block the request names (see [Caveats](#caveats)). The structural case carries no provider
+lists precisely because no provider was queried; `failure-reason` is the whole signal.
 
 The same split is on the metrics side, so alerts can distinguish them without parsing logs:
 
