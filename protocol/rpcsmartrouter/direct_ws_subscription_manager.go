@@ -336,7 +336,13 @@ func (dwsm *DirectWSSubscriptionManager) subscriptionUpstreamName(hashedParams s
 // SetEndpoints replaces both tiers with the currently-serving WebSocket endpoints and
 // reports whether anything actually changed. See subscriptionEndpoints.setEndpoints.
 func (dwsm *DirectWSSubscriptionManager) SetEndpoints(wsEndpoints, wsBackupEndpoints []*common.NodeUrl) (changed bool) {
-	return dwsm.setEndpoints(wsEndpoints, wsBackupEndpoints)
+	if !dwsm.setEndpoints(wsEndpoints, wsBackupEndpoints) {
+		return false
+	}
+	dwsm.lock.RLock()
+	scaleDownDepartedPools(&dwsm.subscriptionEndpoints, dwsm.upstreamPools)
+	dwsm.lock.RUnlock()
+	return true
 }
 
 // Start starts the background cleanup goroutine for the DirectWSSubscriptionManager.
@@ -493,6 +499,7 @@ func (dwsm *DirectWSSubscriptionManager) GetOrCreatePool(nodeUrl *common.NodeUrl
 	pool, exists := dwsm.upstreamPools[nodeUrl.Url]
 	if !exists {
 		pool = NewUpstreamWSPoolWithConfig(nodeUrl, dwsm.config)
+		pool.departed = dwsm.departs(nodeUrl.Url)
 		dwsm.upstreamPools[nodeUrl.Url] = pool
 	}
 	return pool
