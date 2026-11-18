@@ -2,11 +2,13 @@ package rpcsmartrouter
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
@@ -214,4 +216,38 @@ func sendRead(t *testing.T, tc writeInterfaceCase, chainParser chainlib.ChainPar
 	callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	return server.SendParsedRelay(callCtx, nil, protocolMessage)
+}
+
+// Every primary of the route ejected: the write's one broadcast goes to every backup and every
+// ejected primary, one copy each, up to 10, and nothing is sent after it (MAG-5232 Expected 10, test
+// 16; Part I R-Q step 6). Main sent one optimizer-chosen backup, so a write the backup tier could have
+// landed rested on one provider, and the ejected primaries, which may only have been switched off for
+// a burst of failures, were not asked at all.
+func TestWrite_EveryPrimaryEjectedBroadcastsToEveryBackupAndEjectedPrimary(t *testing.T) {
+	rand.InitRandomSeed()
+	tc := writeInterfaceCases[0]
+	chainParser := tc.parser(t)
+	var primaries, backups []writeUpstream
+	for i := 0; i < 3; i++ {
+		primaries = append(primaries, writeUpstream{name: fmt.Sprintf("primary-%d-%s", i, t.Name()), status: http.StatusOK, body: tc.success, disabled: true})
+		backups = append(backups, writeUpstream{name: fmt.Sprintf("backup-%d-%s", i, t.Name()), status: http.StatusOK, body: tc.success})
+	}
+	hits := make([]int64, len(primaries)+len(backups))
+	server := newWriteServer(t, tc, chainParser, primaries, backups, hits)
+
+	_, err := sendWrite(t, tc, chainParser, server)
+	require.NoError(t, err, "a copy landed the write")
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		for i := range hits {
+			assert.Equal(c, int64(1), atomic.LoadInt64(&hits[i]), "upstream %d got one copy", i)
+		}
+	}, statefulDeliveryLinger, 10*time.Millisecond)
+	require.Never(t, func() bool {
+		for i := range hits {
+			if atomic.LoadInt64(&hits[i]) > 1 {
+				return true
+			}
+		}
+		return false
+	}, 200*time.Millisecond, 10*time.Millisecond, "nothing is sent after the broadcast")
 }

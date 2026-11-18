@@ -672,6 +672,11 @@ type SessionWithProvider struct {
 	// serve this request. GetSessions then picks its endpoint with endpointPickLendDisabled, so a
 	// disabled endpoint is lent for this request instead of skipped.
 	lastChance bool
+	// writeBroadcast marks a provider of a write's broadcast with every primary ejected
+	// (everyPrimaryEjectedWriteBroadcast). Its disabled endpoint is lent as the last chance lends
+	// one, but without the last chance's once-per-request limit: every provider of the broadcast
+	// gets its one copy, and nothing is sent after it.
+	writeBroadcast bool
 }
 
 // endpointPickMode says what fetchEndpointConnectionFromConsumerSessionWithProvider does with an
