@@ -31,38 +31,27 @@ func (p *Policy) Decide(input relaycore.DecisionInput) relaycore.DecisionOutput 
 	// sequence a sticky session protects, read the head then
 	// fetch that block, it is exactly how a false gap is produced: nothing here checks that the
 	// other node has reached the block. The pinned node's own answer, error included, goes back
-	// to the caller with Lava-Retries 0. Checked before the stateful rate-limit carve-out, so a
-	// pinned write refused for rate is not broadcast elsewhere either. Cross-validation overrides
-	// pins and stopped above.
+	// to the caller with Lava-Retries 0. Cross-validation overrides pins and stopped above.
 	if input.Pinned {
 		return relaycore.DecisionOutput{Action: relaycore.ActionStop, Reason: "Pinned"}
 	}
-	// A stateful relay is not retried because a possibly-executed write must not run
-	// twice. A rate limit is the one failure that concern does not cover: the upstream
-	// refused before executing anything, so the retry lands on a different endpoint
-	// with nothing at risk. The limit checks below still bound it.
-	//
-	// That is a claim about attempts that have COMPLETED, and only the gotResults path
-	// guarantees it — the ticker fires on a timer with a relay still in flight, which may
-	// already have broadcast. So the carve-out does not extend to a hedge.
-	//
-	// A GraphQL write has no such carve-out (MAG-5122, Part I R-L point 2): never re-sent,
-	// including when every copy answered 429. The interface's own clients treat the one send as
-	// final, so a retry here is a second send the ticket exists to rule out — unlike the other
-	// interfaces this carve-out still serves, which MAG-5061 owns.
-	rateLimitRetrySafe := input.Summary.OnlyRateLimited && !input.IsTickerHedge && !input.IsGraphQLWrite
-	// A batch node error is not proof that nothing ran. Under --batch-node-error-on-any one failed
-	// element makes the whole reply a node error, classified by the failed elements' text alone, so a
-	// rate-limited sibling can stand for a batch whose eth_sendRawTransaction was accepted. Only a
-	// refusal of the whole batch at the transport (a protocol error) proves a stateful batch is safe
-	// to send again.
-	if input.Selection == relaycore.Stateful && input.IsBatch && input.Summary.NodeErrors+input.Summary.SpecialNodeErrors > 0 {
-		rateLimitRetrySafe = false
-	}
-
-	if input.Selection == relaycore.Stateful && !rateLimitRetrySafe {
+	// A write (a stateful relay) is sent once to each provider, all at once, and never again
+	// (MAG-5232, Part I R-L; MAG-5061 item 4), on every interface, single write or batch: not after
+	// every copy answered 429, and not after a refused connection. A 429 from a gateway in front of
+	// the node does not prove the node did not run the transaction, and a second send can come back
+	// as a refusal of bytes that already ran ("nonce too low"), which the client reads as "failed"
+	// and answers by signing a new transaction. Main used to send a write again, to a provider not
+	// yet used, when every copy so far had been refused for rate; MAG-5122 had already removed that
+	// for GraphQL writes.
+	if input.Selection == relaycore.Stateful {
 		return relaycore.DecisionOutput{Action: relaycore.ActionStop, Reason: "Stateful"}
 	}
+
+	// A batch of reads that every upstream refused for rate executed nothing, so it may be sent again
+	// even with batch retries off. That is a claim about attempts that have COMPLETED, and only the
+	// gotResults path guarantees it: the ticker fires on a timer with a relay still in flight, so the
+	// carve-out does not extend to a hedge. The limit checks below still bound it.
+	rateLimitRetrySafe := input.Summary.OnlyRateLimited && !input.IsTickerHedge
 
 	// 2. PERMANENT FAILURE CHECKS
 	// HasNonRetryableNodeError is the umbrella flag — covers unsupported method,
@@ -86,8 +75,6 @@ func (p *Policy) Decide(input relaycore.DecisionInput) relaycore.DecisionOutput 
 	if input.AttemptNumber >= p.config.MaxRetries {
 		return relaycore.DecisionOutput{Action: relaycore.ActionStop, Reason: "MaxRetriesReached"}
 	}
-	// Same reasoning for batches: a rate-limited batch executed nothing — and the same
-	// in-flight caveat, since a batch can carry an eth_sendRawTransaction.
 	if input.IsBatch && p.config.DisableBatchRetry && !rateLimitRetrySafe {
 		return relaycore.DecisionOutput{Action: relaycore.ActionStop, Reason: "BatchDisabled"}
 	}

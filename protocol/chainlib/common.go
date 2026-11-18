@@ -751,8 +751,15 @@ func CombineEarliestRequestedBlock(currentEarliest, parsedBlock int64) int64 {
 // (common.BoundCallerRelayTimeout), and a bounded value is always positive. The window feeds
 // time.NewTicker, and the processing budget is never shorter than it, so this is the one place both
 // hazards of an unchecked header are closed for every consumer of the window (MAG-3600).
+//
+// A write ignores lava-relay-timeout (MAG-5232, Part I): its window is always its own. A shorter
+// value can only cut off a copy that may already have broadcast, which turns a write that landed into
+// an unknown outcome, and a longer one would hold the request past the write's own budget.
 func GetRelayTimeout(chainMessage ChainMessageForSend, averageBlockTime time.Duration) time.Duration {
 	ownWindow := routerRelayTimeout(chainMessage, averageBlockTime)
+	if GetStateful(chainMessage) == common.CONSISTENCY_SELECT_ALL_PROVIDERS {
+		return ownWindow
+	}
 	if override := chainMessage.TimeoutOverride(); override != 0 {
 		if window, ok := common.BoundCallerRelayTimeout(override, ownWindow, GetTimeoutInfo(chainMessage)); ok {
 			return window

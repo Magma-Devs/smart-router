@@ -1503,10 +1503,9 @@ func unclearWriteOutcomeFor(protocolMessage chainlib.ProtocolMessage, relayProce
 	successResults, nodeErrors, protocolErrors := relayProcessor.GetResultsData()
 	answered := len(successResults) + len(nodeErrors) + len(protocolErrors)
 	// Both sides of this comparison must count the same thing. answered is cumulative, so dispatched
-	// is too: SessionsLatestBatch resets on each new batch, and a write is NOT always a single batch
-	// — relaypolicy carves out a retry for a stateful relay whose whole batch was rate limited (the
-	// upstream refused before executing anything). On that path a per-batch count reads as fewer
-	// endpoints than answered, and the verdict flips to "failed" while one is still silent.
+	// is too. A write is one batch today (relaypolicy never sends one again, MAG-5232), but
+	// SessionsLatestBatch resets on each new batch, and a per-batch count read against a cumulative
+	// answered count would flip the verdict to "failed" while an endpoint is still silent.
 	dispatched := relayProcessor.GetUsedProviders().SessionsDispatched()
 
 	ranOutOfRoad := requestRanOutOfRoad(relayProcessor.GetStopReason())
@@ -1668,9 +1667,8 @@ const (
 )
 
 // isGraphQLWrite reports whether protocolMessage is a GraphQL write. MAG-5122 scopes its write-
-// outcome behaviour — the HTTP 200 unclear-write reply, the Lava-Write-Outcome header, the
-// rate-limit retry carve-out removal (relaypolicy.Policy.Decide) — to this interface only; every
-// other interface's write behaviour is MAG-5061's to change.
+// outcome behaviour — the HTTP 200 unclear-write reply and the Lava-Write-Outcome header — to this
+// interface only.
 func isGraphQLWrite(protocolMessage chainlib.ProtocolMessage) bool {
 	if chainlib.GetStateful(protocolMessage) != common.CONSISTENCY_SELECT_ALL_PROVIDERS {
 		return false
