@@ -216,9 +216,7 @@ func TestRelay_GRPCRateLimitIsHeldOffForTheWaitItAskedFor(t *testing.T) {
 			// A frozen clock and no jitter make the applied hold-off exact.
 			now := time.Now()
 			registry := holdoff.NewRegistryWithClock(func() time.Time { return now })
-			restore := relayHoldoff
-			relayHoldoff = registry
-			t.Cleanup(func() { relayHoldoff = restore })
+			swapRelayHoldoff(t, registry)
 
 			server, provider, url := newGRPCRateLimitRouter(t, startRateLimitingGRPCNode(t, tc.message, tc.header, tc.trailer))
 			relayGRPCCall(t, server)

@@ -199,7 +199,7 @@ type subscriptionEndpoints struct {
 	stickyStore *routersession.StickySessionStore
 
 	// rateLimitHoldoff is the hold-off registry selection reads and a subscribe's rate limit
-	// is recorded into. Nil reads relayHoldoff at the time of the call; see holdoffs.
+	// is recorded into. Nil reads relayHoldoff() at the time of the call; see holdoffs.
 	rateLimitHoldoff *holdoff.Registry
 
 	// The tiers are mutable: SetEndpoints swaps them (copy-on-write) whenever the live
@@ -242,7 +242,7 @@ func (se *subscriptionEndpoints) holdoffs() *holdoff.Registry {
 	if se.rateLimitHoldoff != nil {
 		return se.rateLimitHoldoff
 	}
-	return relayHoldoff
+	return relayHoldoff()
 }
 
 // endpointsSnapshot is an immutable view of both tiers plus the URL index, taken under the

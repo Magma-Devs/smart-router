@@ -237,7 +237,7 @@ func NewDirectGRPCSubscriptionManager(
 	}
 	// The registry is fixed here rather than read per call, so a test can give one manager
 	// its own.
-	manager.rateLimitHoldoff = relayHoldoff
+	manager.rateLimitHoldoff = relayHoldoff()
 
 	return manager
 }
