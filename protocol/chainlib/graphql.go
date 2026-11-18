@@ -388,6 +388,14 @@ func (apil *GraphQLChainListener) Serve(ctx context.Context, cmdFlags common.Con
 		// with more than one root field) also says Lava-Write-Outcome: not_sent, so the caller
 		// knows for certain the write never ran and can send it again fixed (MAG-5120).
 		refusal: func(err error, msgSeed string) (int, []byte, string, map[string]string, bool) {
+			// A refusal of the request itself made after parsing, such as a lava-select-provider
+			// name no provider of the router carries (MAG-3800): the same refusal document, with
+			// REQUEST_REFUSED. A refused write's Lava-Write-Outcome: not_sent comes on the relay
+			// reply's headers, which relayHTTP sends with this document: the router sets it there,
+			// since only it knows the request was a mutation.
+			if message, ok := refusedRequestMessage(err); ok {
+				return graphQLRefusalStatus, convertToGraphQLError(message, rpcInterfaceMessages.GraphQLRequestRefusedCode, msgSeed), message, nil, true
+			}
 			refusal := rpcInterfaceMessages.GraphQLRefusalFrom(err)
 			if refusal == nil {
 				return 0, nil, "", nil, false
