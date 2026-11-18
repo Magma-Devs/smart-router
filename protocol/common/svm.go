@@ -4,8 +4,8 @@ package common
 // These chains use slot-based block numbering where slots can be skipped or
 // not yet propagated, requiring special handling in block fetching.
 //
-// Delegates to the authoritative chainFamilyMap in error_registry.go so adding
-// a new SVM chain only needs to update that single map — no parallel switch
+// Delegates to the chain families in error_registry.go, where a new SVM chain
+// takes the Solana family from its spec's import of SOLANA — no parallel switch
 // to keep in sync.
 func IsSolanaFamily(chainID string) bool {
 	family, ok := GetChainFamily(chainID)
