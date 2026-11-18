@@ -109,9 +109,8 @@ type chainReverifyInputs struct {
 	// demotion, and whenever the provider is not currently active, so a re-promoted provider
 	// always starts with a full grace budget.
 	//
-	// Guarded by RPCSmartRouter.mu: applyReverification is called only from updateEpoch, which
-	// holds that lock across both tier calls. Lazily allocated so test fixtures that build
-	// chainReverifyInputs by hand need not.
+	// Guarded by RPCSmartRouter.mu: every caller of decideReverification holds it. Lazily
+	// allocated so test fixtures that build chainReverifyInputs by hand need not.
 	demoteFailStreak map[string]int
 	// rateLimitHoldoff holds off providers that answered a probe with a rate-limit, so the
 	// pass stops adding load to an upstream that just told us it is over its limit. Nil
@@ -384,9 +383,9 @@ func isRateLimitFailure(err error) bool {
 	return chainlib.IsRateLimitFailure(err)
 }
 
-// applyReverification revalidates configured providers for one tier and
-// reconciles the result against the freshly-built active map. It does two
-// things, in order:
+// applyReverification reconciles one tier's re-verify probes — probeReverification
+// over the tier's configured providers — against the freshly-built active map. It
+// does two things, in order:
 //
 //   - Demote: drop entries from `fresh` whose provider has now failed validation on
 //     reverifyDemoteThreshold CONSECUTIVE cycles (a provider failing for the first time is kept,
@@ -398,18 +397,13 @@ func isRateLimitFailure(err error) bool {
 //     configured providers that pass but were absent from `fresh` (returning
 //     from failed-init / quarantine).
 //
-// The per-provider check is inputs.validateFn; production leaves it nil and we
-// fall back to validateProvider (real network probe). Tests inject a fake via
-// inputs.validateFn to exercise the reconciliation logic — and updateEpoch's
-// orchestration around it — without standing up upstreams.
-//
-// Validations run in parallel, capped by SpecReVerifyConcurrency, so a worst-
-// case cycle is bounded by ⌈N/conc⌉ × SpecReVerifyAttemptTimeout instead of
-// N × timeout. Pure with respect to RPCSmartRouter state — no field mutation,
-// no UpdateAllProviders, no tracker reconcile; updateEpoch owns those. The ONE
-// exception is inputs.demoteFailStreak, the cross-cycle failure counter this
-// function both reads and advances; it is guarded by RPCSmartRouter.mu, which
-// updateEpoch holds across both tier calls.
+// The probes are taken before, without the router lock: one provider that never
+// answers holds its probe for SpecReVerifyAttemptTimeout, and nothing else that
+// needs the lock may wait on it (MAG-5318). This applies their verdicts, and callers
+// hold RPCSmartRouter.mu. Pure with respect to RPCSmartRouter state — no field
+// mutation, no UpdateAllProviders, no tracker reconcile; updateEpoch owns those. The
+// ONE exception is inputs.demoteFailStreak, the cross-cycle failure counter this
+// function both reads and advances.
 //
 // Configured lists are pre-filtered by chain+ApiInterface at startup (see
 // relevantStaticProviderList in rpcsmartrouter.go), so no further filter is
@@ -419,17 +413,16 @@ func isRateLimitFailure(err error) bool {
 // those providers from the failed lists — promoting here while leaving them pending
 // for the retry loop produces two sessions for one provider.
 func applyReverification(
-	ctx context.Context,
 	inputs *chainReverifyInputs,
 	fresh map[uint64]*routersession.ConsumerSessionsWithProvider,
 	tier reverifyTier,
 	epoch uint64,
+	probes []reverifyProbe,
 ) (map[uint64]*routersession.ConsumerSessionsWithProvider, []*routersession.ConsumerSessionsWithProvider, []string) {
-	configured := inputs.configuredFor(tier)
-	if len(configured) == 0 {
+	if len(inputs.configuredFor(tier)) == 0 {
 		return fresh, nil, nil
 	}
-	return decideReverification(inputs, fresh, tier, epoch, probeReverification(ctx, inputs, configured, nil, nil), false)
+	return decideReverification(inputs, fresh, tier, epoch, probes, false)
 }
 
 // configuredFor is one tier's configured providers.
