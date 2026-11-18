@@ -407,6 +407,17 @@ func (sm *UnifiedRelayStateMachine) endOfRoadReason(err error) string {
 	return sm.stopReasonOr(StopReasonCallerGone)
 }
 
+// processingEndReason is endOfRoadReason for processingCtx once it has ended. processingCtx is bounded
+// by the router's processing timeout and by the caller's own deadline, whichever is earlier. When the
+// caller's grpc-timeout was the earlier one, the request ended from outside, as a hang-up does: it is
+// not the budget running out, and no endpoint still working on it is blamed (rulebook D10).
+func (sm *UnifiedRelayStateMachine) processingEndReason(processingCtx context.Context) string {
+	if common.CallerDeadlinePassed(processingCtx, time.Now()) {
+		return sm.stopReasonOr(StopReasonCallerGone)
+	}
+	return sm.endOfRoadReason(processingCtx.Err())
+}
+
 // checkAndHandleTimeout checks if processingCtx has expired and handles cleanup if so.
 func (sm *UnifiedRelayStateMachine) checkAndHandleTimeout(
 	processingCtx context.Context,
@@ -431,7 +442,7 @@ func (sm *UnifiedRelayStateMachine) checkAndHandleTimeout(
 		utils.LogAttr("consecutiveBatchErrors", sm.policy.GetConsecutiveBatchErrors()),
 	)
 
-	relayTaskChannel <- RelayStateSendInstructions{Err: processingCtx.Err(), Done: true, StopReason: sm.endOfRoadReason(processingCtx.Err())}
+	relayTaskChannel <- RelayStateSendInstructions{Err: processingCtx.Err(), Done: true, StopReason: sm.processingEndReason(processingCtx)}
 	return true
 }
 
@@ -685,7 +696,7 @@ func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendIn
 						utils.LogAttr("batchNumber", sm.usedProviders.BatchNumber()),
 						utils.LogAttr("consecutiveBatchErrors", sm.policy.GetConsecutiveBatchErrors()),
 					)
-					relayTaskChannel <- RelayStateSendInstructions{Err: processingCtx.Err(), Done: true, StopReason: sm.endOfRoadReason(processingCtx.Err())}
+					relayTaskChannel <- RelayStateSendInstructions{Err: processingCtx.Err(), Done: true, StopReason: sm.processingEndReason(processingCtx)}
 				}
 				return
 			}
