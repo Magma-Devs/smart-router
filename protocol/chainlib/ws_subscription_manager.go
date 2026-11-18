@@ -25,7 +25,9 @@ type WSSubscriptionManager interface {
 	//
 	// Returns:
 	//   - firstReply: The initial subscription confirmation reply
-	//   - repliesChan: Channel for receiving subscription messages
+	//   - repliesChan: Channel for receiving subscription messages. Nil when this client
+	//     already holds this exact subscription: it gets its existing reply again, and the
+	//     channel from its first subscribe keeps delivering.
 	//   - error: Any error that occurred
 	StartSubscription(
 		ctx context.Context,
