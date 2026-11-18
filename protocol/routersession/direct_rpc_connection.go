@@ -507,6 +507,29 @@ type GRPCDirectRPCConnection struct {
 	// to pin down the Close-during-initialization ordering. It is read under initMu
 	// and must be set before the first request.
 	newConnector grpcConnectorFactory
+
+	// onReflection, when set, is told how each reflection session this connection runs
+	// ended: the warm-up sweep, a snapshot read, a lookup of a name the snapshot lacks, and
+	// each resolver lookup. It feeds the router's internal-operations metric (MAG-4563).
+	onReflection atomic.Pointer[func(error)]
+}
+
+// SetChainDescriptors shares this connection's method definitions with the other providers of
+// its chain, and lets it use theirs when its own node gives none (MAG-5134).
+func (g *GRPCDirectRPCConnection) SetChainDescriptors(chain *ChainDescriptors) {
+	g.resolver.SetChainDescriptors(chain)
+}
+
+// SetReflectionObserver sets the function told how each reflection session ended.
+func (g *GRPCDirectRPCConnection) SetReflectionObserver(observe func(error)) {
+	g.onReflection.Store(&observe)
+	g.resolver.SetLookupObserver(observe)
+}
+
+func (g *GRPCDirectRPCConnection) observeReflection(err error) {
+	if observe := g.onReflection.Load(); observe != nil && *observe != nil {
+		(*observe)(err)
+	}
 }
 
 // newGRPCDirectRPCConnection builds a gRPC connection with its descriptor cache in
@@ -1546,6 +1569,7 @@ func (g *GRPCDirectRPCConnection) warmDescriptorCache() {
 	defer cl.Reset()
 
 	services, err := cl.ListServices()
+	g.observeReflection(err)
 	if err != nil {
 		// Not an error: a node that does not serve reflection is a supported
 		// configuration ("file"/"hybrid" with a protoset), and one that is merely
@@ -1585,6 +1609,11 @@ func (g *GRPCDirectRPCConnection) warmDescriptorCache() {
 		}
 
 		serviceDescriptor, err := resolveServiceFrom(descriptorSource, service)
+		// A failure the sweep's own budget caused is not the node's, and is not held
+		// against the service (noteLookupOutcome).
+		if ctx.Err() == nil {
+			g.resolver.noteLookupOutcome(service, err)
+		}
 		if err == nil {
 			g.resolver.cacheServiceMethods(serviceDescriptor)
 			warmed++
@@ -1728,13 +1757,17 @@ func (g *GRPCDirectRPCConnection) initializeDescriptorSource() error {
 // The methodPath should be in format "service/method" (e.g., "cosmos.bank.v1beta1.Query/TotalSupply")
 // Returns nil if no descriptor is cached. The warm-up sweep, a JSON request and
 // ResolveMethodDescriptor fill the cache; a binary request does not, because it goes to
-// the node without a descriptor (see invokeRaw).
+// the node without a descriptor (see invokeRaw). With none cached from this node, the
+// definition another provider of the chain gave is returned (MAG-5134).
 func (g *GRPCDirectRPCConnection) GetCachedMethodDescriptor(methodPath string) *desc.MethodDescriptor {
 	// Parse the method path to get the full name used in cache
 	svc, methodName := rpcInterfaceMessages.ParseSymbol(methodPath)
 	fullMethodName := svc + "." + methodName
 
 	if methodDesc, found, _ := g.descriptorsCache.Load(fullMethodName); found {
+		return methodDesc
+	}
+	if methodDesc, ok := g.resolver.ChainMethod(svc, methodName); ok {
 		return methodDesc
 	}
 	return nil
@@ -1868,6 +1901,7 @@ func (g *GRPCDirectRPCConnection) readReflectionSnapshot() (*GRPCReflectionSnaps
 		snapshot, err = buildReflectionSnapshot(source)
 		return err
 	})
+	g.observeReflection(err)
 	if err != nil {
 		return nil, utils.FormatWarning("gRPC reflection snapshot failed", err,
 			utils.LogAttr("url", g.nodeUrl.Url))
@@ -1896,6 +1930,7 @@ func (g *GRPCDirectRPCConnection) lookupReflectionSymbol(ctx context.Context, na
 		fd = d.GetFile().UnwrapFile()
 		return nil
 	})
+	g.observeReflection(err)
 	return fd, err
 }
 

@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/goccy/go-json"
@@ -53,6 +55,41 @@ type GrpcChainParser struct {
 	// so a second node-url asking for a different one is caught rather than silently
 	// winning. See setupForProvider.
 	descriptorConfig *grpcDescriptorConfig
+
+	// descriptors is the chain's method definitions from any of its providers
+	// (MAG-5134), shared by every gRPC connection and stream pool of the chain and by
+	// verification. A clone for validation keeps the same store.
+	descriptors *routersession.ChainDescriptors
+
+	// onUnreadBlock, when set, is told why a client request's block could not be read for
+	// want of a method definition (MAG-4563).
+	onUnreadBlock atomic.Pointer[func(reason string)]
+}
+
+// SetUnreadBlockObserver sets the function told, once per client request, why its block could
+// not be read for want of a method definition (dyncodec.UnreadBlockReason).
+func (apip *GrpcChainParser) SetUnreadBlockObserver(observe func(reason string)) {
+	apip.onUnreadBlock.Store(&observe)
+}
+
+// unreadBlockOnce returns the observer for one request, called at most once however many times
+// the request's block is parsed, or nil when none is set.
+func (apip *GrpcChainParser) unreadBlockOnce() func(string) {
+	observe := apip.onUnreadBlock.Load()
+	if observe == nil || *observe == nil {
+		return nil
+	}
+	var once sync.Once
+	return func(reason string) { once.Do(func() { (*observe)(reason) }) }
+}
+
+// GrpcChainDescriptors returns the chain's shared method definitions when parser is a gRPC
+// chain's parser, and nil otherwise.
+func GrpcChainDescriptors(parser ChainParser) *routersession.ChainDescriptors {
+	if grpcParser, ok := parser.(*GrpcChainParser); ok && grpcParser != nil {
+		return grpcParser.descriptors
+	}
+	return nil
 }
 
 // grpcDescriptorConfig is the descriptor resolution a single node-url asks for.
@@ -70,7 +107,7 @@ func (c grpcDescriptorConfig) String() string {
 
 // NewGrpcChainParser creates a new instance of GrpcChainParser
 func NewGrpcChainParser() (chainParser *GrpcChainParser, err error) {
-	parser := &GrpcChainParser{}
+	parser := &GrpcChainParser{descriptors: routersession.NewChainDescriptors()}
 	parser.skipWebsocketVerification = SkipWebsocketVerificationDefault
 	return parser, nil
 }
@@ -120,8 +157,9 @@ func (apip *GrpcChainParser) cloneForValidation() *GrpcChainParser {
 			// under the same ws policy as the parser it stands in for.
 			skipWebsocketVerification: apip.SkipWebsocketVerification(),
 		},
-		registry: apip.registry,
-		codec:    apip.codec,
+		registry:    apip.registry,
+		codec:       apip.codec,
+		descriptors: apip.descriptors,
 	}
 }
 
@@ -272,11 +310,12 @@ func (apip *GrpcChainParser) ParseMsg(url string, data []byte, connectionType st
 
 	// Construct grpcMessage
 	grpcMessage := rpcInterfaceMessages.GrpcMessage{
-		Msg:         data,
-		Path:        url,
-		Codec:       apip.codec,
-		Registry:    apip.registry,
-		BaseMessage: chainproxy.BaseMessage{Headers: metadata, LatestBlockHeaderSetter: settingHeaderDirective},
+		Msg:           data,
+		Path:          url,
+		Codec:         apip.codec,
+		Registry:      apip.registry,
+		BaseMessage:   chainproxy.BaseMessage{Headers: metadata, LatestBlockHeaderSetter: settingHeaderDirective},
+		OnUnreadBlock: apip.unreadBlockOnce(),
 	}
 
 	// // Fetch requested block, it is used for data reliability
@@ -689,6 +728,9 @@ type GrpcChainProxy struct {
 	BaseChainProxy
 	conn             chainproxy.GRPCConnectorInterface
 	descriptorsCache *common.SafeSyncMap[string, *desc.MethodDescriptor]
+	// chainDescriptors is the chain's shared store (GrpcChainDescriptors): a method this
+	// node gives no definition of is read with one another provider gave (MAG-5134).
+	chainDescriptors *routersession.ChainDescriptors
 }
 
 func NewGrpcChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint routersession.RPCProviderEndpoint, parser ChainParser) (ChainProxy, error) {
@@ -715,6 +757,7 @@ func newGrpcChainProxy(ctx context.Context, averageBlockTime time.Duration, pars
 		// here no matter what the config says (MAG-2350).
 		BaseChainProxy:   BaseChainProxy{averageBlockTime: averageBlockTime, ErrorHandler: newNodeErrorHandler(common.TransportGRPC, rpcProviderEndpoint.ChainID), ChainID: rpcProviderEndpoint.ChainID, NodeUrl: rpcProviderEndpoint.NodeUrls[0], HashedNodeUrl: chainproxy.HashURL(rpcProviderEndpoint.NodeUrls[0].Url)},
 		descriptorsCache: &common.SafeSyncMap[string, *desc.MethodDescriptor]{},
+		chainDescriptors: GrpcChainDescriptors(parser),
 	}
 	cp.conn = conn
 	if cp.conn == nil {
@@ -741,6 +784,61 @@ func newGrpcChainProxy(ctx context.Context, averageBlockTime time.Duration, pars
 		return nil, fmt.Errorf("grpc chain proxy: failed to setup parser: %w", err)
 	}
 	return cp, nil
+}
+
+// resolveMethod finds the definition of the method at path, and the descriptor source to read its
+// messages with (MAG-5134).
+//
+// The node's own definition comes first, looked up within grpc-config's reflection-timeout: a node
+// that accepts the reflection stream and never answers otherwise held the whole verification
+// attempt. A definition the node gives is added to the chain's store, for the chain's other
+// providers. When the node gives none, the one another provider gave is used, read through its
+// own files. With none from anyone the error wraps routersession.ErrNoMethodDefinition, which
+// verification reads as a check it could not run, not one the node failed.
+func (cp *GrpcChainProxy) resolveMethod(ctx context.Context, descriptorSource grpcurl.DescriptorSource, path string) (*desc.MethodDescriptor, grpcurl.DescriptorSource, error) {
+	methodDescriptor, err := cp.methodDescriptorWithin(ctx, cp.NodeUrl.GrpcConfig.GetReflectionTimeout(), descriptorSource, path)
+	if err == nil {
+		cp.chainDescriptors.AddService(methodDescriptor.GetService())
+		return methodDescriptor, descriptorSource, nil
+	}
+	svc, methodName := rpcInterfaceMessages.ParseSymbol(path)
+	if shared, ok := cp.chainDescriptors.Method(svc, methodName); ok {
+		sharedSource, sourceErr := grpcurl.DescriptorSourceFromFileDescriptors(shared.GetFile())
+		if sourceErr == nil {
+			utils.FormatDebug("gRPC node gave no definition of the method, using another provider's",
+				utils.LogAttr("method", path),
+				utils.LogAttr("chainID", cp.BaseChainProxy.ChainID),
+				utils.LogAttr("error", err.Error()))
+			return shared, sharedSource, nil
+		}
+	}
+	return nil, nil, fmt.Errorf("%w: %w", routersession.ErrNoMethodDefinition, err)
+}
+
+// methodDescriptorWithin is methodDescriptorFor waited on for at most timeout. The reflection
+// client lives on the request's context, which reading the reply still needs after this returns,
+// so the lookup is bounded by the wait rather than by a context of its own. A lookup left behind
+// ends with that context.
+func (cp *GrpcChainProxy) methodDescriptorWithin(ctx context.Context, timeout time.Duration, descriptorSource grpcurl.DescriptorSource, path string) (*desc.MethodDescriptor, error) {
+	type lookup struct {
+		methodDescriptor *desc.MethodDescriptor
+		err              error
+	}
+	done := make(chan lookup, 1)
+	go func() {
+		methodDescriptor, err := cp.methodDescriptorFor(ctx, descriptorSource, path)
+		done <- lookup{methodDescriptor, err}
+	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case result := <-done:
+		return result.methodDescriptor, result.err
+	case <-timer.C:
+		return nil, fmt.Errorf("gRPC method definition lookup exceeded reflection-timeout %s", timeout)
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 // methodDescriptorFor resolves the descriptor of the method at path ("svc/Method" or "svc.Method")
@@ -810,7 +908,7 @@ func (cp *GrpcChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMes
 	if err != nil {
 		return nil, utils.FormatError("failed resolving grpc descriptor source", err, traceAttrs(ctx)...)
 	}
-	methodDescriptor, err := cp.methodDescriptorFor(ctx, descriptorSource, nodeMessage.Path)
+	methodDescriptor, descriptorSource, err := cp.resolveMethod(ctx, descriptorSource, nodeMessage.Path)
 	if err != nil {
 		return nil, err
 	}

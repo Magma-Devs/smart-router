@@ -138,6 +138,13 @@ type DirectGRPCSubscriptionManager struct {
 	// endpointNames names each endpoint's provider for relay_end (SetEndpointNames).
 	endpointNames subscriptionEndpointNames
 
+	// chainDescriptors is the chain's shared method definitions, handed to every pool's
+	// resolver (MAG-5134), and onReflection is told how each of their lookups ended, by
+	// endpoint (MAG-4563). Both are set by SetChainDescriptors before the first pool exists,
+	// and read under lock.
+	chainDescriptors *routersession.ChainDescriptors
+	onReflection     func(endpointURL string, err error)
+
 	// Pending subscriptions for deduplication (prevent duplicate upstream connections)
 	pendingSubscriptions map[string]*pendingSubscriptionsBroadcastManager
 
@@ -240,6 +247,15 @@ func NewDirectGRPCSubscriptionManager(
 	manager.rateLimitHoldoff = relayHoldoff()
 
 	return manager
+}
+
+// SetChainDescriptors hands every pool the manager opens from now on the chain's shared method
+// definitions, and the function told how each of their lookups ended.
+func (dgm *DirectGRPCSubscriptionManager) SetChainDescriptors(chain *routersession.ChainDescriptors, onReflection func(endpointURL string, err error)) {
+	dgm.lock.Lock()
+	defer dgm.lock.Unlock()
+	dgm.chainDescriptors = chain
+	dgm.onReflection = onReflection
 }
 
 // SetEndpointNames gives the manager its endpoints' provider names, by URL, which relay_end writes
@@ -1361,6 +1377,11 @@ func (dgm *DirectGRPCSubscriptionManager) getOrCreatePool(endpoint *common.NodeU
 	}
 
 	pool = NewUpstreamGRPCPoolWithConfig(endpoint, dgm.config)
+	pool.descriptors.resolver.SetChainDescriptors(dgm.chainDescriptors)
+	if observe := dgm.onReflection; observe != nil {
+		endpointURL := endpoint.Url
+		pool.descriptors.resolver.SetLookupObserver(func(err error) { observe(endpointURL, err) })
+	}
 	dgm.upstreamPools[endpoint.Url] = pool
 
 	return pool, nil

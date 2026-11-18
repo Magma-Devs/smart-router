@@ -124,7 +124,15 @@ func verificationNeedsHead(v VerificationContainer) bool {
 // add to the load that produced the 429. It reads a rate limit the way admission does, so
 // a gRPC 429 that survives only in the status text stops the burst too.
 func stopValidateRetries(err error) bool {
-	return err == nil || IsRateLimitFailure(err)
+	return err == nil || IsRateLimitFailure(err) || noMethodDefinition(err)
+}
+
+// noMethodDefinition reports a check that could not run because no provider of the chain has given
+// the router a definition of the gRPC method it calls (routersession.ErrNoMethodDefinition). It is
+// no verdict on the node: the check is skipped with a warning and the provider serves (MAG-5134).
+// Asking again in the same pass cannot help, so it also ends the retries.
+func noMethodDefinition(err error) bool {
+	return errors.Is(err, routersession.ErrNoMethodDefinition)
 }
 
 // IsWebSocketURL reports whether a node url is dialed as a websocket, as verification
@@ -1478,6 +1486,16 @@ func (g *connectionGroup) verify(ctx context.Context, url common.NodeUrl, opts v
 			verifyErr = &VerificationFailure{Check: CheckLatestBlock, Err: fmt.Errorf("latest block unavailable: %w", outcome.headErr)}
 		default:
 			verifyErr = g.check(ctx, router, verification, latestBlock)
+		}
+		// No provider of the chain has given a definition of the method this check calls, so the
+		// check cannot run. It is skipped, as a configured skip is, and the provider serves: refusing
+		// it would leave a node that offers no lookup unable to serve at all (MAG-5134). No verdict
+		// is kept, so a later pass runs it again, by when another provider may have given one.
+		if noMethodDefinition(verifyErr) {
+			utils.FormatWarning("verification skipped: no provider of the chain has given a definition of the method it calls", verifyErr,
+				utils.LogAttr("verification", verification.Name),
+				utils.LogAttr("url", url.String()))
+			continue
 		}
 		outcome.checks = append(outcome.checks, checkOutcome{verification: verification, err: verifyErr})
 		if verifyErr != nil {
