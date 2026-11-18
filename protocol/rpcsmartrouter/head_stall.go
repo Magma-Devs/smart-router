@@ -23,8 +23,13 @@ import (
 // tip alive in the Plasma incident.
 //
 // Rules, from the MAG-3986 plan:
-//   - add at the first cycle that sees SameBlockCycles >= N (D11), N = StallCycleThreshold (D20), and
-//     only while another url of the chain has shown a higher block — a quiet chain marks nothing;
+//   - add at the first cycle that sees all three (MAG-5243, which revises D3):
+//     the url answered SameBlockCycles >= N times without moving (D11), N = StallCycleThreshold (D20);
+//     its highest block has stood still for the grace, StallGrace = 6 block times, at least 30 s;
+//     and another url of the chain has shown a higher block — a quiet chain marks nothing.
+//     The cycles prove the url kept answering, so it is never judged on silence. The grace is the
+//     clock: cycles alone are 5 minutes on Bitcoin, where every healthy url sits on one block for
+//     10, so the first url to report a new block had all the others marked;
 //   - remove only when the endpoint's highest block goes ABOVE the one it was stuck on (D9, H2) — never because
 //     the counter restarted, which also happens when a tracker is recreated;
 //   - never take out the last usable endpoint of this chain and interface, across both tiers (D13);
@@ -108,6 +113,7 @@ func runHeadStallStep(
 	endpoints []*routersession.EndpointWithDirectConnection,
 	getObservation func(url string) (endpointstate.EndpointObservation, bool),
 	n int,
+	grace time.Duration,
 	now time.Time,
 	onRecover func(provider string),
 	setProviderHealth func(provider string, healthy bool),
@@ -276,8 +282,8 @@ func runHeadStallStep(
 		}
 	}
 
-	// 2. Add: N cycles in a row without moving while another url is ahead, unless it is the last
-	// usable url. Every endpoint of the url goes out together, or none does.
+	// 2. Add: N cycles in a row without moving, for at least the grace, while another url is ahead,
+	// unless it is the last usable url. Every endpoint of the url goes out together, or none does.
 	for _, g := range groups {
 		var pending []*routersession.EndpointWithDirectConnection
 		for _, ep := range g.eps {
@@ -289,7 +295,14 @@ func runHeadStallStep(
 			continue
 		}
 		obs, _ := getObservation(g.url)
-		if obs.SameBlockCycles < n || obs.HighestBlockSeen <= 0 || obs.HighestBlockSeen >= chainHigh {
+		// How long the highest block has stood still. A url with no stamp has not answered yet, and
+		// is not judged.
+		var sameBlockFor time.Duration
+		if !obs.HighestBlockSince.IsZero() {
+			sameBlockFor = now.Sub(obs.HighestBlockSince)
+		}
+		if obs.SameBlockCycles < n || sameBlockFor < grace || obs.HighestBlockSince.IsZero() ||
+			obs.HighestBlockSeen <= 0 || obs.HighestBlockSeen >= chainHigh {
 			state.clearKept(g.url)
 			continue
 		}
@@ -303,6 +316,7 @@ func runHeadStallStep(
 					utils.LogAttr("backup", pending[0].Backup),
 					utils.LogAttr("block", obs.HighestBlockSeen),
 					utils.LogAttr("same_block_cycles", obs.SameBlockCycles),
+					utils.LogAttr("same_block_for", sameBlockFor.String()),
 				}, logAttrs...)...)
 			}
 			continue
@@ -330,6 +344,8 @@ func runHeadStallStep(
 			utils.LogAttr("chain_high", chainHigh),
 			utils.LogAttr("same_block_cycles", obs.SameBlockCycles),
 			utils.LogAttr("threshold", n),
+			utils.LogAttr("same_block_for", sameBlockFor.String()),
+			utils.LogAttr("grace", grace.String()),
 		}, logAttrs...)...)
 	}
 
@@ -403,6 +419,7 @@ func (rpcss *RPCSmartRouterServer) runHeadStall(endpoints []*routersession.Endpo
 		endpoints,
 		rpcss.endpointChainTrackerManager.GetObservation,
 		rpcss.endpointChainTrackerManager.StallCycleThreshold(),
+		rpcss.endpointChainTrackerManager.StallGrace(),
 		now, onRecover, setHealth, &rpcss.headStall,
 		[]utils.Attribute{utils.LogAttr("chainID", chainID), utils.LogAttr("apiInterface", apiInterface)},
 	)

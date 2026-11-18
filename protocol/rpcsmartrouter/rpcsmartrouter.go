@@ -420,6 +420,9 @@ func (rpsr *RPCSmartRouter) Start(ctx context.Context, options *rpcSmartRouterSt
 		// /debug/cross-validation-events can serve it (MAG-2772). Until this call the recorder is a
 		// nil check on the relay path, so a production router stores nothing.
 		enableCrossValidationEventRing(crossValidationEventRingCapacity)
+		// And the answers each request received, in the order they reached it, for
+		// /debug/relay-answers (MAG-4358).
+		relaycore.EnableRelayAnswerRecording(relaycore.RelayAnswerRingCapacity, relayAnswerMethod)
 		var currentOffsetNano atomic.Int64
 		debugMux := buildDebugMux(debugMuxDeps{
 			optimizers: optimizers,
@@ -1643,13 +1646,15 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 					// MAG-3986: Enabled is the event slot only. Usable is what selection
 					// sees — Enabled AND no state reason. StateReasons lists head-stalled
 					// with when it was added and the block it was stuck on; SameBlockCycles
-					// is the evidence that adds it, and a HighestBlockSeen above the stuck
-					// block removes it.
+					// and HighestBlockSince (how long the highest block has stood still,
+					// MAG-5243) are the evidence that adds it, and a HighestBlockSeen above
+					// the stuck block removes it.
 					"Usable":            health.Usable,
 					"StateReasons":      debugStateReasons(health.StateReasons),
 					"SameBlockCycles":   obs.SameBlockCycles,
 					"LastAnsweredBlock": obs.LastAnsweredBlock,
 					"HighestBlockSeen":  obs.HighestBlockSeen,
+					"HighestBlockSince": debugTimeRFC3339(obs.HighestBlockSince),
 					"Provider":          ep.ProviderAddress,
 					"Backup":            ep.Backup,
 					// PollIntervalMs is the live dedicated-poll cadence: base when healthy,
@@ -1812,6 +1817,42 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		}
 		writeDebugRows(w, rows)
 	})
+
+	// GET /debug/relay-answers?request_id=<Lava-Guid> — the answers one request's attempts handed
+	// back, in the order they reached the router (MAG-4358, relaycore/relay_answers.go). One row per
+	// answer, oldest first: which provider, the status it answered with, and the router's verdict
+	// (success / node-error / protocol-error), or "unread" for an answer that arrived after the
+	// router stopped reading for its reply, such as a write's other deliveries. ElapsedMs is the time
+	// from the start of the request's relay processing to the answer. Seq is the order key, as on
+	// /debug/cross-validation-events, so the rows are not sorted. Optional limit keeps the most
+	// recent N rows. 503 when the recorder is not installed, so "nothing was recorded" never reads
+	// as "nothing answered"; X-Relay-Answers-Dropped reports the answers the bounded ring evicted.
+	mux.HandleFunc("/debug/relay-answers", debugMethod(http.MethodGet, func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		limit, _ := strconv.Atoi(q.Get("limit"))
+		answers, dropped, enabled := relaycore.ReadRelayAnswers(q.Get("request_id"), limit)
+		if !enabled {
+			http.Error(w, "relay answer recording is not enabled on this router", http.StatusServiceUnavailable)
+			return
+		}
+		rows := make([]map[string]any, 0, len(answers))
+		for _, answer := range answers {
+			rows = append(rows, map[string]any{
+				"Seq":             answer.Seq,
+				"ArrivedAt":       debugTimeRFC3339(answer.ArrivedAt),
+				"ElapsedMs":       answer.Elapsed.Milliseconds(),
+				"ChainID":         answer.ChainID,
+				"ApiInterface":    answer.ApiInterface,
+				"RequestID":       answer.RequestID,
+				"Method":          answer.Method,
+				"ProviderAddress": answer.ProviderAddress,
+				"StatusCode":      answer.StatusCode,
+				"Outcome":         answer.Outcome,
+			})
+		}
+		w.Header().Set("X-Relay-Answers-Dropped", strconv.FormatUint(dropped, 10))
+		encodeDebugJSON(w, rows, "failed encoding relay answers response")
+	}))
 
 	// GET /debug/probe-loop — per-chain proactive-prober cycle telemetry (MAG-2202 endpoint 4). Flat
 	// array of self-describing records (ChainID + ApiInterface): the configured --probe-loop-interval
@@ -2766,6 +2807,17 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	// Create active subscription provider storage for each unique chain
 	activeSubscriptionProvidersStorage := routersession.NewActiveSubscriptionProvidersStorage()
 	sessionManager := routersession.NewConsumerSessionManager(rpcEndpoint, optimizer, smartRouterMetricsManager, smartRouterIdentifier, activeSubscriptionProvidersStorage)
+	// Every name in the router's config, verified or not, on any chain or interface, so a
+	// lava-select-provider name that a provider out of rotation carries is not answered as not
+	// configured (MAG-3800). The session manager's own lists hold the verified providers only. A
+	// provider configured only for another chain or interface has no URL for this route, which is
+	// the provider-unavailable reply, not the caller's mistake: only a name the router does not
+	// have at all is (Part I R-Q).
+	configuredNames := make([]string, 0, len(options.staticProvidersList)+len(options.backupProvidersList))
+	for _, provider := range slices.Concat(options.staticProvidersList, options.backupProvidersList) {
+		configuredNames = append(configuredNames, provider.Name)
+	}
+	sessionManager.SetConfiguredProviderNames(configuredNames)
 	// Cross-pod sticky sessions. Gated on --shared-state, the same operator signal the chain-tip
 	// and tracker-gate sharing use: "this chain runs on several replicas behind one cache". A
 	// single-replica router needs no registry, and its absence leaves stickiness pod-local.
@@ -3924,7 +3976,7 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 	cmdRPCSmartRouter.Flags().String(common.GitLabTokenFlag, "", "GitLab personal access token for accessing private repositories (supports gitlab.com and self-hosted instances)")
 	cmdRPCSmartRouter.Flags().Duration(common.EpochDurationFlag, 0, "duration of each epoch for time-based epoch system (e.g., 30m, 1h). Epochs always run: unset or 0 uses the standalone default of 15m, and a negative value is refused at startup")
 	cmdRPCSmartRouter.Flags().Duration(common.ShutdownGracePeriodFlag, common.DefaultShutdownGracePeriod, "graceful shutdown deadline for in-flight requests and WebSocket clients")
-	cmdRPCSmartRouter.Flags().IntVar(&relaycore.RelayRetryLimit, common.SetRelayRetryLimitFlag, 2, "max total relay retry attempts across all error types (node and protocol errors combined; 0 disables retries)")
+	cmdRPCSmartRouter.Flags().IntVar(&relaycore.RelayRetryLimit, common.SetRelayRetryLimitFlag, relaycore.DefaultRelayRetryLimit, "max total relay retry attempts across all error types (node and protocol errors combined; 0 disables retries)")
 	cmdRPCSmartRouter.Flags().Bool(common.StatefulToBackupFlag, false, "also broadcast stateful relays (transaction submission) to the backup tier. OFF by default: a stateful relay reaches every provider it selects, so this sends EVERY stateful request to the backup — including the ones the primaries serve fine — and a fast backup can answer the caller first. Turn it on to maximise the chance a transaction lands, accepting the backup spend")
 	cmdRPCSmartRouter.Flags().Duration(common.ReadYourWritesWindowFlag, common.DefaultReadYourWritesWindow, "how long an eth_sendRawTransaction's sender and hash stay pinned to the upstream that accepted it: the sender's pending-nonce reads and lookups of the hash go there, so a wallet reads back its own write instead of an upstream the write has not reached yet. Pod-local, and a preference — an upstream that cannot take the read gives way to ordinary selection. 0 turns it off")
 	if err := viper.BindPFlag(common.StatefulToBackupFlag, cmdRPCSmartRouter.Flags().Lookup(common.StatefulToBackupFlag)); err != nil {
