@@ -30,26 +30,38 @@ func TestGraphQLRelay_ReadVerdictsDecideThePeer(t *testing.T) {
 
 	cases := []struct {
 		name      string
+		status    int // the first upstream's status; 0 means 200
 		first     string
 		peerAsked bool
 	}{
-		{"test 5: a codeless whole-request error goes to the peer", `{"data":null,"errors":[{"message":"request timed out"}]}`, true},
-		{"test 4: a codeless field error beside data goes to the peer", `{"data":{"chainIdentifier":null},"errors":[{"message":"failed","path":["chainIdentifier"]}]}`, true},
-		{"an unknown code goes to the peer", `{"data":null,"errors":[{"message":"connection error","extensions":{"code":"postgres-error"}}]}`, true},
-		{"a numeric code goes to the peer", `{"data":null,"errors":[{"message":"bad","extensions":{"code":400}}]}`, true},
-		{"RESOURCE_EXHAUSTED with a path goes to the peer", `{"data":null,"errors":[{"message":"Exceeded the maximum number","path":["chainIdentifier"],"extensions":{"code":"RESOURCE_EXHAUSTED"}}]}`, true},
-		{"a codeless 'Too many requests' goes to the peer", `{"data":null,"errors":[{"message":"Too many requests"}]}`, true},
-		{"a provider fault goes to the peer", `{"data":null,"errors":[{"message":"boom","extensions":{"code":"INTERNAL_SERVER_ERROR"}}]}`, true},
-		{"the caller's error beside a provider fault goes to the peer", `{"data":null,"errors":[{"message":"bad","extensions":{"code":"BAD_USER_INPUT"}},{"message":"boom","extensions":{"code":"INTERNAL_SERVER_ERROR"}}]}`, true},
-		{"a validation failure is served as is", `{"data":null,"errors":[{"message":"Unknown field","extensions":{"code":"GRAPHQL_VALIDATION_FAILED"}}]}`, false},
-		{"test 11: a parse failure is served as is", `{"data":null,"errors":[{"message":"recursion limit exceeded.","extensions":{"code":"GRAPHQL_PARSE_FAILED"}}]}`, false},
-		{"a bad input is served as is", `{"data":null,"errors":[{"message":"bad","extensions":{"code":"BAD_USER_INPUT"}}]}`, false},
-		{"test 10: an HTML page goes to the peer", graphQLTestPage, true},
-		{"test 10: a reply cut off on the way goes to the peer", graphQLTestCutReply, true},
+		{"test 5: a codeless whole-request error goes to the peer", 0, `{"data":null,"errors":[{"message":"request timed out"}]}`, true},
+		{"test 4: a codeless field error beside data goes to the peer", 0, `{"data":{"chainIdentifier":null},"errors":[{"message":"failed","path":["chainIdentifier"]}]}`, true},
+		{"an unknown code goes to the peer", 0, `{"data":null,"errors":[{"message":"connection error","extensions":{"code":"postgres-error"}}]}`, true},
+		{"a numeric code goes to the peer", 0, `{"data":null,"errors":[{"message":"bad","extensions":{"code":400}}]}`, true},
+		{"RESOURCE_EXHAUSTED with a path goes to the peer", 0, `{"data":null,"errors":[{"message":"Exceeded the maximum number","path":["chainIdentifier"],"extensions":{"code":"RESOURCE_EXHAUSTED"}}]}`, true},
+		{"a codeless 'Too many requests' goes to the peer", 0, `{"data":null,"errors":[{"message":"Too many requests"}]}`, true},
+		{"a provider fault goes to the peer", 0, `{"data":null,"errors":[{"message":"boom","extensions":{"code":"INTERNAL_SERVER_ERROR"}}]}`, true},
+		{"the caller's error beside a provider fault goes to the peer", 0, `{"data":null,"errors":[{"message":"bad","extensions":{"code":"BAD_USER_INPUT"}},{"message":"boom","extensions":{"code":"INTERNAL_SERVER_ERROR"}}]}`, true},
+		{"a validation failure is served as is", 0, `{"data":null,"errors":[{"message":"Unknown field","extensions":{"code":"GRAPHQL_VALIDATION_FAILED"}}]}`, false},
+		{"test 11: a parse failure is served as is", 0, `{"data":null,"errors":[{"message":"recursion limit exceeded.","extensions":{"code":"GRAPHQL_PARSE_FAILED"}}]}`, false},
+		{"a bad input is served as is", 0, `{"data":null,"errors":[{"message":"bad","extensions":{"code":"BAD_USER_INPUT"}}]}`, false},
+		{"test 10: an HTML page goes to the peer", 0, graphQLTestPage, true},
+		{"test 10: a reply cut off on the way goes to the peer", 0, graphQLTestCutReply, true},
+
+		// The verdict decides, never a REST body-text row on the error's message (#714 review,
+		// 714-2). Through the shared REST table the first was filed NODE_ENDPOINT_NOT_FOUND
+		// ("path not found") and asked of the peer; the second USER_INVALID_PARAMS ("decoding
+		// bech32 failed" under a 500) and never asked of it. Both fail on #714.
+		{"the caller's error whose message says 'path not found' is served as is", 0, `{"data":null,"errors":[{"message":"Invalid address: path not found","extensions":{"code":"BAD_USER_INPUT"}}]}`, false},
+		{"a 500 saying 'decoding bech32 failed' beside FEATURE_UNAVAILABLE goes to the peer", http.StatusInternalServerError, `{"data":null,"errors":[{"message":"decoding bech32 failed"},{"message":"not here","extensions":{"code":"FEATURE_UNAVAILABLE"}}]}`, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			hits, server := newGatewayTestServer(t, chainParser, logs, refusalReply{http.StatusOK, tc.first}, refusalReply{http.StatusOK, gatewayPeerAnswer})
+			firstStatus := tc.status
+			if firstStatus == 0 {
+				firstStatus = http.StatusOK
+			}
+			hits, server := newGatewayTestServer(t, chainParser, logs, refusalReply{firstStatus, tc.first}, refusalReply{http.StatusOK, gatewayPeerAnswer})
 
 			firstAskedFirst := 0
 			for i := 0; i < 12; i++ {
