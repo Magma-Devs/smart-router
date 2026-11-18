@@ -42,6 +42,15 @@ func (stalledReflectionCodec) Name() string { return "proto" }
 // which never answers: the stalled reflection service MAG-3886 was filed for.
 func startStalledReflectionNode(t *testing.T) string {
 	t.Helper()
+	return startStalledReflectionNodeAnswering(t, func(string, []byte) ([]byte, error) {
+		return []byte{0x08, 0x01}, nil
+	})
+}
+
+// startStalledReflectionNodeAnswering is startStalledReflectionNode whose methods answer with what
+// answer returns for the method and the request's bytes: a reply's bytes, or a status error.
+func startStalledReflectionNodeAnswering(t *testing.T, answer func(method string, body []byte) ([]byte, error)) string {
+	t.Helper()
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	srv := grpc.NewServer(grpc.ForceServerCodec(stalledReflectionCodec{}), grpc.UnknownServiceHandler(func(_ any, stream grpc.ServerStream) error {
@@ -54,7 +63,11 @@ func startStalledReflectionNode(t *testing.T) string {
 		if err := stream.RecvMsg(&body); err != nil {
 			return err
 		}
-		return stream.SendMsg([]byte{0x08, 0x01})
+		reply, err := answer(method, body)
+		if err != nil {
+			return err
+		}
+		return stream.SendMsg(reply)
 	}))
 	go func() { _ = srv.Serve(lis) }()
 	t.Cleanup(srv.Stop)
