@@ -10,14 +10,16 @@ import (
 )
 
 // The default retry limit is 3, the most primary nodes a deployment runs today: when
-// three primaries fail fast, the request still reaches a backup (MAG-5182). The default
-// lives in two places, the flag and the package variable a test or an embedder reads
-// without parsing flags, so both are pinned here.
+// three primaries fail fast, the request still reaches a backup (MAG-5182).
+//
+// The test reads the constant, not relaycore.RelayRetryLimit: building the command
+// (here, or in any earlier test of this package) writes the flag default into that
+// variable, so a check of the variable would pass whatever it was declared as.
 func TestRelayRetryLimitDefaultIsThree(t *testing.T) {
+	require.Equal(t, 3, relaycore.DefaultRelayRetryLimit)
+
 	original := relaycore.RelayRetryLimit
 	t.Cleanup(func() { relaycore.RelayRetryLimit = original })
-
-	require.Equal(t, 3, original, "relaycore.RelayRetryLimit starts at the shipped default")
 
 	cmd := CreateRPCSmartRouterCobraCommand()
 	flag := cmd.Flags().Lookup(common.SetRelayRetryLimitFlag)
