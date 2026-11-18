@@ -475,6 +475,34 @@ read, so messages sent over a WebSocket carry no caller ids today. Reading the u
 would not be the same fix: one socket multiplexes many subscriptions and requests, so those ids
 would label every request on the connection rather than the one the caller tagged.
 
+### The answers one request received (`/debug/relay-answers`)
+
+In debug mode (`--debug-address`), `GET /debug/relay-answers?request_id=<Lava-Guid>` lists the
+answers one request's attempts handed back, in the order they reached the router (MAG-4358). The
+id is the `Lava-Guid` header of the reply, not the caller's `X-Request-Id`. A write goes to every
+primary at once, and what its caller gets depends on that order: a refusal that arrives first is
+held while the router waits for an acceptance. This route shows the order without a log line or the
+metrics port. It is read-only, and reading it does not change any reply.
+
+One row per answer, oldest first:
+
+| Field | Meaning |
+| --- | --- |
+| `Seq` | per-process order key, taken as the answer reached the request. The router reads a request's answers in this order; only two answers handed over in the same instant can swap |
+| `ArrivedAt`, `ElapsedMs` | when the answer arrived, to the second, and how long after the request's relay processing started, to the millisecond. Two answers of one request usually share an `ArrivedAt`: order them by `Seq`, and compare `ElapsedMs` for the time between them |
+| `ChainID`, `ApiInterface`, `RequestID` | the request |
+| `Method` | the request's api, named as `relay_end` names it: without its leading slash, capped at 256 characters, and `Default-REDACTED` for an unlisted api the request named by URL, whose name would be the caller's own path |
+| `ProviderAddress` | who answered |
+| `StatusCode` | the status the upstream answered with. A 5xx or 429 that failed the attempt keeps its status here. `0` means no status came back. On gRPC a call that succeeded reads `200`, and a node's error reads its gRPC status code, `1` to `16` |
+| `Outcome` | `success`, `node-error` or `protocol-error`: what the router made of the answer. `unread` means the answer arrived after the router had stopped reading for its reply: a write's other deliveries, or a cross-validation straggler (see `/debug/cross-validation-events` for those) |
+
+A cache hit, the router's own health check and a subscription record nothing: a subscription is
+served by the subscription managers, not the relay processor. Without `request_id` the route lists
+every request's answers. An optional `limit` keeps the most recent N rows. The route answers
+**503** when the recorder is not installed, so "nothing was recorded" never reads as "nothing
+answered". The ring holds the last 4096 answers, and the `X-Relay-Answers-Dropped` header counts
+the evicted ones.
+
 ### Usage telemetry (OTel)
 
 Off by default. When enabled, the smart router emits two event types as
