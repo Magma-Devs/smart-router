@@ -118,6 +118,9 @@ func TestDecide_ErrorTolerance(t *testing.T) {
 		expectedAction  relaycore.Action
 		expectedReason  string
 	}{
+		// The rows use a limit of 3, the shipped default: three errors still retry,
+		// so with three primaries the fourth attempt can reach a backup. The fourth
+		// error stops the request.
 		{
 			name:            "under limit retries",
 			relayRetryLimit: 3,
@@ -127,15 +130,15 @@ func TestDecide_ErrorTolerance(t *testing.T) {
 		},
 		{
 			name:            "over limit stops",
-			relayRetryLimit: 2,
-			nodeErrors:      3,
+			relayRetryLimit: 3,
+			nodeErrors:      4,
 			expectedAction:  relaycore.ActionStop,
 			expectedReason:  "ErrorToleranceExceeded",
 		},
 		{
 			name:            "at exact limit retries",
-			relayRetryLimit: 2,
-			nodeErrors:      2,
+			relayRetryLimit: 3,
+			nodeErrors:      3,
 			expectedAction:  relaycore.ActionRetry,
 			expectedReason:  "Default",
 		},

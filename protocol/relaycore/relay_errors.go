@@ -170,6 +170,8 @@ type RelayError struct {
 	// JSONRPCErrorCode is the code of a node's JSON-RPC error reply, the one the classifier reads;
 	// 0 for a reply that is not a JSON-RPC error with a code.
 	JSONRPCErrorCode int
+	// GRPCStatus is the status of a gRPC node error, 1 to 16; 0 for any other reply.
+	GRPCStatus int
 }
 
 func (re RelayError) String() string {
