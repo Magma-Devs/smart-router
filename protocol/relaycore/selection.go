@@ -11,7 +11,13 @@ const (
 	noCrossValidationRequirement = 1
 )
 
-var RelayRetryLimit = 2
+// DefaultRelayRetryLimit is the shipped default of --set-relay-retry-limit: the errors a request
+// tolerates before it stops. It is 3, the most primaries a deployment runs today, so a request whose
+// three primaries all fail fast still reaches a backup (MAG-5182). The flag and RelayRetryLimit both
+// read it, so the default lives in one place.
+const DefaultRelayRetryLimit = 3
+
+var RelayRetryLimit = DefaultRelayRetryLimit
 
 // DisableBatchRequestRetry prevents batch requests from being retried when set to true.
 // Batch requests (JSON-RPC batches) cannot be hashed for caching, so retries may be unnecessary.

@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
+	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
@@ -120,6 +121,15 @@ func RegisterForSpecUpdatesOrSetStaticSpecsWithToken(ctx context.Context, chainP
 		utils.LogAttr("chain_id", spec.Index),
 		utils.LogAttr("total_sources", len(specPaths)),
 		utils.LogAttr("total_specs_loaded", len(aggregatedSpecs)))
+
+	// A chain takes its family from its spec's imports, so the families are registered from the
+	// catalog just loaded, before the parser reads its own (SetSpec) and before any reply is
+	// classified (MAG-5246).
+	common.RegisterChainFamilies(aggregatedSpecs)
+	if _, ok := common.GetChainFamily(rpcEndpoint.ChainID); !ok {
+		utils.FormatWarning("Chain has no chain family: no chain-specific error row applies to its replies", nil,
+			utils.LogAttr("chain_id", rpcEndpoint.ChainID))
+	}
 
 	chainParser.SetSpec(*spec)
 	return nil
