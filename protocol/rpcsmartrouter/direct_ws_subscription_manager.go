@@ -1871,7 +1871,9 @@ func writeSubscriptionEndedFrame(method, routerID string, numericIDs bool) ([]by
 
 // handleClientDisconnect releases one client from one subscription when the client's
 // connection ends, or returns early once the client has already left by another path.
-// It is registered for every attached client, creators and joiners alike.
+// It is registered for every attached client, creators and joiners alike. It is what
+// honours WSSubscriptionManager's "cancelling the StartSubscription ctx releases the
+// client"; in production the ingress's UnsubscribeAll usually releases the client first.
 //
 // detached is the client's signal from that subscription, read when the client was attached.
 // Looked up here instead, when the goroutine first runs, it could find nothing: Unsubscribe

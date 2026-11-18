@@ -19,9 +19,13 @@ type WSSubscriptionManager interface {
 	// If a subscription with the same parameters already exists, the client joins it
 	// (subscription deduplication).
 	//
+	// Cancelling ctx releases the client from the subscription: repliesChan closes, and the
+	// last client to leave ends the upstream subscription. The WebSocket ingress also calls
+	// UnsubscribeAll when its connection closes; a caller that never does relies on ctx alone.
+	//
 	// Returns:
 	//   - firstReply: The initial subscription confirmation reply
-	//   - repliesChan: Channel for receiving subscription messages (nil if joining existing)
+	//   - repliesChan: Channel for receiving subscription messages
 	//   - error: Any error that occurred
 	StartSubscription(
 		ctx context.Context,
