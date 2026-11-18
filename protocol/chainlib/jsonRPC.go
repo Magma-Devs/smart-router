@@ -446,17 +446,19 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 		}
 		return fiberCtx.Next()
 	}, wsUpgradeMiddleware, websocketCallbackWithDappID)
-	// A DELETE is refused the way a GET without an upgrade is: 405 and Allow: POST, the only method
-	// this listener serves outside the upgrade, at any path (MAG-4524). It is a Use handler, not a
-	// DELETE route: fiber builds a 405's Allow from the routes of the other methods, so a DELETE
-	// route would add DELETE to the Allow a PUT or a PATCH gets, and Use handlers are left out of
-	// it.
+	// A DELETE, a PUT and a PATCH are refused the way a GET without an upgrade is: 405 and
+	// Allow: POST, the only method this listener serves outside the upgrade, at any path (MAG-4524;
+	// rulebook Part IV, section 1). Left to fiber, a PUT and a PATCH got an Allow of every method
+	// with a route (GET, HEAD, POST), and a GET is served only as an upgrade. It is a Use handler,
+	// not routes for these methods: fiber builds a 405's Allow from the routes of the other methods,
+	// so such routes would show up in each other's Allow, and Use handlers are left out of it.
 	app.Use("/*", func(fiberCtx *fiber.Ctx) error {
-		if fiberCtx.Method() != fiber.MethodDelete {
-			return fiberCtx.Next()
+		switch fiberCtx.Method() {
+		case fiber.MethodDelete, fiber.MethodPut, fiber.MethodPatch:
+			fiberCtx.Set(fiber.HeaderAllow, fiber.MethodPost)
+			return fiber.ErrMethodNotAllowed
 		}
-		fiberCtx.Set(fiber.HeaderAllow, fiber.MethodPost)
-		return fiber.ErrMethodNotAllowed
+		return fiberCtx.Next()
 	})
 
 	apil.listen(ctx, app)

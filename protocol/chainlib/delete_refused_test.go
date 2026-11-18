@@ -18,12 +18,12 @@ import (
 // MAG-4524. A DELETE used to get 204 and an empty body from the shared listener setup, before any
 // route ran: the caller was told it was done when nothing ran. It is now refused with 405 at every
 // path, and nothing is relayed:
-//   - JSON-RPC answers it the way it answers a GET without a WebSocket upgrade: Allow: POST, the
-//     only method it serves outside the upgrade.
+//   - JSON-RPC answers it, and a PUT and a PATCH, the way it answers a GET without a WebSocket
+//     upgrade: Allow: POST, the only method it serves outside the upgrade (rulebook Part IV,
+//     section 1). A PUT and a PATCH used to get fiber's Allow of every routed method.
 //   - Tendermint RPC answers it the way fiber answers a PUT: an Allow of the methods it serves.
 //
-// A PUT keeps its own reply, and its Allow does not gain DELETE. OPTIONS, the CORS preflight, keeps
-// its 204.
+// No Allow advertises DELETE. OPTIONS, the CORS preflight, keeps its 204.
 func TestListeners_ADeleteIsRefused(t *testing.T) {
 	if !rand.Initialized() {
 		rand.InitRandomSeed()
@@ -52,15 +52,24 @@ func TestListeners_ADeleteIsRefused(t *testing.T) {
 			t.Run(apiInterface+" "+path, func(t *testing.T) {
 				status, allow, body := send(t, http.MethodDelete, "http://"+addr+path)
 				putStatus, putAllow, putBody := send(t, http.MethodPut, "http://"+addr+path)
+				patchStatus, patchAllow, patchBody := send(t, http.MethodPatch, "http://"+addr+path)
 
 				require.Equal(t, http.StatusMethodNotAllowed, status, "a DELETE is refused, not answered done")
 				require.Equal(t, http.StatusMethodNotAllowed, putStatus, "a PUT is still refused")
+				require.Equal(t, http.StatusMethodNotAllowed, patchStatus, "a PATCH is still refused")
 				require.NotContains(t, putAllow, http.MethodDelete, "a PUT's Allow does not advertise DELETE")
+				require.NotContains(t, patchAllow, http.MethodDelete, "a PATCH's Allow does not advertise DELETE")
 				require.NotContains(t, allow, http.MethodDelete)
 				switch apiInterface {
 				case spectypes.APIInterfaceJsonRPC:
-					require.Equal(t, fiber.MethodPost, allow, "the only method served outside the upgrade")
-					require.Equal(t, "Method Not Allowed", body)
+					for method, reply := range map[string][2]string{
+						http.MethodDelete: {allow, body},
+						http.MethodPut:    {putAllow, putBody},
+						http.MethodPatch:  {patchAllow, patchBody},
+					} {
+						require.Equal(t, fiber.MethodPost, reply[0], "%s: the only method served outside the upgrade", method)
+						require.Equal(t, "Method Not Allowed", reply[1], method)
+					}
 				case spectypes.APIInterfaceTendermintRPC:
 					require.Equal(t, putAllow, allow, "refused as a PUT is")
 					require.Equal(t, putBody, body)
