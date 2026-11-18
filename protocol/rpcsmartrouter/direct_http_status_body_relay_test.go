@@ -13,9 +13,9 @@ import (
 )
 
 // MAG-4448, through the whole relay with two providers: the first answers a 5xx, and the second
-// would answer the read. A node's 5xx around the caller's own mistake is the answer every provider
-// gives, so the second is never asked. A node's own limit, and any 5xx from a gateway, still sends
-// the relay on to the second, which answers.
+// would answer the read. A 5xx around the caller's own mistake is the answer every provider gives,
+// so the second is never asked, whether the status is the node's or a gateway's. A node's own limit,
+// and a gateway's error page, still send the relay on to the second, which answers.
 func TestSendRelay_A5xxAroundTheCallersMistakeIsNotAskedOfThePeer(t *testing.T) {
 	rand.InitRandomSeed()
 	ctx := context.Background()
@@ -29,6 +29,7 @@ func TestSendRelay_A5xxAroundTheCallersMistakeIsNotAskedOfThePeer(t *testing.T) 
 	require.NoError(t, err)
 
 	invalidParams := `{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"invalid argument 0: hex string has length 3"}}`
+	revert := `{"jsonrpc":"2.0","id":1,"error":{"code":3,"message":"execution reverted","data":"0x"}}`
 	peer := refusalReply{http.StatusOK, `{"jsonrpc":"2.0","id":1,"result":"0x10"}`}
 	cases := []struct {
 		name      string
@@ -37,7 +38,9 @@ func TestSendRelay_A5xxAroundTheCallersMistakeIsNotAskedOfThePeer(t *testing.T) 
 	}{
 		{"the caller's mistake inside a node's 503", refusalReply{http.StatusServiceUnavailable, invalidParams}, false},
 		{"the caller's mistake inside a node's 500", refusalReply{http.StatusInternalServerError, invalidParams}, false},
-		{"the caller's mistake inside a gateway's 502", refusalReply{http.StatusBadGateway, invalidParams}, true},
+		{"the caller's mistake inside a gateway's 502", refusalReply{http.StatusBadGateway, invalidParams}, false},
+		{"a revert under code 3 inside a node's 503", refusalReply{http.StatusServiceUnavailable, revert}, false},
+		{"a gateway's error page", refusalReply{http.StatusBadGateway, `<html>Bad Gateway</html>`}, true},
 		{"a node's own log response cap inside a 503", refusalReply{http.StatusServiceUnavailable, `{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"response is too big"}}`}, true},
 	}
 	for _, tc := range cases {
@@ -51,7 +54,7 @@ func TestSendRelay_A5xxAroundTheCallersMistakeIsNotAskedOfThePeer(t *testing.T) 
 				require.Error(t, sendErr, "the relay ends on the node's reply")
 				require.NotNil(t, result.GetClientFacing(), "the client gets the node's reply")
 				require.Equal(t, tc.first.status, result.GetClientFacing().UpstreamStatus)
-				require.JSONEq(t, invalidParams, string(result.GetClientFacing().UpstreamBody))
+				require.JSONEq(t, tc.first.body, string(result.GetClientFacing().UpstreamBody))
 				return
 			}
 			require.Equal(t, [2]int64{1, 1}, loadRefusalHits(hits), "the relay fails over to the peer")

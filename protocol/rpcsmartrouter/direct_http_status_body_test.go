@@ -72,11 +72,12 @@ func TestEndpointHealth_A5xxWithAJSONRPCBodyIsJudgedByItsBody(t *testing.T) {
 	}
 }
 
-// A node's 5xx whose JSON-RPC body is the caller's own malformed request is read by that body for
-// the retry too (rulebook Part IV, Appendix C row 14): every provider answers it the same, so the
-// relay ends, as it does for the same error under a 200, and the client gets this node's reply
-// instead of the same error from every provider. Before, the attempt kept its status's verdict and
-// the relay failed over to every provider. bitcoind answers a JSON-RPC 1.0 request's error with 500.
+// A 5xx whose JSON-RPC body is the caller's own request is read by that body for the retry too
+// (rulebook Part IV, Appendix C row 14): every provider answers it the same, so the relay ends, as
+// it does for the same error under a 200, and the client gets this node's reply instead of the same
+// error from every provider. Before, the attempt kept its status's verdict and the relay failed over
+// to every provider. bitcoind answers a JSON-RPC 1.0 request's error with 500. A gateway's 502 or
+// 504 is read the same way: a well-formed JSON-RPC error decides whatever the status (Part I).
 func TestClassifyDirectRPCError_A5xxAroundTheCallersMistakeEndsTheRelay(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -88,6 +89,9 @@ func TestClassifyDirectRPCError_A5xxAroundTheCallersMistakeEndsTheRelay(t *testi
 		{"invalid params", common.ChainFamilyUnknown, 503, `{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"invalid argument 0: hex string has length 3"}}`, common.RouterErrorUserInvalidParams},
 		{"invalid params whose text names an address", common.ChainFamilyEVM, 500, `{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"invalid address"}}`, common.RouterErrorUserInvalidParams},
 		{"bitcoind invalid params", common.ChainFamilyBitcoin, 500, `{"result":null,"error":{"code":-32602,"message":"Invalid params"},"id":7}`, common.RouterErrorUserInvalidParams},
+		{"invalid params inside a gateway's 502", common.ChainFamilyEVM, 502, `{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"invalid params"}}`, common.RouterErrorUserInvalidParams},
+		{"invalid params inside a gateway's 504", common.ChainFamilyEVM, 504, `{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"invalid params"}}`, common.RouterErrorUserInvalidParams},
+		{"a revert under code 3", common.ChainFamilyEVM, 503, `{"jsonrpc":"2.0","id":1,"error":{"code":3,"message":"execution reverted: not owner","data":"0x08c379a0"}}`, common.RouterErrorChainExecutionReverted},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -125,7 +129,7 @@ func TestClassifyDirectRPCError_A5xxWithAnErrorAnotherProviderMayAnswerStillFail
 		{"parse error from the node", common.ChainFamilyUnknown, 503, `{"jsonrpc":"2.0","id":1,"error":{"code":-32700,"message":"parse error"}}`},
 		{"invalid request from the node", common.ChainFamilyUnknown, 503, `{"jsonrpc":"2.0","id":1,"error":{"code":-32600,"message":"invalid request"}}`},
 		{"EIP-1474 transaction rejected", common.ChainFamilyEVM, 503, `{"jsonrpc":"2.0","id":1,"error":{"code":-32003,"message":"transaction rejected"}}`},
-		{"execution reverted", common.ChainFamilyEVM, 503, `{"jsonrpc":"2.0","id":1,"error":{"code":3,"message":"execution reverted"}}`},
+		{"execution reverted by text alone, under -32000", common.ChainFamilyEVM, 503, `{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"execution reverted"}}`},
 		{"nonce too low", common.ChainFamilyEVM, 503, `{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"nonce too low"}}`},
 		{"invalid block number by text alone", common.ChainFamilyEVM, 500, `{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"invalid block number"}}`},
 		{"invalid address by text alone", common.ChainFamilyEVM, 500, `{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"invalid address"}}`},
@@ -150,13 +154,13 @@ func TestClassifyDirectRPCError_A5xxWithAnErrorAnotherProviderMayAnswerStillFail
 	}
 }
 
-// A gateway's status is not the node answering, even with a JSON body (ServerErrorIsNodeReply, the
-// rule REST already uses): a 502 or 504 around the caller's mistake still fails over.
-func TestClassifyDirectRPCError_AGatewayStatusAroundTheCallersMistakeStillFailsOver(t *testing.T) {
+// A gateway's own error page carries no JSON-RPC error, so its status decides it: a 502 or 504
+// whose body is a page fails over, whatever text the page holds.
+func TestClassifyDirectRPCError_AGatewayErrorPageStillFailsOver(t *testing.T) {
 	for _, code := range []int{http.StatusBadGateway, http.StatusGatewayTimeout} {
 		t.Run(http.StatusText(code), func(t *testing.T) {
 			status := fmt.Sprintf("%d %s", code, http.StatusText(code))
-			httpErr := &routersession.HTTPStatusError{StatusCode: code, Status: status, Body: []byte(`{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"invalid params"}}`)}
+			httpErr := &routersession.HTTPStatusError{StatusCode: code, Status: status, Body: []byte(`<html><body>invalid params</body></html>`)}
 			statusOnly, _ := classifyDirectRPCError(&routersession.HTTPStatusError{StatusCode: code, Status: status}, common.ChainFamilyEVM, common.TransportJsonRPC)
 
 			_, wrapped := classifyDirectRPCError(httpErr, common.ChainFamilyEVM, common.TransportJsonRPC)
@@ -228,6 +232,11 @@ func TestRelayInnerDirect_A5xxAroundTheCallersMistakeEndsTheRelayWithoutBlamingT
 			`{"jsonrpc":"1.0","id":7,"method":"getblockhash","params":["x"]}`,
 			`{"result":null,"error":{"code":-32602,"message":"Invalid params"},"id":7}`,
 		},
+		{
+			"a revert under code 3", "ETH1", http.StatusServiceUnavailable,
+			`{"jsonrpc":"2.0","id":1,"method":"eth_call","params":[]}`,
+			`{"jsonrpc":"2.0","id":1,"error":{"code":3,"message":"execution reverted","data":"0x"}}`,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -249,11 +258,11 @@ func TestRelayInnerDirect_A5xxAroundTheCallersMistakeEndsTheRelayWithoutBlamingT
 	}
 }
 
-// The other side of the rule, end to end: a node's 503 around a reverted call still fails over, and
-// the endpoint is still not blamed for it.
-func TestRelayInnerDirect_A5xxAroundARevertStillFailsOverWithoutBlamingTheEndpoint(t *testing.T) {
+// The other side of the rule, end to end: a node's 503 around a revert named by its text alone,
+// under -32000, still fails over (the status decides -32000), and the endpoint is still not blamed.
+func TestRelayInnerDirect_A5xxAroundARevertByTextAloneStillFailsOverWithoutBlamingTheEndpoint(t *testing.T) {
 	h := newDirectRelayHarness(t, http.StatusServiceUnavailable,
-		`{"jsonrpc":"2.0","id":1,"error":{"code":3,"message":"execution reverted"}}`)
+		`{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"execution reverted"}}`)
 	msg := &mockChainMessage{requestData: []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_call","params":[]}`)}
 
 	_, err := h.rpcss.relayInnerDirect(

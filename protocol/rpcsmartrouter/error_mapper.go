@@ -4,7 +4,6 @@ import (
 	"errors"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
-	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
 )
@@ -44,17 +43,18 @@ func classifyDirectRPCError(err error, chainFamily common.ChainFamily, transport
 // own limit or index, a parse error or an invalid request from a node, a code whose meaning the
 // chain rows have not settled, a verdict read from the message text alone (review of #613, 613-1).
 //
-// The exception is the caller's own malformed request (callersMistake) inside a status the node
-// itself answered with: every provider answers it the same, so the relay ends and the client gets
-// this node's reply, as the same error does under a 2xx (rulebook Part IV, Appendix C row 14). A
-// gateway's status (502, 504 and the like) is not the node answering, even with a JSON body, so it
-// fails over, as ServerErrorIsNodeReply decides for REST.
+// The exception is the caller's own request (callersMistake): every provider answers it the same,
+// so the relay ends and the client gets this node's reply, as the same error does under a 2xx
+// (rulebook Part IV, Appendix C row 14). That holds under any 5xx, a gateway's 502 or 504 included:
+// a well-formed JSON-RPC error in the body decides whatever the status, and only 429, 401, 402 and
+// 403 are read by their status alone (Part I, "Which decides the class"; Part IV, 3.1 P5). A
+// gateway's own error page carries no JSON-RPC error, so its status decides it.
 func retryVerdict(err error, classified *common.RouterError, chainFamily common.ChainFamily, transport common.TransportType) *common.RouterError {
 	httpErr, ok := err.(*routersession.HTTPStatusError)
 	if !ok || httpErr == nil || len(httpErr.Body) == 0 || !endsRelay(classified, err) {
 		return classified
 	}
-	if callersMistake[classified] && rpcInterfaceMessages.ServerErrorIsNodeReply(httpErr.StatusCode, httpErr.Body) {
+	if callersMistake(classified, httpErr.Body) {
 		return classified
 	}
 	statusOnly, _, _ := chainlib.ClassifyNodeErrorWithDetails(
@@ -65,19 +65,30 @@ func retryVerdict(err error, classified *common.RouterError, chainFamily common.
 	return statusOnly
 }
 
-// callersMistake holds the body verdicts that are the caller's own malformed request, which no
-// provider can accept. Inside a node's 5xx they end the relay. USER_INVALID_PARAMS is the one: the
-// JSON-RPC table gives it by code (-32602) and by chain rows, and the rulebook makes -32602 the
-// caller's (Part IV, 3.2).
+// callersMistake reports whether classified, the verdict a 5xx's JSON-RPC body was read as, is the
+// caller's own request, which every provider answers the same (C2 in rulebook Part IV, 3.2). Inside
+// a 5xx it ends the relay. Two verdicts are:
+//   - USER_INVALID_PARAMS, which the JSON-RPC table gives by code (-32602) and by chain rows;
+//   - CHAIN_EXECUTION_REVERTED under code 3, the revert row of 3.2. The table matches a revert by
+//     its text under any code, and "execution reverted" under -32000 is text alone, so only code 3
+//     counts here.
 //
 // USER_INVALID_BLOCK_FORMAT, USER_INVALID_ADDRESS and USER_INVALID_HEX are left out: the JSON-RPC
 // table gives them by message text alone, mostly under -32000, and wording decides only through a
 // chain row. Under a non-2xx status, -32000 with no chain row is decided by the status (Part IV,
-// 3.2 and 3.3). USER_PARSE_ERROR and USER_INVALID_REQUEST are left out too: from a node they are not
-// the caller's mistake, since the router sent the node a well-formed request (row 13). So is
-// USER_REQUEST_TOO_LARGE, which is a node's own size limit that another provider may not share.
-var callersMistake = map[*common.RouterError]bool{
-	common.RouterErrorUserInvalidParams: true,
+// 3.2 and 3.3); so is "nonce too low". USER_PARSE_ERROR and USER_INVALID_REQUEST are left out too:
+// from a node they are not the caller's mistake, since the router sent the node a well-formed
+// request (row 13). So is USER_REQUEST_TOO_LARGE, which is a node's own size limit that another
+// provider may not share. -32003 follows decision 4 (per chain, main unchanged) and -32005 has two
+// meanings told apart by template (MAG-4410), so both keep the status's verdict.
+func callersMistake(classified *common.RouterError, body []byte) bool {
+	switch classified {
+	case common.RouterErrorUserInvalidParams:
+		return true
+	case common.RouterErrorChainExecutionReverted:
+		return common.ExtractJSONRPCErrorCode(body) == 3
+	}
+	return false
 }
 
 // endsRelay reports whether an attempt failing with err under verdict stops the relay: the
