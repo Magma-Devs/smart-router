@@ -206,7 +206,8 @@ the router believes the pinned one is more than 10 blocks behind the tip (MAG-41
 advance a block a second, faster than the router polls their heads, so here about one pinned head
 call in ten is refused with `pinned provider is too far behind the chain tip`. The customer and
 id-on-every-call scenarios report those rounds and leave them out of the gap count: the caller saw
-an error, which a silent gap is not.
+an error, which a silent gap is not. A scenario fails when fewer than half its rounds were
+answered, because too few are then left to judge the pin.
 
 **Closed gap.** A sticky request used to be answered from the response cache before any upstream
 was chosen, so the pin was not consulted: on a cold start, 24 sticky requests produced 19 claim

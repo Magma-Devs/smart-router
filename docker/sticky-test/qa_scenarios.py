@@ -233,13 +233,21 @@ def pinned_verdict(rounds):
     answered = [r for r in rounds if not r.refused]
     split = [r for r in answered if r.split]
     gaps = [r for r in answered if r.gap]
+    # Refused rounds are left out, so they shrink the sample a split is looked for in. With the
+    # feature off a round agrees by chance 13 times in 36, so one answered round out of ten would
+    # pass about one run in three. At least half the rounds have to be answered. With the feature
+    # on and about one pinned head call in ten refused, ten rounds fall short of that about once
+    # in 7,000 runs.
+    enough = 2 * len(answered) >= len(rounds)
     lines = [
         f"head and fetch on different upstreams: {len(split)} of {len(answered)} answered rounds (must be 0)",
         f"false gaps: {len(gaps)} of {len(answered)} answered rounds (must be 0)",
         *(f"  {r}" + (f" -> false gap: {pinned_gap_cause(r)}" if r.gap else "") for r in answered if r.split or r.gap),
         *refusals(rounds),
     ]
-    return bool(answered) and not split and not gaps, lines
+    if not enough:
+        lines.append(f"answered rounds: {len(answered)} of {len(rounds)} (must be at least half, or too few are left to judge the pin)")
+    return enough and not split and not gaps, lines
 
 
 def refusals(rounds):
