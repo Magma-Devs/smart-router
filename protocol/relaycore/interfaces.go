@@ -94,8 +94,8 @@ type ResultsSummary struct {
 	HasPermanentProtocolError bool // any non-retryable protocol error (excluding epoch mismatch)
 	HasEpochMismatch          bool // any protocol error is epoch mismatch
 	// OnlyRateLimited is true when at least one attempt failed and every failure so far was
-	// an upstream rate limit — the one failure that is safe to retry even for a stateful
-	// relay or a batch, because the upstream refused before executing anything.
+	// an upstream rate limit: the one failure a batch of reads may be sent again after with batch
+	// retries off. A write is never sent again, whatever its copies answered (MAG-5232).
 	OnlyRateLimited bool
 }
 
@@ -153,12 +153,6 @@ type DecisionInput struct {
 	// that upstream or not at all: Decide never retries or hedges it on another one (MAG-2280,
 	// MAG-4123). A plain lava-select-provider is not Pinned and keeps its failover (MAG-4826).
 	Pinned bool
-	// IsGraphQLWrite is true when the request is a GraphQL mutation (MAG-5122). It turns off the
-	// Stateful rate-limit carve-out below: a GraphQL write is never re-sent, including when every
-	// copy answered 429, because the interface's own clients treat one send as final and a second
-	// send risks the double-spend this subtask exists to prevent. Every other interface keeps the
-	// carve-out until MAG-5061 decides whether to remove it there too.
-	IsGraphQLWrite bool
 }
 
 // RelayPolicyInf is the interface that the policy engine must implement.

@@ -3,6 +3,7 @@ package rpcsmartrouter
 import (
 	"context"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -28,7 +29,8 @@ import (
 
 // writeUpstream is one upstream of a two-provider write broadcast: what it answers and how long it
 // takes to answer. firstStatus and firstBody, when set, are what it answers its first request
-// with instead.
+// with instead. refuse makes it an address whose port refuses every connection, so no byte of a
+// request sent to it leaves the router.
 type writeUpstream struct {
 	name        string
 	status      int
@@ -36,6 +38,7 @@ type writeUpstream struct {
 	delay       time.Duration
 	firstStatus int
 	firstBody   string
+	refuse      bool
 }
 
 // writeInterfaceCase is one api interface's write: the request that is stateful on it, and the parser
@@ -172,9 +175,13 @@ func newWriteServer(t *testing.T, tc writeInterfaceCase, chainParser chainlib.Ch
 			_, _ = w.Write([]byte(body))
 		}))
 		t.Cleanup(upstream.Close)
+		upstreamURL := upstream.URL
+		if upstreamCfg.refuse {
+			upstreamURL = refusingURL(t)
+		}
 		// The relay path records a 429 on the process-wide registry, keyed on the provider and the
 		// url it dialed. Clear it, or this upstream's hold-off outlives the test.
-		name, url := upstreamCfg.name, upstream.URL+tc.nodeURLPath
+		name, url := upstreamCfg.name, upstreamURL+tc.nodeURLPath
 		t.Cleanup(func() { holdoff.Shared.RecordAnswer(name, url) })
 
 		connection, err := routersession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: url}, 5, "")
@@ -204,18 +211,29 @@ func newWriteServer(t *testing.T, tc writeInterfaceCase, chainParser chainlib.Ch
 	}
 }
 
+// refusingURL is the address of a port nothing listens on: a connection to it is refused.
+func refusingURL(t *testing.T) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	address := listener.Addr().String()
+	require.NoError(t, listener.Close())
+	return "http://" + address
+}
+
 func sendWrite(t *testing.T, tc writeInterfaceCase, chainParser chainlib.ChainParser, server *RPCSmartRouterServer) (*common.RelayResult, error) {
 	t.Helper()
 	return sendWriteWithDirectives(t, tc, chainParser, server, nil)
 }
 
 // sendWriteWithDirectives is sendWrite with the request's lava-* directive headers, such as a
-// lava-select-provider pin.
+// lava-select-provider pin or lava-relay-timeout, applied as ParseRelay applies them.
 func sendWriteWithDirectives(t *testing.T, tc writeInterfaceCase, chainParser chainlib.ChainParser, server *RPCSmartRouterServer, directives map[string]string) (*common.RelayResult, error) {
 	t.Helper()
 	ctx := context.Background()
 	chainMessage, err := chainParser.ParseMsg(tc.path, []byte(tc.body), tc.method, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 	require.NoError(t, err)
+	server.HandleDirectiveHeadersForMessage(chainMessage, directives)
 	relayData := relayprotocol.NewRelayData(ctx, tc.method, tc.path, []byte(tc.body), 0, spectypes.NOT_APPLICABLE, tc.apiInterface,
 		chainMessage.GetRPCMessage().GetHeaders(), chainlib.GetAddon(chainMessage), common.GetExtensionNames(chainMessage.GetExtensions()))
 	protocolMessage := chainlib.NewProtocolMessage(chainMessage, directives, relayData, "dapp", "1.2.3.4")

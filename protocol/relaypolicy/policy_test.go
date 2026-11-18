@@ -500,40 +500,27 @@ func TestDecide_PriorityAndEdgeCases(t *testing.T) {
 	}
 }
 
-// A stateful batch whose failures are rate-limited node errors may still have executed: under
-// --batch-node-error-on-any a reply with an accepted eth_sendRawTransaction and one rate-limited
-// sibling is a rate-limited node error. Only a transport refusal of the whole batch keeps the
-// carve-out.
-func TestDecide_StatefulBatchRateLimitCarveOutNeedsATransportRefusal(t *testing.T) {
+// A write is sent once to each provider and never again (MAG-5232 Expected 3, MAG-5061 item 4), on
+// every interface: not when every copy answered 429, whether the 429 came as a node error or at the
+// transport, single write or batch. Main sent one again when the failures so far were all rate
+// limits; only a GraphQL write (MAG-5122) and a stateful batch with a node error stopped.
+func TestDecide_WriteIsNeverSentAgain(t *testing.T) {
 	policy := NewPolicy(PolicyConfig{MaxRetries: 10, RelayRetryLimit: 5, SendRelayAttempts: 3, DisableBatchRetry: true})
-	nodeError := policy.Decide(relaycore.DecisionInput{Selection: relaycore.Stateful, IsBatch: true, AttemptNumber: 1, Summary: relaycore.ResultsSummary{NodeErrors: 1, OnlyRateLimited: true}})
-	require.Equal(t, relaycore.ActionStop, nodeError.Action)
-	require.Equal(t, "Stateful", nodeError.Reason)
-
-	transport := policy.Decide(relaycore.DecisionInput{Selection: relaycore.Stateful, IsBatch: true, AttemptNumber: 1, Summary: relaycore.ResultsSummary{ProtocolErrors: 1, OnlyRateLimited: true}})
-	require.Equal(t, relaycore.ActionRetry, transport.Action)
-
-	single := policy.Decide(relaycore.DecisionInput{Selection: relaycore.Stateful, AttemptNumber: 1, Summary: relaycore.ResultsSummary{NodeErrors: 1, OnlyRateLimited: true}})
-	require.Equal(t, relaycore.ActionRetry, single.Action, "a single stateful relay keeps the carve-out it has on main")
-}
-
-// A GraphQL write has no rate-limit carve-out at all (MAG-5122, Part I R-L point 2): never
-// re-sent, including when every copy's failure was a transport-level rate limit — the one case
-// every other interface's write still retries on.
-func TestDecide_GraphQLWriteHasNoRateLimitCarveOut(t *testing.T) {
-	policy := NewPolicy(PolicyConfig{MaxRetries: 10, RelayRetryLimit: 5, SendRelayAttempts: 3})
-
-	graphQLWrite := policy.Decide(relaycore.DecisionInput{
-		Selection: relaycore.Stateful, AttemptNumber: 1, IsGraphQLWrite: true,
-		Summary: relaycore.ResultsSummary{ProtocolErrors: 1, OnlyRateLimited: true},
-	})
-	require.Equal(t, relaycore.ActionStop, graphQLWrite.Action)
-	require.Equal(t, "Stateful", graphQLWrite.Reason)
-
-	nonGraphQLWrite := policy.Decide(relaycore.DecisionInput{
-		Selection: relaycore.Stateful, AttemptNumber: 1,
-		Summary: relaycore.ResultsSummary{ProtocolErrors: 1, OnlyRateLimited: true},
-	})
-	require.Equal(t, relaycore.ActionRetry, nonGraphQLWrite.Action,
-		"every other interface keeps the carve-out until MAG-5061 decides whether to remove it there too")
+	for _, c := range []struct {
+		name    string
+		isBatch bool
+		summary relaycore.ResultsSummary
+	}{
+		{"single write, every copy refused for rate at the transport", false, relaycore.ResultsSummary{ProtocolErrors: 2, OnlyRateLimited: true}},
+		{"single write, every copy a rate-limited node error", false, relaycore.ResultsSummary{NodeErrors: 1, OnlyRateLimited: true}},
+		{"batch with a write, refused for rate at the transport", true, relaycore.ResultsSummary{ProtocolErrors: 1, OnlyRateLimited: true}},
+		{"batch with a write, a rate-limited node error", true, relaycore.ResultsSummary{NodeErrors: 1, OnlyRateLimited: true}},
+		{"single write, a refused connection", false, relaycore.ResultsSummary{ProtocolErrors: 1}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			out := policy.Decide(relaycore.DecisionInput{Selection: relaycore.Stateful, IsBatch: c.isBatch, AttemptNumber: 1, Summary: c.summary})
+			require.Equal(t, relaycore.ActionStop, out.Action)
+			require.Equal(t, "Stateful", out.Reason)
+		})
+	}
 }

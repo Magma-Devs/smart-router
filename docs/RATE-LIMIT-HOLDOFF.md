@@ -50,16 +50,14 @@ another registry, and tests use `NewRegistry` or the jitter-free `NewRegistryWit
   reset connection) clears nothing either.
 - **Internal only.** The registry and the Retry-After values drive internal retry and
   scheduling decisions. Nothing here is surfaced to the customer.
-- **A rate limit is safe to retry once the attempt has completed.** The upstream refused
-  before executing anything, so the retry policy retries a stateful relay or a batch when
-  every failure so far was a rate limit — the one exception to "never retry a
-  possibly-executed write". The normal retry limits still bound it. The exception does not
-  extend to a ticker hedge: that fires on a timer with a relay still in flight, and an
-  in-flight attempt may already have broadcast, so a hedged stateful relay or batch stops
-  exactly as before. Nor does it extend to a stateful batch that the upstream answered: a
-  batch reply is one node error even when some of its elements executed
-  (`--batch-node-error-on-any`), so only a refusal of the whole batch at the transport (HTTP
-  429) lets a batch carrying a write be sent again.
+- **A batch of reads refused for rate may be sent again; a write never is.** When every
+  failure so far was a rate limit, the retry policy sends a batch of reads again even with
+  batch retries off: the upstream refused before executing anything. The normal retry limits
+  still bound it, and it does not extend to a ticker hedge, which fires with a relay still in
+  flight. A write (a stateful relay), single or in a batch, is sent once to each provider and
+  never again, whatever its copies answered (MAG-5232, Part I R-L): a 429 from a gateway in
+  front of the node does not prove the node did not run it, and a second send can come back as
+  a refusal of bytes that already ran.
 - **A fully capped chain answers with the node's own 429.** When every attempt was refused
   for rate, the client gets the upstream's 429 and its body as is, as for any other answer a
   node gave (MAG-4481; it was a router-made 503 before). The node's Retry-After is not passed

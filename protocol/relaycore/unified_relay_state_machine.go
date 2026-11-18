@@ -12,7 +12,6 @@ import (
 	common "github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	routersession "github.com/magma-Devs/smart-router/protocol/routersession"
-	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 )
 
@@ -319,21 +318,14 @@ func signalReturnCondition(returnCondition chan<- error, err error) {
 // buildDecisionInput assembles the DecisionInput for the policy engine.
 func (sm *UnifiedRelayStateMachine) buildDecisionInput(isTickerHedge bool) DecisionInput {
 	return DecisionInput{
-		Selection:      sm.selection,
-		AttemptNumber:  sm.usedProviders.BatchNumber(),
-		IsBatch:        sm.protocolMessage.IsBatch(),
-		Summary:        sm.getResultsSummary(),
-		IsTickerHedge:  isTickerHedge,
-		IsDefaultApi:   sm.protocolMessage.IsDefaultApi(),
-		Pinned:         PinnedByDirectives(sm.protocolMessage.GetDirectiveHeaders()),
-		IsGraphQLWrite: sm.selection == Stateful && isGraphQLMessage(sm.protocolMessage),
+		Selection:     sm.selection,
+		AttemptNumber: sm.usedProviders.BatchNumber(),
+		IsBatch:       sm.protocolMessage.IsBatch(),
+		Summary:       sm.getResultsSummary(),
+		IsTickerHedge: isTickerHedge,
+		IsDefaultApi:  sm.protocolMessage.IsDefaultApi(),
+		Pinned:        PinnedByDirectives(sm.protocolMessage.GetDirectiveHeaders()),
 	}
-}
-
-// isGraphQLMessage reports whether protocolMessage's interface is GraphQL (MAG-5122).
-func isGraphQLMessage(protocolMessage chainlib.ProtocolMessage) bool {
-	collection := protocolMessage.GetApiCollection()
-	return collection != nil && collection.CollectionData.ApiInterface == spectypes.APIInterfaceGraphQL
 }
 
 // PinnedByDirectives reports whether the request is a strict pin: answered by one upstream or not
