@@ -243,11 +243,11 @@ mean responses came back but didn't agree — a retry against a different set *m
 - `diversity-unmet` — a quorum agreed but did not span `min-groups` groups.
 - `group-quorum-unmet` — (per-group mode) too few groups reached their own internal quorum, or the per-group winners disagreed.
 
-**Request-time (structural)** reasons mean the candidate set could not even be assembled — a
-retry against the same router will *not* help (the fleet structurally lacks the
-providers/groups), so the client should fall back:
+**Request-time (structural)** reasons mean the candidate set could not even be assembled, so the
+client should fall back. A retry against the same router helps only once the set can be assembled:
+a blocked provider is re-admitted, or a provider reaches the block the request names:
 
-- `insufficient-capacity` — too few candidate providers/sessions for `max-participants` or the threshold.
+- `insufficient-capacity` — too few candidate providers/sessions for `max-participants` or the threshold. A blocked provider is never a candidate, and for a request that names a block height, neither is a provider known to be below that block (MAG-2785, MAG-2786).
 - `insufficient-groups` — too few candidate groups (or, for per-group, too few groups with enough providers) for `min-groups`.
 
 ### Outlier behavior

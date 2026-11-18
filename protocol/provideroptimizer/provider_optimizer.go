@@ -624,6 +624,27 @@ func (po *ProviderOptimizer) ChooseUpstreamWithStats(ctx context.Context, allAdd
 	return returnedProviders, selectionStats
 }
 
+// KnownBelowBlock reports whether provider's last known block is below block (MAG-2786), so a
+// request for that block must not be sent to it. A node asked for a block it does not have answers
+// as if the block did not exist ({"result": null} on EVM, with no error), and two such answers agree
+// with each other.
+//
+// Only an observed block counts. A provider whose block the optimizer has never seen is not known to
+// be behind. A block that is not a height (latest, earliest, pending, safe, finalized and
+// not-applicable are all negative) has nothing to compare against, and block 0 is held by every node
+// that has a block at all. The block is read from the provider's SyncBlock floor, the authoritative
+// copy (see providerSyncFloor), so a sample recorded a moment ago already counts.
+func (po *ProviderOptimizer) KnownBelowBlock(provider string, block int64) bool {
+	if block <= 0 {
+		return false
+	}
+	stripe := po.providerStripe(provider)
+	stripe.mu.Lock()
+	defer stripe.mu.Unlock()
+	known := stripe.floor[provider]
+	return known > 0 && known < uint64(block)
+}
+
 // getUpstreamScore is a helper function to find a provider's score in the scores list
 func getProviderSelectionWeight(address string, scores []UpstreamScore) float64 {
 	for _, ps := range scores {
