@@ -2,6 +2,7 @@ package flow
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -326,6 +327,30 @@ func TestDashboardUpCommandMountsTheRenderedConfig(t *testing.T) {
 	}
 	if strings.Contains(got, "-f ") {
 		t.Errorf("dashboardUpCommand = %q names a compose file; the dashboard repo's default file is the one to run", got)
+	}
+}
+
+// A repo checked out under a path with a space, or a quote, still gets a command
+// that sets SR_CONFIG_HOST to the whole path: sh runs the printed command, with the
+// docker call swapped for printenv, which prints what the variable became.
+func TestDashboardUpCommandQuotesAPathAShellWouldSplit(t *testing.T) {
+	for _, path := range []string{
+		"/Users/jane/My Projects/smart-router/config/local/x.yml",
+		"/Users/jane/it's/smart-router/config/local/x.yml",
+		"/Users/jane/$HOME/x.yml",
+	} {
+		cmd := dashboardUpCommand(path)
+		if _, err := exec.LookPath("sh"); err != nil {
+			t.Skip("no sh to run the command with")
+		}
+		if _, err := exec.LookPath("printenv"); err != nil {
+			t.Skip("no printenv to read the variable with")
+		}
+		probe := strings.Replace(cmd, "docker compose up --build", "printenv SR_CONFIG_HOST", 1)
+		out, err := exec.Command("sh", "-c", probe).CombinedOutput()
+		if err != nil || strings.TrimSuffix(string(out), "\n") != path {
+			t.Errorf("dashboardUpCommand(%q) = %q: sh set SR_CONFIG_HOST to %q (err %v)", path, cmd, out, err)
+		}
 	}
 }
 

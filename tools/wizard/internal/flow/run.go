@@ -36,9 +36,26 @@ func (s *State) composeFiles() []string {
 // on this host. Prometheus there scrapes host.docker.internal:7779, the base
 // compose's metrics port. SR_CONFIG_HOST mounts the rendered config so the
 // dashboard shows this router's upstreams, and ROUTER_RELAY_HOST points its live
-// test at the host instead of the dashboard stack's own router service.
+// test at the host instead of the dashboard stack's own router service. The
+// config path is absolute, so it carries wherever the repo is checked out, and
+// it is quoted when a shell would split or expand it (shellQuote).
 func dashboardUpCommand(renderedConfig string) string {
-	return fmt.Sprintf("SR_CONFIG_HOST=%s ROUTER_RELAY_HOST=host.docker.internal docker compose up --build", renderedConfig)
+	return fmt.Sprintf("SR_CONFIG_HOST=%s ROUTER_RELAY_HOST=host.docker.internal docker compose up --build", shellQuote(renderedConfig))
+}
+
+// shellQuote returns s as one word for a POSIX shell: as it is when every
+// character is one a shell takes literally, else in single quotes, where a
+// single quote in s closes the quoting, is escaped, and opens it again. A path
+// like "/Users/jane/My Projects/..."
+// would otherwise end the assignment at the space and run the rest as a command.
+func shellQuote(s string) string {
+	literal := func(r rune) bool {
+		return r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("/._-+:@%,", r)
+	}
+	if s != "" && strings.IndexFunc(s, func(r rune) bool { return !literal(r) }) < 0 {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // overridePath returns the absolute path of the generated port-override file
