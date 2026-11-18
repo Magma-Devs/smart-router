@@ -39,12 +39,13 @@ type EndpointPoller struct {
 	onPollObservation func(block int64, latency time.Duration, err error, at time.Time)
 
 	// onTrackerRequest, if set, is invoked ONCE for every upstream request this poller
-	// actually sends, with the request's kind (metrics.TrackerRequestKind*). The
-	// EndpointMonitor wires it to the tracker request counter. Called from sendRawRequest —
-	// the single transport chokepoint all three request paths funnel through — so it counts
-	// requests the node received, never poll ticks that returned early or were gated away.
+	// actually sends, with the request's kind (metrics.TrackerRequestKind*) and how the send
+	// ended (nil on success). The EndpointMonitor wires it to the tracker request counter and
+	// the internal-operations counter (MAG-4563). Called from sendRawRequest — the single
+	// transport chokepoint all three request paths funnel through — so it counts requests the
+	// node received, never poll ticks that returned early or were gated away.
 	// Nil in standalone/test use.
-	onTrackerRequest func(kind string)
+	onTrackerRequest func(kind string, err error)
 }
 
 // NewEndpointPoller creates a new ChainFetcher for a direct RPC endpoint.
@@ -470,12 +471,12 @@ func (ecf *EndpointPoller) sendRawRequest(ctx context.Context, requestData []byt
 	if ecf.directConnection == nil {
 		return nil, fmt.Errorf("no direct connection for endpoint %s", utils.RedactURL(ecf.endpointURL))
 	}
-	// Counted once the request is about to go out, so the number matches what the upstream
-	// node was actually asked for. Deliberately AFTER the no-connection guard above (nothing
-	// was sent, so nothing is counted) and BEFORE the send itself (a request that fails or
-	// times out still reached the node and still cost it work).
+	// Counted for every request that goes out, so the number matches what the upstream
+	// node was actually asked for, with how the send ended. Deliberately AFTER the
+	// no-connection guard above (nothing was sent, so nothing is counted); a request that
+	// fails or times out still reached the node and still cost it work, and counts as failed.
 	if ecf.onTrackerRequest != nil {
-		ecf.onTrackerRequest(kind)
+		defer func() { ecf.onTrackerRequest(kind, err) }()
 	}
 
 	// REST GET: requestData is a URL path (e.g. "/cosmos/base/tendermint/v1beta1/blocks/latest")

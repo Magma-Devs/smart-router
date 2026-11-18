@@ -217,6 +217,9 @@ type RelayReply struct {
 	FinalizedBlocksHashes []byte     `json:"finalized_blocks_hashes"`
 	SigBlocks             []byte     `json:"sig_blocks"`
 	Metadata              []Metadata `json:"metadata"`
+	// Trailers is a gRPC reply's trailer metadata, filtered like Metadata, so a node's trailer
+	// reaches the client as a trailer. Empty on every other interface.
+	Trailers []Metadata `json:"trailers,omitempty"`
 }
 
 // Marshal serialises RelayReply using JSON for use with protocopy.DeepCopyProtoObject.

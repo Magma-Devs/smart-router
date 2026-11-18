@@ -142,6 +142,7 @@ type recordingConnection struct {
 	url        string
 	statusCode int    // status returned by DoHTTPRequest; 0 means 200
 	respBody   []byte // body returned by both routes
+	err        error  // when set, SendRequest fails with it
 
 	httpCalls []routersession.HTTPRequestParams
 	sendCalls []recordedSend
@@ -154,6 +155,9 @@ type recordedSend struct {
 
 func (m *recordingConnection) SendRequest(ctx context.Context, data []byte, headers map[string]string) (*routersession.DirectRPCResponse, error) {
 	m.sendCalls = append(m.sendCalls, recordedSend{data: data, headers: headers})
+	if m.err != nil {
+		return nil, m.err
+	}
 	return &routersession.DirectRPCResponse{Data: m.respBody, StatusCode: http.StatusOK}, nil
 }
 

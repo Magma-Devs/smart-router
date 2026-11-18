@@ -122,9 +122,10 @@ func startRateLimitingGRPCNode(t *testing.T, message string, header, trailer met
 	return lis.Addr().String()
 }
 
-// newGRPCRateLimitRouter builds a router whose one provider is the gRPC node at address, and returns
-// it with the keys the relay path records that provider's hold-off under.
-func newGRPCRateLimitRouter(t *testing.T, address string) (server *RPCSmartRouterServer, provider, url string) {
+// newSingleGRPCNodeRouter builds a router whose one provider is the gRPC node at address, serving
+// grpcRateLimitTestMethod with the spec headers given, and returns it with the keys the relay path
+// records that provider's hold-off under.
+func newSingleGRPCNodeRouter(t *testing.T, address string, headers ...*spectypes.Header) (server *RPCSmartRouterServer, provider, url string) {
 	t.Helper()
 	if !rand.Initialized() {
 		rand.InitRandomSeed()
@@ -141,6 +142,7 @@ func newGRPCRateLimitRouter(t *testing.T, address string) (server *RPCSmartRoute
 	}`
 	var spec spectypes.Spec
 	require.NoError(t, json.Unmarshal([]byte(raw), &spec))
+	spec.ApiCollections[0].Headers = headers
 	parser, err := chainlib.NewGrpcChainParser()
 	require.NoError(t, err)
 	parser.SetSpec(spec)
@@ -218,7 +220,7 @@ func TestRelay_GRPCRateLimitIsHeldOffForTheWaitItAskedFor(t *testing.T) {
 			registry := holdoff.NewRegistryWithClock(func() time.Time { return now })
 			swapRelayHoldoff(t, registry)
 
-			server, provider, url := newGRPCRateLimitRouter(t, startRateLimitingGRPCNode(t, tc.message, tc.header, tc.trailer))
+			server, provider, url := newSingleGRPCNodeRouter(t, startRateLimitingGRPCNode(t, tc.message, tc.header, tc.trailer))
 			relayGRPCCall(t, server)
 			provider = server.holdoffProviderKey(provider)
 

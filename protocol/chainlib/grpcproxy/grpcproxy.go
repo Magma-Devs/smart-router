@@ -19,7 +19,9 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-type ProxyCallBack = func(ctx context.Context, method string, reqBody []byte) ([]byte, metadata.MD, error)
+// ProxyCallBack serves one unary call: the reply's bytes, its header metadata and its trailer
+// metadata, or the error status to end the call with.
+type ProxyCallBack = func(ctx context.Context, method string, reqBody []byte) (reply []byte, header, trailer metadata.MD, err error)
 
 // StreamProxyCallBack is the server-streaming counterpart of ProxyCallBack. It is
 // called before the unary callback for every incoming request.
@@ -159,24 +161,29 @@ func makeProxyFunc(callBack ProxyCallBack, streamCallBack StreamProxyCallBack) g
 			// to the unary path, which is the whole of the pre-streaming behaviour.
 		}
 
-		respBytes, md, err := callBack(stream.Context(), method, reqBytes)
+		respBytes, md, trailer, err := callBack(stream.Context(), method, reqBytes)
 
 		md = lowercaseMetadata(md)
+		trailer = lowercaseMetadata(trailer)
 
 		if err != nil {
 			// On error the handler returns no message, so gRPC sends a trailers-only response — SetHeader
 			// metadata is unreliable there, but trailers are always flushed with the status. Attach the
 			// reply metadata (e.g. lava-cross-validation-* failure headers) as trailers so error responses
-			// still carry it, matching the success path's SetHeader. Skipped when empty, so non-CV errors
-			// are unchanged.
-			if len(md) > 0 {
-				stream.SetTrailer(md)
+			// still carry it, matching the success path's SetHeader, together with the node's own
+			// trailers. Skipped when empty, so errors with neither are unchanged.
+			if all := metadata.Join(md, trailer); len(all) > 0 {
+				stream.SetTrailer(all)
 			}
 			return err
 		}
 
 		if err := stream.SetHeader(md); err != nil {
 			utils.FormatError("Got error when setting header", err, utils.LogAttr("headers", utils.RedactHeaders(md)))
+		}
+		// A node's trailers reach the client as trailers, sent with the status after the message.
+		if len(trailer) > 0 {
+			stream.SetTrailer(trailer)
 		}
 		return stream.SendMsg(respBytes)
 	}

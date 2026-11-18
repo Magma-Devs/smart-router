@@ -65,5 +65,6 @@ func SanitizeForeignCacheReply(reply *pairingtypes.RelayReply, directiveLists ..
 	reply.Sig = nil
 	reply.SigBlocks = nil
 	reply.Metadata = common.FilterUpstreamReplyMetadata(reply.Metadata, directiveLists...)
+	reply.Trailers = common.FilterUpstreamReplyMetadata(reply.Trailers, directiveLists...)
 	reply.LatestBlock = 0
 }
