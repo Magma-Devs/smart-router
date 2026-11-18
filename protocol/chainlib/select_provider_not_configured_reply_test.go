@@ -14,6 +14,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
+	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/magma-Devs/smart-router/utils/rand"
@@ -175,4 +176,31 @@ func TestGrpcChainListener_ASelectedProviderThatIsNotConfiguredIsInvalidArgument
 		require.NotContains(t, st.Message(), name)
 	}
 	require.NotEmpty(t, trailer.Get(common.GUID_HEADER_NAME), "the refusal carries the request id, as a served call does")
+}
+
+// A GraphQL write refused this way says Lava-Write-Outcome: not_sent. The router puts it on the
+// reply it returns beside the error, since only it knows the request was a mutation, and the
+// listener sends that reply's headers with its refusal document.
+func TestGraphQLListener_ARefusedPinnedWriteSaysNotSent(t *testing.T) {
+	if !rand.Initialized() {
+		rand.InitRandomSeed()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	refused := &common.RelayResult{Reply: &pairingtypes.RelayReply{Metadata: []pairingtypes.Metadata{{Name: common.WRITE_OUTCOME_HEADER_NAME, Value: "not_sent"}}}}
+	relay := &scriptedRelay{result: refused, err: notConfiguredRelayError()}
+	addr := serveGoldenListener(t, ctx, spectypes.APIInterfaceGraphQL, relay)
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+addr+"/graphql", strings.NewReader(`{"query":"mutation { executeTransaction(transactionDataBcs: \"AA==\", signatures: []) { digest } }"}`))
+	require.NoError(t, err)
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(httpReq)
+	require.NoError(t, err)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode, "%s", body)
+	require.Equal(t, "not_sent", resp.Header.Get(common.WRITE_OUTCOME_HEADER_NAME))
+	require.Contains(t, string(body), "REQUEST_REFUSED")
 }
