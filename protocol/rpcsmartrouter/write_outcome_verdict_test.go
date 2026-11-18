@@ -166,3 +166,31 @@ func TestSendParsedRelay_WriteReplyResultIsHTTP200(t *testing.T) {
 		})
 	}
 }
+
+// renamedWrite is a write under another method name, the same request otherwise.
+type renamedWrite struct {
+	chainlib.ProtocolMessage
+	name string
+}
+
+func (r renamedWrite) GetApi() *spectypes.Api {
+	api := *r.ProtocolMessage.GetApi()
+	api.Name = r.name
+	return &api
+}
+
+// Every EVM submit whose first parameter is the signed transaction has its hash computed the same
+// way: keccak-256 of the raw transaction. A submit that takes several, or none, has no single hash.
+func TestWriteTxHash_EVMRawTransactionVariants(t *testing.T) {
+	tc := writeInterfaceCases[0]
+	chainParser := tc.parser(t)
+	server := &RPCSmartRouterServer{listenEndpoint: &routersession.RPCEndpoint{ChainID: tc.chainID, ApiInterface: tc.apiInterface}}
+	write := parsedWrite(t, tc, chainParser)
+	const keccakOf01 = "0x5fe7f977e71dba2ea1a68e21057beebb9be2ac30c6410aa38d4f3fbe41dcffd2"
+	for name := range evmRawTxMethods {
+		require.Equal(t, keccakOf01, server.writeTxHash(renamedWrite{write, name}), name)
+	}
+	for _, name := range []string{"eth_sendRawTransactions", "eth_sendTransaction", "quai_sendRawTransaction"} {
+		require.Empty(t, server.writeTxHash(renamedWrite{write, name}), name)
+	}
+}

@@ -290,11 +290,23 @@ func requestGUID(ctx context.Context) string {
 	return ""
 }
 
+// evmRawTxMethods are the EVM submits whose first parameter is the signed transaction itself, so its
+// hash is keccak-256 of those bytes: eth_sendRawTransaction and the variants chains add beside it
+// (a synchronous one, a conditional one, a private one, MegaETH's realtime one, Filecoin's EVM one).
+var evmRawTxMethods = map[string]struct{}{
+	rywWriteMethod:                      {},
+	"eth_sendRawTransactionSync":        {},
+	"eth_sendRawTransactionConditional": {},
+	"eth_sendPrivateRawTransaction":     {},
+	"realtime_sendRawTransaction":       {},
+	"Filecoin.EthSendRawTransaction":    {},
+}
+
 // writeTxHash is the transaction's hash, computed from the request with the chain's formula (Part I
 // R-L, MAG-5232 Expected 7), or "" when the chain has none or the request carries no single
 // transaction (a batch):
 //
-//   - EVM, eth_sendRawTransaction: keccak-256 of the raw transaction, 0x-hex, as the node reports it;
+//   - EVM, evmRawTxMethods: keccak-256 of the raw transaction, 0x-hex, as the node reports it;
 //   - Solana, sendTransaction: the transaction's first signature, in base58.
 //
 // Every other chain has no formula here yet, and its reply carries the no-hash sentence.
@@ -306,8 +318,9 @@ func (rpcss *RPCSmartRouterServer) writeTxHash(protocolMessage chainlib.Protocol
 	if api == nil {
 		return ""
 	}
+	_, evmRawTx := evmRawTxMethods[api.Name]
 	switch {
-	case api.Name == rywWriteMethod:
+	case evmRawTx:
 		return evmRawTxHash(protocolMessage)
 	case api.Name == solanaSendMethod && rpcss.directRelayChainFamily() == common.ChainFamilySolana:
 		return solanaRequestSignature(protocolMessage)
