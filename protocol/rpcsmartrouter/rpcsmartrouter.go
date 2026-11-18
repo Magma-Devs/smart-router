@@ -413,15 +413,7 @@ func (rpsr *RPCSmartRouter) Start(ctx context.Context, options *rpcSmartRouterSt
 	// Start optional debug HTTP server for integration tests.
 	// Only starts when --debug-address flag is provided. Off by default.
 	if options.cmdFlags.DebugAddress != "" {
-		// Debug-mode-only: enable the in-memory ring-buffer log sink so the
-		// /debug/logs endpoint can serve recent logs to the test harness.
-		utils.EnableDebugLogBuffer(debugLogBufferCapacity)
-		// Debug-mode-only, same reasoning: start recording cross-validation dissent so
-		// /debug/cross-validation-events can serve it (MAG-2772). Until this call the recorder is a
-		// nil check on the relay path, so a production router stores nothing.
-		enableCrossValidationEventRing(crossValidationEventRingCapacity)
-		// And keep each relay's relay_end for /debug/relay-end (MAG-4899), on the same terms.
-		enableRelayEndStore(debugLogBufferCapacity)
+		enableDebugRecorders()
 		var currentOffsetNano atomic.Int64
 		debugMux := buildDebugMux(debugMuxDeps{
 			optimizers: optimizers,
@@ -1218,6 +1210,19 @@ func sharedStickyReason(wired, requested bool) string {
 
 // buildDebugMux builds every /debug/* route the --debug-address server serves. Each
 // route is documented on its handler.
+// enableDebugRecorders installs what the debug server reads and a router without --debug-address
+// never keeps. Start calls it with the debug server; TestEnableDebugRecorders_InstallsTheRelayEndStore
+// pins what it installs.
+//   - The in-memory ring-buffer log sink, so /debug/logs can serve recent logs to the test harness.
+//   - Cross-validation dissent, so /debug/cross-validation-events can serve it (MAG-2772). Until this
+//     call the recorder is a nil check on the relay path, so a production router stores nothing.
+//   - Each relay's relay_end, for /debug/relay-end (MAG-4899), on the same terms.
+func enableDebugRecorders() {
+	utils.EnableDebugLogBuffer(debugLogBufferCapacity)
+	enableCrossValidationEventRing(crossValidationEventRingCapacity)
+	enableRelayEndStore(debugLogBufferCapacity, relayEndStoreByteBudget)
+}
+
 func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 	optimizers := deps.optimizers
 	currentOffsetNano := deps.offsetNano
@@ -1601,7 +1606,8 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 	// request it sent rather than searching the log. guid is the decimal Lava-Guid of the reply.
 	// X-Relay-End-Records says how many events were written with that GUID: 1 for every relay, a
 	// retried one included, so a higher count is the router breaking that contract, and the body is
-	// then the last of them. The store keeps the newest debugLogBufferCapacity GUIDs.
+	// then the last of them. The store keeps the newest GUIDs, up to debugLogBufferCapacity of them and
+	// relayEndStoreByteBudget bytes of records.
 	//   200  the record
 	//   400  no guid
 	//   404  a GUID the store does not hold: never written, or dropped as older than the rest

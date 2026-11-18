@@ -21,6 +21,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
+	"github.com/magma-Devs/smart-router/utils"
 	"github.com/magma-Devs/smart-router/utils/rand"
 	"github.com/stretchr/testify/require"
 )
@@ -28,9 +29,9 @@ import (
 // useRelayEndStore installs a fresh store for one test and removes it afterwards, so the
 // package-level recorder neither leaks between tests nor keeps the records of this package's other
 // relay tests.
-func useRelayEndStore(t *testing.T, capacity int) {
+func useRelayEndStore(t *testing.T, capacity, byteBudget int) {
 	t.Helper()
-	enableRelayEndStore(capacity)
+	enableRelayEndStore(capacity, byteBudget)
 	t.Cleanup(func() { relayEndRecorder.Store(nil) })
 }
 
@@ -95,7 +96,7 @@ func postRelayEnd(t *testing.T, address, body string) (guid, reply string) {
 
 func TestDebugRelayEnd_RecordOfARequest(t *testing.T) {
 	rand.InitRandomSeed() // the session manager and the listener draw from it
-	useRelayEndStore(t, debugLogBufferCapacity)
+	useRelayEndStore(t, debugLogBufferCapacity, relayEndStoreByteBudget)
 	read := captureRelayEnds(t)
 	server := newRelayEndServer(t, "ETH1", spectypes.APIInterfaceJsonRPC, ethJsonRPCParser(t), relayEndNode{"node-a", relayEndReply(200, relayEndBalance, 0)})
 	address := serveRelayEndJSONRPC(t, server)
@@ -124,7 +125,7 @@ func TestDebugRelayEnd_RecordOfARequest(t *testing.T) {
 
 func TestDebugRelayEnd_RetriedRequestHasOneRecord(t *testing.T) {
 	rand.InitRandomSeed() // the session manager and the listener draw from it
-	useRelayEndStore(t, debugLogBufferCapacity)
+	useRelayEndStore(t, debugLogBufferCapacity, relayEndStoreByteBudget)
 	// The only primary refuses the connection, so the read is retried on the backup, which answers.
 	server, _ := newRelayEndServerWithBackups(t, "ETH1", spectypes.APIInterfaceJsonRPC, ethJsonRPCParser(t),
 		[]relayEndNode{{"node-a", nil}},
@@ -152,7 +153,7 @@ func TestDebugRelayEnd_RetriedRequestHasOneRecord(t *testing.T) {
 
 func TestDebugRelayEnd_SubmitNamesItsTransaction(t *testing.T) {
 	rand.InitRandomSeed() // the session manager and the listener draw from it
-	useRelayEndStore(t, debugLogBufferCapacity)
+	useRelayEndStore(t, debugLogBufferCapacity, relayEndStoreByteBudget)
 	server := newRelayEndServer(t, "ETH1", spectypes.APIInterfaceJsonRPC, ethJsonRPCParser(t), relayEndNode{"node-a", relayEndReply(200, relayEndTxHash, 0)})
 	address := serveRelayEndJSONRPC(t, server)
 
@@ -168,17 +169,17 @@ func TestDebugRelayEnd_SubmitNamesItsTransaction(t *testing.T) {
 
 func TestDebugRelayEnd_Refusals(t *testing.T) {
 	t.Run("unknown GUID is 404", func(t *testing.T) {
-		useRelayEndStore(t, debugLogBufferCapacity)
+		useRelayEndStore(t, debugLogBufferCapacity, relayEndStoreByteBudget)
 		recordRelayEnd(&relayEnd{guid: "1"})
 		require.Equal(t, http.StatusNotFound, getRelayEnd(t, http.MethodGet, "2").Code)
 	})
 	t.Run("POST is 405", func(t *testing.T) {
-		useRelayEndStore(t, debugLogBufferCapacity)
+		useRelayEndStore(t, debugLogBufferCapacity, relayEndStoreByteBudget)
 		recordRelayEnd(&relayEnd{guid: "1"})
 		require.Equal(t, http.StatusMethodNotAllowed, getRelayEnd(t, http.MethodPost, "1").Code)
 	})
 	t.Run("no GUID is 400", func(t *testing.T) {
-		useRelayEndStore(t, debugLogBufferCapacity)
+		useRelayEndStore(t, debugLogBufferCapacity, relayEndStoreByteBudget)
 		require.Equal(t, http.StatusBadRequest, getRelayEnd(t, http.MethodGet, "").Code)
 	})
 	t.Run("no store is 503, never a 404", func(t *testing.T) {
@@ -196,7 +197,7 @@ func TestRelayEndStore_OffByDefault(t *testing.T) {
 
 // TestRelayEndStore_KeepsTheNewest pins the bound: at capacity the oldest GUID goes.
 func TestRelayEndStore_KeepsTheNewest(t *testing.T) {
-	useRelayEndStore(t, 2)
+	useRelayEndStore(t, 2, relayEndStoreByteBudget)
 	for _, guid := range []string{"1", "2", "3"} {
 		recordRelayEnd(&relayEnd{guid: guid})
 	}
@@ -215,7 +216,7 @@ func TestRelayEndStore_KeepsTheNewest(t *testing.T) {
 // reader rather than replacing the first silently: a test asserting one record per relay must be
 // able to fail.
 func TestRelayEndStore_CountsASecondWrite(t *testing.T) {
-	useRelayEndStore(t, 2)
+	useRelayEndStore(t, 2, relayEndStoreByteBudget)
 	recordRelayEnd(&relayEnd{guid: "1", outcome: relayOutcomeNoAnswer})
 	recordRelayEnd(&relayEnd{guid: "1", outcome: relayOutcomeOK})
 	recordRelayEnd(&relayEnd{guid: "2"})
@@ -229,7 +230,103 @@ func TestRelayEndStore_CountsASecondWrite(t *testing.T) {
 }
 
 func TestRelayEndStore_KeepsNoEventWithoutAGUID(t *testing.T) {
-	useRelayEndStore(t, 2)
+	useRelayEndStore(t, 2, relayEndStoreByteBudget)
 	recordRelayEnd(&relayEnd{})
 	require.Empty(t, relayEndRecorder.Load().records)
+}
+
+// TestRelayEndStore_HoldsAByteBudget pins the byte bound: a record's size follows its attempts, so a
+// count alone does not bound the store's memory. With room for two records' bytes and a count bound
+// far away, the third record pushes the oldest out.
+func TestRelayEndStore_HoldsAByteBudget(t *testing.T) {
+	size := len(relayEndLine(&relayEnd{guid: "1"}))
+	useRelayEndStore(t, 100, 2*size+size/2)
+	for _, guid := range []string{"1", "2", "3"} {
+		recordRelayEnd(&relayEnd{guid: guid})
+	}
+	_, writes, _ := readRelayEnd("1")
+	require.Zero(t, writes, "the oldest GUID was dropped for bytes, not count")
+	for _, guid := range []string{"2", "3"} {
+		_, writes, _ := readRelayEnd(guid)
+		require.Equal(t, 1, writes)
+	}
+	requireRelayEndStoreBytesAdd(t)
+}
+
+// A rewrite of a GUID over the budget never drops that GUID, and the bytes follow the new line. The
+// budget holds the first event exactly, so the longer rewrite passes it.
+func TestRelayEndStore_ARewriteKeepsItsRecord(t *testing.T) {
+	size := len(relayEndLine(&relayEnd{guid: "1"}))
+	useRelayEndStore(t, 100, size)
+	recordRelayEnd(&relayEnd{guid: "1"})
+	recordRelayEnd(&relayEnd{guid: "1", method: "eth_getLogs", outcome: relayOutcomeOK, servedBy: "a-node-with-a-long-name"})
+
+	line, writes, _ := readRelayEnd("1")
+	require.Equal(t, 2, writes)
+	require.Contains(t, string(line), "eth_getLogs", "the record is the last event written")
+	requireRelayEndStoreBytesAdd(t)
+}
+
+// One record larger than the whole budget is still kept, alone.
+func TestRelayEndStore_KeepsOneRecordLargerThanTheBudget(t *testing.T) {
+	useRelayEndStore(t, 100, 10)
+	recordRelayEnd(&relayEnd{guid: "1"})
+	recordRelayEnd(&relayEnd{guid: "2"})
+
+	_, writes, _ := readRelayEnd("1")
+	require.Zero(t, writes)
+	_, writes, _ = readRelayEnd("2")
+	require.Equal(t, 1, writes)
+	requireRelayEndStoreBytesAdd(t)
+}
+
+// requireRelayEndStoreBytesAdd checks the store's byte count is the sum of the lines it holds.
+func requireRelayEndStoreBytesAdd(t *testing.T) {
+	t.Helper()
+	store := relayEndRecorder.Load()
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	sum := 0
+	for _, record := range store.records {
+		sum += len(record.line)
+	}
+	require.Equal(t, sum, store.bytes)
+	require.Len(t, store.order, len(store.records))
+}
+
+// TestEnableDebugRecorders_InstallsTheRelayEndStore pins the wiring Start runs with --debug-address:
+// without it every real router answers /debug/relay-end with 503, while every other test still
+// passes.
+func TestEnableDebugRecorders_InstallsTheRelayEndStore(t *testing.T) {
+	previousCrossValidation, previousRelayEnd := crossValidationEventRecorder.Load(), relayEndRecorder.Load()
+	t.Cleanup(func() {
+		utils.DisableDebugLogBuffer()
+		crossValidationEventRecorder.Store(previousCrossValidation)
+		relayEndRecorder.Store(previousRelayEnd)
+	})
+	relayEndRecorder.Store(nil)
+
+	enableDebugRecorders()
+
+	store := relayEndRecorder.Load()
+	require.NotNil(t, store, "the relay_end store is installed")
+	require.Equal(t, debugLogBufferCapacity, store.capacity)
+	require.Equal(t, relayEndStoreByteBudget, store.byteBudget)
+	require.NotNil(t, crossValidationEventRecorder.Load(), "the cross-validation ring is installed")
+}
+
+// A subscription request's relay_end is kept too: ReportSubscriptionRelay writes through the same
+// emitRelayEnd as every other relay.
+func TestDebugRelayEnd_ASubscriptionRequestIsKept(t *testing.T) {
+	useRelayEndStore(t, debugLogBufferCapacity, relayEndStoreByteBudget)
+	server := newRelayEndServer(t, "ETH1", spectypes.APIInterfaceJsonRPC, ethJsonRPCParser(t))
+	subscribe, err := server.ParseRelay(context.Background(), "", `{"jsonrpc":"2.0","id":1,"method":"eth_subscribe","params":["newHeads"]}`, http.MethodPost, relayEndNoCustomerID, "", nil)
+	require.NoError(t, err)
+	ctx := chainlib.WithSubscriptionUpstream(utils.WithUniqueIdentifier(context.Background(), 4242))
+
+	server.ReportSubscriptionRelay(ctx, subscribe, time.Now(), nil)
+
+	record := requireOneRelayEndRecord(t, "4242")
+	require.Equal(t, "4242", record["GUID"])
+	require.Equal(t, "eth_subscribe", record["method"])
 }

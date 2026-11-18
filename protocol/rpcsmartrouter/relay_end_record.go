@@ -6,9 +6,9 @@ package rpcsmartrouter
 // The record is the event's own object, rendered by the same MarshalZerologObject the log line is,
 // so the two cannot drift: docs/RELAY-END-EVENT.md is the contract of both.
 //
-// Keeping records is DEBUG-MODE ONLY. The store is installed by enableRelayEndStore, called from
-// Start next to utils.EnableDebugLogBuffer when --debug-address is set, so a production router pays
-// one atomic nil load per relay and keeps nothing.
+// Keeping records is DEBUG-MODE ONLY. The store is installed by enableDebugRecorders, which Start
+// calls when --debug-address is set, so a production router pays one atomic nil load per relay and
+// keeps nothing. It is bounded in records and in bytes (relayEndStoreByteBudget).
 
 import (
 	"bytes"
@@ -19,19 +19,28 @@ import (
 	zerolog "github.com/rs/zerolog"
 )
 
-// debugLogBufferCapacity is the number of lines the /debug/logs ring holds. The relay_end store
-// holds as many records: every relay writes its relay_end into that ring too, so the store keeps
-// at least every record /debug/logs could still return.
+// debugLogBufferCapacity is the number of lines the /debug/logs ring holds, and the most records
+// the relay_end store holds.
 const debugLogBufferCapacity = 50000
 
-// relayEndStore keeps the newest records, one per GUID, and drops the oldest GUID at capacity.
-// Written from every relay's goroutine and read from the debug HTTP handler, so every access takes
-// the lock.
+// relayEndStoreByteBudget bounds the bytes of the records the relay_end store holds. A count alone
+// does not bound its memory, because a record's size follows its attempts: about 400 B for a read one
+// provider answered, about 1.2 KB for four failed attempts, more with long node messages. 50 000
+// records of failed relays came to 60-90 MiB, on top of the /debug/logs ring, on routers that run
+// --debug-address with a 512 MiB limit (k3d). 16 MiB still holds tens of thousands of the newest
+// records, far more than a test reads back.
+const relayEndStoreByteBudget = 16 << 20
+
+// relayEndStore keeps the newest records, one per GUID, and drops the oldest GUID when it holds
+// capacity records or the records' bytes would pass byteBudget. Written from every relay's goroutine
+// and read from the debug HTTP handler, so every access takes the lock.
 type relayEndStore struct {
-	mu       sync.Mutex
-	records  map[string]*relayEndRecord
-	order    []string // the GUIDs held, oldest first
-	capacity int
+	mu         sync.Mutex
+	records    map[string]*relayEndRecord
+	order      []string // the GUIDs held, oldest first
+	capacity   int
+	byteBudget int
+	bytes      int // the bytes of every record's line
 }
 
 type relayEndRecord struct {
@@ -46,11 +55,13 @@ type relayEndRecord struct {
 // already be ending.
 var relayEndRecorder atomic.Pointer[relayEndStore]
 
-func enableRelayEndStore(capacity int) {
+// enableRelayEndStore installs a store of at most capacity records and byteBudget bytes of them. Its
+// map and order grow with what it holds, so an idle debug router pays nothing up front.
+func enableRelayEndStore(capacity, byteBudget int) {
 	relayEndRecorder.Store(&relayEndStore{
-		records:  make(map[string]*relayEndRecord, capacity),
-		order:    make([]string, 0, capacity),
-		capacity: capacity,
+		records:    make(map[string]*relayEndRecord),
+		capacity:   capacity,
+		byteBudget: byteBudget,
 	})
 }
 
@@ -71,16 +82,34 @@ func recordRelayEnd(end *relayEnd) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if record, held := store.records[end.guid]; held {
+		store.bytes += len(line) - len(record.line)
 		record.line = line
 		record.writes++
+		store.dropOldestWhileOver(false, 0, end.guid)
 		return
 	}
-	if len(store.order) >= store.capacity {
-		delete(store.records, store.order[0])
-		store.order = store.order[1:]
-	}
+	store.dropOldestWhileOver(true, len(line), "")
 	store.order = append(store.order, end.guid)
 	store.records[end.guid] = &relayEndRecord{line: line, writes: 1}
+	store.bytes += len(line)
+}
+
+// dropOldestWhileOver drops the oldest GUID while the store, with incoming more bytes and, when
+// adding, one more record, would pass its bounds. It never drops keep, the GUID just rewritten, so a
+// rewrite cannot lose the record it counts. A new record is added after it returns, so one record
+// larger than the whole budget is still kept, alone. Called with the lock held.
+func (store *relayEndStore) dropOldestWhileOver(adding bool, incoming int, keep string) {
+	added := 0
+	if adding {
+		added = 1
+	}
+	for len(store.order) > 0 && store.order[0] != keep &&
+		(len(store.order)+added > store.capacity || store.bytes+incoming > store.byteBudget) {
+		oldest := store.order[0]
+		store.bytes -= len(store.records[oldest].line)
+		delete(store.records, oldest)
+		store.order = store.order[1:]
+	}
 }
 
 // readRelayEnd returns the record kept for guid and how many events were written with it; writes is

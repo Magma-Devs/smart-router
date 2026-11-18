@@ -207,7 +207,8 @@ its upstream connection drops, write no event.
 In debug mode (`--debug-address`), `GET /debug/relay-end?guid=<GUID>` returns the event of one
 request, so a test asserts on the router's record of the request it sent instead of searching the
 log (MAG-4899). `guid` is the event's `GUID`: the reply's `Lava-Guid` header, or the error id of an
-error reply without one.
+error reply without one. A message answered over a WebSocket and a gRPC stream's open reply with no
+GUID, so their events are kept but can be found only through `/debug/logs`.
 
 | Status | When |
 | --- | --- |
@@ -217,8 +218,10 @@ error reply without one.
 | `405` | Any method but `GET`. |
 | `503` | The router keeps no events. `--debug-address` installs the store with the route, so a router never answers this; it is not a `404` so that "not kept" cannot read as "never written". |
 
-The router keeps the events of its 50 000 newest GUIDs, as many as the `/debug/logs` buffer holds
-lines, and drops the oldest GUID first. An event is kept as it is written, so a request's event is
+The router keeps the events of its newest GUIDs, up to 50 000 of them (as many as the `/debug/logs`
+buffer holds lines) and up to 16 MiB of event text, whichever comes first, and drops the oldest GUID
+first. The byte bound is the one that holds memory: an event's size follows its attempts, from about
+400 bytes for a read one provider answered to over a kilobyte for a relay that failed over. An event is kept as it is written, so a request's event is
 kept before its HTTP or gRPC reply leaves the router. An event without a GUID is not kept.
 
 ## Collector
