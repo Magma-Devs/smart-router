@@ -2766,11 +2766,14 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	// Create active subscription provider storage for each unique chain
 	activeSubscriptionProvidersStorage := routersession.NewActiveSubscriptionProvidersStorage()
 	sessionManager := routersession.NewConsumerSessionManager(rpcEndpoint, optimizer, smartRouterMetricsManager, smartRouterIdentifier, activeSubscriptionProvidersStorage)
-	// Every configured name, verified or not, so a lava-select-provider name that a provider out of
-	// rotation carries is not answered as not configured (MAG-3800). The session manager's own
-	// lists hold the verified providers only.
-	configuredNames := make([]string, 0, len(relevantStaticProviderList)+len(relevantBackupProviderList))
-	for _, provider := range slices.Concat(relevantStaticProviderList, relevantBackupProviderList) {
+	// Every name in the router's config, verified or not, on any chain or interface, so a
+	// lava-select-provider name that a provider out of rotation carries is not answered as not
+	// configured (MAG-3800). The session manager's own lists hold the verified providers only. A
+	// provider configured only for another chain or interface has no URL for this route, which is
+	// the provider-unavailable reply, not the caller's mistake: only a name the router does not
+	// have at all is (Part I R-Q).
+	configuredNames := make([]string, 0, len(options.staticProvidersList)+len(options.backupProvidersList))
+	for _, provider := range slices.Concat(options.staticProvidersList, options.backupProvidersList) {
 		configuredNames = append(configuredNames, provider.Name)
 	}
 	sessionManager.SetConfiguredProviderNames(configuredNames)

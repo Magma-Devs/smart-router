@@ -139,7 +139,7 @@ type ConsumerSessionManager struct {
 	// backup providers - emergency fallback providers when no regular providers are available
 	backupProviders map[string]*ConsumerSessionsWithProvider // key == provider address
 
-	// configuredProviderNames is every provider name the router's config gives this chain and
+	// configuredProviderNames is every provider name in the router's config, on any chain or
 	// interface, primary and backup, whether or not it passed verification
 	// (SetConfiguredProviderNames). nil until set.
 	configuredProviderNames []string
@@ -2300,10 +2300,10 @@ func (csm *ConsumerSessionManager) providerByAddress(address string) *ConsumerSe
 	return csm.backupProviders[address]
 }
 
-// SetConfiguredProviderNames records every provider name the router's config gives this chain and
-// interface, primary and backup, healthy or not. csm.pairing and csm.backupProviders hold only the
-// providers that passed verification, so they cannot tell a name that is not configured at all
-// from a configured provider that is out of rotation (MAG-3800).
+// SetConfiguredProviderNames records every provider name in the router's config, on any chain or
+// interface, primary and backup, healthy or not. csm.pairing and csm.backupProviders hold only this
+// route's providers that passed verification, so they cannot tell a name that is not configured at
+// all from a configured provider that is out of rotation or has no URL for this route (MAG-3800).
 func (csm *ConsumerSessionManager) SetConfiguredProviderNames(names []string) {
 	csm.lock.Lock()
 	defer csm.lock.Unlock()

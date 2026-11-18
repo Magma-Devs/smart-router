@@ -85,3 +85,47 @@ func TestSelectProvider_ANameTheRouterDoesNotHaveIsRefusedWith400(t *testing.T) 
 	require.Equal(t, http.StatusInternalServerError, resp.StatusCode, "%s", body)
 	require.NotContains(t, string(body), "Selected provider is not configured")
 }
+
+// MAG-3800, through the router's real boot (CreateSmartRouterEndpoint): a pin is checked against
+// every name in the router's config, on any chain or interface, verified or not. Only a name none
+// of them carries is refused with 400. A configured provider that failed its boot check and one
+// configured only for another interface are the provider-unavailable reply, the 500, as before:
+// neither is the caller's mistake (Part I R-Q).
+func TestSelectProvider_ABootedRouterRefusesOnlyANameItDoesNotHaveAtAll(t *testing.T) {
+	u := newFakeUpstreams(t)
+	server := bootETH1Endpoint(t,
+		[]*routersession.RPCStaticProviderEndpoint{
+			{Name: "primary-1", ChainID: "ETH1", ApiInterface: spectypes.APIInterfaceJsonRPC, NodeUrls: []common.NodeUrl{{Url: u.httpURL("/primary/" + upPruned)}}},
+			{Name: "wrong-chain-1", ChainID: "ETH1", ApiInterface: spectypes.APIInterfaceJsonRPC, NodeUrls: []common.NodeUrl{{Url: u.httpURL("/wrong/" + upWrongChain)}}},
+			{Name: "rest-only-1", ChainID: "ETH1", ApiInterface: spectypes.APIInterfaceRest, NodeUrls: []common.NodeUrl{{Url: u.httpURL("/rest/" + upPruned)}}},
+		},
+		nil, nil)
+
+	cases := []struct {
+		pin  string
+		want int
+	}{
+		{"no-such-provider", http.StatusBadRequest},
+		{"wrong-chain-1", http.StatusInternalServerError}, // configured, failed the chain-id check
+		{"rest-only-1", http.StatusInternalServerError},   // configured, no URL for this interface
+		{"primary-1", http.StatusOK},
+	}
+	for _, tc := range cases {
+		t.Run(tc.pin, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+server.GetListeningAddress()+"/",
+				bytes.NewBufferString(`{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}`))
+			require.NoError(t, err)
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set(common.SELECT_PROVIDER_HEADER_NAME, tc.pin)
+			resp, err := http.DefaultClient.Do(req)
+			require.NoError(t, err)
+			body, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			require.NoError(t, resp.Body.Close())
+
+			require.Equal(t, tc.want, resp.StatusCode, "%s", body)
+		})
+	}
+}
