@@ -629,12 +629,22 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 		return existingReply, nil, nil
 	}
 
-	// Handle pending subscriptions (another client is creating the same subscription)
+	// Handle pending subscriptions (another client is creating the same subscription).
+	// The wait ends with this client's context, as the gRPC manager's does: the creator's
+	// subscribe can take as long as a dial and the node's answer, and a client that left
+	// meanwhile has nothing to join. The channel is buffered, so the creator's settle does
+	// not block on a waiter that is gone.
 	for {
 		pendingChan, foundPending := dwsm.checkAndAddPendingSubscription(hashedParams)
 		if foundPending {
 			utils.FormatTrace("DirectWS: waiting for pending subscription")
-			success := <-pendingChan
+			var success bool
+			select {
+			case success = <-pendingChan:
+			case <-ctx.Done():
+				dwsm.metricsManager.SetFailedWsSubscriptionRequestMetric(dwsm.chainID, dwsm.apiInterface)
+				return nil, nil, ctx.Err()
+			}
 			if success {
 				existingReply, joined := dwsm.checkForActiveSubscriptionAndConnect(ctx, hashedParams, clientKey, safeChannelSender, requestID)
 				if existingReply != nil {
