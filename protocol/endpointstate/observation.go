@@ -77,6 +77,12 @@ type EndpointObservation struct {
 	// URL on the silence. The probe loop reads it and decides head-stalled.
 	SameBlockCycles  int
 	HighestBlockSeen int64
+	// HighestBlockSince is when HighestBlockSeen last went up: the time of the answer (poll or
+	// relay) that carried the new highest block. It is the clock of the head-stall grace
+	// (MAG-5243): a url is judged stuck only once its highest block has stood still for
+	// StallGrace, on top of the cycle count. The counter says the url kept answering; this says
+	// for how long. Zero until the first answer.
+	HighestBlockSince time.Time
 	// lastCountedRelayAt is the relay stamp the last relay-covered cycle counted, so one relay
 	// answer that spans two poll cycles is counted once.
 	lastCountedRelayAt time.Time
@@ -91,11 +97,13 @@ type TipObservationFunc func(endpointURL string, block int64, repeat bool)
 // highest one seen resets the same-block counter; any other block adds one cycle only when
 // countRepeat is set (a poll is one tracker cycle; a relay is not — relay-covered cycles are
 // counted once per cycle by countRelayCoveredCycle). The first answer only records the block:
-// nothing is counted before an endpoint has answered once.
-func (o *EndpointObservation) noteAnsweredBlockLocked(block int64, countRepeat bool) {
+// nothing is counted before an endpoint has answered once. at is the time of the answer: a new
+// highest block stamps it as the start of the stretch the head-stall grace measures.
+func (o *EndpointObservation) noteAnsweredBlockLocked(block int64, at time.Time, countRepeat bool) {
 	o.LastAnsweredBlock = block
 	if block > o.HighestBlockSeen {
 		o.HighestBlockSeen = block
+		o.HighestBlockSince = at
 		o.SameBlockCycles = 0
 		return
 	}
@@ -200,7 +208,7 @@ func (m *EndpointMonitor) recordPollObservation(endpointURL string, gen uint64, 
 		answeredBlock = block // the url answered; the tip store's verdict below is a separate question
 		// Stall evidence: an answer that does not go above the highest block seen is one more
 		// cycle without moving; a new highest block resets the count.
-		o.noteAnsweredBlockLocked(block, true)
+		o.noteAnsweredBlockLocked(block, at, true)
 		repeat := m.tipRepeats(endpointURL, block)
 		// The block triple lives in the single-source-of-truth endpointtip store, not on
 		// this record. Set applies the block-monotonic guard (T4) and reports whether it
@@ -286,7 +294,7 @@ func (m *EndpointMonitor) RecordRelayObservation(endpointURL string, gen uint64,
 	// Stall evidence: a relay with a new highest block resets the counter. Any other relay is
 	// counted once per tracker cycle by the traffic gate (countRelayCoveredCycle), not per relay,
 	// so a busy endpoint's request rate never inflates it.
-	o.noteAnsweredBlockLocked(block, false)
+	o.noteAnsweredBlockLocked(block, at, false)
 	m.observations[endpointURL] = o
 	repeat := m.tipRepeats(endpointURL, block)
 
@@ -398,7 +406,7 @@ func (m *EndpointMonitor) countRelayCoveredCycle(endpointURL string, gen uint64,
 	if !exists || o.HighestBlockSeen <= 0 || !tip.ObservedAt.After(o.lastCountedRelayAt) {
 		return
 	}
-	o.noteAnsweredBlockLocked(tip.Block, true) // the same counting rule as a poll
+	o.noteAnsweredBlockLocked(tip.Block, tip.ObservedAt, true) // the same counting rule as a poll
 	o.lastCountedRelayAt = tip.ObservedAt
 	m.observations[endpointURL] = o
 }
@@ -417,7 +425,9 @@ func (m *EndpointMonitor) acceptsLocked(endpointURL string, gen uint64) bool {
 	return ok && liveGen == gen
 }
 
-// ResetStallCounters zeroes every endpoint's same-block counter, keeping the blocks seen.
+// ResetStallCounters zeroes every endpoint's same-block counter, keeping the blocks seen and the
+// time the highest one was reached: after a reset a url needs N fresh answers before it can be
+// marked again, and the time its block has stood still is still true.
 // The operator reset (/debug/reset-endpoint-health) calls it together with clearing head-stalled,
 // so the next probe check does not re-add the reason from the evidence that was just discarded.
 func (m *EndpointMonitor) ResetStallCounters() {
@@ -433,10 +443,14 @@ func (m *EndpointMonitor) ResetStallCounters() {
 // slowest poll divisor (MAG-3986, H10).
 const minStallCycles = 3
 
-// StallCycleThreshold is how many consecutive same-block cycles mark an endpoint head-stalled:
-// 10 × the poll divisor, rounded up, floored at minStallCycles. The tracker ticks every
-// averageBlockTime / divisor, so while the router is active this is about 10 block times whatever
-// divisor the operator chose (MAG-3986, D20).
+// StallCycleThreshold is how many consecutive same-block cycles an endpoint must have answered
+// before it can be marked head-stalled: 10 × the poll divisor, rounded up, floored at
+// minStallCycles (MAG-3986, D20).
+//
+// It is evidence that the url kept answering, not a measure of time. The tracker ticks every
+// averageBlockTime / divisor, but never slower than chaintracker.BACKOFF_MAX_TIME (60 s) and with
+// skipped cycles in between, so N cycles is about 10 block times on some chains and half a block
+// time on Bitcoin. The time half of the rule is StallGrace (MAG-5243).
 func (m *EndpointMonitor) StallCycleThreshold() int {
 	return m.stallCycles
 }
@@ -449,6 +463,32 @@ func stallCyclesFor(divisor float64) int {
 		return minStallCycles
 	}
 	return n
+}
+
+// The head-stall grace (MAG-5243): how long a url's highest block must stand still before the url
+// can be marked. 6 block times: a trade between catching a stuck node soon and marking healthy ones.
+// Block gaps are uneven, and when a gap runs past the grace every healthy url is past it together,
+// so the first one to report the next block gets the others marked. Measured over 61 days of
+// Bitcoin mainnet blocks, a gap over 5 block times came once a day, over 6 once in 3 days, over 7.5
+// once, over 10 never. Never under 30 seconds, because 6 block times of a sub-second chain is
+// shorter than the pauses a healthy node's head answer makes (up to 19 s seen on Solana).
+const (
+	stallGraceBlockTimes = 6
+	minStallGrace        = 30 * time.Second
+)
+
+// StallGrace is how long an endpoint's highest block must have stood still before it can be marked
+// head-stalled: stallGraceBlockTimes × the chain's average block time, floored at minStallGrace.
+// One rule for every chain; it does not depend on the poll divisor or on the tracker tick.
+func (m *EndpointMonitor) StallGrace() time.Duration {
+	return stallGraceFor(m.averageBlockTime)
+}
+
+func stallGraceFor(averageBlockTime time.Duration) time.Duration {
+	if grace := stallGraceBlockTimes * averageBlockTime; grace > minStallGrace {
+		return grace
+	}
+	return minStallGrace
 }
 
 // tipKey builds this monitor's composite key into the shared endpointtip store. Keying
