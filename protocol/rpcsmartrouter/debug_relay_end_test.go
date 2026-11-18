@@ -19,6 +19,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
@@ -312,8 +313,10 @@ func TestEnableDebugRecorders_InstallsTheRelayEndStore(t *testing.T) {
 		utils.DisableDebugLogBuffer()
 		crossValidationEventRecorder.Store(previousCrossValidation)
 		relayEndRecorder.Store(previousRelayEnd)
+		relaycore.DisableRelayAnswerRecording()
 	})
 	relayEndRecorder.Store(nil)
+	relaycore.DisableRelayAnswerRecording()
 
 	enableDebugRecorders()
 
@@ -322,6 +325,8 @@ func TestEnableDebugRecorders_InstallsTheRelayEndStore(t *testing.T) {
 	require.Equal(t, debugLogBufferCapacity, store.capacity)
 	require.Equal(t, relayEndStoreByteBudget, store.byteBudget)
 	require.NotNil(t, crossValidationEventRecorder.Load(), "the cross-validation ring is installed")
+	_, _, answersOn := relaycore.ReadRelayAnswers("", 1)
+	require.True(t, answersOn, "the relay-answer ring is installed")
 	utils.FormatInfo("enableDebugRecorders probe line")
 	found := false
 	for _, line := range utils.ReadDebugLogBuffer("", time.Time{}, time.Time{}, 100) {

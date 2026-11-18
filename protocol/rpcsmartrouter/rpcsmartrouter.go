@@ -414,9 +414,6 @@ func (rpsr *RPCSmartRouter) Start(ctx context.Context, options *rpcSmartRouterSt
 	// Only starts when --debug-address flag is provided. Off by default.
 	if options.cmdFlags.DebugAddress != "" {
 		enableDebugRecorders()
-		// And the answers each request received, in the order they reached it, for
-		// /debug/relay-answers (MAG-4358).
-		relaycore.EnableRelayAnswerRecording(relaycore.RelayAnswerRingCapacity, relayAnswerMethod)
 		var currentOffsetNano atomic.Int64
 		debugMux := buildDebugMux(debugMuxDeps{
 			optimizers: optimizers,
@@ -1219,10 +1216,13 @@ func sharedStickyReason(wired, requested bool) string {
 //   - Cross-validation dissent, so /debug/cross-validation-events can serve it (MAG-2772). Until this
 //     call the recorder is a nil check on the relay path, so a production router stores nothing.
 //   - Each relay's relay_end, for /debug/relay-end (MAG-4899), on the same terms.
+//   - The answers each request received, in the order they reached it, for /debug/relay-answers
+//     (MAG-4358), named as relay_end names a request (relayAnswerMethod).
 func enableDebugRecorders() {
 	utils.EnableDebugLogBuffer(debugLogBufferCapacity)
 	enableCrossValidationEventRing(crossValidationEventRingCapacity)
 	enableRelayEndStore(debugLogBufferCapacity, relayEndStoreByteBudget)
+	relaycore.EnableRelayAnswerRecording(relaycore.RelayAnswerRingCapacity, relayAnswerMethod)
 }
 
 // buildDebugMux builds every /debug/* route the --debug-address server serves. Each
