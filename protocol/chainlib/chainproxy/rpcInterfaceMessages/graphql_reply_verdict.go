@@ -75,7 +75,7 @@ var graphQLReadRows = map[string]graphQLVerdict{
 
 // graphQLReplyError is one entry of a reply's errors list, read leniently: a reply is never made
 // unreadable by the shape of one entry. code is the text of extensions.code, or "" when the code is
-// missing, not text (a number counts as no code, MAG-4428) or extensions is not an object.
+// missing, not text (a number counts as no code, MAG-5121 test 13) or extensions is not an object.
 type graphQLReplyError struct {
 	message string
 	code    string
@@ -107,8 +107,8 @@ func readGraphQLReply(body []byte) (reply graphQLReply, isResponse bool) {
 	return reply, len(reply.errors) > 0 || graphQLDataIsObject(reply.data)
 }
 
-// readGraphQLReplyError reads one errors entry. An entry that is not an object keeps its raw text
-// as the message, with no code and no path.
+// readGraphQLReplyError reads one errors entry. An entry that is not an object keeps its text (a
+// JSON string's text, any other value's raw JSON) as the message, with no code and no path.
 func readGraphQLReplyError(raw json.RawMessage) graphQLReplyError {
 	var entry struct {
 		Message    json.RawMessage `json:"message"`
@@ -116,7 +116,7 @@ func readGraphQLReplyError(raw json.RawMessage) graphQLReplyError {
 		Extensions json.RawMessage `json:"extensions"`
 	}
 	if err := json.Unmarshal(raw, &entry); err != nil {
-		return graphQLReplyError{message: string(raw)}
+		return graphQLReplyError{message: jsonTextOrRaw(raw)}
 	}
 	read := graphQLReplyError{
 		message: jsonTextOrRaw(entry.Message),
@@ -265,13 +265,22 @@ func readVerdict(body []byte, httpStatusCode int) (verdict graphQLVerdict, isErr
 		return statusTableVerdict(body, httpStatusCode, extractErrorMessage(body, httpStatusCode)), true
 	}
 
+	// The status table's verdict depends on the body and the status, never on which error is
+	// read, so it is worked out once per reply: per error, it read the whole body again.
+	var statusVerdict graphQLVerdict
+	statusVerdictReady := false
 	for index, replyError := range reply.errors {
 		errorVerdict, matched := readErrorVerdict(replyError)
 		if !matched {
 			if is2xx {
 				errorVerdict = unknownVerdict(replyError.message)
 			} else {
-				errorVerdict = statusTableVerdict(body, httpStatusCode, replyError.message)
+				if !statusVerdictReady {
+					statusVerdict = statusTableVerdict(body, httpStatusCode, "")
+					statusVerdictReady = true
+				}
+				errorVerdict = statusVerdict
+				errorVerdict.message = replyError.message
 			}
 		}
 		if index == 0 || errorVerdict.stronger(verdict) {

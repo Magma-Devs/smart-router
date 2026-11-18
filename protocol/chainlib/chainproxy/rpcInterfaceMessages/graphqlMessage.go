@@ -650,21 +650,26 @@ func (gm *GraphQLMessage) verdict(data []byte, httpStatusCode int) (graphQLVerdi
 //     the caller's (a 400: not retried, not scored).
 func writeVerdict(data []byte, httpStatusCode int) (graphQLVerdict, bool) {
 	if httpStatusCode != 0 && (httpStatusCode < 200 || httpStatusCode >= 300) {
-		return graphQLVerdict{status: graphQLGatewayRefusalStatus(data, httpStatusCode), message: extractErrorMessage(data, httpStatusCode)}, true
+		status := graphQLGatewayRefusalStatus(data, httpStatusCode)
+		return graphQLVerdict{kind: graphQLKindOfStatus(status), status: status, message: extractErrorMessage(data, httpStatusCode)}, true
 	}
 	reply, isResponse := readGraphQLReply(data)
 	if !isResponse {
-		return graphQLVerdict{status: http.StatusBadGateway, message: graphQLNotAResponsePrefix + extractErrorMessage(data, httpStatusCode)}, true
+		return graphQLVerdict{kind: graphQLVerdictFault, status: http.StatusBadGateway, message: graphQLNotAResponsePrefix + extractErrorMessage(data, httpStatusCode)}, true
 	}
 	if len(reply.errors) == 0 {
-		return graphQLVerdict{status: httpStatusCode}, false
+		return graphQLVerdict{kind: graphQLVerdictAnswer, status: httpStatusCode}, false
 	}
 	for _, replyError := range reply.errors {
 		if status, isNodeFault := graphQLWriteNodeErrorCodes[replyError.code]; isNodeFault {
-			return graphQLVerdict{status: status, message: replyError.message}, true
+			kind := graphQLVerdictFault
+			if status == http.StatusTooManyRequests {
+				kind = graphQLVerdictThrottled
+			}
+			return graphQLVerdict{kind: kind, status: status, message: replyError.message}, true
 		}
 	}
-	return graphQLVerdict{status: http.StatusBadRequest, message: reply.errors[0].message}, true
+	return graphQLVerdict{kind: graphQLVerdictCaller, status: http.StatusBadRequest, message: reply.errors[0].message}, true
 }
 
 // graphQLNotAResponsePrefix opens the error message of a 2xx body that is not a GraphQL response,

@@ -1,6 +1,7 @@
 package rpcInterfaceMessages
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -67,8 +68,14 @@ func TestGraphQLReadVerdicts(t *testing.T) {
 		{"GRAPHQL_VALIDATION_FAILED is the caller's", 200, `{"data":null,"errors":[{"message":"Unknown field","extensions":{"code":"GRAPHQL_VALIDATION_FAILED"}}]}`, effectCaller},
 		{"BAD_USER_INPUT is the caller's", 200, `{"data":null,"errors":[{"message":"bad","extensions":{"code":"BAD_USER_INPUT"}}]}`, effectCaller},
 		// Measured 16 Nov: a query nested 100 deep passes the router (limit 256) and every Sui, IOTA
-		// and Fuel node refuses it at the parse step (limit 64).
+		// and Fuel node refuses it at the parse step (limit 64). Sui sends GRAPHQL_PARSE_FAILED;
+		// IOTA and Fuel send the same message with no code (next case).
 		{"GRAPHQL_PARSE_FAILED is the caller's", 200, `{"data":null,"errors":[{"message":"recursion limit exceeded.","extensions":{"code":"GRAPHQL_PARSE_FAILED"}}]}`, effectCaller},
+		// Fuel and IOTA (live, 16 Nov) send no extensions.code on any error, so their caller's
+		// errors read as unknown until they have chain rows (MAG-4910): retried on every provider,
+		// then served as is.
+		{"Fuel's codeless parse refusal is unknown", 200, `{"data":null,"errors":[{"message":"recursion limit exceeded."}]}`, effectElsewhere},
+		{"Fuel's codeless unknown field is unknown", 200, `{"data":null,"errors":[{"message":"Unknown field \"notAField\" on type \"Query\".","locations":[{"line":1,"column":3}]}]}`, effectElsewhere},
 		{"INTERNAL_SERVER_ERROR is a provider fault", 200, `{"data":null,"errors":[{"message":"boom","extensions":{"code":"INTERNAL_SERVER_ERROR"}}]}`, effectFault},
 		{"UNAVAILABLE is a provider fault", 200, `{"data":null,"errors":[{"message":"down","extensions":{"code":"UNAVAILABLE"}}]}`, effectFault},
 		{"REQUEST_TIMEOUT is a provider fault", 200, `{"data":null,"errors":[{"message":"Request timed out","extensions":{"code":"REQUEST_TIMEOUT"}}]}`, effectFault},
@@ -125,6 +132,8 @@ func TestGraphQLReadVerdicts(t *testing.T) {
 			`{"errors":[{"message":"boom","extensions":{"code":"INTERNAL_SERVER_ERROR"}}]}`, effectFault},
 		{"a 500 with GRAPHQL_VALIDATION_FAILED is the caller's", 500,
 			`{"errors":[{"message":"Unknown field","extensions":{"code":"GRAPHQL_VALIDATION_FAILED"}}]}`, effectCaller},
+		{"a 400 with the caller's error beside a codeless one is the caller's", 400,
+			`{"errors":[{"message":"bad","extensions":{"code":"BAD_USER_INPUT"}},{"message":"what"}]}`, effectCaller},
 		{"a 503 with a codeless error falls to the status", 503,
 			`{"errors":[{"message":"down"}]}`, effectFault},
 
@@ -152,6 +161,48 @@ func TestGraphQLReadVerdictMessage(t *testing.T) {
 
 	_, message = read.CheckResponseError([]byte(`{}`), 200)
 	require.Contains(t, message, graphQLNotAResponsePrefix)
+
+	_, message = read.CheckResponseError([]byte(`{"errors":["bad"]}`), 200)
+	require.Equal(t, "bad", message, "an entry that is a string keeps its text, not its JSON quotes")
+
+	// Under an error status the status table decides each unmatched error, once per reply; each
+	// error still carries its own message.
+	_, message = read.CheckResponseError([]byte(`{"errors":[{"message":"first"},{"message":"second"}]}`), 503)
+	require.Equal(t, "first", message)
+}
+
+// TestGraphQLWriteVerdictKinds pins that a write's verdict names its kind, so nothing that reads
+// the kind takes a write's error for an answer.
+func TestGraphQLWriteVerdictKinds(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		body   string
+		want   graphQLVerdictKind
+	}{
+		{"an answer", 200, `{"data":{"executeTransaction":{"digest":"d"}}}`, graphQLVerdictAnswer},
+		{"a codeless error is the caller's", 200, `{"errors":[{"message":"Invalid user signature"}]}`, graphQLVerdictCaller},
+		{"RESOURCE_EXHAUSTED is throttled", 200, `{"errors":[{"message":"m","extensions":{"code":"RESOURCE_EXHAUSTED"}}]}`, graphQLVerdictThrottled},
+		{"INTERNAL_SERVER_ERROR is a fault", 200, `{"errors":[{"message":"m","extensions":{"code":"INTERNAL_SERVER_ERROR"}}]}`, graphQLVerdictFault},
+		{"a body that is not a response is a fault", 200, `{}`, graphQLVerdictFault},
+		{"a 503 is a fault", 503, `down`, graphQLVerdictFault},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			verdict, _ := writeVerdict([]byte(test.body), test.status)
+			require.Equal(t, test.want, verdict.kind)
+		})
+	}
+}
+
+// BenchmarkGraphQLReadVerdictManyErrorsUnder400 measures a 4xx reply with many codeless errors,
+// whose status-table verdict is worked out once per reply, not once per error.
+func BenchmarkGraphQLReadVerdictManyErrorsUnder400(b *testing.B) {
+	body := []byte(`{"data":null,"errors":[` + strings.TrimSuffix(strings.Repeat(`{"message":"codeless error with some text in it"},`, 8000), ",") + `]}`)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		readVerdict(body, 400)
+	}
 }
 
 // TestGraphQLWriteVerdictsUnchanged pins that MAG-5121 leaves a mutation's verdicts as they were

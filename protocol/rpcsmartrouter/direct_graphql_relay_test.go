@@ -94,7 +94,7 @@ func TestGraphQLDirectRelay(t *testing.T) {
 			wantNonRetrying: true,
 		},
 		{
-			// Read as no code, not as an unreadable reply blamed as a bad gateway (MAG-4428).
+			// Read as no code, not as an unreadable reply blamed as a bad gateway (MAG-5121 test 13).
 			name:           "a numeric code is no code",
 			status:         http.StatusOK,
 			reply:          `{"data":null,"errors":[{"message":"bad","extensions":{"code":400}}]}`,
