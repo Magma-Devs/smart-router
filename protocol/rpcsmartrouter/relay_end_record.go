@@ -23,12 +23,13 @@ import (
 // the relay_end store holds.
 const debugLogBufferCapacity = 50000
 
-// relayEndStoreByteBudget bounds the bytes of the records the relay_end store holds. A count alone
+// relayEndStoreByteBudget bounds the bytes of event text the relay_end store holds. A count alone
 // does not bound its memory, because a record's size follows its attempts: about 400 B for a read one
-// provider answered, about 1.2 KB for four failed attempts, more with long node messages. 50 000
-// records of failed relays came to 60-90 MiB, on top of the /debug/logs ring, on routers that run
-// --debug-address with a 512 MiB limit (k3d). 16 MiB still holds tens of thousands of the newest
-// records, far more than a test reads back.
+// provider answered, about 1.2 KB for four failed attempts, more with long node messages. At those
+// sizes 50 000 records of failed relays are 60-90 MiB, on top of the /debug/logs ring, on routers that
+// run --debug-address with a 512 MiB limit (k3d). 16 MiB holds about 40 000 of the smallest records,
+// so this bound acts before the count; each record's map slot, key and order slot add roughly
+// 100-150 B more, so about 20 MiB in all. That is still far more records than a test reads back.
 const relayEndStoreByteBudget = 16 << 20
 
 // relayEndStore keeps the newest records, one per GUID, and drops the oldest GUID when it holds
@@ -82,29 +83,26 @@ func recordRelayEnd(end *relayEnd) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if record, held := store.records[end.guid]; held {
+		// A rewrite keeps the GUID's place and drops nothing, so it cannot lose the record it
+		// counts. It can take the store past its byte bound until the next new record, which drops
+		// the oldest GUIDs, this one included once it is the oldest.
 		store.bytes += len(line) - len(record.line)
 		record.line = line
 		record.writes++
-		store.dropOldestWhileOver(false, 0, end.guid)
 		return
 	}
-	store.dropOldestWhileOver(true, len(line), "")
+	store.makeRoomFor(len(line))
 	store.order = append(store.order, end.guid)
 	store.records[end.guid] = &relayEndRecord{line: line, writes: 1}
 	store.bytes += len(line)
 }
 
-// dropOldestWhileOver drops the oldest GUID while the store, with incoming more bytes and, when
-// adding, one more record, would pass its bounds. It never drops keep, the GUID just rewritten, so a
-// rewrite cannot lose the record it counts. A new record is added after it returns, so one record
-// larger than the whole budget is still kept, alone. Called with the lock held.
-func (store *relayEndStore) dropOldestWhileOver(adding bool, incoming int, keep string) {
-	added := 0
-	if adding {
-		added = 1
-	}
-	for len(store.order) > 0 && store.order[0] != keep &&
-		(len(store.order)+added > store.capacity || store.bytes+incoming > store.byteBudget) {
+// makeRoomFor drops the oldest GUID while one more record of incoming bytes would pass the store's
+// bounds. The new record is added after it returns, so one record larger than the whole budget is
+// still kept, alone. Called with the lock held.
+func (store *relayEndStore) makeRoomFor(incoming int) {
+	for len(store.order) > 0 &&
+		(len(store.order)+1 > store.capacity || store.bytes+incoming > store.byteBudget) {
 		oldest := store.order[0]
 		store.bytes -= len(store.records[oldest].line)
 		delete(store.records, oldest)

@@ -1208,11 +1208,10 @@ func sharedStickyReason(wired, requested bool) string {
 	}
 }
 
-// buildDebugMux builds every /debug/* route the --debug-address server serves. Each
-// route is documented on its handler.
 // enableDebugRecorders installs what the debug server reads and a router without --debug-address
-// never keeps. Start calls it with the debug server; TestEnableDebugRecorders_InstallsTheRelayEndStore
-// pins what it installs.
+// never keeps. Start calls it with the debug server. TestEnableDebugRecorders_InstallsTheRelayEndStore
+// pins what it installs; that Start calls it is exercised only where a router boots with
+// --debug-address (k3d), since no unit test runs Start.
 //   - The in-memory ring-buffer log sink, so /debug/logs can serve recent logs to the test harness.
 //   - Cross-validation dissent, so /debug/cross-validation-events can serve it (MAG-2772). Until this
 //     call the recorder is a nil check on the relay path, so a production router stores nothing.
@@ -1223,6 +1222,8 @@ func enableDebugRecorders() {
 	enableRelayEndStore(debugLogBufferCapacity, relayEndStoreByteBudget)
 }
 
+// buildDebugMux builds every /debug/* route the --debug-address server serves. Each
+// route is documented on its handler.
 func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 	optimizers := deps.optimizers
 	currentOffsetNano := deps.offsetNano
@@ -1550,7 +1551,7 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 	// GET /debug/logs — return recent in-memory log records, optionally scoped
 	// by request_id and/or a [from,to] time window, so an external test harness
 	// can attach the router's logs to failing tests. The ring buffer is enabled
-	// only in debug mode (see EnableDebugLogBuffer in Start); when it was never
+	// only in debug mode (see enableDebugRecorders); when it was never
 	// enabled this returns an empty set. Each line is an already-valid JSON
 	// object (zerolog JSON record); we assemble the array by joining the raw
 	// bytes with commas rather than re-marshalling.

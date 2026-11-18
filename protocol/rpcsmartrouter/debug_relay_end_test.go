@@ -253,8 +253,9 @@ func TestRelayEndStore_HoldsAByteBudget(t *testing.T) {
 	requireRelayEndStoreBytesAdd(t)
 }
 
-// A rewrite of a GUID over the budget never drops that GUID, and the bytes follow the new line. The
-// budget holds the first event exactly, so the longer rewrite passes it.
+// A rewrite of a GUID keeps its record and drops nothing, even past the budget, and the bytes follow
+// the new line. The next new record restores the bound. The budget holds the first event exactly, so
+// the longer rewrite passes it.
 func TestRelayEndStore_ARewriteKeepsItsRecord(t *testing.T) {
 	size := len(relayEndLine(&relayEnd{guid: "1"}))
 	useRelayEndStore(t, 100, size)
@@ -265,6 +266,12 @@ func TestRelayEndStore_ARewriteKeepsItsRecord(t *testing.T) {
 	require.Equal(t, 2, writes)
 	require.Contains(t, string(line), "eth_getLogs", "the record is the last event written")
 	requireRelayEndStoreBytesAdd(t)
+
+	recordRelayEnd(&relayEnd{guid: "2"})
+	_, writes, _ = readRelayEnd("1")
+	require.Zero(t, writes, "the next new record drops the oldest GUID to fit the budget")
+	requireRelayEndStoreBytesAdd(t)
+	require.LessOrEqual(t, relayEndRecorder.Load().bytes, size)
 }
 
 // One record larger than the whole budget is still kept, alone.
@@ -294,9 +301,11 @@ func requireRelayEndStoreBytesAdd(t *testing.T) {
 	require.Len(t, store.order, len(store.records))
 }
 
-// TestEnableDebugRecorders_InstallsTheRelayEndStore pins the wiring Start runs with --debug-address:
-// without it every real router answers /debug/relay-end with 503, while every other test still
-// passes.
+// TestEnableDebugRecorders_InstallsTheRelayEndStore pins what enableDebugRecorders installs: without
+// the relay_end store, every router started with --debug-address answers /debug/relay-end with 503.
+// That Start calls it is exercised only where a router boots (k3d): no unit test runs Start. The
+// cleanup turns the log buffer back off, as utils.DisableDebugLogBuffer asks of a test that enables
+// it, and puts both recorders back as they were.
 func TestEnableDebugRecorders_InstallsTheRelayEndStore(t *testing.T) {
 	previousCrossValidation, previousRelayEnd := crossValidationEventRecorder.Load(), relayEndRecorder.Load()
 	t.Cleanup(func() {
@@ -313,6 +322,12 @@ func TestEnableDebugRecorders_InstallsTheRelayEndStore(t *testing.T) {
 	require.Equal(t, debugLogBufferCapacity, store.capacity)
 	require.Equal(t, relayEndStoreByteBudget, store.byteBudget)
 	require.NotNil(t, crossValidationEventRecorder.Load(), "the cross-validation ring is installed")
+	utils.FormatInfo("enableDebugRecorders probe line")
+	found := false
+	for _, line := range utils.ReadDebugLogBuffer("", time.Time{}, time.Time{}, 100) {
+		found = found || bytes.Contains(line, []byte("enableDebugRecorders probe line"))
+	}
+	require.True(t, found, "the /debug/logs buffer is on")
 }
 
 // A subscription request's relay_end is kept too: ReportSubscriptionRelay writes through the same
