@@ -1658,8 +1658,10 @@ func unclearWriteReason(answered, dispatched int, cutOffs writeCutOffs) *unclear
 // router can state for a GraphQL write today (MAG-5122, Part I R-L point 4: accepted > unknown >
 // rejected > not_sent). accepted is the chain's success row only (appendGraphQLWriteAcceptedHeader),
 // unknown comes from each copy's status and transport (unclearWriteOutcomeFor). rejected and
-// not_sent need the chain's refusal rows (MAG-4909, MAG-5121). Any other reply keeps the ticket's
-// rule for a chain without those rows: the node's body is forwarded as is, with no header.
+// not_sent read from a node's reply need the chain's refusal rows (MAG-4909, MAG-5121); the
+// router's own refusal of a write before any provider is asked says not_sent (MAG-3800). Any other
+// reply keeps the ticket's rule for a chain without those rows: the node's body is forwarded as
+// is, with no header.
 const (
 	graphQLWriteOutcomeAccepted = "accepted"
 	graphQLWriteOutcomeUnknown  = "unknown"
@@ -1926,6 +1928,16 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 			return timedOut, err
 		}
 
+		// A GraphQL write pinned to a lava-select-provider name the router does not have is refused
+		// before any provider is asked, so its reply says the write was never sent, as the
+		// listener's other refusals of a GraphQL write do (MAG-3800; Part I R-Q, Part II Q8). The
+		// listener writes the refusal and passes this reply's headers on; only this function knows
+		// the request is a write.
+		if isGraphQLWrite(protocolMessage) && errors.Is(err, routersession.SelectedProviderNotConfiguredError) {
+			refused := &common.RelayResult{}
+			ensureWriteOutcomeHeader(refused, rpcInterfaceMessages.GraphQLWriteOutcomeNotSent)
+			return refused, err
+		}
 		return nil, err
 	}
 
