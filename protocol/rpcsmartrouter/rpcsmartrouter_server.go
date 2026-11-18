@@ -3454,7 +3454,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 				// MAG-2159 (Topic B) tip harvest + tip-state update — gated on tip-eligibility so
 				// historical responses cannot poison the endpoint tip / estimator / metric
 				// (finding 4). harvestGen was captured before dispatch (finding 5).
-				rpcss.harvestAndUpdateTipFromRelay(targetEndpoint, chainMessage, localRelayResult.Reply, harvestGen, endpointAddress)
+				rpcss.harvestAndUpdateTipFromRelay(targetEndpoint, chainMessage, localRelayResult.Reply, localRelayResult.NodeLatestBlock, harvestGen, endpointAddress)
 
 				// latestServicedBlock: the block this response actually serviced (may be
 				// historical), used for OnSessionDone and propagated to downstream consumers
@@ -4440,17 +4440,26 @@ func (rpcss *RPCSmartRouterServer) forgetURLLatestBlockIfUntracked(endpointURL s
 // serviced" (latestServicedBlock) is a separate
 // concept the caller handles ungated. No-op when targetEndpoint is nil or the response is not
 // tip-eligible. harvestGen is the generation captured before dispatch (finding 5).
+//
+// nodeLatestBlock is the tip the node stamped on the reply outside its body
+// (RelayResult.NodeLatestBlock, a Sui node's x-sui-checkpoint-height), 0 when it stamped none. A
+// stamp is a current-tip observation on any method, so it is taken ahead of tipBlockFromRelay,
+// and through the same guards (MAG-5141).
 func (rpcss *RPCSmartRouterServer) harvestAndUpdateTipFromRelay(
 	targetEndpoint *routersession.Endpoint,
 	chainMessage chainlib.ChainMessage,
 	reply *pairingtypes.RelayReply,
+	nodeLatestBlock int64,
 	harvestGen uint64,
 	endpointAddress string,
 ) {
 	if targetEndpoint == nil {
 		return
 	}
-	tip, ok := rpcss.tipBlockFromRelay(chainMessage, reply)
+	tip, ok := nodeLatestBlock, nodeLatestBlock > 0
+	if !ok {
+		tip, ok = rpcss.tipBlockFromRelay(chainMessage, reply)
+	}
 	if !ok {
 		return
 	}
@@ -4542,6 +4551,10 @@ func (rpcss *RPCSmartRouterServer) endpointObservationGeneration(endpointURL str
 //     Reply.LatestBlock is populated for JSON-RPC and gRPC; REST and GraphQL harvest nothing (a
 //     GraphQL caller names its reply's fields, so the tip directive's path is the caller's to
 //     fill — see sendGraphQLRelay, MAG-4373).
+//
+// A tip the node stamps outside the body (Sui gRPC's x-sui-checkpoint-height header) is not read
+// here: the reply's headers are filtered for the client by now, so the sender reads it first
+// (RelayResult.NodeLatestBlock) and harvestAndUpdateTipFromRelay takes it ahead of this.
 //
 // Note: RequestedBlock() is not concretized during the relay flow (the
 // UpdateLatestBlockInMessage call in relaycore/results_manager.go is disabled), so it still
@@ -6320,6 +6333,8 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	relayResult.IsNodeCapability = result.IsNodeCapability
 	relayResult.IsNodeAtFault = result.IsNodeAtFault
 	relayResult.ProviderInfo = result.ProviderInfo
+	// The tip the node stamped outside the body, for the harvest in sendRelayToDirectEndpoints.
+	relayResult.NodeLatestBlock = result.NodeLatestBlock
 	if relayResult.Reply != nil {
 		relayResult.Reply.Metadata = append(relayResult.Reply.Metadata, pairingtypes.Metadata{
 			Name:  common.RELAY_PROTOCOL_HEADER_NAME,

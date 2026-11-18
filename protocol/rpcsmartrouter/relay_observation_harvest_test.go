@@ -477,7 +477,7 @@ func TestHarvestAndUpdateTipFromRelay_HistoricalDoesNotPoisonTip(t *testing.T) {
 	// A historical response: eth_getBlockByNumber(0x10a7eb0) carries Reply.LatestBlock = that
 	// concrete block, but it is NOT the tip.
 	histMsg := parse(`{"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":["0x10a7eb0",false]}`)
-	rpcss.harvestAndUpdateTipFromRelay(ep, histMsg, &pairingtypes.RelayReply{LatestBlock: 17_460_400}, gen, addr)
+	rpcss.harvestAndUpdateTipFromRelay(ep, histMsg, &pairingtypes.RelayReply{LatestBlock: 17_460_400}, 0, gen, addr)
 
 	require.Equal(t, int64(0), endpointtip.Default().Block(endpointtip.Key("ETH1", "jsonrpc", url)),
 		"a historical response must NOT move the endpoint tip")
@@ -490,7 +490,7 @@ func TestHarvestAndUpdateTipFromRelay_HistoricalDoesNotPoisonTip(t *testing.T) {
 
 	// A tip-eligible response: eth_blockNumber → the current tip.
 	tipMsg := parse(`{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}`)
-	rpcss.harvestAndUpdateTipFromRelay(ep, tipMsg, &pairingtypes.RelayReply{LatestBlock: 20_000_000}, gen, addr)
+	rpcss.harvestAndUpdateTipFromRelay(ep, tipMsg, &pairingtypes.RelayReply{LatestBlock: 20_000_000}, 0, gen, addr)
 
 	require.Equal(t, int64(20_000_000), endpointtip.Default().Block(endpointtip.Key("ETH1", "jsonrpc", url)),
 		"a tip-eligible response moves the endpoint tip")
@@ -591,7 +591,7 @@ func TestHarvest_GenerationCapturedBeforeDispatch_RejectsAfterReplacement(t *tes
 	// The gate must reject it — it belongs to the dead incarnation, not B.
 	tipMsg, perr := newRealChainParserForHarvest(t, "ETH1").ParseMsg("", []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}`), http.MethodPost, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 	require.NoError(t, perr)
-	rpcss.harvestAndUpdateTipFromRelay(ep, tipMsg, &pairingtypes.RelayReply{LatestBlock: 20_000_000}, genA, addr)
+	rpcss.harvestAndUpdateTipFromRelay(ep, tipMsg, &pairingtypes.RelayReply{LatestBlock: 20_000_000}, 0, genA, addr)
 
 	// The store may carry a failed-poll record from incarnation B's nil-connection poll; what
 	// must NOT exist is a Relay write of 20M attributed to B from relay A's stale generation.
@@ -616,7 +616,7 @@ func TestHarvest_GenerationCapturedBeforeDispatch_RejectsAfterReplacement(t *tes
 
 	// Sanity: harvesting with the live generation (genB) IS accepted — proving the rejection
 	// above was the generation gate, not a broken store.
-	rpcss.harvestAndUpdateTipFromRelay(ep, tipMsg, &pairingtypes.RelayReply{LatestBlock: 20_000_000}, genB, addr)
+	rpcss.harvestAndUpdateTipFromRelay(ep, tipMsg, &pairingtypes.RelayReply{LatestBlock: 20_000_000}, 0, genB, addr)
 	o, obsExists := m.GetObservation(url)
 	require.True(t, obsExists)
 	require.Equal(t, int64(20_000_000), o.LatestBlock)
@@ -680,7 +680,7 @@ func TestEnsureEndpointChainTracker_GenerationAvailableSynchronously(t *testing.
 	tipMsg := newRealChainParserForHarvest(t, "ETH1")
 	cm, perr := tipMsg.ParseMsg("", []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}`), http.MethodPost, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 	require.NoError(t, perr)
-	rpcss.harvestAndUpdateTipFromRelay(ep, cm, &pairingtypes.RelayReply{LatestBlock: 21_000_000}, gen, "provider@provider1")
+	rpcss.harvestAndUpdateTipFromRelay(ep, cm, &pairingtypes.RelayReply{LatestBlock: 21_000_000}, 0, gen, "provider@provider1")
 	o, ok := m.GetObservation(url)
 	require.True(t, ok)
 	require.Equal(t, int64(21_000_000), o.LatestBlock, "the early relay's tip is recorded under the synchronous generation")
@@ -690,7 +690,7 @@ func TestEnsureEndpointChainTracker_GenerationAvailableSynchronously(t *testing.
 	// generation is rejected (a removed URL has no live generation to match).
 	m.RemoveTracker(url)
 	require.Zero(t, rpcss.endpointObservationGeneration(url), "a removed tracker has no live generation")
-	rpcss.harvestAndUpdateTipFromRelay(ep, cm, &pairingtypes.RelayReply{LatestBlock: 22_000_000}, gen, "provider@provider1")
+	rpcss.harvestAndUpdateTipFromRelay(ep, cm, &pairingtypes.RelayReply{LatestBlock: 22_000_000}, 0, gen, "provider@provider1")
 	if o, exists := m.GetObservation(url); exists {
 		require.NotEqual(t, int64(22_000_000), o.LatestBlock, "a harvest with a removed tracker's generation must be rejected")
 	}

@@ -672,6 +672,11 @@ type RelayResult struct {
 	// AttemptLatency is how long the upstream attempt behind this result took; zero when no
 	// upstream was asked (a cache hit, a result the router built itself).
 	AttemptLatency time.Duration
+	// NodeLatestBlock is the node's latest block as the node stamped it on this reply outside the
+	// body, 0 when it stamped none: a Sui node's x-sui-checkpoint-height header (MAG-5141). Unlike
+	// Reply.LatestBlock, the block the reply served, it is always the node's tip, whatever the
+	// method, so the tip harvest takes it without the method's definition.
+	NodeLatestBlock int64
 }
 
 // ApplyNodeErrorClassification stamps every registry-derived policy flag onto a node-error
