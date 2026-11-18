@@ -480,6 +480,20 @@ func (mr *MockChainMessageMockRecorder) GetUsedDefaultValue() *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetUsedDefaultValue", reflect.TypeOf((*MockChainMessage)(nil).GetUsedDefaultValue))
 }
 
+// HasBlocklessElement mocks base method.
+func (m *MockChainMessage) HasBlocklessElement() bool {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "HasBlocklessElement")
+	ret0, _ := ret[0].(bool)
+	return ret0
+}
+
+// HasBlocklessElement indicates an expected call of HasBlocklessElement.
+func (mr *MockChainMessageMockRecorder) HasBlocklessElement() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "HasBlocklessElement", reflect.TypeOf((*MockChainMessage)(nil).HasBlocklessElement))
+}
+
 // IsBatch mocks base method.
 func (m *MockChainMessage) IsBatch() bool {
 	m.ctrl.T.Helper()

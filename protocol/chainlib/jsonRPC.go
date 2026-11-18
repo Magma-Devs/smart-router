@@ -255,6 +255,8 @@ func (apip *JsonRPCChainParser) ParseMsg(url string, data []byte, connectionType
 			return nil, err
 		}
 	}
+	// The cache never writes the request as final when the fold left an element out (MAG-4650).
+	nodeMsg.blocklessElement = blockFold.skippedBlocklessElement()
 	apip.BaseChainParser.ExtensionParsing(apiCollection.CollectionData.AddOn, nodeMsg, extensionInfo)
 	return nodeMsg, nil
 }
@@ -343,7 +345,6 @@ func (apip *JsonRPCChainParser) ChainBlockStats() (allowedBlockLagForQosSync int
 type JsonRPCChainListener struct {
 	chainListenerBase
 	wsListenerBase
-	app *fiber.App // captured during Serve so Shutdown can drain HTTP
 }
 
 // NewJrpcChainListener creates a new instance of JsonRPCChainListener
@@ -376,7 +377,6 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 	// true: a DELETE goes on to this listener's own refusal below, instead of the shared 204
 	// that told the caller it was done (MAG-4524).
 	app := createAndSetupBaseAppListener(cmdFlags, apil.endpoint.HealthCheckPath, apil.healthReporter, true, true)
-	apil.app = app
 
 	// ConnectionType POST: ParseMsg needs it to find the subscription method in the spec.
 	wsUpgradeMiddleware, websocketCallbackWithDappID := apil.websocketRoutes(ctx, app, &apil.chainListenerBase, cmdFlags, "jsonrpc", fiber.MethodPost)
@@ -644,5 +644,5 @@ func (apil *JsonRPCChainListener) Shutdown(ctx context.Context) error {
 	if apil == nil {
 		return nil
 	}
-	return drainHTTPThenWS(ctx, apil.app, &apil.wsWG, "JSONRPC")
+	return drainHTTPThenWS(ctx, &apil.gate, &apil.wsWG, "JSONRPC")
 }

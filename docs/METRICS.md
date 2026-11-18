@@ -110,7 +110,7 @@ They split into **endpoint-scoped** (`rpc_endpoint_*`) and **router-scoped**
 
 | Metric | Type | Labels | Description |
 | --- | --- | --- | --- |
-| `rpc_endpoint_total_relays_serviced` | Counter | `spec`, `apiInterface`, `endpoint_id`, `function` | Relays successfully served by this endpoint. |
+| `rpc_endpoint_total_relays_serviced` | Counter | `spec`, `apiInterface`, `endpoint_id`, `function` | Relays this endpoint answered. An answer that carries a node error counts here too (and on `smartrouter_node_errors_total`): only a transport failure or timeout goes to `rpc_endpoint_total_errored`. Whether the endpoint answers clients' reads with results is `smartrouter_node_results_total`. |
 | `rpc_endpoint_total_errored` | Counter | `spec`, `apiInterface`, `endpoint_id`, `function` | Errored relays for this endpoint. Excludes relays the router itself cancelled — see `rpc_endpoint_total_cancelled`. |
 | `rpc_endpoint_total_cancelled` | Counter | `spec`, `apiInterface`, `endpoint_id`, `function` | Relays the router aborted before completion: the losing side of a hedged read, a broadcast delivery still running 5 s after the caller was answered, and client disconnects. **Not an endpoint fault** — excluded from `rpc_endpoint_total_errored` and from QoS/availability scoring. |
 | `rpc_endpoint_requests_in_flight` | Gauge | `spec`, `apiInterface`, `endpoint_id`, `function` | Relays currently in flight to this endpoint. |
@@ -121,7 +121,7 @@ They split into **endpoint-scoped** (`rpc_endpoint_*`) and **router-scoped**
 | `rpc_endpoint_latest_block` | Gauge | `spec`, `apiInterface`, `endpoint_id` | Latest block reported by the endpoint. |
 | `rpc_endpoint_url_latest_block` | Gauge | `spec`, `apiInterface`, `endpoint_id`, `url`, `internal_path` | Latest block one node url of a provider answered with, written on every answered poll (the same block again included) and by the relay harvest: one series per (provider, url), for the stuck-provider alerts. `rpc_endpoint_latest_block` is written by every url of the provider, so it cannot show a url that froze while another moves on (MAG-4204). `url` is a fingerprint of the node url, the first 8 hex digits of its sha256, and nothing of the url itself, since a node url can hold an api key in any part of it; `/debug/endpoint-state` shows it as `URLFingerprint` beside each endpoint, on a router run with its debug server. `internal_path` is the spec path the url serves (`/v2`), empty for the root. ws/wss urls and unregistered urls have no series; a url whose tracker is removed loses it. |
 | `rpc_endpoint_url_answered_until_seconds` | Gauge | as `rpc_endpoint_url_latest_block` | Unix time until which the url counts as answering: its last answer, an answered poll or a harvested relay, plus max(2m, 6 x the interval the url's tracker polls at): up to 4 polls the traffic gate skips, the poll after them, and one interval for that poll's answer. The tracker caps that interval at 1 minute, so BTC polls every minute and a BTC url that dies reads as down 6 minutes after its last answer; ETH and TON keep the 2-minute floor. Past it, the url has stopped answering: it is down, not stuck, and serves no stale block. Compare with `timestamp(rpc_endpoint_url_answered_until_seconds)`, the time the sample was scraped, not `time()`: with `time()` a scrape that arrives late flips an answering url to down, where `timestamp()` only delays the verdict. |
-| `rpc_endpoint_url_relays_serviced_total` | Counter | as `rpc_endpoint_url_latest_block` | Relays one node url of a provider served successfully: the per-url counterpart of `rpc_endpoint_total_relays_serviced`, so a page about a url can ask whether customers' requests reach it. |
+| `rpc_endpoint_url_relays_serviced_total` | Counter | as `rpc_endpoint_url_latest_block` | Relays one node url of a provider answered, an answer carrying a node error included: the per-url counterpart of `rpc_endpoint_total_relays_serviced`, so a page about a url can ask whether customers' requests reach it. |
 | `rpc_endpoint_fetch_latest_fails` | Counter | `spec`, `apiInterface`, `endpoint_id` | Latest-block fetch failures. An **event** counter, not a request counter — see the note below. |
 | `rpc_endpoint_fetch_block_fails` | Counter | `spec`, `apiInterface`, `endpoint_id` | Failed specific-block fetches. |
 | `rpc_endpoint_fetch_latest_success` | Counter | `spec`, `apiInterface`, `endpoint_id` | New-block **detections** by the chain tracker, not successful requests — see the note below. |
@@ -243,7 +243,7 @@ They split into **endpoint-scoped** (`rpc_endpoint_*`) and **router-scoped**
 
 | Metric | Type | Labels | Description |
 | --- | --- | --- | --- |
-| `smartrouter_total_relays_serviced` | Counter | `spec`, `apiInterface`, `function` | Relays served by the router. |
+| `smartrouter_total_relays_serviced` | Counter | `spec`, `apiInterface`, `function` | Relays the router's endpoints answered, an answer carrying a node error included. |
 | `smartrouter_total_errored` | Counter | `spec`, `apiInterface`, `function` | Errored relays. |
 | `smartrouter_end_to_end_latency_milliseconds` | Histogram | `spec`, `apiInterface`, `function` | Router-level end-to-end latency. |
 | `smartrouter_overall_health` | Gauge | — | Overall router health (1 / 0). |
@@ -384,7 +384,8 @@ node on the router offers it, the request is still served without it and the rep
 
 | Metric | Type | Labels | Description |
 | --- | --- | --- | --- |
-| `smartrouter_node_errors_total` | Counter | `spec`, `apiInterface`, `provider_address`, `method` | Node errors returned by endpoints. |
+| `smartrouter_node_errors_total` | Counter | `spec`, `apiInterface`, `provider_address`, `method` | Node errors returned by endpoints. Not counted on a stateful request (a write): it goes to every provider and all but one refuse it. |
+| `smartrouter_node_results_total` | Counter | `spec`, `apiInterface`, `provider_address`, `method` | Clients' reads an endpoint answered with a result: an answer, not a node error. Not counted: a stateful request (a write — its answers say nothing about who serves reads), the router's own health check, and an attempt that got no answer. This is the counter that says whether a provider is serving clients; `rpc_endpoint_total_relays_serviced` counts its node errors too. `provider_address` is the endpoint's name, the `endpoint_id` of the `rpc_endpoint_*` series. |
 | `smartrouter_protocol_errors_total` | Counter | `spec`, `apiInterface`, `provider_address`, `method` | Protocol/transport errors (connection/session failures). |
 
 `GET /debug/relay-errors` on the debug server (`--debug-address`) reports the router's own count of

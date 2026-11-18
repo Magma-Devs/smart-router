@@ -12,13 +12,23 @@ import (
 )
 
 // noAnswerShape is the error body a listener's router-made replies already use: a JSON-RPC 2.0
-// error object (JSON-RPC, Tendermint POST), or {"error": "..."} (REST, Tendermint GET, GraphQL).
+// error object (JSON-RPC, Tendermint POST), {"error": "..."} (REST, Tendermint GET), or the
+// router's own GraphQL error (GraphQL).
 type noAnswerShape int
 
 const (
 	noAnswerJsonRpc noAnswerShape = iota
 	noAnswerJsonError
+	// noAnswerGraphQL is the router's own GraphQL error (MAG-5119): one error with the code
+	// NO_PROVIDER_ANSWER, the guid in extensions and in Lava-Guid, no data key, and a sentence
+	// that names no provider (graphQLNoAnswerMessage).
+	noAnswerGraphQL
 )
+
+// graphQLNoProviderAnswerCode is the extensions.code of the GraphQL reply when no provider answered:
+// 502 when a provider refused or dropped the connection, 504 when every provider timed out (the
+// GraphQL chapter's cases T9 and T10).
+const graphQLNoProviderAnswerCode = "NO_PROVIDER_ANSWER"
 
 // failedRelayReply is what the client reads for a failed relay.
 type failedRelayReply struct {
@@ -27,6 +37,9 @@ type failedRelayReply struct {
 	contentType string // empty: keep the listener's own Content-Type
 	// fromUpstream is true when the body is the upstream's answer rather than the router's text.
 	fromUpstream bool
+	// guid, when set, is also sent as Lava-Guid, after the relay's own reply headers, so the header
+	// always equals the guid the body carries (the GraphQL shape).
+	guid string
 }
 
 // buildFailedRelayReply decides the reply for a failed relay that carries a client-facing verdict
@@ -57,6 +70,17 @@ func buildFailedRelayReply(relayResult *common.RelayResult, guid string, request
 	if metrics.ReturnMaskedErrors != "false" {
 		return failedRelayReply{}, false
 	}
+	if shape == noAnswerGraphQL {
+		// The router speaks for itself here, so the sentence is its own and names no provider. The
+		// transport cause carries a provider's url and address, and a url can carry an API key;
+		// it stays in the router's log line, under the same guid (MAG-5119).
+		return failedRelayReply{
+			status:      relayResult.GetStatusCode(),
+			body:        convertToGraphQLError(graphQLNoAnswerMessage(cf), graphQLNoProviderAnswerCode, guid),
+			contentType: fiber.MIMEApplicationJSONCharsetUTF8,
+			guid:        guid,
+		}, true
+	}
 	message := utils.RedactSecrets(cf.NoAnswerMessage())
 	var body []byte
 	switch shape {
@@ -84,6 +108,18 @@ func buildFailedRelayReply(relayResult *common.RelayResult, guid string, request
 	return failedRelayReply{status: relayResult.GetStatusCode(), body: body, contentType: fiber.MIMEApplicationJSONCharsetUTF8}, true
 }
 
+// graphQLNoAnswerMessage is the GraphQL no-answer sentence. It names the request's timeout when
+// every provider timed out, and nothing else: no provider, no address, no transport error.
+func graphQLNoAnswerMessage(cf *common.ClientFacingError) string {
+	if cf.TimedOut {
+		if cf.Timeout > 0 {
+			return "no provider answered within " + cf.Timeout.String()
+		}
+		return "no provider answered within the request's timeout"
+	}
+	return "no provider answered the request"
+}
+
 // failedRelayStatus is the status of a failed relay's reply when buildFailedRelayReply did not
 // build it. A masked no-answer is masked in its status too, so it reads 500 like any other masked
 // router error.
@@ -105,6 +141,10 @@ func sendFailedRelayReply(fiberCtx *fiber.Ctx, reply failedRelayReply, metadata 
 	} else if reply.fromUpstream {
 		// The upstream sent no Content-Type: do not label its body as JSON on its behalf.
 		fiberCtx.Response().Header.Del(fiber.HeaderContentType)
+	}
+	if reply.guid != "" {
+		// Last, so it wins over a Lava-Guid among the relay's own reply headers.
+		metadata = append(append([]pairingtypes.Metadata(nil), metadata...), pairingtypes.Metadata{Name: common.GUID_HEADER_NAME, Value: reply.guid})
 	}
 	return addHeadersAndSendBytes(fiberCtx, metadata, reply.body)
 }

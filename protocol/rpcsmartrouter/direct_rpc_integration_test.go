@@ -867,7 +867,8 @@ func (m *mockChainMessage) GetParseDirective() *spectypes.ParseDirective {
 	m.parseDirectiveCalls++
 	return m.parseDirective
 }
-func (m *mockChainMessage) IsBatch() bool { return false }
+func (m *mockChainMessage) IsBatch() bool             { return false }
+func (m *mockChainMessage) HasBlocklessElement() bool { return false }
 
 type mockGenericMessage struct {
 	data []byte

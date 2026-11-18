@@ -247,6 +247,8 @@ func (apip *TendermintChainParser) ParseMsg(urlPath string, data []byte, connect
 		}
 	}
 
+	// The cache never writes the request as final when the fold left an element out (MAG-4650).
+	nodeMsg.blocklessElement = blockFold.skippedBlocklessElement()
 	utils.FormatTrace("[Archive Debug] TendermintRPC ParseMsg calling ExtensionParsing", utils.LogAttr("addon", apiCollection.CollectionData.AddOn), utils.LogAttr("extensionInfo", extensionInfo), utils.LogAttr("urlPath", urlPath))
 	apip.BaseChainParser.ExtensionParsing(apiCollection.CollectionData.AddOn, nodeMsg, extensionInfo)
 	return nodeMsg, nil
@@ -314,7 +316,6 @@ func (apip *TendermintChainParser) ChainBlockStats() (allowedBlockLagForQosSync 
 type TendermintRpcChainListener struct {
 	chainListenerBase
 	wsListenerBase
-	app *fiber.App // captured during Serve so Shutdown can drain HTTP
 }
 
 // NewTendermintRpcChainListener creates a new instance of TendermintRpcChainListener
@@ -349,7 +350,6 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 	// PUT: 405, with an Allow of the methods this listener does serve (GET and POST), instead of the
 	// shared 204 that told the caller it was done (MAG-4524).
 	app := createAndSetupBaseAppListener(cmdFlags, apil.endpoint.HealthCheckPath, apil.healthReporter, true, true)
-	apil.app = app
 
 	// ConnectionType "": ParseMsg looks a Tendermint subscription method up without one.
 	wsUpgradeMiddleware, websocketCallbackWithDappID := apil.websocketRoutes(ctx, app, &apil.chainListenerBase, cmdFlags, "tendermintrpc", "")
@@ -568,5 +568,5 @@ func (apil *TendermintRpcChainListener) Shutdown(ctx context.Context) error {
 	if apil == nil {
 		return nil
 	}
-	return drainHTTPThenWS(ctx, apil.app, &apil.wsWG, "TendermintRPC")
+	return drainHTTPThenWS(ctx, &apil.gate, &apil.wsWG, "TendermintRPC")
 }

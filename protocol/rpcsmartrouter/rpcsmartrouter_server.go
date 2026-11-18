@@ -3405,7 +3405,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 					// wait; the result carries it instead (MAG-4914).
 					retryAfter = localRelayResult.RetryAfter
 				}
-				heldFor := relayHoldoff.RecordRateLimit(holdoffProvider, holdoffURL, retryAfter)
+				heldFor := relayHoldoff().RecordRateLimit(holdoffProvider, holdoffURL, retryAfter)
 				releaseErr := err
 				if releaseErr == nil {
 					releaseErr = fmt.Errorf("upstream rate-limited the relay (HTTP %d)", statusCode)
@@ -3424,7 +3424,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 				// "I do not hold this data" is neither failure nor success. It comes back fast, so
 				// OnSessionDone would reward a lagging or pruned node with availability and latency
 				// for data it did not serve. The request still fails over; only the endpoint's tip is scored.
-				relayHoldoff.RecordAnswer(holdoffProvider, holdoffURL)
+				relayHoldoff().RecordAnswer(holdoffProvider, holdoffURL)
 				releaseErr := fmt.Errorf("upstream does not hold the requested data (status %d)", statusCode)
 				if errSession := rpcss.sessionManager.OnSessionDataNotHeld(singleConsumerSession, releaseErr); errSession != nil {
 					utils.FormatWarning("OnSessionDataNotHeld failed for direct RPC", errSession,
@@ -3434,7 +3434,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 			} else if !shouldFailSession {
 				// The endpoint answered for real — success or a plain client error — so any
 				// standing rate-limit hold-off for it is stale.
-				relayHoldoff.RecordAnswer(holdoffProvider, holdoffURL)
+				relayHoldoff().RecordAnswer(holdoffProvider, holdoffURL)
 				// Success or client error (4xx except 429) - update session as success.
 				// targetEndpoint / directConn were resolved and the tracker ensured before
 				// dispatch (above), so harvestGen is the generation captured pre-relay.
@@ -4197,7 +4197,7 @@ func probeAppenderUnlessIdle(appender probeQoSAppender, idle bool) probeQoSAppen
 // constructed endpoints + a fake observation getter + a fake appender. For every endpoint it renders
 // a verdict, applies the proactive re-enable, then feeds ONE aggregated QoS sample per provider
 // (rule E2). A nil appender still performs the re-enable (QoS feed simply skipped). The one shared
-// state it reads is the rate-limit hold-off registry (relayHoldoff, which tests swap): a stale
+// state it reads is the rate-limit hold-off registry (relayHoldoff(), which tests swap): a stale
 // endpoint whose url is held off is left out of its provider's sample rather than scored dead.
 //
 // Returns the per-cycle telemetry for /debug/probe-loop (MAG-2202 endpoint 4): scored = endpoints
@@ -4268,7 +4268,7 @@ func runProbeCycleCore(
 		// sends no sample this cycle. A fresh observation is judged as usual, held off or not; the
 		// re-enable pass above is unaffected.
 		if !verdict.Alive {
-			if readyAt := relayHoldoff.URLReadyAt(ep.HoldoffKey, ep.Endpoint.NetworkAddress); !readyAt.IsZero() {
+			if readyAt := relayHoldoff().URLReadyAt(ep.HoldoffKey, ep.Endpoint.NetworkAddress); !readyAt.IsZero() {
 				utils.FormatDebug("probe leaves a rate-limited endpoint out of its provider's sample",
 					utils.LogAttr("endpoint", ep.Endpoint.NetworkAddress),
 					utils.LogAttr("provider", ep.ProviderAddress),
@@ -4937,6 +4937,11 @@ func (rpcss *RPCSmartRouterServer) adoptSharedStateTip(ctx context.Context, peer
 // (a trace, a log query, a fee estimate) are not excluded here: that is a reproducibility
 // question, and the spec's deterministic flag, which cross-validation owns, is where it
 // is answered.
+//
+// GraphQL adds a third: a root field whose answer differs from provider to provider because
+// each runs its own server version, such as introspection or Sui's serviceConfig
+// (graphQLNeverCacheRootFields, MAG-5123). It is read on both gates too, so an entry an
+// older router wrote for such a field is not served either.
 func cacheExclusionReason(protocolMessage chainlib.ProtocolMessage) string {
 	if chainlib.GetStateful(protocolMessage) == common.CONSISTENCY_SELECT_ALL_PROVIDERS {
 		return "stateful"
@@ -4944,7 +4949,20 @@ func cacheExclusionReason(protocolMessage chainlib.ProtocolMessage) string {
 	if nodeBoundReason(protocolMessage.GetApi().Name) != "" {
 		return "node-bound"
 	}
+	if graphQLNeverCacheReason(protocolMessage) != "" {
+		return "never-cache"
+	}
 	return ""
+}
+
+// cacheExclusionWhy is the detail behind cacheExclusionReason for the log: which method is
+// node-bound or which GraphQL field is never cached, and why. "" for a stateful request,
+// whose reason says it all.
+func cacheExclusionWhy(protocolMessage chainlib.ProtocolMessage) string {
+	if why := nodeBoundReason(protocolMessage.GetApi().Name); why != "" {
+		return why
+	}
+	return graphQLNeverCacheReason(protocolMessage)
 }
 
 // cacheAnsweredEarlierAttempt reports whether the cache answered an earlier attempt of this relay.
@@ -4987,11 +5005,12 @@ func skipCacheWriteAfterDegrade(ctx context.Context, relayProcessor *relaycore.R
 // Cache writes are skipped when:
 // - Cache is not active
 // - Quorum is enabled (quorum requires fresh endpoint validation)
-// - Request is stateful or node-bound (cacheExclusionReason)
+// - Request is stateful, node-bound or selects a GraphQL never-cache field (cacheExclusionReason)
 // - Response is a node error
 // - Response body is larger than cacheMaxEntryBytes (--cache-max-entry-bytes)
 // - Requested block is NOT_APPLICABLE
-// - Reply is a null for a concrete block at or below the router's tip (nullForBlockAtOrBelowTip)
+// - Reply answers nothing (a null, {}, an error document) for a concrete block at or below the router's tip (noAnswerForBlockAtOrBelowTip)
+// - Reply is a GraphQL reply with an error, or with a root field that is null or [] (graphQLReplyCacheExclusion)
 // - Requested block is a tag the resolution above leaves negative (EARLIEST/PENDING/SAFE/FINALIZED)
 func (rpcss *RPCSmartRouterServer) tryCacheWrite(
 	ctx context.Context,
@@ -5026,7 +5045,7 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 	if reason := cacheExclusionReason(protocolMessage); reason != "" {
 		utils.FormatDebug("cache write skipped: "+reason+" request",
 			utils.LogAttr("api", protocolMessage.GetApi().Name),
-			utils.LogAttr("why", nodeBoundReason(protocolMessage.GetApi().Name)),
+			utils.LogAttr("why", cacheExclusionWhy(protocolMessage)),
 			utils.LogAttr("GUID", ctx),
 		)
 		return
@@ -5102,15 +5121,30 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 		return
 	}
 
-	// A null for a block the router knows exists is one lagging node's answer, not the chain's.
-	// Written, it would be replayed to every caller of that block as a gap (MAG-4124). The caller
-	// that drew it still gets it; only the replay is refused.
-	if tip := int64(rpcss.getLatestBlock()); nullForBlockAtOrBelowTip(requestedBlock, tip, relayResult.Reply.Data) {
-		utils.FormatDebug("cache write skipped: a null for a block at or below the tip",
+	// No answer for a block the router knows exists (a JSON-RPC null, a REST {} or error document)
+	// is one node's answer, not the chain's. Written, it would be replayed to every caller of that
+	// block as a gap (MAG-4124, MAG-5307). The caller that drew it still gets it; only the replay is
+	// refused.
+	if tip := int64(rpcss.getLatestBlock()); noAnswerForBlockAtOrBelowTip(requestedBlock, tip, relayResult.Reply.Data) {
+		utils.FormatDebug("cache write skipped: no answer for a block at or below the tip",
 			utils.LogAttr("chainId", chainId),
 			utils.LogAttr("api", apiName),
 			utils.LogAttr("requestedBlock", requestedBlock),
 			utils.LogAttr("tip", tip),
+			utils.LogAttr("GUID", ctx),
+		)
+		return
+	}
+
+	// A GraphQL reply is cached only as a clean, complete answer: no error (a partial reply
+	// included), and no root field that is null or an empty list (MAG-5123). Each is a 200 that
+	// passed the node-error gate above, and each, replayed, would hand the next caller one
+	// provider's miss as the chain's answer (MAG-5201's lagging-provider null).
+	if why := graphQLReplyCacheExclusion(protocolMessage, relayResult.Reply.Data); why != "" {
+		utils.FormatDebug("cache write skipped: not a clean graphql answer",
+			utils.LogAttr("chainId", chainId),
+			utils.LogAttr("api", apiName),
+			utils.LogAttr("why", why),
 			utils.LogAttr("GUID", ctx),
 		)
 		return
@@ -5152,6 +5186,13 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 		// transaction answers null) is stamped downstream with the endpoint's observed
 		// tip, and that value must never settle an answer that can still change.
 		finalized = byHashFinalized(extractBlockHeightFromJSONResponse(relayResult.Reply.Data, protocolMessage), int64(rpcss.getLatestBlock()), int64(blockDistanceForFinalizedData))
+	}
+	// An element that names no block took no part in the request's block, so that block being
+	// final says nothing about the element's answer: a gas price batched with a read of a final
+	// block is still a gas price, and filed as final it was served for an hour (MAG-4650). The
+	// entry gets the chain's short lifetime, as a block-less element beside a latest read does.
+	if finalized && protocolMessage.HasBlocklessElement() {
+		finalized = false
 	}
 
 	// Convert LATEST_BLOCK to the concrete block the cache key carries. This MUST be the
@@ -5526,7 +5567,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 				utils.LogAttr("cacheActive", true),
 				utils.LogAttr("api", protocolMessage.GetApi().Name),
 				utils.LogAttr("reason", reason),
-				utils.LogAttr("why", nodeBoundReason(protocolMessage.GetApi().Name)),
+				utils.LogAttr("why", cacheExclusionWhy(protocolMessage)),
 			)
 		} else if protocolMessage.GetForceCacheRefresh() {
 			// User requested cache bypass via header
@@ -7339,10 +7380,23 @@ func classifyHTTPStatus(code int, classified *common.RouterError) (shouldMarkUnh
 	return classifyEndpointHealth(classified, false)
 }
 
-// relayHoldoff is the hot path's handle on the process-wide
-// rate-limit hold-off registry (docs/RATE-LIMIT-HOLDOFF.md). A package variable rather
-// than a server field so tests can swap in a clock-pinned registry and restore it.
-var relayHoldoff = holdoff.Shared
+// relayHoldoffOverride, when set, replaces the process-wide rate-limit hold-off registry
+// (docs/RATE-LIMIT-HOLDOFF.md) on the hot path. It is a package variable rather than a server
+// field so tests can swap in a clock-pinned registry and restore it, and it is atomic because a
+// relay can outlive the call that started it: a stateful broadcast's other delivery keeps running
+// for up to statefulDeliveryLinger after the answer (MAG-4032) and records its outcome here while
+// the next test may already be swapping the registry. As a plain variable, that swap was a data
+// race the race detector reported on pull requests that never touched this code.
+var relayHoldoffOverride atomic.Pointer[holdoff.Registry]
+
+// relayHoldoff is the hot path's handle on the rate-limit hold-off registry: a test's override
+// when one is set, the process-wide registry otherwise.
+func relayHoldoff() *holdoff.Registry {
+	if registry := relayHoldoffOverride.Load(); registry != nil {
+		return registry
+	}
+	return holdoff.Shared
+}
 
 // holdoffProviderKey is the hold-off registry key of a provider on this server's chain and
 // api-interface (holdoff.ProviderKey), the key relay selection reads.
