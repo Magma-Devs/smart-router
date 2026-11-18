@@ -1414,7 +1414,7 @@ func (rp *RelayProcessor) ProcessingResult() (returnedResult *common.RelayResult
 	rp.lock.RLock()
 	defer rp.lock.RUnlock()
 
-	successResults, nodeErrors, protocolErrors := rp.GetResultsData()
+	successResults, nodeErrors, protocolErrors := rp.GetResultsDetail()
 	successResultsCount, nodeErrorCount, protocolErrorCount := len(successResults), len(nodeErrors), len(protocolErrors)
 
 	if rp.debugRelay {
@@ -1499,12 +1499,19 @@ func (rp *RelayProcessor) processCrossValidationResult(
 }
 
 // processNonCrossValidationResult handles Stateful and Stateless modes, which share the same result
-// selection: first success, else the first non-retryable node error, else the first node error, else a
-// failure result built from the best node/protocol error. (Stateful fans out without retries and
-// Stateless retries sequentially, but that difference lives in the state machine, not here.)
+// selection: the first success, else the provider's answer of the best kind, else a failure result
+// built from the protocol errors. (Stateful fans out without retries and Stateless retries
+// sequentially, but that difference lives in the state machine, not here.)
+//
+// When every provider failed, the answers are ranked by kind, not by arrival (Part I R-K, MAG-5061
+// item 2, MAG-5232 Expected 8; failureKind): C2 > C3 > C5 / unknown > C4 > C6, a node error and an
+// upstream's error status alike. A 429 beats a 403, and a revert beats the "method not found" of a
+// provider that refused first (MAG-2771). Among answers of one kind a node error comes first, then
+// the first to arrive. A transport failure is no provider's answer and has no kind: the router
+// speaks for itself only when no provider answered (buildFailureResult, MAG-4218).
 func (rp *RelayProcessor) processNonCrossValidationResult(
-	successResults, nodeErrors []common.RelayResult,
-	protocolErrors []RelayError,
+	successResults []common.RelayResult,
+	nodeErrors, protocolErrors []RelayError,
 ) (*common.RelayResult, error) {
 	// Return first success if available
 	if len(successResults) > 0 {
@@ -1512,24 +1519,17 @@ func (rp *RelayProcessor) processNonCrossValidationResult(
 		return &result, nil
 	}
 
-	// No successes: return a node error, a non-retryable one first. A non-retryable error is a fact
-	// about the chain or the request, the same from every node, and it is the answer that ended the
-	// request. A retryable one is the node's claim about itself (MAG-2771): a refusal, a limit, data
-	// it does not hold. Taking the first error to arrive handed the caller the refusing provider's
-	// "method not found" even after the provider it was retried on had answered with the revert.
-	if len(nodeErrors) > 0 {
-		for i := range nodeErrors {
-			if nodeErrors[i].IsNonRetryable {
-				result := nodeErrors[i]
-				return &result, nil
-			}
+	best, nodeKind := bestNodeError(nodeErrors)
+	if best >= 0 {
+		if upstreamKind, answered := bestUpstreamAnswerKind(protocolErrors); !answered || nodeKind >= upstreamKind {
+			result := nodeErrors[best].Response.RelayResult
+			return &result, nil
 		}
-		result := nodeErrors[0]
-		return &result, nil
 	}
 
-	// No node responses at all - build a failure result from the best node/protocol error.
-	return rp.buildFailureResult(nodeErrors, protocolErrors)
+	// No node error, or an upstream's answer of a better kind: build the failure result from the
+	// protocol errors.
+	return rp.buildFailureResult(protocolErrors)
 }
 
 // onlyRateLimited reports whether at least one attempt failed and every failure was an
@@ -1557,28 +1557,19 @@ func onlyRateLimited(nodeErrorResults []common.RelayResult, protocolErrorResults
 	return true
 }
 
-// buildFailureResult constructs an error result when no consensus can be reached. It returns the best
-// node/protocol error's own RelayResult, whose ProviderInfo.ProviderAddress is a SINGLE provider — the
-// source of the error body being returned. It must never be a comma-joined list: packing the whole
-// attempted set here made appendHeadersToRelayResult treat the joined blob as the resolver name and
-// append it after the per-attempt names, so on the all-transport-errors path Lava-Provider-Address
-// listed ~2x the providers and disagreed with Lava-Retries (MAG-2351).
-func (rp *RelayProcessor) buildFailureResult(
-	nodeErrors []common.RelayResult, protocolErrors []RelayError,
-) (*common.RelayResult, error) {
+// buildFailureResult constructs an error result from the protocol errors when no provider's answer
+// was better (processNonCrossValidationResult). It returns the best protocol error's own RelayResult,
+// whose ProviderInfo.ProviderAddress is a SINGLE provider — the source of the error body being
+// returned. It must never be a comma-joined list: packing the whole attempted set here made
+// appendHeadersToRelayResult treat the joined blob as the resolver name and append it after the
+// per-attempt names, so on the all-transport-errors path Lava-Provider-Address listed ~2x the
+// providers and disagreed with Lava-Retries (MAG-2351).
+func (rp *RelayProcessor) buildFailureResult(protocolErrors []RelayError) (*common.RelayResult, error) {
 	returnedResult := &common.RelayResult{StatusCode: http.StatusInternalServerError}
 	var processingError error
 
 	var bestRouterError *common.RouterError
-	if len(nodeErrors) > 0 {
-		// Prefer node errors over protocol errors
-		nodeErr := rp.GetBestNodeErrorMessageForUser()
-		processingError = nodeErr.Err
-		bestRouterError = nodeErr.RouterError
-		if nodeErr.Response != nil {
-			returnedResult = &nodeErr.Response.RelayResult
-		}
-	} else if len(protocolErrors) > 0 {
+	if len(protocolErrors) > 0 {
 		protocolErr := rp.GetBestProtocolErrorMessageForUser()
 		processingError = protocolErr.Err
 		bestRouterError = protocolErr.RouterError
@@ -1605,7 +1596,7 @@ func (rp *RelayProcessor) buildFailureResult(
 				stamped.StatusCode = NoAnswerStatus(cf)
 			}
 			returnedResult = &stamped
-		} else if onlyRateLimited(nodeErrors, protocolErrors) {
+		} else if onlyRateLimited(nil, protocolErrors) {
 			// Every attempt was refused for rate, but none carried a node status to forward: a 429
 			// on a WebSocket handshake, or a gRPC RESOURCE_EXHAUSTED. Without a status the HTTP
 			// listeners would send 500, so say what the nodes said: 429. A forwarded node answer

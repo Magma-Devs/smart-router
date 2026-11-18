@@ -1,6 +1,7 @@
 package rpcsmartrouter
 
 import (
+	"context"
 	"net/http"
 	"sync/atomic"
 	"testing"
@@ -11,6 +12,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/relayprotocol"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils/rand"
 )
@@ -155,4 +157,61 @@ func TestRead_KeepsTheCallersRelayTimeout(t *testing.T) {
 	chainMessage.TimeoutOverride(time.Second)
 	_, averageBlockTime, _, _ := chainParser.ChainBlockStats()
 	require.Equal(t, time.Second, chainlib.GetRelayTimeout(chainMessage, averageBlockTime))
+}
+
+// When every provider failed, the client gets the answer of the best kind, not the first to arrive
+// (MAG-5232 Expected 8, test 13; MAG-5061 item 2): one provider answers 403 at once, the other 429
+// after 300 ms, and the client gets the 429, on a write and on a read. A 403 is about the router's
+// key; a rate limit passes on its own. On main the 403, a node error, beat the 429.
+func TestEveryProviderFailed_A429BeatsA403(t *testing.T) {
+	rand.InitRandomSeed()
+	const refusal = `{"jsonrpc":"2.0","id":1,"error":{"code":-32002,"message":"key disabled"}}`
+	const throttle = `{"code":-32007,"message":"50/second request limit reached"}`
+	tc := writeInterfaceCases[0]
+	read := tc
+	read.body = `{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}`
+
+	for _, c := range []struct {
+		name string
+		send func(t *testing.T, chainParser chainlib.ChainParser, server *RPCSmartRouterServer) (*common.RelayResult, error)
+	}{
+		{"write", func(t *testing.T, chainParser chainlib.ChainParser, server *RPCSmartRouterServer) (*common.RelayResult, error) {
+			return sendWrite(t, tc, chainParser, server)
+		}},
+		{"read", func(t *testing.T, chainParser chainlib.ChainParser, server *RPCSmartRouterServer) (*common.RelayResult, error) {
+			return sendRead(t, read, chainParser, server)
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			chainParser := tc.parser(t)
+			refused := writeUpstream{name: "refused-" + t.Name(), status: http.StatusForbidden, body: refusal}
+			throttled := writeUpstream{name: "throttled-" + t.Name(), status: http.StatusTooManyRequests, body: throttle, delay: 300 * time.Millisecond}
+			hits := make([]int64, 2)
+			server := newWriteServer(t, tc, chainParser, []writeUpstream{refused, throttled}, nil, hits)
+
+			result, _ := c.send(t, chainParser, server)
+			require.NotNil(t, result)
+			require.Equal(t, int64(1), atomic.LoadInt64(&hits[0]), "setup: both providers were asked")
+			require.Equal(t, int64(1), atomic.LoadInt64(&hits[1]), "setup: both providers were asked")
+			require.Equal(t, http.StatusTooManyRequests, result.StatusCode)
+			cf := result.GetClientFacing()
+			require.NotNil(t, cf, "the 429 is forwarded as the upstream sent it")
+			require.JSONEq(t, throttle, string(cf.UpstreamBody))
+		})
+	}
+}
+
+// sendRead sends tc's request, a read, through SendParsedRelay.
+func sendRead(t *testing.T, tc writeInterfaceCase, chainParser chainlib.ChainParser, server *RPCSmartRouterServer) (*common.RelayResult, error) {
+	t.Helper()
+	ctx := context.Background()
+	chainMessage, err := chainParser.ParseMsg(tc.path, []byte(tc.body), tc.method, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
+	require.NoError(t, err)
+	relayData := relayprotocol.NewRelayData(ctx, tc.method, tc.path, []byte(tc.body), 0, spectypes.NOT_APPLICABLE, tc.apiInterface,
+		chainMessage.GetRPCMessage().GetHeaders(), chainlib.GetAddon(chainMessage), common.GetExtensionNames(chainMessage.GetExtensions()))
+	protocolMessage := chainlib.NewProtocolMessage(chainMessage, nil, relayData, "dapp", "1.2.3.4")
+	require.Equal(t, uint32(common.NO_STATE), chainlib.GetStateful(protocolMessage), "setup: the request must be a read")
+	callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	return server.SendParsedRelay(callCtx, nil, protocolMessage)
 }
