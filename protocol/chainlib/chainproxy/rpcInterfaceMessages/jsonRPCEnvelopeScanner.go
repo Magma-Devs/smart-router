@@ -137,6 +137,27 @@ func scanJsonrpcBatchElements(data []byte, fn func(elementBytes []byte) bool) er
 	}
 }
 
+// IsJsonrpcReply reports whether data is a JSON-RPC reply: an object carrying "result" or
+// "error", or a non-empty batch of only such objects. A JSON-RPC node answers in JSON-RPC, so a
+// body that is not one (a gateway's HTML page, an empty body, plain text, {}) is not the node's
+// answer, whatever the router read it as (MAG-5072).
+func IsJsonrpcReply(data []byte) bool {
+	if scan, err := scanJsonrpcEnvelope(data); err == nil {
+		return scan.hasResult || scan.hasError
+	}
+	replies := 0
+	err := scanJsonrpcBatchElements(data, func(element []byte) bool {
+		scan, err := scanJsonrpcEnvelope(element)
+		if err != nil || !(scan.hasResult || scan.hasError) {
+			replies = -1
+			return false
+		}
+		replies++
+		return true
+	})
+	return err == nil && replies > 0
+}
+
 // SkipJSONWhitespace returns the index of the first byte at or after pos that is not JSON
 // whitespace. Shared with the router's own top-level JSON scanners.
 func SkipJSONWhitespace(data []byte, pos int) int {
