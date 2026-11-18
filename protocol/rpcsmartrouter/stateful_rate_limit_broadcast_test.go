@@ -30,7 +30,8 @@ import (
 // writeUpstream is one upstream of a two-provider write broadcast: what it answers and how long it
 // takes to answer. firstStatus and firstBody, when set, are what it answers its first request
 // with instead. refuse makes it an address whose port refuses every connection, so no byte of a
-// request sent to it leaves the router.
+// request sent to it leaves the router. disabled switches its url off, as the router does after
+// consecutive failures, so selection ejects the provider.
 type writeUpstream struct {
 	name        string
 	status      int
@@ -39,6 +40,7 @@ type writeUpstream struct {
 	firstStatus int
 	firstBody   string
 	refuse      bool
+	disabled    bool
 }
 
 // writeInterfaceCase is one api interface's write: the request that is stateful on it, and the parser
@@ -186,7 +188,7 @@ func newWriteServer(t *testing.T, tc writeInterfaceCase, chainParser chainlib.Ch
 
 		connection, err := routersession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: url}, 5, "")
 		require.NoError(t, err)
-		endpoint := &routersession.Endpoint{NetworkAddress: url, Enabled: true, DirectConnections: []routersession.DirectRPCConnection{connection}}
+		endpoint := &routersession.Endpoint{NetworkAddress: url, Enabled: !upstreamCfg.disabled, DirectConnections: []routersession.DirectRPCConnection{connection}}
 		provider := routersession.NewConsumerSessionWithProvider(upstreamCfg.name, []*routersession.Endpoint{endpoint}, 100000, 1, 1)
 		provider.StaticProvider = true
 		if i < len(primaryUpstreams) {

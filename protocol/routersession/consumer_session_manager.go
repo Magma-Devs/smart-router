@@ -1758,6 +1758,11 @@ func (csm *ConsumerSessionManager) getSessionWithProviderOrError(ctx context.Con
 	sessionWithProviderMap, err = csm.getValidConsumerSessionsWithProvider(ctx, wantedProviderNumber, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, internalPath, stateful, virtualEpoch, stickiness, selectedProvider, minGroups, perGroupTarget)
 	if err != nil {
 		if errors.Is(err, PairingListEmptyError) {
+			// A write with every primary of its route ejected is not served by the fallback chain
+			// below: its one broadcast goes to every backup and every ejected primary (MAG-5232).
+			if csm.writeBroadcastsPastEjectedPrimaries(ctx, stateful, selectedProvider, stickiness, tempIgnoredProviders, addon, extensionNames) {
+				return csm.everyPrimaryEjectedWriteBroadcast(ctx, tempIgnoredProviders, cuNeededForSession, addon, extensionNames, virtualEpoch, usedProviders)
+			}
 			// Emergency fallback chain, in order: backup providers, then releasing the standing
 			// blocked list, then the blocked providers themselves, for maximum availability.
 			if len(csm.backupProviders) > 0 {
@@ -2076,9 +2081,10 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 			sessionEpoch := sessionWithProvider.CurrentEpoch
 
 			// Get a valid Endpoint from the provider chosen. A provider the blocked-list fallback handed
-			// out as this request's last chance is lent a disabled endpoint instead of skipping it.
+			// out as this request's last chance, or one of a write's broadcast past its ejected
+			// primaries, is lent a disabled endpoint instead of skipping it.
 			pickMode := endpointPickSkipDisabled
-			if sessionWithProvider.lastChance {
+			if sessionWithProvider.lastChance || sessionWithProvider.writeBroadcast {
 				pickMode = endpointPickLendDisabled
 			}
 			connected, endpoints, _, err := consumerSessionsWithProvider.fetchEndpointConnectionFromConsumerSessionWithProvider(ctx, pickMode, false, addon, extensionNames, internalPath, csm.urlHeldOff(providerAddress))
@@ -2108,7 +2114,9 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 			endpoint := endpoints[0]
 			if pickMode == endpointPickLendDisabled {
 				if snap := endpoint.endpoint.HealthSnapshot(); !snap.Enabled {
-					if !usedProviders.TakeLastChance() {
+					// A write's broadcast lends every provider of it its endpoint: it is the write's
+					// one send, and nothing follows it.
+					if !usedProviders.TakeLastChance() && !sessionWithProvider.writeBroadcast {
 						// This request was already lent a disabled endpoint once; never a second.
 						tempIgnoredProviders.providers[providerAddress] = struct{}{}
 						continue
@@ -2216,6 +2224,11 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 		if err != nil {
 			return nil, err
 		}
+		// A write's broadcast past its ejected primaries is the whole of what it is sent to, so it
+		// sets the goal, whatever the primaries' count set it to.
+		if isWriteBroadcast(sessionWithProviderMap) {
+			wantedSession = len(sessions) + len(sessionWithProviderMap)
+		}
 		// if we got here we managed to get more sessions so we will try to connect and return a session to the user.
 	}
 }
@@ -2264,6 +2277,122 @@ func (csm *ConsumerSessionManager) getProvidersForStatefulCalls(ctx context.Cont
 		utils.LogAttr("GUID", ctx),
 	)
 	return append(providers, backups...)
+}
+
+// writeBroadcastsPastEjectedPrimaries reports whether a request whose selection found no primary is
+// a write that is broadcast to every backup and every ejected primary of its route instead of
+// walking the fallback chain (MAG-5232 Expected 10, Part I R-Q step 6): a write that is broadcast
+// at all (stateful, and not under the cost strategy, which sends a write to one provider), pinned
+// to no provider, not cross-validated, and with every primary of its route ejected: blocked, or out
+// of rotation. A write whose primaries are only all taken by this request, one of them having
+// failed to connect at selection, keeps the fallback chain.
+func (csm *ConsumerSessionManager) writeBroadcastsPastEjectedPrimaries(ctx context.Context, stateful uint32, selectedProvider, stickiness string, ignored *ignoredProviders, addon string, extensions []string) bool {
+	if stateful != common.CONSISTENCY_SELECT_ALL_PROVIDERS || csm.providerOptimizer.Strategy() == provideroptimizer.StrategyCost {
+		return false
+	}
+	if selectedProvider != "" || stickiness != "" || ignored.crossValidation {
+		return false
+	}
+	return len(csm.cacheAddonAddresses(addon, extensions, ctx)) == 0
+}
+
+// writeBroadcastLimit caps a write's broadcast past its ejected primaries, every tier together.
+const writeBroadcastLimit = statefulFanoutPerTier
+
+// everyPrimaryEjectedWriteBroadcast is a write's one broadcast when every primary of its route is
+// ejected (MAG-5232 Expected 10, Part I R-Q step 6, Omer 15 Nov): one copy to every backup and every
+// ejected primary of the route, up to writeBroadcastLimit, and nothing after it. Main walked the
+// fallback chain instead: one optimizer-chosen backup at a time, else the whole bench re-admitted for
+// every request, else one disabled url lent. That left a write the backup tier could have landed on
+// a single provider, and never asked a primary switched off for a burst of failures, which may well
+// be the one that lands it.
+//
+// The order decides who survives the cap: the backups in rotation first, the ones most likely to
+// answer, ranked by compute units served; then the ejected primaries, in the blocked list's order;
+// then the backups that are out themselves. A provider out of rotation is lent its disabled endpoint
+// for this one copy (writeBroadcast), and one blocked is marked so that a copy it serves returns it
+// to the pool, as the last chance does. A provider this request already tried is left out.
+func (csm *ConsumerSessionManager) everyPrimaryEjectedWriteBroadcast(ctx context.Context, ignored *ignoredProviders, cuNeededForSession uint64, addon string, extensions []string, virtualEpoch uint64, usedProviders UsedProvidersInf) (SessionWithProviderMap, error) {
+	csm.lock.RLock()
+	defer csm.lock.RUnlock()
+	currentEpoch := csm.atomicReadCurrentEpoch()
+	routerKey := NewRouterKey(extensions)
+
+	ejected := csm.lastChanceCandidatesLocked()
+	out := make(map[string]struct{}, len(ejected))
+	for _, provider := range ejected {
+		out[provider.PublicAddress] = struct{}{}
+	}
+	var candidates []*ConsumerSessionsWithProvider
+	inRotationBackups := make([]string, 0, len(csm.backupProviders))
+	for address, provider := range csm.backupProviders {
+		if _, isOut := out[address]; provider != nil && !isOut {
+			inRotationBackups = append(inRotationBackups, address)
+		}
+	}
+	for _, address := range csm.rankStatefulTier(inRotationBackups, nil) {
+		candidates = append(candidates, csm.backupProviders[address])
+	}
+	for _, provider := range ejected {
+		if _, isPrimary := csm.pairing[provider.PublicAddress]; isPrimary {
+			candidates = append(candidates, provider)
+		}
+	}
+	for _, provider := range ejected {
+		if _, isPrimary := csm.pairing[provider.PublicAddress]; !isPrimary {
+			candidates = append(candidates, provider)
+		}
+	}
+
+	broadcast := SessionWithProviderMap{}
+	for _, provider := range candidates {
+		if len(broadcast) == writeBroadcastLimit {
+			break
+		}
+		address := provider.PublicAddress
+		if _, tried := ignored.triedByThisRequest[address]; tried {
+			continue
+		}
+		if _, already := broadcast[address]; already {
+			continue
+		}
+		ignored.providers[address] = struct{}{}
+		ignored.markTried(address)
+		usedProviders.AddUnwantedAddresses(address, routerKey)
+		if provider.validateComputeUnits(cuNeededForSession, virtualEpoch) != nil {
+			continue
+		}
+		if !provider.IsSupportingAddon(addon) || !provider.IsSupportingExtensions(extensions, ctx) {
+			continue
+		}
+		if _, isOut := out[address]; isOut {
+			provider.atomicWriteBlockedStatus(BlockedProviderSessionUsedStatus) // returned to the pool if its copy is served
+		}
+		broadcast[address] = &SessionWithProvider{SessionsWithProvider: provider, CurrentEpoch: currentEpoch, writeBroadcast: true}
+	}
+	if len(broadcast) == 0 {
+		return nil, utils.FormatDebugErr("every primary is ejected and no backup or ejected primary is left for this write", PairingListEmptyError, utils.LogAttr("GUID", ctx))
+	}
+	addresses := make([]string, 0, len(broadcast))
+	for address := range broadcast {
+		addresses = append(addresses, address)
+	}
+	sort.Strings(addresses)
+	utils.FormatInfo("every primary is ejected: broadcasting the write to every backup and ejected primary",
+		utils.LogAttr("providers", addresses),
+		utils.LogAttr("addon", addon),
+		utils.LogAttr("extensions", extensions),
+		utils.LogAttr("GUID", ctx),
+	)
+	return broadcast, nil
+}
+
+// isWriteBroadcast reports whether a selection is a write's broadcast past its ejected primaries.
+func isWriteBroadcast(selection SessionWithProviderMap) bool {
+	for _, sessionWithProvider := range selection {
+		return sessionWithProvider.writeBroadcast
+	}
+	return false
 }
 
 // rankStatefulTier orders one tier's addresses by compute units served, highest first, drops the
