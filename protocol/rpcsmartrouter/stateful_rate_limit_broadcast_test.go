@@ -3,7 +3,6 @@ package rpcsmartrouter
 import (
 	"context"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -179,7 +178,7 @@ func newWriteServer(t *testing.T, tc writeInterfaceCase, chainParser chainlib.Ch
 		t.Cleanup(upstream.Close)
 		upstreamURL := upstream.URL
 		if upstreamCfg.refuse {
-			upstreamURL = refusingURL(t)
+			upstreamURL = refusingUpstream(t)
 		}
 		// The relay path records a 429 on the process-wide registry, keyed on the provider and the
 		// url it dialed. Clear it, or this upstream's hold-off outlives the test.
@@ -211,16 +210,6 @@ func newWriteServer(t *testing.T, tc writeInterfaceCase, chainParser chainlib.Ch
 		sessionManager:     csm,
 		rpcSmartRouterLogs: logs,
 	}
-}
-
-// refusingURL is the address of a port nothing listens on: a connection to it is refused.
-func refusingURL(t *testing.T) string {
-	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	address := listener.Addr().String()
-	require.NoError(t, listener.Close())
-	return "http://" + address
 }
 
 func sendWrite(t *testing.T, tc writeInterfaceCase, chainParser chainlib.ChainParser, server *RPCSmartRouterServer) (*common.RelayResult, error) {
