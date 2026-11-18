@@ -579,3 +579,45 @@ func parseJsonRPCMsg(data []byte) (msgRet []JsonrpcMessage, err error) {
 	msgs, _, err := ParseJsonRPCMsgWithBatchFlag(data)
 	return msgs, err
 }
+
+// MAG-5072: lava-identified-node-error is set on JSON-RPC only when the body is the node's
+// JSON-RPC reply. IsJsonrpcReply is that test.
+func TestIsJsonrpcReply(t *testing.T) {
+	cases := []struct {
+		name string
+		data string
+		want bool
+	}{
+		{name: "error object", data: `{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"the method does not exist"}}`, want: true},
+		{name: "empty error object", data: `{"jsonrpc":"2.0","id":1,"error":{}}`, want: true},
+		{name: "result", data: `{"jsonrpc":"2.0","id":1,"result":"0x10"}`, want: true},
+		{name: "null result", data: `{"jsonrpc":"2.0","id":1,"result":null}`, want: true},
+		{name: "null error beside a result", data: `{"jsonrpc":"2.0","id":1,"error":null,"result":"0x10"}`, want: true},
+		{name: "Tendermint error inside a result", data: `{"jsonrpc":"2.0","id":1,"result":{"response":{"code":18,"log":"invalid request"}}}`, want: true},
+		{name: "XRPL error inside a result", data: `{"result":{"error":"lgrNotFound","error_code":21,"status":"error"}}`, want: true},
+		{name: "leading whitespace", data: " \n{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"x\"}}", want: true},
+		{name: "batch of replies", data: `[{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"x"}},{"jsonrpc":"2.0","id":2,"result":"0x1"}]`, want: true},
+
+		{name: "HTML page", data: `<html><body>401 Authorization Required</body></html>`},
+		{name: "empty body", data: ``},
+		{name: "whitespace", data: "  \n"},
+		{name: "text", data: `404 page not found`},
+		{name: "null", data: `null`},
+		{name: "number", data: `429`},
+		{name: "JSON that is not JSON-RPC", data: `{"message":"Not Found"}`},
+		{name: "envelope without result or error", data: `{"jsonrpc":"2.0","id":1}`},
+		{name: "null error alone", data: `{"jsonrpc":"2.0","id":1,"error":null}`},
+		{name: "string error", data: `{"error":"invalid api key"}`},
+		{name: "string error beside a result", data: `{"error":"invalid api key","result":"0x1"}`},
+		{name: "truncated object", data: `{"jsonrpc":"2.0","id":1,"error":{"code":-32000`},
+		{name: "empty batch", data: `[]`},
+		{name: "batch with an element that is not a reply", data: `[{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"x"}},{"id":2}]`},
+		{name: "batch of strings", data: `["a","b"]`},
+		{name: "truncated batch", data: `[{"jsonrpc":"2.0","id":1,"result":"0x1"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, IsJsonrpcReply([]byte(tc.data)))
+		})
+	}
+}

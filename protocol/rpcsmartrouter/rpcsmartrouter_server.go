@@ -6639,6 +6639,36 @@ type RelayProcessorForHeaders interface {
 	GetDegradedExtensions() []string // the caller's extensions an attempt was sent without (MAG-4729)
 }
 
+// identifiesNodeError reports whether a reply carries lava-identified-node-error: true. The header
+// says the node answered with an error, so on JSON-RPC and Tendermint RPC it is set only when the
+// reply shows that (MAG-5072; rulebook Part IV Appendix C row 42 and Part I §1 headers): the body
+// is the node's JSON-RPC reply (rpcInterfaceMessages.IsJsonrpcReply), and the status is not a 401,
+// 402, 403 or 429, which is the vendor's gateway refusing the router whatever the body says. A web
+// page, an empty or text body or a null is not the node's answer.
+//
+// Only the header changes. The result is still a node error to every other reader (retry, scoring,
+// the cache write, redaction), and the client gets the reply as is. Other interfaces keep
+// IsNodeError alone; their chapters own their rule.
+func identifiesNodeError(protocolMessage chainlib.ProtocolMessage, relayResult *common.RelayResult) bool {
+	if !relayResult.IsNodeError {
+		return false
+	}
+	collection := protocolMessage.GetApiCollection()
+	if collection == nil {
+		return true
+	}
+	switch collection.CollectionData.ApiInterface {
+	case spectypes.APIInterfaceJsonRPC, spectypes.APIInterfaceTendermintRPC:
+	default:
+		return true
+	}
+	switch relayResult.StatusCode {
+	case http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden, http.StatusTooManyRequests:
+		return false
+	}
+	return rpcInterfaceMessages.IsJsonrpcReply(relayResult.Reply.GetData())
+}
+
 // appendHeadersToRelayResult returns the cross-validation pending-providers list it computed for
 // the header (nil outside CV mode), so SendParsedRelay can hand the SAME set to the straggler
 // watcher — a single call site defines "pending", keeping the client-visible header and the
@@ -7153,7 +7183,7 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 		})
 
 	// add is node error flag
-	if relayResult.IsNodeError {
+	if identifiesNodeError(protocolMessage, relayResult) {
 		metadataReply = append(metadataReply,
 			pairingtypes.Metadata{
 				Name:  common.IDENTIFIED_NODE_ERROR_HEADER,
