@@ -105,9 +105,11 @@ type crossValidationRecord struct {
 	Tenant       string `json:"tenant,omitempty"`
 	ChainID      string `json:"chainId"`
 	ApiInterface string `json:"apiInterface"`
-	Method       string `json:"method"`
-	BlockHeight  int64  `json:"blockHeight"`
-	Finality     string `json:"finality"`
+	// Method is written as relay_end writes it (crossValidationRecordMethod): a REST path without its
+	// leading slash, and an unlisted api named by URL withheld as Default-REDACTED.
+	Method      string `json:"method"`
+	BlockHeight int64  `json:"blockHeight"`
+	Finality    string `json:"finality"`
 
 	// AgreementThreshold/MaxParticipants/MinGroups are the policy as RESOLVED for this request (after
 	// clamp(caller, floor, cap)), not whatever the config says when the record is later read.
@@ -170,6 +172,15 @@ type crossValidationRecordInputs struct {
 	// AllProviders is every provider queried for this request. Anything in here not present in the
 	// three result slices above is reported not-received.
 	AllProviders []string
+}
+
+// crossValidationRecordMethod is the record's method, written as relay_end writes it (relayEndMethod).
+// The fleet's log collector rewrites a value that starts with "/" as /REDACTED, so a REST path keeps
+// its spec name without the leading slash, and a reader of the records can still filter on it
+// (MAG-2788). An unlisted api named by URL is the caller's own path and query, which may carry a
+// credential, so it is withheld.
+func crossValidationRecordMethod(protocolMessage chainlib.ProtocolMessage, apiInterface string) string {
+	return relayEndMethod(protocolMessage.GetApi().GetName(), relayEndNamedByURL(protocolMessage, apiInterface))
 }
 
 // buildCrossValidationRecord assembles one record from a complete view of a request's outcome. It
@@ -340,7 +351,7 @@ func (rpcss *RPCSmartRouterServer) recordCrossValidationFailFast(ctx context.Con
 	rpcss.emitCrossValidationRecord(buildCrossValidationRecord(crossValidationRecordInputs{
 		ChainID:       chainId,
 		ApiInterface:  apiInterface,
-		Method:        protocolMessage.GetApi().GetName(),
+		Method:        crossValidationRecordMethod(protocolMessage, apiInterface),
 		RequestID:     requestID,
 		Tenant:        crossValidationRecordTenant(analytics),
 		BlockHeight:   requestedBlock,
