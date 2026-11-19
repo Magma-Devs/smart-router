@@ -48,6 +48,9 @@ func TestGraphQLReadingALargeReplyDoesNotCopyIt(t *testing.T) {
 	// The decoder copies its input into a buffer it reuses from one call to the next (goccy/go-json
 	// RuntimeContext.SetInput), so a reading may still pay one copy of the body when that buffer
 	// was dropped by a collection. What must not come back is a copy per reading.
+	if raceEnabled {
+		t.Skip("under -race, sync.Pool drops one Put in four, so goccy copies its input again on about one reading in four")
+	}
 	const runs = 10
 	perRead := bytesAllocatedPerRun(runs, func() { read.ReplyVerdict(body, 200) })
 	require.Less(t, perRead, uint64(len(body)/4), "reading a %d-byte answer allocated %d bytes per reading", len(body), perRead)
