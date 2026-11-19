@@ -81,11 +81,6 @@ linters:
         linters:
           - dupl
         text: "(jsonRPC|tendermintRPC)\\.go"
-      # Twins whose differences are the point: sticky vs fresh selection (log text).
-      - path: protocol/routersession/consumer_session_manager\.go
-        linters:
-          - dupl
-        text: "consumer_session_manager\\.go"
       - linters:
           - gocritic
         text: "singleCaseSwitch"
