@@ -48,6 +48,11 @@ func TestGraphQLRelay_ReadVerdictsDecideThePeer(t *testing.T) {
 		{"test 10: an HTML page goes to the peer", 0, graphQLTestPage, true},
 		{"test 10: a reply cut off on the way goes to the peer", 0, graphQLTestCutReply, true},
 
+		// The rows decide before the status under every 5xx, not only under the ones whose JSON
+		// body the server's status step already took as the node's reply (500, 503, ...).
+		{"a 502 carrying the caller's error is served as is", http.StatusBadGateway, `{"errors":[{"message":"bad","extensions":{"code":"BAD_USER_INPUT"}}]}`, false},
+		{"a 504 carrying FEATURE_UNAVAILABLE goes to the peer", http.StatusGatewayTimeout, `{"errors":[{"message":"not here","extensions":{"code":"FEATURE_UNAVAILABLE"}}]}`, true},
+
 		// The verdict decides, never a REST body-text row on the error's message (#714 review,
 		// 714-2). Through the shared REST table the first was filed NODE_ENDPOINT_NOT_FOUND
 		// ("path not found") and asked of the peer; the second USER_INVALID_PARAMS ("decoding

@@ -1038,6 +1038,7 @@ func (d *DirectRPCRelaySender) sendGraphQLRelay(
 	case ownClassification != nil:
 		// A read is filed by GraphQL's own rows, never by the shared REST rows (MAG-5121).
 		result.ApplyRouterErrorClassification(ownClassification)
+		result.IsOwnVerdict = true
 	case hasError:
 		// A write is still filed by the shared rows under the status its verdict stands for (a
 		// caller's error as a 400), until the write verdicts land (MAG-5122).
