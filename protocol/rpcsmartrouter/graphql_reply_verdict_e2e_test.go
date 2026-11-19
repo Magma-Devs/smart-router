@@ -17,7 +17,9 @@ import (
 //
 //   - an error the router cannot read (no code, an unknown code, a numeric code, a field limit) is
 //     unknown: when unsure, retry, so the caller gets the peer's answer;
-//   - the caller's own error is served as is, and the peer is never asked: it would say the same.
+//   - the caller's own error is served as is, and the peer is never asked: it would say the same;
+//   - an HTML page is kept and blamed, and JSON cut off on the way is a dropped connection: both go
+//     to the peer.
 func TestGraphQLRelay_ReadVerdictsDecideThePeer(t *testing.T) {
 	rand.InitRandomSeed()
 	ctx := context.Background()
@@ -41,6 +43,8 @@ func TestGraphQLRelay_ReadVerdictsDecideThePeer(t *testing.T) {
 		{"a validation failure is served as is", `{"data":null,"errors":[{"message":"Unknown field","extensions":{"code":"GRAPHQL_VALIDATION_FAILED"}}]}`, false},
 		{"test 11: a parse failure is served as is", `{"data":null,"errors":[{"message":"recursion limit exceeded.","extensions":{"code":"GRAPHQL_PARSE_FAILED"}}]}`, false},
 		{"a bad input is served as is", `{"data":null,"errors":[{"message":"bad","extensions":{"code":"BAD_USER_INPUT"}}]}`, false},
+		{"test 10: an HTML page goes to the peer", graphQLTestPage, true},
+		{"test 10: a reply cut off on the way goes to the peer", graphQLTestCutReply, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -95,4 +99,50 @@ func TestGraphQLRelay_UnknownOnEveryProviderIsServedAsIs(t *testing.T) {
 	require.NotNil(t, result.Reply)
 	require.JSONEq(t, codeless, string(result.Reply.Data), "the caller gets a provider's reply as is")
 	require.Equal(t, http.StatusOK, result.StatusCode)
+}
+
+// A 200 whose body is not a GraphQL reply (MAG-5121 test 10): a page from whatever answered, and
+// JSON cut off on the way.
+const (
+	graphQLTestPage     = "<html><head><title>502 Bad Gateway</title></head><body>nginx</body></html>"
+	graphQLTestCutReply = `{"data":{"chainIdentifier":"358`
+)
+
+// TestGraphQLRelay_PageInsteadOfAReply (MAG-5121 test 10) sends reads to two local upstreams that
+// both answer a 200 whose body is not a GraphQL reply. One such provider beside a healthy one is
+// covered by TestGraphQLRelay_ReadVerdictsDecideThePeer.
+//
+//   - An HTML or text page is a whole reply from whatever answered: when every provider sends a
+//     page, the client gets one of them as is, not a reply of the router's own.
+//   - JSON cut off on the way is a dropped connection: when every provider's reply is cut, the
+//     client gets the router's own error.
+func TestGraphQLRelay_PageInsteadOfAReply(t *testing.T) {
+	rand.InitRandomSeed()
+	ctx := context.Background()
+	logs, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
+	require.NoError(t, err)
+	chainParser := newGatewayTestGraphQLParser(t)
+
+	page, cut := graphQLTestPage, graphQLTestCutReply
+
+	t.Run("a page from every provider is served as is", func(t *testing.T) {
+		hits, server := newGatewayTestServer(t, chainParser, logs, refusalReply{http.StatusOK, page}, refusalReply{http.StatusOK, page})
+		result, sendErr := sendGatewayTestRequest(t, ctx, chainParser, server, gatewayTestQuery)
+		require.Equal(t, [2]int64{1, 1}, loadRefusalHits(hits), "both providers are asked")
+		require.NoError(t, sendErr, "a provider's page reaches the caller")
+		require.NotNil(t, result.Reply)
+		require.Equal(t, page, string(result.Reply.Data), "the caller gets the page as is")
+		require.Equal(t, http.StatusOK, result.StatusCode)
+		require.True(t, result.IsNodeError, "the page carries the node-error flag, so it is never cached")
+	})
+
+	t.Run("a reply cut off on every provider is the router's own error", func(t *testing.T) {
+		hits, server := newGatewayTestServer(t, chainParser, logs, refusalReply{http.StatusOK, cut}, refusalReply{http.StatusOK, cut})
+		result, sendErr := sendGatewayTestRequest(t, ctx, chainParser, server, gatewayTestQuery)
+		require.Equal(t, [2]int64{1, 1}, loadRefusalHits(hits), "both providers are asked")
+		require.Error(t, sendErr, "no provider sent a reply, so the router answers")
+		if result != nil && result.Reply != nil {
+			require.NotEqual(t, cut, string(result.Reply.Data), "a cut reply is never served")
+		}
+	})
 }

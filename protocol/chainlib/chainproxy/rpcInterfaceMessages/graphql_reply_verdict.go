@@ -277,7 +277,7 @@ func readVerdict(body []byte, httpStatusCode int) (verdict graphQLVerdict, isErr
 			return graphQLVerdict{
 				kind:    graphQLVerdictFault,
 				status:  http.StatusBadGateway,
-				message: graphQLNotAResponsePrefix + extractErrorMessage(body, httpStatusCode),
+				message: graphQLNotAResponseMessage(body, httpStatusCode),
 			}, true
 		}
 		return statusTableVerdict(body, httpStatusCode, extractErrorMessage(body, httpStatusCode)), true

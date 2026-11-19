@@ -665,7 +665,7 @@ func writeVerdict(data []byte, httpStatusCode int) (graphQLVerdict, bool) {
 	}
 	reply, isResponse := readGraphQLReply(data)
 	if !isResponse {
-		return graphQLVerdict{kind: graphQLVerdictFault, status: http.StatusBadGateway, message: graphQLNotAResponsePrefix + extractErrorMessage(data, httpStatusCode)}, true
+		return graphQLVerdict{kind: graphQLVerdictFault, status: http.StatusBadGateway, message: graphQLNotAResponseMessage(data, httpStatusCode)}, true
 	}
 	if len(reply.errors) == 0 {
 		return graphQLVerdict{kind: graphQLVerdictAnswer, status: httpStatusCode}, false
@@ -682,10 +682,23 @@ func writeVerdict(data []byte, httpStatusCode int) (graphQLVerdict, bool) {
 	return graphQLVerdict{kind: graphQLVerdictCaller, status: http.StatusBadRequest, message: reply.errors[0].message}, true
 }
 
-// graphQLNotAResponsePrefix opens the error message of a 2xx body that is not a GraphQL response,
-// so the log line says why a 200 counted as a node error. The body's own message follows it, and
-// the registry's message rows still read that.
-const graphQLNotAResponsePrefix = "reply is not a GraphQL response (no data object, no errors): "
+// graphQLNotAResponsePrefix and graphQLNotJSONPrefix open the error message of a 2xx body that is
+// not a GraphQL response, so the log line says why a 200 counted as a node error: JSON with neither
+// a data object nor errors, or a body that is not JSON at all (an HTML or text page). The body's
+// own message follows, and the registry's message rows still read that.
+const (
+	graphQLNotAResponsePrefix = "reply is not a GraphQL response (no data object, no errors): "
+	graphQLNotJSONPrefix      = "reply is not a GraphQL response (not JSON): "
+)
+
+// graphQLNotAResponseMessage is the error message of a 2xx body that is not a GraphQL response.
+func graphQLNotAResponseMessage(body []byte, httpStatusCode int) string {
+	prefix := graphQLNotAResponsePrefix
+	if !json.Valid(body) {
+		prefix = graphQLNotJSONPrefix
+	}
+	return prefix + extractErrorMessage(body, httpStatusCode)
+}
 
 // GetParams returns the arguments of the operation's single root field, so block_parsing can
 // resolve a pinned checkpoint out of the request body. A multi-root operation has no single

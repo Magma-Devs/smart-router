@@ -971,9 +971,15 @@ func (d *DirectRPCRelaySender) sendGraphQLRelay(
 		return nil, classifyAndWrap(err, d.chainFamily, common.TransportREST)
 	}
 
-	// Every GraphQL reply is a JSON document, errors included, so a 2xx body that does not
-	// parse is a truncated or corrupted reply: a transport failure, as on JSON-RPC.
-	if response.StatusCode >= 200 && response.StatusCode < 300 && len(response.Body) > 0 && !json.Valid(response.Body) {
+	// Every GraphQL reply is a JSON document, errors included. A 2xx body that starts like one
+	// and does not parse was cut on the way: a dropped connection, a transport failure, as on
+	// JSON-RPC. A body that does not start like JSON at all (an HTML or text page) is a whole
+	// reply from whatever answered: on a read it goes on as this provider's reply, which the
+	// verdict blames as a bad gateway and the client gets as is when no provider answers
+	// (MAG-5121). A write keeps the transport failure, which tells the broadcast that it may
+	// have run (MAG-5122).
+	if response.StatusCode >= 200 && response.StatusCode < 300 && len(response.Body) > 0 &&
+		(graphqlMessage.IsMutation() || looksLikeJSONOpening(response.Body)) && !json.Valid(response.Body) {
 		utils.FormatDebug("direct GraphQL response is not valid JSON",
 			utils.LogAttr("endpoint", d.endpointName),
 			utils.LogAttr("status_code", response.StatusCode),
