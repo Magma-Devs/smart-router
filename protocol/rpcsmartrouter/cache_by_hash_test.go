@@ -2,45 +2,20 @@ package rpcsmartrouter
 
 import (
 	"context"
-	"net"
 	"net/http"
 	"testing"
 	"time"
 
-	ecocache "github.com/magma-Devs/smart-router/ecosystem/cache"
 	"github.com/magma-Devs/smart-router/protocol/chainstate"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/performance"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/grpc"
 )
 
-// startCacheServerWithShortTempStore is startCacheServerForTest with the shortest temp
-// lifetime the policy allows for ETH1, an eighth of its 13 s block time, so a test can
-// tell the two stores apart by waiting: a temp entry is gone within two seconds, a
-// finalized one lives an hour.
-func startCacheServerWithShortTempStore(t *testing.T) (*performance.Cache, *ecocache.RelayerCacheServer) {
-	t.Helper()
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-
-	cs := &ecocache.CacheServer{CacheMaxCost: 1 << 20}
-	cs.InitCache(ctx, time.Hour, 100*time.Millisecond, 5*time.Second, time.Hour, "disabled", 1, 1)
-	rcs := &ecocache.RelayerCacheServer{CacheServer: cs}
-
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	grpcServer := grpc.NewServer()
-	pairingtypes.RegisterRelayerCacheServer(grpcServer, rcs)
-	go func() { _ = grpcServer.Serve(lis) }()
-	t.Cleanup(grpcServer.Stop)
-
-	client, err := performance.InitCache(ctx, lis.Addr().String())
-	require.NoError(t, err)
-	require.True(t, client.CacheActive(), "test cache server must be connected")
-	return client, rcs
-}
+// shortTempStoreTTL is the shortest temp lifetime the policy allows for ETH1, an eighth of its
+// 13 s block time, so a test can tell the two stores apart by waiting: a temp entry is gone within
+// two seconds, a finalized one lives an hour.
+const shortTempStoreTTL = 100 * time.Millisecond
 
 const (
 	txHash    = "0xabababababababababababababababababababababababababababababababab"
@@ -83,7 +58,7 @@ func TestIdentityKeyedIsTheEVMByHashFamily(t *testing.T) {
 // seconds later (the ticket's measurement) was a miss even for an unchangeable answer.
 func TestByHashAnswerSettlesOnceItsBlockIsFinal(t *testing.T) {
 	const tip = int64(20000000) // 0x1312d00; ETH1 finalizes eight blocks behind it
-	primary, rcs := startCacheServerWithShortTempStore(t)
+	primary, rcs := startCacheServerWithNonFinalizedTTLForTest(t, shortTempStoreTTL)
 	chainParser := ethJsonRPCParser(t)
 	rpcss := ethCacheTestServer(chainParser, primary)
 	chainState := chainstate.New("ETH1", chainstate.DefaultConfig(13*time.Second))

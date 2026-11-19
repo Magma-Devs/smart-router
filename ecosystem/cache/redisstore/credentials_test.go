@@ -136,7 +136,7 @@ func TestRefreshKeepsPreviousCredentialsWhenTheFileIsEmpty(t *testing.T) {
 	require.Equal(t, "u:pw1", creds.RawCredentials())
 
 	require.NoError(t, os.WriteFile(credFile, []byte(" \n"), 0o600))
-	out := captureLog(t, provider.Refresh)
+	out := logSink.Capture(t, provider.Refresh)
 	require.Empty(t, listener.recorded(), "an empty file pushes nothing")
 	require.Contains(t, out, credFile, "the failed read names the file")
 
@@ -161,7 +161,7 @@ func TestEmptyCredentialFileIsOneOutage(t *testing.T) {
 
 	require.NoError(t, os.WriteFile(credFile, []byte(" \n"), 0o600))
 	late := &recordingListener{}
-	out := captureLog(t, func() {
+	out := logSink.Capture(t, func() {
 		for i := 0; i < 5; i++ {
 			provider.Refresh()
 		}
@@ -175,7 +175,7 @@ func TestEmptyCredentialFileIsOneOutage(t *testing.T) {
 	require.Empty(t, listener.recorded(), "nothing is pushed during the outage")
 
 	require.NoError(t, os.WriteFile(credFile, []byte("pw2"), 0o600))
-	out = captureLog(t, provider.Refresh)
+	out = logSink.Capture(t, provider.Refresh)
 	require.Equal(t, 1, strings.Count(out, "readable again"), "the recovery is one line: %s", out)
 	require.Equal(t, []string{"u:pw2"}, listener.recorded(), "the rotation that lands with the recovery is pushed")
 	require.Equal(t, []string{"u:pw2"}, late.recorded(), "to the connection opened during the outage too")
@@ -189,7 +189,7 @@ func TestFileCredentialsWarnOnceAboutAnInvisibleLeadingRune(t *testing.T) {
 	t.Run("zero-width space before the password", func(t *testing.T) {
 		path := writeTempFile(t, "cred", zeroWidthSpace+"placeholder-credential\n")
 		src := &FileCredentials{Username: "u", Path: path}
-		out := captureLog(t, func() {
+		out := logSink.Capture(t, func() {
 			for i := 0; i < 3; i++ {
 				_, pass, err := src.Credentials()
 				require.NoError(t, err)
@@ -204,7 +204,7 @@ func TestFileCredentialsWarnOnceAboutAnInvisibleLeadingRune(t *testing.T) {
 	t.Run("non-breaking space before the username", func(t *testing.T) {
 		path := writeTempFile(t, "cred", nbsp+"cacheuser:placeholder-credential\n")
 		src := &FileCredentials{Username: "ignored", Path: path}
-		out := captureLog(t, func() {
+		out := logSink.Capture(t, func() {
 			user, _, err := src.Credentials()
 			require.NoError(t, err)
 			require.Equal(t, nbsp+"cacheuser", user)
@@ -214,7 +214,7 @@ func TestFileCredentialsWarnOnceAboutAnInvisibleLeadingRune(t *testing.T) {
 	})
 	t.Run("control: a clean file says nothing", func(t *testing.T) {
 		src := &FileCredentials{Username: "u", Path: writeTempFile(t, "cred", " placeholder-credential\n")}
-		out := captureLog(t, func() {
+		out := logSink.Capture(t, func() {
 			_, _, err := src.Credentials()
 			require.NoError(t, err)
 		})
@@ -229,7 +229,7 @@ func TestFileCredentialsWarnOnceAboutAnInvisibleLeadingRune(t *testing.T) {
 func TestCombinedFormIsReportedOncePerStartup(t *testing.T) {
 	mr := miniredis.RunT(t)
 	mr.RequireUserAuth("cacheuser", "placeholder-credential")
-	out := captureLog(t, func() {
+	out := logSink.Capture(t, func() {
 		store, err := New(Config{Addresses: []string{mr.Addr()}, PasswordFile: writeTempFile(t, "userpw", "cacheuser:placeholder-credential\n")})
 		require.NoError(t, err)
 		require.NoError(t, store.Ping(context.Background()))
@@ -465,12 +465,12 @@ func TestRefreshReportsSourceFailureOncePerOutage(t *testing.T) {
 
 	const failed, recovered = "credential source unreadable", "readable again; refresh resumed"
 
-	quiet := captureLog(t, func() { provider.Refresh() })
+	quiet := logSink.Capture(t, func() { provider.Refresh() })
 	require.NotContains(t, quiet, failed, "a readable source is not an event")
 	require.NotContains(t, quiet, recovered)
 
 	require.NoError(t, os.Remove(credFile))
-	outage := captureLog(t, func() {
+	outage := logSink.Capture(t, func() {
 		for i := 0; i < 21; i++ {
 			provider.Refresh()
 		}
@@ -479,7 +479,7 @@ func TestRefreshReportsSourceFailureOncePerOutage(t *testing.T) {
 	require.Empty(t, listener.recorded(), "nothing is pushed while the source is unreadable")
 
 	require.NoError(t, os.WriteFile(credFile, []byte("pw1"), 0o600))
-	back := captureLog(t, func() {
+	back := logSink.Capture(t, func() {
 		provider.Refresh()
 		provider.Refresh()
 	})
@@ -488,7 +488,7 @@ func TestRefreshReportsSourceFailureOncePerOutage(t *testing.T) {
 	require.Empty(t, listener.recorded(), "unchanged credentials still do not push after recovery")
 
 	require.NoError(t, os.Remove(credFile))
-	again := captureLog(t, func() {
+	again := logSink.Capture(t, func() {
 		provider.Refresh()
 		provider.Refresh()
 	})
@@ -497,7 +497,7 @@ func TestRefreshReportsSourceFailureOncePerOutage(t *testing.T) {
 	// A change of cause mid-outage is news, and is reported once more: the
 	// path now exists but cannot be read as a file.
 	require.NoError(t, os.Mkdir(credFile, 0o700))
-	cause := captureLog(t, func() {
+	cause := logSink.Capture(t, func() {
 		provider.Refresh()
 		provider.Refresh()
 	})
@@ -508,7 +508,7 @@ func TestRefreshReportsSourceFailureOncePerOutage(t *testing.T) {
 
 	// Recovery with ROTATED contents both closes the outage and pushes.
 	require.NoError(t, os.WriteFile(credFile, []byte("pw2"), 0o600))
-	rotated := captureLog(t, func() { provider.Refresh() })
+	rotated := logSink.Capture(t, func() { provider.Refresh() })
 	require.Equal(t, 1, strings.Count(rotated, recovered))
 	require.Equal(t, []string{"u:pw2"}, listener.recorded(), "a rotation that lands during recovery is applied")
 }
@@ -558,7 +558,7 @@ func TestSubscribeDuringSourceOutageHandsOutLastGoodCredentials(t *testing.T) {
 
 	t.Run("before any successful read the error stands", func(t *testing.T) {
 		provider := NewStreamingProvider(&FileCredentials{Username: "u", Path: "/does/not/exist"})
-		out := captureLog(t, func() {
+		out := logSink.Capture(t, func() {
 			for i := 0; i < 3; i++ {
 				_, _, err := provider.Subscribe(&recordingListener{})
 				require.ErrorContains(t, err, "/does/not/exist", "nothing to hand out yet: this is New's fail-fast")
@@ -588,7 +588,7 @@ func TestSubscribeDuringSourceOutageHandsOutLastGoodCredentials(t *testing.T) {
 
 		require.NoError(t, os.Remove(credFile))
 		late := &recordingListener{}
-		out := captureLog(t, func() {
+		out := logSink.Capture(t, func() {
 			provider.Refresh() // the watcher notices first
 			creds, unsubscribe, err = provider.Subscribe(late)
 			require.NoError(t, err, "a connection opened during the outage must not fail its setup")
@@ -608,7 +608,7 @@ func TestSubscribeDuringSourceOutageHandsOutLastGoodCredentials(t *testing.T) {
 		// one recovery line, and the push reaches the early connection (still on
 		// pw1) and the late one alike.
 		require.NoError(t, os.WriteFile(credFile, []byte("pw2"), 0o600))
-		back := captureLog(t, func() { provider.Refresh() })
+		back := logSink.Capture(t, func() { provider.Refresh() })
 		require.Equal(t, 1, strings.Count(back, recovered))
 		require.NotContains(t, back, failed)
 		require.Equal(t, []string{"u:pw2"}, early.recorded(), "the connection that had the old set is re-authenticated")
@@ -622,7 +622,7 @@ func TestSubscribeDuringSourceOutageHandsOutLastGoodCredentials(t *testing.T) {
 		require.NoError(t, err)
 		hold(t, unsubscribe)
 		require.NoError(t, os.Remove(credFile))
-		out := captureLog(t, func() {
+		out := logSink.Capture(t, func() {
 			_, unsubscribe, err = provider.Subscribe(&recordingListener{})
 			require.NoError(t, err)
 			hold(t, unsubscribe)
@@ -671,7 +671,7 @@ func TestConnectionsOpenedDuringSourceOutageAuthenticate(t *testing.T) {
 		}
 		return err
 	}
-	out := captureLog(t, func() {
+	out := logSink.Capture(t, func() {
 		results := make(chan error, inFlight)
 		for i := 0; i < inFlight; i++ {
 			go func() { results <- block() }()

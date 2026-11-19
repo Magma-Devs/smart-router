@@ -3,7 +3,6 @@ package rpcsmartrouter
 import (
 	"context"
 	"errors"
-	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -11,6 +10,7 @@ import (
 	"time"
 
 	ecocache "github.com/magma-Devs/smart-router/ecosystem/cache"
+	"github.com/magma-Devs/smart-router/internal/testutil/cachetest"
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/chainlibtest"
@@ -25,7 +25,6 @@ import (
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/grpc"
 )
 
 // ---------------------------------------------------------------------------
@@ -84,24 +83,8 @@ func startCacheServerForTest(t *testing.T) (*performance.Cache, *ecocache.Relaye
 // shortest lifetime of an entry that is not final, for tests that watch one expire.
 func startCacheServerWithNonFinalizedTTLForTest(t *testing.T, nonFinalized time.Duration) (*performance.Cache, *ecocache.RelayerCacheServer) {
 	t.Helper()
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-
-	cs := &ecocache.CacheServer{CacheMaxCost: 1 << 20}
-	cs.InitCache(ctx, time.Hour, nonFinalized, 5*time.Second, time.Hour, "disabled", 1, 1)
-	rcs := &ecocache.RelayerCacheServer{CacheServer: cs}
-
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	grpcServer := grpc.NewServer()
-	pairingtypes.RegisterRelayerCacheServer(grpcServer, rcs)
-	go func() { _ = grpcServer.Serve(lis) }()
-	t.Cleanup(grpcServer.Stop)
-
-	client, err := performance.InitCache(ctx, lis.Addr().String())
-	require.NoError(t, err)
-	require.True(t, client.CacheActive(), "test cache server must be connected")
-	return client, rcs
+	rcs := cachetest.NewServer(t, cachetest.TTLs{Finalized: time.Hour, NonFinalized: nonFinalized, NodeErrors: 5 * time.Second})
+	return cachetest.Serve(t, rcs), rcs
 }
 
 // buildRestProtocolMessage builds a REAL protocol message (real chain parser, real
