@@ -336,7 +336,13 @@ func (dwsm *DirectWSSubscriptionManager) subscriptionUpstreamName(hashedParams s
 // SetEndpoints replaces both tiers with the currently-serving WebSocket endpoints and
 // reports whether anything actually changed. See subscriptionEndpoints.setEndpoints.
 func (dwsm *DirectWSSubscriptionManager) SetEndpoints(wsEndpoints, wsBackupEndpoints []*common.NodeUrl) (changed bool) {
-	return dwsm.setEndpoints(wsEndpoints, wsBackupEndpoints)
+	if !dwsm.setEndpoints(wsEndpoints, wsBackupEndpoints) {
+		return false
+	}
+	dwsm.lock.RLock()
+	scaleDownDepartedPools(&dwsm.subscriptionEndpoints, dwsm.upstreamPools)
+	dwsm.lock.RUnlock()
+	return true
 }
 
 // Start starts the background cleanup goroutine for the DirectWSSubscriptionManager.
@@ -493,6 +499,7 @@ func (dwsm *DirectWSSubscriptionManager) GetOrCreatePool(nodeUrl *common.NodeUrl
 	pool, exists := dwsm.upstreamPools[nodeUrl.Url]
 	if !exists {
 		pool = NewUpstreamWSPoolWithConfig(nodeUrl, dwsm.config)
+		pool.departed = dwsm.departs(nodeUrl.Url)
 		dwsm.upstreamPools[nodeUrl.Url] = pool
 	}
 	return pool
@@ -622,12 +629,22 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 		return existingReply, nil, nil
 	}
 
-	// Handle pending subscriptions (another client is creating the same subscription)
+	// Handle pending subscriptions (another client is creating the same subscription).
+	// The wait ends with this client's context, as the gRPC manager's does: the creator's
+	// subscribe can take as long as a dial and the node's answer, and a client that left
+	// meanwhile has nothing to join. The channel is buffered, so the creator's settle does
+	// not block on a waiter that is gone.
 	for {
 		pendingChan, foundPending := dwsm.checkAndAddPendingSubscription(hashedParams)
 		if foundPending {
 			utils.FormatTrace("DirectWS: waiting for pending subscription")
-			success := <-pendingChan
+			var success bool
+			select {
+			case success = <-pendingChan:
+			case <-ctx.Done():
+				dwsm.metricsManager.SetFailedWsSubscriptionRequestMetric(dwsm.chainID, dwsm.apiInterface)
+				return nil, nil, ctx.Err()
+			}
 			if success {
 				existingReply, joined := dwsm.checkForActiveSubscriptionAndConnect(ctx, hashedParams, clientKey, safeChannelSender, requestID)
 				if existingReply != nil {
@@ -1854,7 +1871,9 @@ func writeSubscriptionEndedFrame(method, routerID string, numericIDs bool) ([]by
 
 // handleClientDisconnect releases one client from one subscription when the client's
 // connection ends, or returns early once the client has already left by another path.
-// It is registered for every attached client, creators and joiners alike.
+// It is registered for every attached client, creators and joiners alike. It is what
+// honours WSSubscriptionManager's "cancelling the StartSubscription ctx releases the
+// client"; in production the ingress's UnsubscribeAll usually releases the client first.
 //
 // detached is the client's signal from that subscription, read when the client was attached.
 // Looked up here instead, when the goroutine first runs, it could find nothing: Unsubscribe

@@ -139,6 +139,11 @@ type ConsumerSessionManager struct {
 	// backup providers - emergency fallback providers when no regular providers are available
 	backupProviders map[string]*ConsumerSessionsWithProvider // key == provider address
 
+	// configuredProviderNames is every provider name in the router's config, on any chain or
+	// interface, primary and backup, whether or not it passed verification
+	// (SetConfiguredProviderNames). nil until set.
+	configuredProviderNames []string
+
 	// blocked backup providers - backup providers blocked this epoch due to failures.
 	// Separate from currentlyBlockedProviderAddresses because backup providers are not in validAddresses.
 	blockedBackupProviders map[string]struct{}
@@ -1882,6 +1887,20 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 		stickiness = ""
 	}
 
+	// The caller's own lava-select-provider name, before a sticky claim below can fill
+	// selectedProvider. Only that name can be the caller's mistake: a refusal of it that names no
+	// provider of this router at all is marked SelectedProviderNotConfiguredError, which the
+	// listeners answer as a refused request (MAG-3800). A blocked provider, one that lacks the
+	// add-on, a name matching two providers by case, and a sticky claim whose provider is gone keep
+	// the plain SelectedProviderUnavailableError: none of them is the caller's mistake.
+	if headerPin := selectedProvider; headerPin != "" {
+		defer func() {
+			if errors.Is(errRet, SelectedProviderUnavailableError) && !csm.selectedProviderConfigured(headerPin) {
+				errRet = fmt.Errorf("%w: %w", SelectedProviderNotConfiguredError, errRet)
+			}
+		}()
+	}
+
 	// Cross-pod stickiness resolves BEFORE any lock is taken, because it may call the fleet
 	// store and no network round trip may happen while csm.lock is held.
 	//
@@ -2310,6 +2329,45 @@ func (csm *ConsumerSessionManager) providerByAddress(address string) *ConsumerSe
 		return provider
 	}
 	return csm.backupProviders[address]
+}
+
+// SetConfiguredProviderNames records every provider name in the router's config, on any chain or
+// interface, primary and backup, healthy or not. csm.pairing and csm.backupProviders hold only this
+// route's providers that passed verification, so they cannot tell a name that is not configured at
+// all from a configured provider that is out of rotation or has no URL for this route (MAG-3800).
+func (csm *ConsumerSessionManager) SetConfiguredProviderNames(names []string) {
+	csm.lock.Lock()
+	defer csm.lock.Unlock()
+	csm.configuredProviderNames = append([]string{}, names...)
+}
+
+// selectedProviderConfigured reports whether name, a lava-select-provider value, names a provider
+// this router is configured with: a primary or a backup, in rotation or not, in any letter case, the
+// way resolveSelectedProviderAddress matches it. With no configured list recorded, every name
+// counts as configured: an unknown answer must not tell a caller their provider does not exist in
+// the middle of an outage. It takes the read lock itself, so the caller must not hold csm.lock.
+func (csm *ConsumerSessionManager) selectedProviderConfigured(name string) bool {
+	csm.lock.RLock()
+	defer csm.lock.RUnlock()
+	if csm.configuredProviderNames == nil {
+		return true
+	}
+	for _, configured := range csm.configuredProviderNames {
+		if strings.EqualFold(configured, name) {
+			return true
+		}
+	}
+	for address := range csm.pairing {
+		if strings.EqualFold(address, name) {
+			return true
+		}
+	}
+	for address := range csm.backupProviders {
+		if strings.EqualFold(address, name) {
+			return true
+		}
+	}
+	return false
 }
 
 // convertSelectionStatsToMetrics converts SelectionStats to metrics format with all provider scores
