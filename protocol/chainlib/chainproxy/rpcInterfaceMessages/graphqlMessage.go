@@ -656,7 +656,13 @@ func (gm *GraphQLMessage) verdict(data []byte, httpStatusCode int) (graphQLVerdi
 	if gm.IsMutation() {
 		return writeVerdict(data, httpStatusCode)
 	}
-	return readVerdict(data, httpStatusCode)
+	verdict, isError := readVerdict(data, httpStatusCode)
+	if isError && verdict.classified == nil {
+		// A read's error is never filed by the shared rows: a row that names no registry entry
+		// (a chain's row added without one) is filed by its kind instead (MAG-5121).
+		verdict.classified = graphQLClassifiedOfKind(verdict.kind, verdict.status)
+	}
+	return verdict, isError
 }
 
 // writeVerdict is a mutation's verdict, unchanged by MAG-5121 except that every reply is now

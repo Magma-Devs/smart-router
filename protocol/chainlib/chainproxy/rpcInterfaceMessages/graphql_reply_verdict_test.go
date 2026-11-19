@@ -1,6 +1,7 @@
 package rpcInterfaceMessages
 
 import (
+	"net/http"
 	"strings"
 	"testing"
 
@@ -330,5 +331,31 @@ func TestGraphQLReadsNeverUseTheSharedRows(t *testing.T) {
 			}
 			require.NotNil(t, read.OwnClassification([]byte(body), status), "status %d, body %q", status, body)
 		}
+	}
+}
+
+// TestGraphQLReadRowWithoutAnEntryIsFiledByItsKind pins that a read's error never reaches the shared
+// rows, even from a row that names no registry entry (a chain's row added without one): it is
+// filed under the entry its kind stands for.
+func TestGraphQLReadRowWithoutAnEntryIsFiledByItsKind(t *testing.T) {
+	read := parsedRead(t)
+	rows := []struct {
+		code string
+		row  graphQLVerdict
+		want *common.RouterError
+	}{
+		{"TEST_CALLER", graphQLVerdict{kind: graphQLVerdictCaller, status: http.StatusBadRequest}, common.RouterErrorUserInvalidRequest},
+		{"TEST_ELSEWHERE", graphQLVerdict{kind: graphQLVerdictElsewhere, status: graphQLRetryElsewhereStatus}, common.RouterErrorNodeUnrecognizedError},
+		{"TEST_THROTTLED", graphQLVerdict{kind: graphQLVerdictThrottled, status: http.StatusTooManyRequests}, common.RouterErrorNodeRateLimited},
+		{"TEST_FAULT_504", graphQLVerdict{kind: graphQLVerdictFault, status: http.StatusGatewayTimeout}, common.RouterErrorNodeGatewayTimeout},
+		{"TEST_FAULT_NO_5XX", graphQLVerdict{kind: graphQLVerdictFault, status: http.StatusOK}, common.RouterErrorNodeBadGateway},
+	}
+	for _, row := range rows {
+		graphQLReadRows[row.code] = row.row
+		t.Cleanup(func() { delete(graphQLReadRows, row.code) })
+	}
+	for _, row := range rows {
+		body := []byte(`{"errors":[{"message":"m","extensions":{"code":"` + row.code + `"}}]}`)
+		require.Equal(t, row.want, read.OwnClassification(body, http.StatusOK), row.code)
 	}
 }

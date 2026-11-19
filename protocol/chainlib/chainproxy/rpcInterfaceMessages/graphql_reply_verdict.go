@@ -269,6 +269,25 @@ func statusTableVerdict(httpStatusCode int, message string) graphQLVerdict {
 	return verdict
 }
 
+// graphQLClassifiedOfKind is the registry entry of a read verdict that names none: the entry its
+// kind stands for. It goes by the kind, not the status: a caller's verdict stands for a 400, which
+// the status table files as "elsewhere".
+func graphQLClassifiedOfKind(kind graphQLVerdictKind, status int) *common.RouterError {
+	switch kind {
+	case graphQLVerdictCaller:
+		return graphQLCallerRow.classified
+	case graphQLVerdictThrottled:
+		return common.RouterErrorNodeRateLimited
+	case graphQLVerdictFault:
+		if status >= 500 {
+			return statusTableVerdict(status, "").classified
+		}
+		return common.RouterErrorNodeBadGateway
+	default: // elsewhere, unknown
+		return common.RouterErrorNodeUnrecognizedError
+	}
+}
+
 // graphQLKindOfStatus reads the verdict kind the registry's REST rows give a bare status. Only a
 // write's error status uses it: writes still stand on the shared rows (MAG-5122), reads on
 // statusTableVerdict.
