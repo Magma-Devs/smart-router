@@ -24,7 +24,7 @@ require (
 	github.com/gogo/status v1.1.1
 	github.com/golang/mock v1.6.0
 	github.com/golang/protobuf v1.5.4
-	github.com/grafana/pyroscope-go v1.4.3
+	github.com/grafana/pyroscope-go v1.5.0
 	github.com/itchyny/gojq v0.12.20
 	github.com/jhump/protoreflect v1.19.0
 	github.com/redis/go-redis/v9 v9.23.0
@@ -60,7 +60,7 @@ require (
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/gogo/googleapis v1.4.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/grafana/pyroscope-go/godeltaprof v0.1.11 // indirect
+	github.com/grafana/pyroscope-go/godeltaprof v0.1.12 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.31.0 // indirect
 	github.com/holiman/uint256 v1.3.2 // indirect
 	github.com/itchyny/timefmt-go v0.1.9 // indirect
