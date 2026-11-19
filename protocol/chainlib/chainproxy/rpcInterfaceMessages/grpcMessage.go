@@ -40,12 +40,15 @@ func (gm *GrpcMessage) GetRawRequestHash() ([]byte, error) {
 	return rawRequestHash("jsonRpc", gm.GetHeaders(), gm.Path, gm.Msg)
 }
 
+// CheckResponseError reports whether a gRPC reply is a node error. A status other than OK is one,
+// with no message: the sender reads the node's status message itself. An OK reply is a success,
+// unless it is a BroadcastTx reply refusing the transaction (checkGRPCBroadcast, MAG-5323).
 func (jm GrpcMessage) CheckResponseError(data []byte, httpStatusCode int) (hasError bool, errorMessage string) {
 	// grpc status code different than OK or 0 is a node error.
 	if httpStatusCode != 0 && httpStatusCode != http.StatusOK {
 		return true, ""
 	}
-	return false, ""
+	return checkGRPCBroadcast(jm.Path, data)
 }
 
 // GetParams will be deprecated after we remove old client
