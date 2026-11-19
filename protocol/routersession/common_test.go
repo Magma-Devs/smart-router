@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/magma-Devs/smart-router/internal/testutil"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
-	"github.com/magma-Devs/smart-router/utils"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/encoding/gzip"
@@ -63,15 +63,14 @@ func BenchmarkGRPCServer(b *testing.B) {
 	defer lis.Close()
 
 	csp := &ConsumerSessionsWithProvider{}
-	for {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_, _, err := csp.ConnectRawClientWithTimeout(ctx, address)
-		if err != nil {
-			utils.FormatDebug("waiting for grpc server to launch")
-			continue
+	if err := testutil.WaitForServer(func(ctx context.Context) error {
+		_, conn, err := csp.ConnectRawClientWithTimeout(ctx, address)
+		if err == nil {
+			conn.Close()
 		}
-		cancel()
-		break
+		return err
+	}); err != nil {
+		b.Fatalf("the test relayer server never answered: %v", err)
 	}
 
 	runBenchmark := func(b *testing.B, opts ...grpc.DialOption) {

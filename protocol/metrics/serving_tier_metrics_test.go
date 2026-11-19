@@ -3,20 +3,9 @@ package metrics
 import (
 	"testing"
 
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 )
-
-func newSmartRouterForServingTierTest() *SmartRouterMetricsManager {
-	return &SmartRouterMetricsManager{
-		endpointServingTier: prometheus.NewGaugeVec(
-			prometheus.GaugeOpts{Name: "t_sr_endpoint_serving_tier"},
-			[]string{"spec", "apiInterface"},
-		),
-		urlToProviderNames: make(map[string][]string),
-	}
-}
 
 func TestServingTier_Mapping(t *testing.T) {
 	for _, tc := range []struct {
@@ -47,7 +36,7 @@ func TestServingTier_ConstantOrdering(t *testing.T) {
 }
 
 func TestSetEndpointServingTier_PublishesGauge(t *testing.T) {
-	m := newSmartRouterForServingTierTest()
+	m := newTestMetricsManager(t)
 	gauge := m.endpointServingTier.WithLabelValues("BSC", "jsonrpc")
 
 	m.SetEndpointServingTier("BSC", "jsonrpc", 3, 2)
@@ -66,7 +55,7 @@ func TestSetEndpointServingTier_PublishesGauge(t *testing.T) {
 // that mutates the session maps, so a stale reading would either page forever
 // after a recovery or stay silent after a demotion.
 func TestSetEndpointServingTier_RecoversAfterDark(t *testing.T) {
-	m := newSmartRouterForServingTierTest()
+	m := newTestMetricsManager(t)
 	gauge := m.endpointServingTier.WithLabelValues("BSC", "jsonrpc")
 
 	m.SetEndpointServingTier("BSC", "jsonrpc", 0, 0) // booted dark
@@ -83,7 +72,7 @@ func TestSetEndpointServingTier_RecoversAfterDark(t *testing.T) {
 }
 
 func TestSetEndpointServingTier_ChainsAreLabelledSeparately(t *testing.T) {
-	m := newSmartRouterForServingTierTest()
+	m := newTestMetricsManager(t)
 
 	m.SetEndpointServingTier("BSC", "jsonrpc", 0, 0)
 	m.SetEndpointServingTier("ETH1", "jsonrpc", 3, 0)

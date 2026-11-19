@@ -20,7 +20,7 @@ func TestSecondaryRespCacheLogsUnderItsOwnName(t *testing.T) {
 
 	cfg := redisstore.Config{Addresses: []string{deadAddress}, KeyPrefix: "zone-a"}
 	var reader *performance.RespCache
-	logs := captureLog(t, func() {
+	logs := logSink.Capture(t, func() {
 		cfg.Name = "secondary-resp-cache"
 		reader, err = performance.OpenSecondaryRespCache(cfg, performance.DefaultSecondaryCacheTimeout)
 		require.NoError(t, err)

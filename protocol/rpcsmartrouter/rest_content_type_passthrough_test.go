@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
+	"github.com/magma-Devs/smart-router/protocol/chainlibtest"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
@@ -29,7 +29,7 @@ func contentTypeRelayHarness(t *testing.T, chainID, apiInterface string, specOve
 	t.Helper()
 	ctx := context.Background()
 	received := make(chan string, 1)
-	chainParser, _, _, closeServer, endpoint, err := chainlib.CreateChainLibMocks(
+	chainParser, _, _, closeServer, endpoint, err := chainlibtest.CreateChainLibMocks(
 		ctx, chainID, apiInterface,
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			received <- r.Header.Get("Content-Type")

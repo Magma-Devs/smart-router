@@ -8,28 +8,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-var (
-	cvLabels         = []string{"spec", "apiInterface", "method"}
-	cvProviderLabels = []string{"spec", "apiInterface", "method", "provider_address"}
-)
-
-func newSmartRouterForCVTest() *SmartRouterMetricsManager {
-	return &SmartRouterMetricsManager{
-		crossValidationRequestsTotalMetric:              prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_cv_req"}, cvLabels),
-		crossValidationSuccessTotalMetric:               prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_cv_success"}, cvLabels),
-		crossValidationFailedTotalMetric:                prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_cv_failed"}, cvLabels),
-		crossValidationProviderAgreementsTotalMetric:    prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_cv_agreements"}, cvProviderLabels),
-		crossValidationProviderDisagreementsTotalMetric: prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_cv_disagreements"}, cvProviderLabels),
-		crossValidationMismatchTotalMetric:              prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_cv_mismatch"}, []string{"spec", "apiInterface", "method", "group", "finality"}),
-		crossValidationFailuresTotalMetric:              prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_cv_failures"}, []string{"spec", "apiInterface", "method", "reason"}),
-		urlToProviderNames:                              make(map[string][]string),
-	}
-}
-
 // TestSetCrossValidationFailureMetric covers the bounded by-reason failures counter: the right series
 // increments per reason, repeated calls accumulate, and an empty reason is a no-op (no empty-label series).
 func TestSetCrossValidationFailureMetric(t *testing.T) {
-	m := newSmartRouterForCVTest()
+	m := newTestMetricsManager(t)
 	m.SetCrossValidationFailureMetric("ETH1", "jsonrpc", "eth_getBalance", "no-agreement")
 	m.SetCrossValidationFailureMetric("ETH1", "jsonrpc", "eth_getBalance", "no-agreement")
 	m.SetCrossValidationFailureMetric("ETH1", "jsonrpc", "eth_getBalance", "diversity-unmet")
@@ -49,7 +31,7 @@ func TestSetCrossValidationFailureMetric(t *testing.T) {
 // TestSetCrossValidationMismatchMetric covers the bounded group+finality mismatch counter (1.3): the
 // right series increments, repeated calls accumulate, and an empty group folds into "default".
 func TestSetCrossValidationMismatchMetric(t *testing.T) {
-	m := newSmartRouterForCVTest()
+	m := newTestMetricsManager(t)
 	m.SetCrossValidationMismatchMetric("ETH1", "jsonrpc", "eth_getBalance", "tier-1", "finalized")
 	m.SetCrossValidationMismatchMetric("ETH1", "jsonrpc", "eth_getBalance", "tier-1", "finalized")
 	m.SetCrossValidationMismatchMetric("ETH1", "jsonrpc", "eth_getBalance", "external", "not_finalized")
@@ -74,8 +56,8 @@ type cvRunner struct {
 	disagreements *prometheus.CounterVec
 }
 
-func newSmartRouterCVRunner() *cvRunner {
-	m := newSmartRouterForCVTest()
+func newSmartRouterCVRunner(t *testing.T) *cvRunner {
+	m := newTestMetricsManager(t)
 	return &cvRunner{
 		invoke:        m.SetCrossValidationMetric,
 		total:         m.crossValidationRequestsTotalMetric,
@@ -136,7 +118,7 @@ func TestSetCrossValidationMetric(t *testing.T) {
 
 	runners := []struct {
 		name string
-		new  func() *cvRunner
+		new  func(*testing.T) *cvRunner
 	}{
 		{"smart_router", newSmartRouterCVRunner},
 	}
@@ -151,7 +133,7 @@ func TestSetCrossValidationMetric(t *testing.T) {
 		t.Run(r.name, func(t *testing.T) {
 			for _, tc := range cases {
 				t.Run(tc.name, func(t *testing.T) {
-					runner := r.new()
+					runner := r.new(t)
 
 					for _, c := range tc.calls {
 						runner.invoke(spec, api, method, c.success, c.agreeing, c.disagreeing)

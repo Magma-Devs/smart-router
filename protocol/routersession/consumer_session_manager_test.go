@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/magma-Devs/smart-router/internal/testutil"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
@@ -188,15 +189,15 @@ func TestMain(m *testing.M) {
 		os.Exit(-1)
 	}
 	csp := &ConsumerSessionsWithProvider{}
-	for {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_, _, err := csp.ConnectRawClientWithTimeout(ctx, grpcListener)
-		if err != nil {
-			utils.FormatDebug("waiting for grpc server to launch")
-			continue
+	if err := testutil.WaitForServer(func(ctx context.Context) error {
+		_, conn, err := csp.ConnectRawClientWithTimeout(ctx, grpcListener)
+		if err == nil {
+			conn.Close()
 		}
-		cancel()
-		break
+		return err
+	}); err != nil {
+		fmt.Println("the test relayer server never answered:", err)
+		os.Exit(1)
 	}
 
 	// Start running tests.

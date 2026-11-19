@@ -98,71 +98,19 @@ func TestGrpcChainProxy(t *testing.T) {
 }
 
 func TestParsingRequestedBlocksHeadersGrpc(t *testing.T) {
-	ctx := context.Background()
-	callbackHeaderNameToCheck := ""
-	serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Handle the incoming request and provide the desired response
-		headers := r.Header[callbackHeaderNameToCheck]
-		if len(headers) > 0 && headers[0] != "" {
-			block, err := strconv.Atoi(headers[0])
-			require.NoError(t, err)
-			w.WriteHeader(block)
-		} else {
-			w.WriteHeader(244591)
-		}
-	})
-	chainParser, chainRouter, _, closeServer, _, err := CreateChainLibMocks(ctx, "GRPCTEST", spectypes.APIInterfaceGrpc, serverHandler, nil, "../../", nil)
-	require.NoError(t, err)
-	defer func() {
-		if closeServer != nil {
-			closeServer()
-		}
-	}()
-	parsingForCrafting, apiCollection, ok := chainParser.GetParsingByTag(spectypes.FUNCTION_TAG_GET_BLOCKNUM)
-	require.True(t, ok)
-	collectionData := apiCollection.CollectionData
-	headerParsingDirective, _, ok := chainParser.GetParsingByTag(spectypes.FUNCTION_TAG_SET_LATEST_IN_METADATA)
-	callbackHeaderNameToCheck = headerParsingDirective.GetApiName() // this causes the callback to modify the response to simulate a real behavior
-	require.True(t, ok)
-	block := 244590
-	metadata := []pairingtypes.Metadata{{Name: headerParsingDirective.GetApiName(), Value: fmt.Sprintf(headerParsingDirective.FunctionTemplate, block)}}
-
-	tests := []struct {
-		desc           string
-		metadata       []pairingtypes.Metadata
-		block          int64
-		requestedBlock int64
-	}{
-		{
-			desc:           "no metadata",
-			metadata:       []pairingtypes.Metadata{},
-			block:          244591,
-			requestedBlock: spectypes.LATEST_BLOCK,
-		},
-		{
-			desc:           "with-metadata",
-			metadata:       metadata,
-			block:          244590,
-			requestedBlock: 244590,
-		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.desc, func(t *testing.T) {
-			chainMessage, err := chainParser.ParseMsg(parsingForCrafting.ApiName, []byte{}, collectionData.Type, test.metadata, extensionslib.ExtensionInfo{LatestBlock: 0})
-			require.NoError(t, err)
-			require.NoError(t, err)
-
-			requestedBlock, _ := chainMessage.RequestedBlock()
-			require.Equal(t, test.requestedBlock, requestedBlock)
-			reply, _, _, err := chainRouter.SendNodeMsg(ctx, chainMessage, nil)
-			require.NoError(t, err)
-			parserInput, err := FormatResponseForParsing(reply.RelayReply, chainMessage)
-			require.NoError(t, err)
-			parsedInput := parser.ParseBlockFromReply(parserInput, parsingForCrafting.ResultParsing, nil)
-			require.Equal(t, test.block, parsedInput.GetBlock())
+	requireLatestInMetadataSetsTheRequestedBlock(t, "GRPCTEST", spectypes.APIInterfaceGrpc, func(headerName *string) http.HandlerFunc {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// The mock gRPC node carries the block in the status it answers with.
+			headers := r.Header[*headerName]
+			if len(headers) > 0 && headers[0] != "" {
+				block, err := strconv.Atoi(headers[0])
+				require.NoError(t, err)
+				w.WriteHeader(block)
+			} else {
+				w.WriteHeader(244591)
+			}
 		})
-	}
+	})
 }
 
 func TestSettingBlocksHeadersGrpc(t *testing.T) {

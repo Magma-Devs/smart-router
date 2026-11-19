@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
+	"github.com/magma-Devs/smart-router/protocol/chainlibtest"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
@@ -18,7 +18,7 @@ import (
 
 func TestRESTRelay_GET_PathParameters(t *testing.T) {
 	ctx := context.Background()
-	chainParser, _, _, closeServer, endpoint, err := chainlib.CreateChainLibMocks(
+	chainParser, _, _, closeServer, endpoint, err := chainlibtest.CreateChainLibMocks(
 		ctx,
 		"LAVA",
 		spectypes.APIInterfaceRest,
@@ -67,7 +67,7 @@ func TestRESTRelay_GET_PathParameters(t *testing.T) {
 
 func TestRESTRelay_GET_QueryParameters(t *testing.T) {
 	ctx := context.Background()
-	chainParser, _, _, closeServer, endpoint, err := chainlib.CreateChainLibMocks(
+	chainParser, _, _, closeServer, endpoint, err := chainlibtest.CreateChainLibMocks(
 		ctx,
 		"LAVA",
 		spectypes.APIInterfaceRest,
@@ -117,7 +117,7 @@ func TestRESTRelay_GET_QueryParameters(t *testing.T) {
 
 func TestRESTRelay_POST_JSONBody(t *testing.T) {
 	ctx := context.Background()
-	chainParser, _, _, closeServer, endpoint, err := chainlib.CreateChainLibMocks(
+	chainParser, _, _, closeServer, endpoint, err := chainlibtest.CreateChainLibMocks(
 		ctx,
 		"LAVA",
 		spectypes.APIInterfaceRest,
@@ -166,7 +166,7 @@ func TestRESTRelay_POST_JSONBody(t *testing.T) {
 
 func TestRESTRelay_404_NotFound(t *testing.T) {
 	ctx := context.Background()
-	chainParser, _, _, closeServer, endpoint, err := chainlib.CreateChainLibMocks(
+	chainParser, _, _, closeServer, endpoint, err := chainlibtest.CreateChainLibMocks(
 		ctx,
 		"LAVA",
 		spectypes.APIInterfaceRest,
@@ -222,7 +222,7 @@ func TestRESTRelay_404_NotFound(t *testing.T) {
 func sendRESTThroughMockUpstream(t *testing.T, status int, body string) *common.RelayResult {
 	t.Helper()
 	ctx := context.Background()
-	chainParser, _, _, closeServer, endpoint, err := chainlib.CreateChainLibMocks(
+	chainParser, _, _, closeServer, endpoint, err := chainlibtest.CreateChainLibMocks(
 		ctx,
 		"LAVA",
 		spectypes.APIInterfaceRest,
@@ -410,7 +410,7 @@ func TestRESTRelay_410_Pruned_IsRetriedElsewhere(t *testing.T) {
 
 func TestRESTRelay_429_RateLimit(t *testing.T) {
 	ctx := context.Background()
-	chainParser, _, _, closeServer, endpoint, err := chainlib.CreateChainLibMocks(
+	chainParser, _, _, closeServer, endpoint, err := chainlibtest.CreateChainLibMocks(
 		ctx,
 		"LAVA",
 		spectypes.APIInterfaceRest,
@@ -455,7 +455,7 @@ func TestRESTRelay_429_RateLimit(t *testing.T) {
 
 func TestRESTRelay_503_ServiceUnavailable(t *testing.T) {
 	ctx := context.Background()
-	chainParser, _, _, closeServer, endpoint, err := chainlib.CreateChainLibMocks(
+	chainParser, _, _, closeServer, endpoint, err := chainlibtest.CreateChainLibMocks(
 		ctx,
 		"LAVA",
 		spectypes.APIInterfaceRest,
@@ -504,7 +504,7 @@ func TestRESTRelay_503_ServiceUnavailable(t *testing.T) {
 // cosmossdk as pass_both) is kept under the upstream's spelling.
 func TestRESTRelay_ResponseHeaders(t *testing.T) {
 	ctx := context.Background()
-	chainParser, _, _, closeServer, endpoint, err := chainlib.CreateChainLibMocks(
+	chainParser, _, _, closeServer, endpoint, err := chainlibtest.CreateChainLibMocks(
 		ctx,
 		"LAVA",
 		spectypes.APIInterfaceRest,
@@ -574,7 +574,7 @@ func TestRESTRelay_ResponseHeaders(t *testing.T) {
 // NodeError the sender produced is preserved and returned to the client.
 func TestRESTRelay_501_NotImplemented_relayInnerDirect(t *testing.T) {
 	ctx := context.Background()
-	chainParser, _, _, closeServer, endpoint, err := chainlib.CreateChainLibMocks(
+	chainParser, _, _, closeServer, endpoint, err := chainlibtest.CreateChainLibMocks(
 		ctx,
 		"LAVA",
 		spectypes.APIInterfaceRest,
@@ -649,7 +649,7 @@ func TestRESTRelay_501_NotImplemented_relayInnerDirect(t *testing.T) {
 func relayInnerDirectREST(t *testing.T, status int, body string) (*common.RelayResult, error) {
 	t.Helper()
 	ctx := context.Background()
-	chainParser, _, _, closeServer, endpoint, err := chainlib.CreateChainLibMocks(
+	chainParser, _, _, closeServer, endpoint, err := chainlibtest.CreateChainLibMocks(
 		ctx,
 		"LAVA",
 		spectypes.APIInterfaceRest,
@@ -747,7 +747,7 @@ func TestRESTRelay_5xx_TransportPathUnchanged(t *testing.T) {
 // POST too: the directives are resolved for the whole API interface, and pass_ignore passes.
 func TestRESTRelay_AptosLedgerStateHeadersSurviveOnGETAndPOST(t *testing.T) {
 	ctx := context.Background()
-	chainParser, _, _, closeServer, endpoint, err := chainlib.CreateChainLibMocks(
+	chainParser, _, _, closeServer, endpoint, err := chainlibtest.CreateChainLibMocks(
 		ctx,
 		"APT1",
 		spectypes.APIInterfaceRest,

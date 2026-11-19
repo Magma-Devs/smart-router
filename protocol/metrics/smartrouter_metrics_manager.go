@@ -14,10 +14,10 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-// registerOrReuse is RegisterOrReuse into the default registry, panicking on any other failure:
+// registerOrReuse is RegisterOrReuse into the manager's registry, panicking on any other failure:
 // the manager's collectors are the metrics page, so a router without them must not start.
-func registerOrReuse[T prometheus.Collector](c T) T {
-	return RegisterOrReuse(prometheus.DefaultRegisterer, c, PanicOnRegisterFailure)
+func registerOrReuse[T prometheus.Collector](registerer prometheus.Registerer, c T) T {
+	return RegisterOrReuse(registerer, c, PanicOnRegisterFailure)
 }
 
 // Compile-time check: SmartRouterMetricsManager must satisfy ConsumerMetricsManagerInf.
@@ -202,9 +202,14 @@ const DefaultURLAnswerTimeout = 2 * time.Minute
 //     HTTP server is started (register-only; used by tests and
 //     embedded callers)
 //   - "host:port"     → manager is created and the metrics HTTP server listens there
+//
+// Registry is the registry the collectors go into, and the one the metrics page gathers from. Nil
+// is the Prometheus default registry, which the router uses; a test passes a registry of its own,
+// so its series start at zero and no other test's manager shares them.
 type SmartRouterMetricsManagerOptions struct {
 	NetworkAddress     string
 	OptimizerQoSClient *ConsumerOptimizerQoSClient
+	Registry           *prometheus.Registry
 }
 
 // NewSmartRouterMetricsManager creates a new SmartRouterMetricsManager instance
@@ -212,6 +217,11 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	if options.NetworkAddress == DisabledFlagOption {
 		utils.FormatWarning("prometheus endpoint inactive, option is disabled", nil)
 		return nil
+	}
+
+	registerer, gatherer := prometheus.DefaultRegisterer, prometheus.DefaultGatherer
+	if options.Registry != nil {
+		registerer, gatherer = options.Registry, options.Registry
 	}
 
 	// Every collector below is registered as it is built, into the manager's own field; on
@@ -240,47 +250,47 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	endpointFunctionLabels := []string{"spec", "apiInterface", "endpoint_id", "function"}
 	endpointLabels := []string{"spec", "apiInterface", "endpoint_id"}
 
-	m.endpointTotalRelaysServiced = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.endpointTotalRelaysServiced = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "rpc_endpoint_total_relays_serviced",
 		Help: "Total relays this RPC endpoint answered, by function, an answer carrying a node error included: smartrouter_node_results_total counts the reads it answered with a result.",
 	}, endpointFunctionLabels))
 
-	m.endpointTotalErrored = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.endpointTotalErrored = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "rpc_endpoint_total_errored",
 		Help: "Total errored relays for this RPC endpoint, by function.",
 	}, endpointFunctionLabels))
 
-	m.endpointTotalCancelled = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.endpointTotalCancelled = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "rpc_endpoint_total_cancelled",
 		Help: "Relays cancelled by the router before completion, by function — relay-race losers on stateful broadcasts, and client disconnects. NOT an endpoint fault: these are deliberately excluded from rpc_endpoint_total_errored and from QoS/availability scoring. A high rate here is normal on write-heavy traffic (one winner, N-1 cancelled) and is the signal for tuning broadcast fan-out.",
 	}, endpointFunctionLabels))
 
-	m.endpointInFlight = registerOrReuse(prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	m.endpointInFlight = registerOrReuse(registerer, prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "rpc_endpoint_requests_in_flight",
 		Help: "Current number of in-flight relays for this RPC endpoint, by function.",
 	}, endpointFunctionLabels))
 
-	m.endpointOverallHealth = registerOrReuse(prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	m.endpointOverallHealth = registerOrReuse(registerer, prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "rpc_endpoint_overall_health",
 		Help: "Health status of this RPC endpoint (1=healthy, 0=unhealthy).",
 	}, endpointLabels))
 
-	m.endpointOverallHealthBreakdown = registerOrReuse(prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	m.endpointOverallHealthBreakdown = registerOrReuse(registerer, prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "rpc_endpoint_overall_health_breakdown",
 		Help: "Health check status per chain for RPC endpoints (1=healthy, 0=unhealthy).",
 	}, []string{"spec", "apiInterface"}))
 
-	m.endpointSelectionScore = registerOrReuse(prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	m.endpointSelectionScore = registerOrReuse(registerer, prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "rpc_endpoint_selection_score",
 		Help: "Latest selection score for each RPC endpoint by score type (availability/latency/sync/stake/composite).",
 	}, []string{"spec", "apiInterface", "endpoint_id", "score_type"}))
 
-	m.optimizerSelectionScore = registerOrReuse(prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	m.optimizerSelectionScore = registerOrReuse(registerer, prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "rpc_optimizer_selection_score",
 		Help: "Periodic optimizer selection score per provider by score type (availability/latency/sync/stake/composite). Chain-level, not scoped to apiInterface.",
 	}, []string{"spec", "endpoint_id", "score_type"}))
 
-	m.endpointLatestBlock = registerOrReuse(prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	m.endpointLatestBlock = registerOrReuse(registerer, prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "rpc_endpoint_latest_block",
 		Help: "Latest block known by this RPC endpoint.",
 	}, endpointLabels))
@@ -289,35 +299,35 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	// of a provider writes the provider series above, so that series cannot show a url that
 	// froze while another url of the provider moves on.
 	urlLabels := []string{"spec", "apiInterface", "endpoint_id", "url", "internal_path"}
-	m.endpointURLLatestBlock = registerOrReuse(prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	m.endpointURLLatestBlock = registerOrReuse(registerer, prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "rpc_endpoint_url_latest_block",
 		Help: "Latest block one node url of a provider answered with. url is a fingerprint of the node url: the first 8 hex digits of its sha256.",
 	}, urlLabels))
-	m.endpointURLAnsweredUntil = registerOrReuse(prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	m.endpointURLAnsweredUntil = registerOrReuse(registerer, prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "rpc_endpoint_url_answered_until_seconds",
 		Help: "Unix time until which a node url counts as answering: its last answer, a poll or a relay, plus max(2m, 6 x the interval its tracker polls at). A url past it has stopped answering: it is down, not stuck.",
 	}, urlLabels))
-	m.endpointURLRelaysServiced = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.endpointURLRelaysServiced = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "rpc_endpoint_url_relays_serviced_total",
 		Help: "Relays one node url of a provider answered, an answer carrying a node error included.",
 	}, urlLabels))
 
-	m.endpointFetchLatestFails = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.endpointFetchLatestFails = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "rpc_endpoint_fetch_latest_fails",
 		Help: "Total failed latest-block fetch operations for this RPC endpoint.",
 	}, endpointLabels))
 
-	m.endpointFetchBlockFails = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.endpointFetchBlockFails = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "rpc_endpoint_fetch_block_fails",
 		Help: "Total failed specific-block fetch operations for this RPC endpoint.",
 	}, endpointLabels))
 
-	m.endpointFetchLatestSuccess = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.endpointFetchLatestSuccess = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "rpc_endpoint_fetch_latest_success",
 		Help: "Total successful latest-block fetch operations for this RPC endpoint.",
 	}, endpointLabels))
 
-	m.endpointFetchBlockSuccess = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.endpointFetchBlockSuccess = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "rpc_endpoint_fetch_block_success",
 		Help: "Total successful specific-block fetch operations for this RPC endpoint.",
 	}, endpointLabels))
@@ -330,7 +340,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	//
 	// kind is bounded to trackerRequestKind* below. Watch kind="block_hash" go to zero when
 	// fork detection is off (--enable-fork-detection), and kind="latest_block" stay flat.
-	m.endpointTrackerRequests = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.endpointTrackerRequests = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "rpc_endpoint_tracker_requests_total",
 		Help: "Total upstream requests sent by the per-endpoint chain tracker, by kind (latest_block, block_hash).",
 	}, []string{"spec", "apiInterface", "endpoint_id", "kind"}))
@@ -342,7 +352,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	// the poll's answer — idle mode).
 	// Together with rpc_endpoint_tracker_requests_total this shows both halves of the
 	// tracker's cadence: requests sent, and ticks that sent nothing and why.
-	m.endpointTrackerGateSkips = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.endpointTrackerGateSkips = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "rpc_endpoint_tracker_gate_skips_total",
 		Help: "Total per-endpoint tracker poll cycles suppressed by the traffic gate, by source (relay, peer, idle).",
 	}, []string{"spec", "apiInterface", "endpoint_id", "source"}))
@@ -350,7 +360,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	// Counts FAILED calls to the fleet observation store, by operation. Without it a broken
 	// cache backend and a fleet with nothing to share are indistinguishable — both leave
 	// rpc_endpoint_tracker_gate_skips_total{source="peer"} at zero.
-	m.endpointTrackerGateErrors = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.endpointTrackerGateErrors = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "rpc_endpoint_tracker_gate_errors_total",
 		Help: "Total failed fleet-observation-store calls made by the per-endpoint tracker gate, by op (fetch, publish).",
 	}, []string{"spec", "apiInterface", "endpoint_id", "op"}))
@@ -359,7 +369,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	// Endpoint-scoped histogram (labels: spec, apiInterface, endpoint_id, function)
 	// =========================================================================
 
-	m.endpointEndToEndLatency = registerOrReuse(prometheus.NewHistogramVec(prometheus.HistogramOpts{
+	m.endpointEndToEndLatency = registerOrReuse(registerer, prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "rpc_endpoint_end_to_end_latency_milliseconds",
 		Help:    "Distribution of end-to-end relay latency for this RPC endpoint by function in milliseconds. Use histogram_quantile() for percentiles.",
 		Buckets: latencyBuckets,
@@ -372,23 +382,23 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 
 	routerFunctionLabels := []string{"spec", "apiInterface", "function"}
 
-	m.routerTotalRelaysServiced = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.routerTotalRelaysServiced = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_total_relays_serviced",
 		Help: "Total relays the smart router's endpoints answered, by function, an answer carrying a node error included.",
 	}, routerFunctionLabels))
 
-	m.routerTotalErrored = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.routerTotalErrored = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_total_errored",
 		Help: "Total errored relays on the smart router, by function.",
 	}, routerFunctionLabels))
 
-	m.routerEndToEndLatency = registerOrReuse(prometheus.NewHistogramVec(prometheus.HistogramOpts{
+	m.routerEndToEndLatency = registerOrReuse(registerer, prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "smartrouter_end_to_end_latency_milliseconds",
 		Help:    "Distribution of end-to-end relay latency across all endpoints on the smart router by function in milliseconds. Use histogram_quantile() for percentiles.",
 		Buckets: latencyBuckets,
 	}, routerFunctionLabels))
 
-	m.routerOverallHealth = registerOrReuse(prometheus.NewGauge(prometheus.GaugeOpts{
+	m.routerOverallHealth = registerOrReuse(registerer, prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "smartrouter_overall_health",
 		Help: "Overall health of the RPC smart router (1=healthy, 0=unhealthy).",
 	}))
@@ -401,12 +411,12 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	// minutes, and a router that never became healthy went on reporting it.
 	m.routerOverallHealth.Set(0)
 
-	m.routerOverallHealthBreakdown = registerOrReuse(prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	m.routerOverallHealthBreakdown = registerOrReuse(registerer, prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "smartrouter_overall_health_breakdown",
 		Help: "Health check status per chain on the smart router (1=healthy, 0=unhealthy).",
 	}, []string{"spec", "apiInterface"}))
 
-	m.routerLatestBlock = registerOrReuse(prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	m.routerLatestBlock = registerOrReuse(registerer, prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "smartrouter_latest_block",
 		Help: "Latest block known by the RPC smart router for this chain/interface.",
 	}, []string{"spec", "apiInterface"}))
@@ -414,7 +424,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	// Counts the chain tip moving DOWN (MAG-4153). smartrouter_latest_block is a per-pod gauge that
 	// is also written on every relay, so a drop in it cannot be told apart from a pod restart; this
 	// counter is the alertable signal. reason is chainstate.RegressionReason* — a closed set of two.
-	m.routerLatestBlockRegressions = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.routerLatestBlockRegressions = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_latest_block_regressions_total",
 		Help: "Times the router's latest block for this chain/interface moved backwards, by reason (consensus, stale_tip).",
 	}, []string{"spec", "apiInterface", "reason"}))
@@ -422,55 +432,55 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	// Idle mode per chain/interface: 1 while the chain has served no client relay for the idle
 	// window and its dedicated polls are paused (or on the idle heartbeat), 0 while active. Left
 	// unset when idle mode is off, so a missing series means "not configured", not "active".
-	m.routerChainIdle = registerOrReuse(prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	m.routerChainIdle = registerOrReuse(registerer, prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "smartrouter_chain_idle",
 		Help: "Idle mode state for this chain/interface (1=idle: no client relay within --chain-tracker-idle-after, tracker polls paused; 0=active).",
 	}, []string{"spec", "apiInterface"}))
 
-	m.routerProtocolVersion = registerOrReuse(prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	m.routerProtocolVersion = registerOrReuse(registerer, prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "smartrouter_protocol_version",
 		Help: "Protocol version of the RPC smart router encoded as major*1e6+minor*1e3+patch.",
 	}, []string{"version"}))
 
-	m.routerWsConnectionsActive = registerOrReuse(prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	m.routerWsConnectionsActive = registerOrReuse(registerer, prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "smartrouter_ws_connections_active",
 		Help: "Number of currently active WebSocket connections served by the smart router.",
 	}, []string{"spec", "apiInterface"}))
 
-	m.routerWsSubscriptionsTotal = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.routerWsSubscriptionsTotal = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_ws_subscriptions_total",
 		Help: "Total WebSocket subscription requests received by the smart router.",
 	}, []string{"spec", "apiInterface"}))
 
-	m.routerWsSubscriptionErrors = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.routerWsSubscriptionErrors = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_ws_subscription_errors_total",
 		Help: "Total failed WebSocket subscription requests on the smart router.",
 	}, []string{"spec", "apiInterface"}))
 
-	m.subscriptionClientsDropped = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.subscriptionClientsDropped = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_subscription_clients_dropped_total",
 		Help: "Clients dropped from a shared subscription (WebSocket or gRPC) because they did not keep up with its pushes.",
 	}, []string{"spec", "apiInterface"}))
 
 	crossValidationLabels := []string{"spec", "apiInterface", "method"}
 	crossValidationProviderLabels := []string{"spec", "apiInterface", "method", "provider_address"}
-	m.crossValidationRequestsTotalMetric = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.crossValidationRequestsTotalMetric = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_cross_validation_requests_total",
 		Help: "Total number of cross-validated requests.",
 	}, crossValidationLabels))
-	m.crossValidationSuccessTotalMetric = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.crossValidationSuccessTotalMetric = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_cross_validation_success_total",
 		Help: "Total number of cross-validated requests that reached consensus.",
 	}, crossValidationLabels))
-	m.crossValidationFailedTotalMetric = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.crossValidationFailedTotalMetric = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_cross_validation_failed_total",
 		Help: "Total number of cross-validated requests that failed to reach consensus.",
 	}, crossValidationLabels))
-	m.crossValidationProviderAgreementsTotalMetric = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.crossValidationProviderAgreementsTotalMetric = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_cross_validation_provider_agreements_total",
 		Help: "Total number of times a provider agreed with the cross-validation consensus.",
 	}, crossValidationProviderLabels))
-	m.crossValidationProviderDisagreementsTotalMetric = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.crossValidationProviderDisagreementsTotalMetric = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_cross_validation_provider_disagreements_total",
 		Help: "Total number of times a provider's response disagreed with the cross-validation consensus.",
 	}, crossValidationProviderLabels))
@@ -479,7 +489,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	// high-signal alert. Records only SUCCESSFUL content outliers after a quorum was reached, on
 	// deterministic methods — NOT quorum failures or node/protocol errors (see
 	// SetCrossValidationMismatchMetric).
-	m.crossValidationMismatchTotalMetric = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.crossValidationMismatchTotalMetric = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_cross_validation_mismatch_total",
 		Help: "Successful cross-validation content outliers (a successful response that disagreed with a reached consensus on a deterministic method), by provider group and finality. Excludes quorum failures and node/protocol errors.",
 	}, []string{"spec", "apiInterface", "method", "group", "finality"}))
@@ -487,7 +497,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	// dashboard cannot tell a structural capacity failure (fall back) from a quorum disagreement (retry may
 	// help). This series adds the reason, drawn from the closed CrossValidationReason* enum (low cardinality),
 	// without touching the existing series' label sets. Covers both quorum-time and request-time fail-fast.
-	m.crossValidationFailuresTotalMetric = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.crossValidationFailuresTotalMetric = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_cross_validation_failures_total",
 		Help: "Cross-validation failures by reason (CrossValidationReason* enum: insufficient-responses, no-agreement, diversity-unmet, group-quorum-unmet, insufficient-capacity, insufficient-groups). Bounded — the reason set is a closed enum.",
 	}, []string{"spec", "apiInterface", "method", "reason"}))
@@ -495,7 +505,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	// (surfaced in the pending-providers header) and how their late response resolved against the reached
 	// consensus. Bounded — outcome is the closed CrossValidationStragglerOutcome* enum. A late confirmed
 	// content dissent additionally feeds crossValidationMismatchTotalMetric (the alerting surface).
-	m.crossValidationStragglerTotalMetric = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.crossValidationStragglerTotalMetric = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_cross_validation_straggler_total",
 		Help: "Cross-validation straggler resolutions (responses that arrived after the quorum early-exit reply), by outcome (agreed, disagreed, node-error, protocol-error, not-received). Bounded — the outcome set is a closed enum.",
 	}, []string{"spec", "apiInterface", "method", "outcome"}))
@@ -504,7 +514,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	// blocking; this counter makes that drop visible without needing to notice a gap in the record's
 	// own Seq sequence. Deliberately unlabeled by method: it is a fact about the write pipeline's
 	// capacity, not about any one request.
-	m.crossValidationRecordDroppedTotalMetric = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.crossValidationRecordDroppedTotalMetric = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_cross_validation_record_dropped_total",
 		Help: "Structured cross-validation compliance records (MAG-2787) dropped because the async write queue was full. Any non-zero value means the Seq sequence in the log stream has a gap.",
 	}, []string{"spec", "apiInterface"}))
@@ -515,60 +525,60 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	incidentProviderLabels := []string{"spec", "apiInterface", "provider_address", "method"}
 	incidentMethodLabels := []string{"spec", "apiInterface", "method"}
 
-	m.incidentNodeErrorsTotalMetric = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.incidentNodeErrorsTotalMetric = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_node_errors_total",
 		Help: "Total node errors received from RPC endpoints by the smart router.",
 	}, incidentProviderLabels))
-	m.incidentNodeResultsTotalMetric = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.incidentNodeResultsTotalMetric = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_node_results_total",
 		Help: "Client reads an RPC endpoint answered with a result rather than a node error. Not counted: a stateful request (a write, broadcast to every provider), the router's own health check, and an attempt that got no answer.",
 	}, incidentProviderLabels))
-	m.incidentProtocolErrorsTotalMetric = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.incidentProtocolErrorsTotalMetric = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_protocol_errors_total",
 		Help: "Total protocol errors (transport/timeout) encountered by the smart router.",
 	}, incidentProviderLabels))
-	m.incidentRetriesTotalMetric = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.incidentRetriesTotalMetric = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_retries_total",
 		Help: "Total relay retries attempted by the smart router (extra attempts beyond the first).",
 	}, incidentMethodLabels))
-	m.incidentRetriesSuccessMetric = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.incidentRetriesSuccessMetric = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_retries_success_total",
 		Help: "Retried relay requests on the smart router that ultimately succeeded.",
 	}, incidentMethodLabels))
-	m.incidentRetriesFailedMetric = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.incidentRetriesFailedMetric = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_retries_failed_total",
 		Help: "Retried relay requests on the smart router that ultimately failed.",
 	}, incidentMethodLabels))
-	m.incidentRetryAttemptsHistogram = registerOrReuse(prometheus.NewHistogramVec(prometheus.HistogramOpts{
+	m.incidentRetryAttemptsHistogram = registerOrReuse(registerer, prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "smartrouter_retry_attempts",
 		Help:    "Distribution of how many provider attempts were needed per retried request.",
 		Buckets: []float64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10},
 	}, incidentMethodLabels))
-	m.incidentConsistencyTotalMetric = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.incidentConsistencyTotalMetric = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_consistency_total",
 		Help: "Total relay requests on the smart router that enforced a minimum seen block (consistency).",
 	}, incidentMethodLabels))
-	m.incidentConsistencySuccessMetric = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.incidentConsistencySuccessMetric = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_consistency_success_total",
 		Help: "Consistency-enforced relay requests on the smart router that succeeded.",
 	}, incidentMethodLabels))
-	m.incidentConsistencyFailedMetric = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.incidentConsistencyFailedMetric = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_consistency_failed_total",
 		Help: "Consistency-enforced relay requests on the smart router that failed.",
 	}, incidentMethodLabels))
-	m.incidentHedgeTotalMetric = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.incidentHedgeTotalMetric = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_hedge_total",
 		Help: "Total relay requests on the smart router that triggered a hedge (batch ticker).",
 	}, incidentMethodLabels))
-	m.incidentHedgeSuccessMetric = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.incidentHedgeSuccessMetric = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_hedge_success_total",
 		Help: "Hedged relay requests on the smart router that succeeded.",
 	}, incidentMethodLabels))
-	m.incidentHedgeFailedMetric = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.incidentHedgeFailedMetric = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_hedge_failed_total",
 		Help: "Hedged relay requests on the smart router that failed.",
 	}, incidentMethodLabels))
-	m.incidentHedgeAttemptsHistogram = registerOrReuse(prometheus.NewHistogramVec(prometheus.HistogramOpts{
+	m.incidentHedgeAttemptsHistogram = registerOrReuse(registerer, prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "smartrouter_hedge_attempts",
 		Help:    "Distribution of how many hedge relays were sent per hedged request.",
 		Buckets: []float64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10},
@@ -581,31 +591,31 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	// without firing a probe relay (which could repopulate the same stores).
 	// =========================================================================
 	csmStateLabels := []string{"spec", "apiInterface"}
-	m.csmBlockedProvidersCount = registerOrReuse(prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	m.csmBlockedProvidersCount = registerOrReuse(registerer, prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "smartrouter_csm_blocked_providers",
 		Help: "Number of providers currently blocked and receiving no traffic (ConsumerSessionManager.currentlyBlockedProviderAddresses). Non-zero means the chain is degraded. Goes to 0 after /debug/reset-all.",
 	}, csmStateLabels))
-	m.csmPrevEpochBlockedProviders = registerOrReuse(prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	m.csmPrevEpochBlockedProviders = registerOrReuse(registerer, prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "smartrouter_csm_previous_epoch_blocked_providers",
 		Help: "Size of ConsumerSessionManager.previousEpochBlockedProviders (cross-epoch known-bad provider memory, briefly populated at an epoch boundary and cleared once the re-block pass runs). Goes to 0 after /debug/reset-all. This is what smartrouter_csm_blocked_providers reported before the metric was corrected.",
 	}, csmStateLabels))
-	m.csmProviderBlocked = registerOrReuse(prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	m.csmProviderBlocked = registerOrReuse(registerer, prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "smartrouter_csm_provider_blocked",
 		Help: "Whether this specific provider is out of rotation (1=out: blocked by the router, or none of its urls can take a relay right now; 0=at least one url in rotation), in the regular pairing or the backup pool. Companion to the smartrouter_csm_blocked_providers and smartrouter_csm_blocked_backup_providers counts, for identifying WHICH provider went out. Republished in full on every state-size tick, so it converges even when the blocked list is drained wholesale.",
 	}, []string{"spec", "apiInterface", "provider_address"}))
-	m.csmBlockedProvidersByReason = registerOrReuse(prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	m.csmBlockedProvidersByReason = registerOrReuse(registerer, prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "smartrouter_csm_blocked_providers_by_reason",
 		Help: "How many providers are currently blocked, split by WHY (MAG-2599): all-endpoints-disabled, explicit-block-signal, blocked-in-previous-epoch, unspecified. Counts both the regular and the backup pool, so it sums to smartrouter_csm_blocked_providers + smartrouter_csm_blocked_backup_providers. Those two count memberships and this one counts providers, so a provider blocked in both pools is counted twice there and once here. Deliberately carries no provider label — every reason is republished on every state-size tick, including the zeros, which is what keeps the series self-correcting; a provider label would leave the previous reason's series stuck at 1 after a provider is re-blocked for a different reason. Use smartrouter_csm_provider_blocked or /debug/provider-routing for WHICH provider.",
 	}, []string{"spec", "apiInterface", "reason"}))
-	m.csmBlockedBackupProvidersCount = registerOrReuse(prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	m.csmBlockedBackupProvidersCount = registerOrReuse(registerer, prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "smartrouter_csm_blocked_backup_providers",
 		Help: "Size of ConsumerSessionManager.blockedBackupProviders (per-epoch backup-provider failure memory). Goes to 0 after /debug/reset-all.",
 	}, csmStateLabels))
-	m.csmStickySessionsCount = registerOrReuse(prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	m.csmStickySessionsCount = registerOrReuse(registerer, prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "smartrouter_csm_sticky_sessions",
 		Help: "Number of live sticky-session affinities tracked by the smart router. Goes to 0 after /debug/reset-all.",
 	}, csmStateLabels))
-	m.csmStickyClaims = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.csmStickyClaims = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_csm_sticky_claims_total",
 		Help: "Cross-pod sticky-session claim resolutions by outcome. " +
 			"local_hit: answered from this pod's confirmed table, no round trip. " +
@@ -617,19 +627,19 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 			"invalidated: a local claim was dropped because its upstream could not serve here; a climbing series means claims outlive the upstreams they name. " +
 			"error: the claim could not be established, and the request was failed rather than served off an unverified pin.",
 	}, []string{"spec", "apiInterface", "outcome"}))
-	m.csmReportedProvidersCount = registerOrReuse(prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	m.csmReportedProvidersCount = registerOrReuse(registerer, prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "smartrouter_csm_reported_providers",
 		Help: "Number of providers currently in the ReportedProviders unresponsiveness register. Goes to 0 after /debug/reset-all.",
 	}, csmStateLabels))
-	m.endpointServingTier = registerOrReuse(prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	m.endpointServingTier = registerOrReuse(registerer, prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "smartrouter_endpoint_serving_tier",
 		Help: "Which provider tier an endpoint is serving from: 2=primaries, 1=DEGRADED (backups only), 0=DARK (no healthy providers). Since MAG-2525 a dark chain no longer crash-loops, so this gauge — not pod restarts — is the signal that a chain cannot serve. While a chain is dark, at boot or after the epoch re-verifier demoted its last provider, its providers are retried from ~2s (doubling to a 3m ceiling). Size alert windows for the 3m ceiling.",
 	}, csmStateLabels))
-	m.providerVerificationFailed = registerOrReuse(prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	m.providerVerificationFailed = registerOrReuse(registerer, prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "smartrouter_provider_verification_failed",
 		Help: "While a configured provider is failing a verification: the unix time in seconds the failure started, labelled with the check it fails. A provider that moves to another check in the same scope and service keeps its start. scope=provider: the provider is out of the pairing (failed at boot, or demoted by the epoch re-verifier). scope=service: the provider still serves but lost one add-on or extension (service) to that check; service=websocket: it serves no subscriptions, every ws(s) url refused or none configured (check missing-url). scope=url: the provider still serves but one of its node urls was refused, whole (no service) or for one service another url still serves; a refused ws(s) url is service=websocket. scope=none: a check the spec gives severity Warning is failing, and nothing was switched off. severity: Fail when the failure takes an http(s) url or the provider out, PartialFail when it switches off only that service (a ws(s) url carries only the websocket), Warning when it switches off nothing. The series exists only while the failure lasts. check is the spec verification's name, or latest-block, unsupported-addon, connect, config, missing-url, not-run, rate-limited, unknown. A failing provider, service or url (not missing-url, which only a config change fixes) is retried from --verification-retry-delay (30s), doubling to --verification-retry-max-delay (15m), and from 2s doubling to 3m while its chain is dark; a Warning check is re-checked every 15m epoch. Size alert windows above 15m.",
 	}, verificationFailureLabels))
-	m.verificationCheckFailures = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.verificationCheckFailures = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_provider_verification_check_failures_total",
 		Help: "Failed verification check runs, one per run that failed. Labels as smartrouter_provider_verification_failed: scope=provider when the failure costs the whole provider, scope=service when it costs one add-on or extension (service), scope=url when it costs one node url, scope=none when it costs nothing (severity Warning). A failing provider, service or url is re-run on its retry backoff (30s doubling to 15m, by default) and on every 15m epoch, so each failure appears at that cadence. A rate-limited run is inconclusive and not counted, and a missing websocket url (check missing-url) ran nothing.",
 	}, verificationFailureLabels))
@@ -639,55 +649,55 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	// =========================================================================
 	routerRequestLabels := []string{"spec", "apiInterface", "provider_address", "method"}
 
-	m.routerRequestsTotal = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.routerRequestsTotal = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_requests_total",
 		Help: "Total number of requests on the smart router.",
 	}, routerRequestLabels))
-	m.routerRequestsSuccess = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.routerRequestsSuccess = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_requests_success_total",
 		Help: "Total number of successful requests on the smart router.",
 	}, routerRequestLabels))
-	m.routerRequestsFailed = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.routerRequestsFailed = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_requests_failed_total",
 		Help: "Total number of failed requests on the smart router.",
 	}, routerRequestLabels))
-	m.routerRequestsRead = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.routerRequestsRead = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_requests_read_total",
 		Help: "Total number of read (stateful=0) requests on the smart router.",
 	}, routerRequestLabels))
-	m.routerRequestsWrite = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.routerRequestsWrite = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_requests_write_total",
 		Help: "Total number of write (stateful=1) requests on the smart router.",
 	}, routerRequestLabels))
-	m.routerRequestsDebugTrace = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.routerRequestsDebugTrace = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_requests_debug_trace_total",
 		Help: "Total number of debug/trace addon requests on the smart router.",
 	}, routerRequestLabels))
-	m.routerRequestsArchive = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.routerRequestsArchive = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_requests_archive_total",
 		Help: "Total number of archive requests on the smart router.",
 	}, routerRequestLabels))
-	m.routerRequestsBatch = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.routerRequestsBatch = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_requests_batch_total",
 		Help: "Total number of batch requests on the smart router.",
 	}, routerRequestLabels))
-	m.extensionUnavailableTotal = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.extensionUnavailableTotal = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_extension_unavailable_total",
 		Help: "Requests served without an extension the caller asked for with lava-extension, because no node on this router offers it, per extension. Counted once per request per such extension, on the same replies that carry the Lava-Extension-Unavailable response header. An extension the router adds on its own (archive for a deep eth_call) is never counted. Non-zero means callers depend on an extension this deployment has no node for.",
 	}, []string{"spec", "apiInterface", "extension"}))
 
-	m.batchSize = registerOrReuse(prometheus.NewHistogramVec(prometheus.HistogramOpts{
+	m.batchSize = registerOrReuse(registerer, prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name: "smartrouter_batch_size",
 		Help: "Number of sub-requests per batch request. This carries the magnitude that the collapsed method label intentionally drops. Single-element batches are indistinguishable from single requests at this layer and are not observed.",
 		// Batch sizes are small-and-clustered with a long tail; buckets start at 2
 		// because a 1-element batch never reaches this histogram.
 		Buckets: []float64{2, 3, 5, 10, 25, 50, 100, 250, 500},
 	}, []string{"spec", "apiInterface"}))
-	m.batchSignatureOverflow = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.batchSignatureOverflow = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_batch_signature_overflow_total",
 		Help: `Label normalizations that fell into method="batch:other". reason="cap": the spec exhausted its distinct-signature budget. reason="wide": one batch spanned more distinct methods than a signature may name. reason="invalid": the name was not valid UTF-8. Non-zero means per-batch-type breakdowns are lossy — raise the cap or accept the aggregation.`,
 	}, []string{"spec", "reason"}))
-	m.defaultMethodOverflow = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.defaultMethodOverflow = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_default_method_overflow_total",
 		Help: `Label normalizations that fell into method="Default-other": the spec exhausted its distinct unmatched-API name budget, or a name was not valid UTF-8. Sustained growth means clients are hitting URLs the spec does not match — concrete IDs in the path mint a new name per request — which usually indicates a spec gap (e.g. a path variant the templates miss).`,
 	}, []string{"spec"}))
@@ -697,48 +707,48 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	// tracker traffic. The latency histogram leaves method out: it is the family whose
 	// series multiply, and per-customer latency is asked per chain.
 	customerRequestLabels := []string{"spec", "apiInterface", "customer", "method"}
-	m.customerRequestsTotal = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.customerRequestsTotal = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_customer_requests_total",
 		Help: `Client requests, once each with their final outcome, by the caller's customer-id header. customer="DefaultDappID": no header. customer="other": past the per-spec customer cap (see smartrouter_customer_overflow_total). Subscription pushes are not counted; the subscribe request is.`,
 	}, customerRequestLabels))
-	m.customerRequestsFailed = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.customerRequestsFailed = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_customer_requests_failed_total",
 		Help: "Client requests that ended in an error to the client, by the caller's customer-id header. Success rate = 1 - failed / smartrouter_customer_requests_total.",
 	}, customerRequestLabels))
-	m.customerEndToEndLatency = registerOrReuse(prometheus.NewHistogramVec(prometheus.HistogramOpts{
+	m.customerEndToEndLatency = registerOrReuse(registerer, prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "smartrouter_customer_end_to_end_latency_milliseconds",
 		Help:    "End-to-end latency of successful client requests in milliseconds, by the caller's customer-id header. Use histogram_quantile() for percentiles.",
 		Buckets: latencyBuckets,
 	}, []string{"spec", "apiInterface", "customer"}))
-	m.customerOverflow = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.customerOverflow = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_customer_overflow_total",
 		Help: `Label normalizations that fell into customer="other": the spec exhausted its distinct-customer budget, or the customer-id value was too long to be an id. Non-zero means per-customer numbers are lossy for this spec.`,
 	}, []string{"spec"}))
 
 	cacheLabels := []string{"spec", "apiInterface", "method", "cache_tier"}
-	m.cacheRequestsTotalMetric = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.cacheRequestsTotalMetric = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_cache_requests_total",
 		Help: "Total number of cache lookup attempts, per cache tier (primary|secondary). Skipped/inactive tiers are not counted.",
 	}, cacheLabels))
-	m.cacheSuccessTotalMetric = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.cacheSuccessTotalMetric = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_cache_success_total",
 		Help: "Total number of cache lookups that returned a cached response (hits), per cache tier.",
 	}, cacheLabels))
-	m.cacheFailedTotalMetric = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.cacheFailedTotalMetric = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_cache_failed_total",
 		Help: "Total number of cache lookups that did not produce a cached response, per cache tier, split by outcome (miss = clean not-found, error = transport/server error, or a JSON-RPC/Tendermint entry that is not a usable reply and was refused, timeout = lookup budget exceeded).",
 	}, append(append([]string{}, cacheLabels...), "outcome")))
-	m.cacheLatencyHistogram = registerOrReuse(prometheus.NewHistogramVec(prometheus.HistogramOpts{
+	m.cacheLatencyHistogram = registerOrReuse(registerer, prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "smartrouter_cache_latency_milliseconds",
 		Help:    "Distribution of cache lookup latency in milliseconds, per cache tier, observed on every attempted lookup (hits and non-hits).",
 		Buckets: latencyBuckets,
 	}, cacheLabels))
 	cacheWriteLabels := []string{"spec", "apiInterface", "method"}
-	m.cacheWriteSkippedTotalMetric = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.cacheWriteSkippedTotalMetric = registerOrReuse(registerer, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_cache_write_skipped_total",
 		Help: "Replies the router served but did not write to its cache, by reason. reason=size: the reply body exceeded --cache-max-entry-bytes.",
 	}, append(append([]string{}, cacheWriteLabels...), "reason")))
-	m.cacheEntryBytesHistogram = registerOrReuse(prometheus.NewHistogramVec(prometheus.HistogramOpts{
+	m.cacheEntryBytesHistogram = registerOrReuse(registerer, prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "smartrouter_cache_entry_bytes",
 		Help:    "Body size in bytes of every reply the router hands to its cache backend for writing, before the backend encodes it.",
 		Buckets: cacheEntryBytesBuckets,
@@ -748,7 +758,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	// address leaves the manager in register-only mode (collectors registered, no
 	// socket) — see SmartRouterMetricsManagerOptions.
 	if options.NetworkAddress != "" {
-		mux := m.metricsMux(prometheus.DefaultRegisterer, prometheus.DefaultGatherer)
+		mux := m.metricsMux(registerer, gatherer)
 
 		go func() {
 			utils.FormatInfo("prometheus endpoint listening", utils.Attribute{Key: "Listen Address", Value: options.NetworkAddress})

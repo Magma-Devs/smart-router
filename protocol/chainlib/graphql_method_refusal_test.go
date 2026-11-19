@@ -23,14 +23,14 @@ import (
 // no errors list, no Allow and no Lava-Guid. OPTIONS keeps its 204, the health path its health
 // check, and a POST is served at any path.
 func TestGraphQLListener_AMethodOtherThanPostIsRefused(t *testing.T) {
-	relay := &parsingRelay{}
+	relay := newGraphQLParsingRelay()
 	send := sendToGraphQLListener(t, relay)
 	const request = `{"query":"{ chainIdentifier }"}`
 
 	for _, method := range []string{http.MethodGet, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodHead} {
 		for _, path := range []string{"/", "/graphql", "/x/y"} {
 			t.Run(method+" "+path, func(t *testing.T) {
-				relayed := relay.relayed
+				relayed := relay.relayed()
 				body := request
 				if method == http.MethodGet || method == http.MethodHead {
 					body = ""
@@ -41,7 +41,7 @@ func TestGraphQLListener_AMethodOtherThanPostIsRefused(t *testing.T) {
 				require.Equal(t, http.MethodPost, reply.header.Get(fiber.HeaderAllow), "the reply names the one method that is served")
 				guid := reply.header.Get(common.GUID_HEADER_NAME)
 				require.NotEmpty(t, guid, "the reply carries its request id in Lava-Guid")
-				require.Equal(t, relayed, relay.relayed, "a refused method reaches no provider")
+				require.Equal(t, relayed, relay.relayed(), "a refused method reaches no provider")
 				if method == http.MethodHead {
 					require.Empty(t, reply.body, "a HEAD reply has no body")
 					return
@@ -55,11 +55,11 @@ func TestGraphQLListener_AMethodOtherThanPostIsRefused(t *testing.T) {
 	}
 
 	t.Run("control: OPTIONS keeps its 204 with no body", func(t *testing.T) {
-		relayed := relay.relayed
+		relayed := relay.relayed()
 		reply := send(http.MethodOptions, "/x/y", "")
 		require.Equal(t, http.StatusNoContent, reply.status)
 		require.Empty(t, reply.body)
-		require.Equal(t, relayed, relay.relayed)
+		require.Equal(t, relayed, relay.relayed())
 	})
 
 	t.Run("control: a GET on the health path is the health check", func(t *testing.T) {
@@ -68,10 +68,10 @@ func TestGraphQLListener_AMethodOtherThanPostIsRefused(t *testing.T) {
 	})
 
 	t.Run("control: a POST is served at any path", func(t *testing.T) {
-		relayed := relay.relayed
+		relayed := relay.relayed()
 		reply := send(http.MethodPost, "/x/y", request)
 		require.Equal(t, http.StatusOK, reply.status, "body: %s", reply.body)
-		require.Equal(t, relayed+1, relay.relayed, "the POST reaches the relay")
+		require.Equal(t, relayed+1, relay.relayed(), "the POST reaches the relay")
 	})
 }
 

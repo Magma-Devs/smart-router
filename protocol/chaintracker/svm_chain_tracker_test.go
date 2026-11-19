@@ -6,42 +6,12 @@ import (
 	"testing"
 
 	"github.com/dgraph-io/ristretto/v2"
-	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/stretchr/testify/require"
 )
 
-// svmMockChainFetcher is a minimal ChainFetcher whose CustomMessage returns a
-// canned getLatestBlockhash body. fetchLatestBlockNumInner reaches the chain only
-// through CustomMessage, so the other three methods are inert stubs.
-type svmMockChainFetcher struct {
-	latestBlockhashResponse []byte
-}
-
-func (m *svmMockChainFetcher) CustomMessage(ctx context.Context, path string, data []byte, connectionType string, apiName string) ([]byte, error) {
-	return m.latestBlockhashResponse, nil
-}
-
-func (m *svmMockChainFetcher) FetchLatestBlockNum(ctx context.Context) (int64, error) { return 0, nil }
-
-func (m *svmMockChainFetcher) FetchBlockHashByNum(ctx context.Context, blockNum int64) (string, error) {
-	return "", nil
-}
-
-func (m *svmMockChainFetcher) FetchEndpoint() routersession.RPCProviderEndpoint {
-	return routersession.RPCProviderEndpoint{}
-}
-
-// svmMockDataFetcher stubs IChainTrackerDataFetcher; the slot-vs-block-height
-// assertion does not depend on server memory or the parent's latest block.
-type svmMockDataFetcher struct{}
-
-func (svmMockDataFetcher) GetAtomicLatestBlockNum() int64 { return 0 }
-func (svmMockDataFetcher) GetServerBlockMemory() uint64   { return 0 }
-
-// newTestSVMChainTrackerFromResponse builds a tracker whose CustomMessage returns a canned
-// getLatestBlockhash body (distinct from the observer-fetcher-based helper in
-// svm_chain_tracker_internal_test.go — both files test SVMChainTracker from different angles).
-func newTestSVMChainTrackerFromResponse(t *testing.T, latestBlockhashResponse string) *SVMChainTracker {
+// newTestSVMChainTracker builds an SVMChainTracker over fetcher and data, with the caches the
+// real one starts with, so a test drives its real FetchLatestBlockNum.
+func newTestSVMChainTracker(t *testing.T, fetcher ChainFetcher, data IChainTrackerDataFetcher) *SVMChainTracker {
 	t.Helper()
 	slotCache, err := ristretto.NewCache(&ristretto.Config[int64, int64]{NumCounters: CacheNumCounters, MaxCost: CacheMaxCost, BufferItems: 64, IgnoreInternalCost: true})
 	require.NoError(t, err)
@@ -50,8 +20,8 @@ func newTestSVMChainTrackerFromResponse(t *testing.T, latestBlockhashResponse st
 	return &SVMChainTracker{
 		slotCache:    slotCache,
 		hashCache:    hashCache,
-		dataFetcher:  svmMockDataFetcher{},
-		chainFetcher: &svmMockChainFetcher{latestBlockhashResponse: []byte(latestBlockhashResponse)},
+		dataFetcher:  data,
+		chainFetcher: fetcher,
 	}
 }
 
@@ -75,7 +45,7 @@ func TestSVMChainTracker_TracksSlotNotLastValidBlockHeight(t *testing.T) {
 		response             = `{"jsonrpc":"2.0","id":1,"result":{"context":{"slot":100},"value":{"blockhash":"abc","lastValidBlockHeight":42}}}`
 	)
 
-	tracker := newTestSVMChainTrackerFromResponse(t, response)
+	tracker := newTestSVMChainTracker(t, newFakeFetcher(0).answerCustom(response, nil), fakeDataFetcher{})
 
 	latestBlock, err := tracker.FetchLatestBlockNum(context.Background())
 	require.NoError(t, err)

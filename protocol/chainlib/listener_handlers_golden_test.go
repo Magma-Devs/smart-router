@@ -13,7 +13,6 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -29,41 +28,25 @@ import (
 
 var updateListenerGolden = flag.Bool("update-listener-golden", false, "rewrite testdata/listener_handlers.golden.json")
 
-// scriptedRelay answers every relay with one fixed result and error, and records the arguments
-// the listener handed it: the url, body and connection type, the consumer IP, and the names of the
-// request headers it forwards (the values of most of them vary per connection, so only the golden
-// header's value is kept).
-type scriptedRelay struct {
-	result *common.RelayResult
-	err    error
-
-	mu    sync.Mutex
-	calls []string
-}
-
-func (r *scriptedRelay) SendRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, analytics *metrics.RelayMetrics, metadataValues []pairingtypes.Metadata) (*common.RelayResult, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	names := make([]string, 0, len(metadataValues))
-	goldenHeader := ""
-	for _, md := range metadataValues {
-		names = append(names, md.Name)
-		if md.Name == goldenRequestHeader {
-			goldenHeader = md.Value
+// goldenRelayCalls renders the arguments the listener handed each relay: the url, body and
+// connection type, the consumer IP, and the names of the request headers it forwards (the values
+// of most of them vary per connection, so only the golden header's value is kept).
+func goldenRelayCalls(relay *recordingRelaySender) []string {
+	var calls []string
+	for _, call := range relay.sends() {
+		names := make([]string, 0, len(call.metadata))
+		goldenHeader := ""
+		for _, md := range call.metadata {
+			names = append(names, md.Name)
+			if md.Name == goldenRequestHeader {
+				goldenHeader = md.Value
+			}
 		}
+		sort.Strings(names)
+		calls = append(calls, fmt.Sprintf("url=%q req=%q connectionType=%q consumerIp=%q headers=%s %s=%q",
+			call.url, call.req, call.connectionType, call.consumerIp, strings.Join(names, ","), goldenRequestHeader, goldenHeader))
 	}
-	sort.Strings(names)
-	r.calls = append(r.calls, fmt.Sprintf("url=%q req=%q connectionType=%q consumerIp=%q headers=%s %s=%q",
-		url, req, connectionType, consumerIp, strings.Join(names, ","), goldenRequestHeader, goldenHeader))
-	return r.result, r.err
-}
-
-func (r *scriptedRelay) ParseRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, metadata []pairingtypes.Metadata) (ProtocolMessage, error) {
-	return nil, errors.New("not used")
-}
-
-func (r *scriptedRelay) SendParsedRelay(ctx context.Context, analytics *metrics.RelayMetrics, protocolMessage ProtocolMessage) (*common.RelayResult, error) {
-	return nil, errors.New("not used")
+	return calls
 }
 
 // goldenRequestHeader is a request header every golden request carries, besides the IP-forwarding
@@ -133,16 +116,14 @@ func TestListenerHandlers_Golden(t *testing.T) {
 
 	got := map[string]string{}
 	for _, outcome := range outcomes {
-		relay := &scriptedRelay{result: outcome.result, err: outcome.err}
+		relay := &recordingRelaySender{send: answeringWith(outcome.result, outcome.err)}
 		addrs := map[string]string{}
 		ctx, cancel := context.WithCancel(context.Background())
 		for _, apiInterface := range []string{spectypes.APIInterfaceJsonRPC, spectypes.APIInterfaceTendermintRPC, spectypes.APIInterfaceRest, spectypes.APIInterfaceGraphQL} {
 			addrs[apiInterface] = serveGoldenListener(t, ctx, apiInterface, relay)
 		}
 		for _, req := range requests {
-			relay.mu.Lock()
-			relay.calls = nil
-			relay.mu.Unlock()
+			relay.reset()
 			var body io.Reader
 			if req.body != "" {
 				body = strings.NewReader(req.body)
@@ -169,9 +150,7 @@ func TestListenerHandlers_Golden(t *testing.T) {
 				headerLines = append(headerLines, name+": "+guidPattern.ReplaceAllString(strings.Join(values, ", "), "<GUID>"))
 			}
 			sort.Strings(headerLines)
-			relay.mu.Lock()
-			calls := append([]string(nil), relay.calls...)
-			relay.mu.Unlock()
+			calls := goldenRelayCalls(relay)
 			got[req.name+" / "+outcome.name] = fmt.Sprintf("status %d\nheaders %s\nbody %s\nrelay %s",
 				resp.StatusCode, strings.Join(headerLines, " | "), guidPattern.ReplaceAllString(string(respBody), "<GUID>"), strings.Join(calls, " ; "))
 		}

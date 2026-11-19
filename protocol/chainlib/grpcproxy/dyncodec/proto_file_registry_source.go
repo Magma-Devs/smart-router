@@ -47,15 +47,6 @@ func loadCachedFileRegistry(path string) (*FileDescriptorSetRegistry, error) {
 	return entry.registry, entry.err
 }
 
-// ResetFileRegistryCacheForTest drops every memoized registry. Production never
-// calls this; tests that rewrite a descriptor set at a reused temp path must.
-func ResetFileRegistryCacheForTest() {
-	fileRegistryCache.Range(func(key, _ any) bool {
-		fileRegistryCache.Delete(key)
-		return true
-	})
-}
-
 // sharedFileRegistry adapts a cached registry to ProtoFileRegistry while dropping
 // Close on the floor.
 //

@@ -9,6 +9,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
+	"github.com/magma-Devs/smart-router/protocol/chainlibtest"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
 	"github.com/magma-Devs/smart-router/protocol/qos"
@@ -62,7 +63,7 @@ func TestBlameAtCallSite(t *testing.T) {
 			defer upstream.Close()
 			defer close(release)
 
-			chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(
+			chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(
 				ctx, "LAVA", spectypes.APIInterfaceRest,
 				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }),
 				nil, "../../", nil)
@@ -103,7 +104,7 @@ func TestBlameAtCallSite(t *testing.T) {
 			require.NoError(t, session.SetUsageForSession(0, nil, usedProviders, routersession.NewRouterKey(nil)))
 
 			sm := &budgetCallSiteStateMachine{usedProviders: usedProviders, protocolMessage: protocolMsg}
-			relayProcessor := relaycore.NewRelayProcessor(ctx, nil, cvGuardMetrics{}, cvGuardMetrics{},
+			relayProcessor := relaycore.NewRelayProcessor(ctx, nil, lavaRESTMetrics, lavaRESTMetrics,
 				sm)
 			// The dispatcher reads this to decide, exactly as ProcessRelaySend sets it before the
 			// deferred cancel that releases the goroutines.

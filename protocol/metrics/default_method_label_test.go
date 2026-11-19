@@ -4,23 +4,9 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 )
-
-// newSmartRouterForDefaultLabelTest extends the batch-label test manager with the
-// unmatched-API collaborators, so Default-* normalization admits real names instead
-// of degrading to DefaultMethodOther on a nil registry.
-func newSmartRouterForDefaultLabelTest() *SmartRouterMetricsManager {
-	m := newSmartRouterForBatchLabelTest()
-	m.defaultMethodOverflow = prometheus.NewCounterVec(
-		prometheus.CounterOpts{Name: "t_sr_default_overflow"},
-		[]string{"spec"},
-	)
-	m.defaultMethods = newDefaultMethodRegistry()
-	return m
-}
 
 // defaultName builds a raw unmatched-API method the way chainlib's spec-miss
 // fallthrough does: the Default- prefix glued onto the raw request name.
@@ -38,7 +24,7 @@ func exhaustDefaultBudget(m *SmartRouterMetricsManager, spec string) {
 }
 
 func TestNormalizeMethodLabelLeavesMatchedMethodsAlone(t *testing.T) {
-	m := newSmartRouterForDefaultLabelTest()
+	m := newTestMetricsManager(t)
 
 	// Matched apis — jsonrpc names and templated REST paths — carry no Default-
 	// prefix and must pass through byte-identical.
@@ -48,7 +34,7 @@ func TestNormalizeMethodLabelLeavesMatchedMethodsAlone(t *testing.T) {
 }
 
 func TestNormalizeMethodLabelAdmitsStableDefaultNames(t *testing.T) {
-	m := newSmartRouterForDefaultLabelTest()
+	m := newTestMetricsManager(t)
 
 	// A genuinely-missing spec API produces one stable name. That is the spec-gap
 	// signal the cap exists to preserve, so it must survive normalization.
@@ -58,7 +44,7 @@ func TestNormalizeMethodLabelAdmitsStableDefaultNames(t *testing.T) {
 }
 
 func TestNormalizeMethodLabelCapsDefaultNamesPerSpec(t *testing.T) {
-	m := newSmartRouterForDefaultLabelTest()
+	m := newTestMetricsManager(t)
 
 	// Distinct routes, not a concrete-ID flood: reshaping folds ids into one shape,
 	// so only genuinely different paths can still exhaust a spec's budget.
@@ -77,7 +63,7 @@ func TestNormalizeMethodLabelCapsDefaultNamesPerSpec(t *testing.T) {
 }
 
 func TestNormalizeMethodLabelDefaultBudgetIsPerSpec(t *testing.T) {
-	m := newSmartRouterForDefaultLabelTest()
+	m := newTestMetricsManager(t)
 
 	exhaustDefaultBudget(m, "TEZOS")
 
@@ -90,7 +76,7 @@ func TestNormalizeMethodLabelDefaultBudgetIsPerSpec(t *testing.T) {
 // hazard: relay start and relay end normalize independently, so an unstable mapping
 // would Add one series and Sub another, leaving a gauge stuck above zero forever.
 func TestNormalizeMethodLabelDefaultIsStablePerName(t *testing.T) {
-	m := newSmartRouterForDefaultLabelTest()
+	m := newTestMetricsManager(t)
 	raw := defaultName("cosmos_missing_query")
 
 	first := m.normalizeMethodLabel("OSMOSIS", raw)
@@ -103,7 +89,7 @@ func TestNormalizeMethodLabelDefaultIsStablePerName(t *testing.T) {
 }
 
 func TestNormalizeMethodLabelDefaultOtherIsIdempotent(t *testing.T) {
-	m := newSmartRouterForDefaultLabelTest()
+	m := newTestMetricsManager(t)
 
 	// The collapsed value must pass through without consuming budget or counting
 	// overflow — the public recorders delegate to one another and each normalizes
@@ -203,7 +189,7 @@ func TestDefaultMethodShapeIsIdempotent(t *testing.T) {
 // never binds and the breakdown stays lossless.
 func TestNormalizeMethodLabelShapesBeforeAdmitting(t *testing.T) {
 	t.Parallel()
-	m := newSmartRouterForDefaultLabelTest()
+	m := newTestMetricsManager(t)
 
 	distinct := make(map[string]struct{})
 	for i := range maxDefaultMethodsPerSpec * 100 {
@@ -222,7 +208,7 @@ func TestNormalizeMethodLabelShapesBeforeAdmitting(t *testing.T) {
 // A label value must be valid UTF-8. A name that is not collapses into the overflow bucket
 // of its kind before admission.
 func TestNormalizeMethodLabelCollapsesNamesThatAreNotUTF8(t *testing.T) {
-	m := newSmartRouterForDefaultLabelTest()
+	m := newTestMetricsManager(t)
 
 	single := defaultName("/x/\xff")
 	require.Equal(t, DefaultMethodOther, m.normalizeMethodLabel("LAV1", single))
@@ -240,7 +226,7 @@ func TestNormalizeMethodLabelCollapsesNamesThatAreNotUTF8(t *testing.T) {
 // Every recorder that takes a method label goes through normalizeMethodLabel, so a name
 // that is not UTF-8 reaches no WithLabelValues call.
 func TestMethodRecordersTakeANameThatIsNotUTF8(t *testing.T) {
-	m := NewSmartRouterMetricsManager(SmartRouterMetricsManagerOptions{})
+	m := newTestMetricsManager(t)
 	name := defaultName("/x/\xff")
 	require.NotPanics(t, func() {
 		m.RecordDirectRelayStart("LAV1", "rest", "ep-utf8", name)

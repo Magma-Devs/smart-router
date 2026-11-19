@@ -11,6 +11,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
+	"github.com/magma-Devs/smart-router/protocol/chainlibtest"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/endpointtip"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
@@ -109,7 +110,7 @@ func TestDataScopeAnswerScoresSyncOnly(t *testing.T) {
 			seedEndpointTip("ETH1", "jsonrpc", upstream.URL, 700)
 			t.Cleanup(func() { endpointtip.Default().Remove(endpointtip.Key("ETH1", "jsonrpc", upstream.URL)) })
 
-			chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(
+			chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(
 				ctx, "ETH1", spectypes.APIInterfaceJsonRPC,
 				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }),
 				nil, "../../", nil)
@@ -163,7 +164,7 @@ func TestDataScopeAnswerScoresSyncOnly(t *testing.T) {
 			}
 
 			sm := &budgetCallSiteStateMachine{usedProviders: usedProviders, protocolMessage: protocolMsg}
-			relayProcessor := relaycore.NewRelayProcessor(ctx, nil, cvGuardMetrics{}, cvGuardMetrics{}, sm)
+			relayProcessor := relaycore.NewRelayProcessor(ctx, nil, lavaRESTMetrics, lavaRESTMetrics, sm)
 			require.NoError(t, rpcss.sendRelayToDirectEndpoints(ctx, sessions, protocolMsg, relayProcessor, nil, nil, common.CacheLookupReport{}))
 
 			waitCtx, cancelWait := context.WithTimeout(ctx, 5*time.Second)

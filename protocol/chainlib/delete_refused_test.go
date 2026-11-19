@@ -46,7 +46,7 @@ func TestListeners_ADeleteIsRefused(t *testing.T) {
 	paths := []string{"/", "/some/other/path", "/status", "/ws", "/websocket", common.DEFAULT_HEALTH_PATH}
 
 	for _, apiInterface := range []string{spectypes.APIInterfaceJsonRPC, spectypes.APIInterfaceTendermintRPC} {
-		relay := &scriptedRelay{}
+		relay := &recordingRelaySender{send: answeringWith(nil, nil)}
 		addr := serveGoldenListener(t, ctx, apiInterface, relay)
 		for _, path := range paths {
 			t.Run(apiInterface+" "+path, func(t *testing.T) {
@@ -75,9 +75,7 @@ func TestListeners_ADeleteIsRefused(t *testing.T) {
 					require.Equal(t, putBody, body)
 				}
 
-				relay.mu.Lock()
-				calls := len(relay.calls)
-				relay.mu.Unlock()
+				calls := len(relay.sends())
 				require.Zero(t, calls, "nothing is relayed")
 
 				optionsStatus, _, _ := send(t, http.MethodOptions, "http://"+addr+path)

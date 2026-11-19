@@ -14,19 +14,17 @@ package performance_test
 
 import (
 	"context"
-	"net"
 	"testing"
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
-	"github.com/magma-Devs/smart-router/ecosystem/cache"
 	"github.com/magma-Devs/smart-router/ecosystem/cache/core"
 	"github.com/magma-Devs/smart-router/ecosystem/cache/redisstore"
+	"github.com/magma-Devs/smart-router/internal/testutil/cachetest"
 	"github.com/magma-Devs/smart-router/protocol/performance"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/grpc"
 )
 
 // ttlBackend couples a backend with a way to advance time past a TTL.
@@ -44,27 +42,9 @@ const (
 
 func newGRPCTTLBackend(t *testing.T) ttlBackend {
 	t.Helper()
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-
-	cs := &cache.CacheServer{CacheMaxCost: 1 << 20}
-	// (expiration, nonFinalized, nodeErrorsOnFinalized, blocksHashesToHeights,
-	//  metricsAddr, finalizedMult, nonFinalizedMult)
-	cs.InitCache(ctx, parityFinalizedTTL, time.Minute, parityNodeErrTTL, time.Hour, "disabled", 1, 1)
-
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	grpcServer := grpc.NewServer()
-	pairingtypes.RegisterRelayerCacheServer(grpcServer, &cache.RelayerCacheServer{CacheServer: cs})
-	go func() { _ = grpcServer.Serve(lis) }()
-	t.Cleanup(grpcServer.Stop)
-
-	client, err := performance.InitCache(context.Background(), lis.Addr().String())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = client.Close() })
-
+	server := cachetest.NewServer(t, cachetest.TTLs{Finalized: parityFinalizedTTL, NonFinalized: time.Minute, NodeErrors: parityNodeErrTTL})
 	return ttlBackend{
-		backend: client,
+		backend: cachetest.Serve(t, server),
 		// ristretto expires on real time; a small margin over the configured
 		// TTL is deterministic enough because the TTL is a floor, not a race.
 		advance: func(d time.Duration) { time.Sleep(d + 150*time.Millisecond) },

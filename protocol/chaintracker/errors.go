@@ -5,11 +5,7 @@ import "errors"
 var ( // Consumer Side Errors
 	InvalidConfigErrorBlocksToSave  = errors.New("blocks to save wasn't defined in config")
 	InvalidConfigBlockTime          = errors.New("average block time wasn't defined in config")
-	InvalidLatestBlockNumValue      = errors.New("returned latest block num should be greater than 0, but it's not")
-	InvalidRequestedBlocks          = errors.New("provided requested blocks for function do not compose a valid request")
-	RequestedBlocksOutOfRange       = errors.New("requested blocks are outside the supported range by the state tracker")
 	ErrorFailedToFetchTooEarlyBlock = errors.New("server memory protection triggered, requested block is too early")
-	InvalidRequestedSpecificBlock   = errors.New("provided requested specific blocks for function do not compose a stored entry")
 	// ErrorPollNowNotDelivered means a PollNow request was never taken by the poll goroutine before
 	// the caller's context expired — the tracker is still starting, is retrying its init, or has
 	// stopped. No poll ran and no observation was written (MAG-2649).

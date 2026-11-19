@@ -19,6 +19,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
+	"github.com/magma-Devs/smart-router/protocol/chainlibtest/fixture"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
@@ -42,7 +43,7 @@ func xrplSubmitMessage(t *testing.T) chainlib.ChainMessage {
 	t.Helper()
 	chainParser, err := chainlib.NewChainParser(spectypes.APIInterfaceJsonRPC)
 	require.NoError(t, err)
-	chainParser.SetSpec(chainlib.CreateMockXRPLSpec("XRPT"))
+	chainParser.SetSpec(fixture.CreateMockXRPLSpec("XRPT"))
 	chainMessage, err := chainParser.ParseMsg("", []byte(xrplSubmitRequest), http.MethodPost, nil, extensionslib.ExtensionInfo{})
 	require.NoError(t, err)
 	return chainMessage
@@ -123,7 +124,7 @@ func startXRPLRouter(t *testing.T, ctx context.Context, upstreams map[string]str
 
 	chainParser, err := chainlib.NewChainParser(spectypes.APIInterfaceJsonRPC)
 	require.NoError(t, err)
-	chainParser.SetSpec(chainlib.CreateMockXRPLSpec("XRPT"))
+	chainParser.SetSpec(fixture.CreateMockXRPLSpec("XRPT"))
 	logs, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
 	require.NoError(t, err)
 	server := &RPCSmartRouterServer{

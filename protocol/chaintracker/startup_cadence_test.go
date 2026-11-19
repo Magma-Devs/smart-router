@@ -1,62 +1,36 @@
-package chaintracker_test
+package chaintracker
 
 import (
 	"context"
 	"fmt"
-	"sync"
 	"testing"
 	"time"
 
-	"github.com/magma-Devs/smart-router/protocol/chaintracker"
 	"github.com/stretchr/testify/require"
 )
 
-// recordingFetcher wraps MockChainFetcher to timestamp every FetchLatestBlockNum call and
-// optionally inject latency / failures on the initial calls. It lets the startup-cadence
-// tests assert timing around the REAL StartAndServe path (MAG-2159 finding 3), not just
-// computePollInterval.
-type recordingFetcher struct {
-	*MockChainFetcher
-
-	mu         sync.Mutex
-	calls      []time.Time
-	initDelay  time.Duration // applied to the 1st FetchLatestBlockNum call (simulates slow init)
-	failFirstN int           // the first N FetchLatestBlockNum calls return an error
-}
-
-func (f *recordingFetcher) FetchLatestBlockNum(ctx context.Context) (int64, error) {
-	f.mu.Lock()
-	f.calls = append(f.calls, time.Now())
-	n := len(f.calls)
-	f.mu.Unlock()
-
-	if n == 1 && f.initDelay > 0 {
-		select {
-		case <-time.After(f.initDelay):
-		case <-ctx.Done():
-			return 0, ctx.Err()
+// newStartupFetcher is a one-block fetcher whose first head fetch takes initDelay, as a slow init
+// does, and whose first failFirstN head fetches fail. The fetcher timestamps every head fetch,
+// which lets the startup-cadence tests assert timing around the REAL StartAndServe path (MAG-2159
+// finding 3), not just computePollInterval.
+func newStartupFetcher(initDelay time.Duration, failFirstN int) *fakeFetcher {
+	f := newWindowedFetcher(1000, 1, nil)
+	f.latest = func(ctx context.Context, call int) (int64, error) {
+		if call == 1 && initDelay > 0 {
+			if err := sleepCtx(ctx, initDelay); err != nil {
+				return 0, err
+			}
 		}
+		if call <= failFirstN {
+			return 0, fmt.Errorf("induced init failure %d", call)
+		}
+		return f.headBlock(), nil
 	}
-	if n <= f.failFirstN {
-		return 0, fmt.Errorf("induced init failure %d", n)
-	}
-	return f.MockChainFetcher.FetchLatestBlockNum(ctx)
+	return f
 }
 
-func (f *recordingFetcher) callCount() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return len(f.calls)
-}
-
-func (f *recordingFetcher) callAt(i int) time.Time {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.calls[i]
-}
-
-func flatTrackerConfig(flat time.Duration) chaintracker.ChainTrackerConfig {
-	return chaintracker.ChainTrackerConfig{
+func flatTrackerConfig(flat time.Duration) ChainTrackerConfig {
+	return ChainTrackerConfig{
 		BlocksToSave:          1,
 		AverageBlockTime:      2 * flat, // flat == avgBlockTime/2, as EndpointMonitor sets it
 		ServerBlockMemory:     100,
@@ -74,21 +48,21 @@ func TestChainTracker_FlatCadence_StartupRespectsInterval(t *testing.T) {
 	const flat = 120 * time.Millisecond
 	const initDelay = 120 * time.Millisecond
 
-	f := &recordingFetcher{MockChainFetcher: NewMockChainFetcher(1000, 1, nil), initDelay: initDelay}
+	f := newStartupFetcher(initDelay, 0)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ct, err := chaintracker.NewChainTracker(ctx, f, flatTrackerConfig(flat))
+	ct, err := NewChainTracker(ctx, f, flatTrackerConfig(flat))
 	require.NoError(t, err)
 	go ct.StartAndServe(ctx)
 
-	require.Eventually(t, func() bool { return f.callCount() >= 2 }, 3*time.Second, 5*time.Millisecond,
+	require.Eventually(t, func() bool { return f.latestCalls() >= 2 }, 3*time.Second, 5*time.Millisecond,
 		"expected an init fetch and a first periodic fetch")
 	cancel()
 
 	// call[0] starts at t0 and returns ~t0+initDelay (init). call[1] is the first periodic
 	// poll. Fixed: t1-t0 ≥ initDelay + flat. Buggy (timer before init): t1-t0 ≈ initDelay.
-	gap := f.callAt(1).Sub(f.callAt(0))
+	gap := f.latestCallAt(1).Sub(f.latestCallAt(0))
 	require.GreaterOrEqual(t, gap, initDelay+flat*8/10,
 		"first periodic poll must be ~one interval after init completes, not during/right after init")
 }
@@ -102,17 +76,17 @@ func TestChainTracker_FlatCadence_StartupRespectsInterval(t *testing.T) {
 func TestChainTracker_FlatCadence_FirstPollWaitsTheCappedInterval(t *testing.T) {
 	for _, flat := range []time.Duration{
 		40 * time.Millisecond,
-		chaintracker.BACKOFF_MAX_TIME,
+		BACKOFF_MAX_TIME,
 		75 * time.Second,
 		5 * time.Minute,
 		40 * time.Minute,
 	} {
 		ctx, cancel := context.WithCancel(context.Background())
-		f := &recordingFetcher{MockChainFetcher: NewMockChainFetcher(1000, 1, nil)}
-		ct, err := chaintracker.NewChainTracker(ctx, f, flatTrackerConfig(flat))
+		f := newStartupFetcher(0, 0)
+		ct, err := NewChainTracker(ctx, f, flatTrackerConfig(flat))
 		require.NoError(t, err)
 		require.NoError(t, ct.StartAndServe(ctx))
-		require.Equal(t, min(flat, chaintracker.BACKOFF_MAX_TIME), ct.CurrentPollInterval(), "flat interval %v", flat)
+		require.Equal(t, min(flat, BACKOFF_MAX_TIME), ct.CurrentPollInterval(), "flat interval %v", flat)
 		cancel()
 	}
 }
@@ -123,21 +97,21 @@ func TestChainTracker_FlatCadence_FailedInitRetriesAreSpaced(t *testing.T) {
 	const flat = 80 * time.Millisecond
 
 	// First two latest-block fetches fail, third succeeds.
-	f := &recordingFetcher{MockChainFetcher: NewMockChainFetcher(1000, 1, nil), failFirstN: 2}
+	f := newStartupFetcher(0, 2)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ct, err := chaintracker.NewChainTracker(ctx, f, flatTrackerConfig(flat))
+	ct, err := NewChainTracker(ctx, f, flatTrackerConfig(flat))
 	require.NoError(t, err)
 	go ct.StartAndServe(ctx)
 
-	require.Eventually(t, func() bool { return f.callCount() >= 3 }, 3*time.Second, 5*time.Millisecond,
+	require.Eventually(t, func() bool { return f.latestCalls() >= 3 }, 3*time.Second, 5*time.Millisecond,
 		"expected two failed init fetches and a successful one")
 	cancel()
 
-	require.GreaterOrEqual(t, f.callAt(1).Sub(f.callAt(0)), flat*8/10,
+	require.GreaterOrEqual(t, f.latestCallAt(1).Sub(f.latestCallAt(0)), flat*8/10,
 		"failed init retry #1 must be spaced by ~the flat interval")
-	require.GreaterOrEqual(t, f.callAt(2).Sub(f.callAt(1)), flat*8/10,
+	require.GreaterOrEqual(t, f.latestCallAt(2).Sub(f.latestCallAt(1)), flat*8/10,
 		"failed init retry #2 must be spaced by ~the flat interval")
 }
 
@@ -147,10 +121,10 @@ func TestChainTracker_FlatCadence_InitCancellationIsPrompt(t *testing.T) {
 	const flat = 2 * time.Second // long, so a non-cancellable sleep would hang the test
 
 	// Always fail init, so it would otherwise sleep `flat` between retries.
-	f := &recordingFetcher{MockChainFetcher: NewMockChainFetcher(1000, 1, nil), failFirstN: 100}
+	f := newStartupFetcher(0, 100)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	ct, err := chaintracker.NewChainTracker(ctx, f, flatTrackerConfig(flat))
+	ct, err := NewChainTracker(ctx, f, flatTrackerConfig(flat))
 	require.NoError(t, err)
 
 	done := make(chan struct{})
@@ -160,7 +134,7 @@ func TestChainTracker_FlatCadence_InitCancellationIsPrompt(t *testing.T) {
 	}()
 
 	// Let the first init fetch happen and enter the retry delay, then cancel.
-	require.Eventually(t, func() bool { return f.callCount() >= 1 }, time.Second, 5*time.Millisecond)
+	require.Eventually(t, func() bool { return f.latestCalls() >= 1 }, time.Second, 5*time.Millisecond)
 	cancel()
 
 	select {

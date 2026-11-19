@@ -592,7 +592,7 @@ func relayEndWriteUnknownCode(cause error, attempts relayEndAttempts, ranOutOfRo
 		return common.RouterErrorContextDeadline.Name
 	}
 	// Only a transport error can leave a write unsettled; a node's reply settles its upstream, as in
-	// writeOutcomeIsUnknown.
+	// unclearWriteOutcomeFor.
 	for i := range attempts {
 		if attempts[i].transport && attempts[i].routerError != nil && attempts[i].routerError.MayHaveReachedNode {
 			return attempts[i].errorCode

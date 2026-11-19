@@ -566,56 +566,6 @@ func TestJsonRPC_SpecUpdateWithExtensions(t *testing.T) {
 	require.False(t, isExtensionConfigured())
 }
 
-func TestJsonRPCChainListener_Shutdown_DrainsWSWaitGroup(t *testing.T) {
-	listener := &JsonRPCChainListener{}
-	listener.wsWG.Add(1)
-
-	// Goroutine that simulates a WS connection that drains within the timeout.
-	go func() {
-		time.Sleep(100 * time.Millisecond)
-		listener.wsWG.Done()
-	}()
-
-	start := time.Now()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	require.NoError(t, listener.Shutdown(ctx))
-	elapsed := time.Since(start)
-
-	// Should have waited ~100ms for the WG, not the full 2s timeout.
-	require.GreaterOrEqual(t, elapsed, 100*time.Millisecond)
-	require.Less(t, elapsed, 1*time.Second)
-}
-
-func TestJsonRPCChainListener_Shutdown_RespectsContextDeadline(t *testing.T) {
-	listener := &JsonRPCChainListener{}
-	listener.wsWG.Add(1) // never call Done — simulates a stuck WS goroutine
-
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	defer cancel()
-
-	start := time.Now()
-	err := listener.Shutdown(ctx)
-	elapsed := time.Since(start)
-
-	// Should return roughly when ctx deadline fires, not hang.
-	require.Less(t, elapsed, 1*time.Second)
-	// Shutdown propagates ctx error from app.ShutdownWithContext or returns it directly.
-	// Either nil (Fiber considered the empty server idle) or a context error is acceptable;
-	// the key assertion is that we did NOT hang.
-	_ = err
-
-	// Drain the WG so the test doesn't leak the goroutine reference.
-	listener.wsWG.Done()
-}
-
-func TestJsonRPCChainListener_Shutdown_NilApp(t *testing.T) {
-	listener := &JsonRPCChainListener{}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	require.NoError(t, listener.Shutdown(ctx))
-}
-
 // startTestJsonRPCListener spins up a JsonRPCChainListener bound to 127.0.0.1:0
 // and returns the listener plus its dynamic address once Serve is ready.
 func startTestJsonRPCListener(t *testing.T, ctx context.Context, slowHandler bool) (*JsonRPCChainListener, string) {
@@ -901,21 +851,13 @@ type plainRelayMessage struct {
 
 func (plainRelayMessage) GetParseDirective() *spectypes.ParseDirective { return nil }
 
-const wsRelayStubReply = `{"jsonrpc":"2.0","id":1,"result":"0x1"}`
-
-// wsRelayStub is the slice of RelaySender a normal websocket relay uses.
-type wsRelayStub struct{}
-
-func (wsRelayStub) SendRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, analytics *metrics.RelayMetrics, metadataValues []pairingtypes.Metadata) (*common.RelayResult, error) {
-	return nil, errors.New("not used")
-}
-
-func (wsRelayStub) ParseRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, metadata []pairingtypes.Metadata) (ProtocolMessage, error) {
-	return plainRelayMessage{}, nil
-}
-
-func (wsRelayStub) SendParsedRelay(ctx context.Context, analytics *metrics.RelayMetrics, protocolMessage ProtocolMessage) (*common.RelayResult, error) {
-	return &common.RelayResult{Reply: &pairingtypes.RelayReply{Data: []byte(wsRelayStubReply)}, StatusCode: http.StatusOK}, nil
+// newWSRelay parses every websocket frame as a plain relay and answers it with
+// jsonRPCResultReply.
+func newWSRelay() *recordingRelaySender {
+	return &recordingRelaySender{
+		parse:      func(relayCall) (ProtocolMessage, error) { return plainRelayMessage{}, nil },
+		sendParsed: answering(jsonRPCResultReply),
+	}
 }
 
 // MAG-4055: a websocket relay's relay_usage event carries the Origin the client
@@ -935,7 +877,7 @@ func TestJsonRPCChainListener_WebsocketRelayUsageCarriesOrigin(t *testing.T) {
 			sink := &usageCaptureSink{events: make(chan metrics.RelayUsageEvent, 8)}
 			logger, err := metrics.NewRPCConsumerLogs(nil, sink, nil)
 			require.NoError(t, err)
-			listener, addr := startTestJsonRPCListenerWithOptions(t, serveCtx, common.DEFAULT_HEALTH_PATH, wsRelayStub{}, logger)
+			listener, addr := startTestJsonRPCListenerWithOptions(t, serveCtx, common.DEFAULT_HEALTH_PATH, newWSRelay(), logger)
 			t.Cleanup(func() {
 				shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancelShutdown()
@@ -950,7 +892,7 @@ func TestJsonRPCChainListener_WebsocketRelayUsageCarriesOrigin(t *testing.T) {
 			_ = client.SetReadDeadline(time.Now().Add(3 * time.Second))
 			_, reply, err := client.ReadMessage()
 			require.NoError(t, err)
-			require.JSONEq(t, wsRelayStubReply, string(reply))
+			require.JSONEq(t, jsonRPCResultReply, string(reply))
 
 			select {
 			case event := <-sink.events:
@@ -989,11 +931,11 @@ func (subscribeRelayMessage) GetRPCMessage() rpcInterfaceMessages.GenericMessage
 	return &rpcInterfaceMessages.JsonrpcMessage{}
 }
 
-// wsSubscribeStub parses every websocket message as an eth_subscribe.
-type wsSubscribeStub struct{ wsRelayStub }
-
-func (wsSubscribeStub) ParseRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, metadata []pairingtypes.Metadata) (ProtocolMessage, error) {
-	return subscribeRelayMessage{}, nil
+// newWSSubscribeRelay parses every websocket message as an eth_subscribe.
+func newWSSubscribeRelay() *recordingRelaySender {
+	relay := newWSRelay()
+	relay.parse = func(relayCall) (ProtocolMessage, error) { return subscribeRelayMessage{}, nil }
+	return relay
 }
 
 // failingSubscriptions refuses every subscribe.
@@ -1019,7 +961,7 @@ func TestJsonRPCChainListener_FailedWebsocketSubscribeIsCounted(t *testing.T) {
 	sink := &usageCaptureSink{events: make(chan metrics.RelayUsageEvent, 8)}
 	logger, err := metrics.NewRPCConsumerLogs(nil, sink, nil)
 	require.NoError(t, err)
-	listener, addr := startTestJsonRPCListenerWithSubscriptions(t, serveCtx, common.DEFAULT_HEALTH_PATH, wsSubscribeStub{}, logger, failingSubscriptions{})
+	listener, addr := startTestJsonRPCListenerWithSubscriptions(t, serveCtx, common.DEFAULT_HEALTH_PATH, newWSSubscribeRelay(), logger, failingSubscriptions{})
 	t.Cleanup(func() {
 		shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancelShutdown()

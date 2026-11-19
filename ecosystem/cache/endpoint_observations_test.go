@@ -156,3 +156,9 @@ func TestEndpointObservationWireTypes_RoundTrip(t *testing.T) {
 	require.NoError(t, replyBack.Unmarshal(b))
 	require.Equal(t, *reply, replyBack)
 }
+
+func (m *expiringMap[V]) len() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.byKey)
+}

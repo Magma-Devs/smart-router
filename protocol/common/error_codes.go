@@ -390,7 +390,7 @@ var (
 	// MayHaveReachedNode is true because the node answered: the already-finalized case means a
 	// transaction answered with ABORTED can be on chain. It does not decide a write's verdict
 	// here. A gRPC status error comes back as a node error carrying the node's own message, and
-	// writeOutcomeIsUnknown reads this flag only from protocol errors, so the caller gets Sui's
+	// unclearWriteOutcomeFor reads this flag only from protocol errors, so the caller gets Sui's
 	// ABORTED answer, with its "retriable with another submission" text, rather than a "transaction
 	// status unclear" error (unclearWriteError).
 	//

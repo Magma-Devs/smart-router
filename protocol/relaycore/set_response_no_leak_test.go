@@ -8,6 +8,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
+	"github.com/magma-Devs/smart-router/protocol/chainlibtest"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
@@ -24,7 +25,7 @@ import (
 func newProcessorForLeakTest(t *testing.T, ctx context.Context, selection Selection) *RelayProcessor {
 	t.Helper()
 	serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
-	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(context.Background(), "LAVA", spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
+	chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(context.Background(), "LAVA", spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		if closeServer != nil {

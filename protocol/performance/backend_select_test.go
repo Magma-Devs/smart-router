@@ -200,7 +200,7 @@ func TestSelectBackendGRPCKeyPrefix(t *testing.T) {
 // reported by the other line.
 func TestSelectBackendWarnsWhenTheGRPCPrefixIsOutranked(t *testing.T) {
 	mr := miniredis.RunT(t)
-	logged := captureLog(t, func() {
+	logged := logSink.Capture(t, func() {
 		selectBackend(t, fmt.Sprintf("resp-cache:\n  addresses: [%q]\n  key-prefix: in-force\ncache-be: \"127.0.0.1:1\"\ncache-be-key-prefix: outranked\n", mr.Addr()))
 	})
 	require.Contains(t, logged, "takes precedence, so the gRPC prefix scopes nothing")
@@ -208,7 +208,7 @@ func TestSelectBackendWarnsWhenTheGRPCPrefixIsOutranked(t *testing.T) {
 	require.Contains(t, logged, `"resp-cache-key-prefix":"in-force"`)
 	require.NotContains(t, logged, "dangling configuration, it scopes nothing", "the outranked shape is not the dangling one")
 
-	logged = captureLog(t, func() {
+	logged = logSink.Capture(t, func() {
 		selectBackend(t, "cache-be-key-prefix: dangling\n")
 	})
 	require.Contains(t, logged, "dangling configuration, it scopes nothing")
@@ -235,7 +235,7 @@ resp-cache:
 %s`, mr.Addr(), tlsLines)
 	}
 
-	plaintext := captureLog(t, func() {
+	plaintext := logSink.Capture(t, func() {
 		backend := selectBackend(t, block(""))
 		require.True(t, backend.CacheActive())
 		require.NoError(t, backend.Close())
@@ -248,14 +248,14 @@ resp-cache:
 	// Control: the same credentials under TLS. The handshake fails against the
 	// plaintext server, so the probe logs its own failure while the cache lives;
 	// closing inside the capture keeps that to this capture.
-	encrypted := captureLog(t, func() {
+	encrypted := logSink.Capture(t, func() {
 		backend := selectBackend(t, block("  tls:\n    enabled: true\n"))
 		require.NoError(t, backend.Close())
 	})
 	require.NotContains(t, encrypted, warning, "with tls on the credentials do not cross readable, so nothing to warn about")
 
 	// Control: no credentials at all.
-	anonymous := captureLog(t, func() {
+	anonymous := logSink.Capture(t, func() {
 		backend := selectBackend(t, fmt.Sprintf("\nresp-cache:\n  addresses: [%q]\n", mr.Addr()))
 		require.NoError(t, backend.Close())
 	})
@@ -270,7 +270,7 @@ resp-cache:
 func TestSelectBackendLogsTheResolvedTopology(t *testing.T) {
 	mr := miniredis.RunT(t)
 	var backend performance.CacheBackend
-	logged := captureLog(t, func() {
+	logged := logSink.Capture(t, func() {
 		backend = selectBackend(t, fmt.Sprintf(`
 resp-cache:
   addresses: [%q]
@@ -303,7 +303,7 @@ resp-cache:
 	}
 
 	var insecure performance.CacheBackend
-	logged := captureLog(t, func() { insecure = selectBackend(t, block(true)) })
+	logged := logSink.Capture(t, func() { insecure = selectBackend(t, block(true)) })
 	require.Contains(t, logged, "insecure-skip-verify is set", "the setting must be named at startup")
 	require.Contains(t, logged, `"level":"warn"`)
 	require.Contains(t, logged, `"tls-insecure-skip-verify":"true"`, "and carried on the configured line beside the tls switch")
@@ -316,7 +316,7 @@ resp-cache:
 	// cache's startup (Codex review of #402).
 	require.NoError(t, insecure.Close())
 
-	quiet := captureLog(t, func() { _ = selectBackend(t, block(false)) })
+	quiet := logSink.Capture(t, func() { _ = selectBackend(t, block(false)) })
 	require.NotContains(t, quiet, "insecure-skip-verify is set", "a verifying configuration is not warned about")
 	require.Contains(t, quiet, `"tls-insecure-skip-verify":"false"`)
 }

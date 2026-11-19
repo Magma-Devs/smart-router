@@ -10,6 +10,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
+	"github.com/magma-Devs/smart-router/protocol/chainlibtest"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
 	"github.com/magma-Devs/smart-router/protocol/qos"
@@ -48,7 +49,7 @@ func startQuietGroupRequest(t *testing.T, budget, window time.Duration, nodeGrou
 	const agreementThreshold = 2
 	ctx := context.Background()
 	noop := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
-	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, "ETH1", spectypes.APIInterfaceJsonRPC, noop, nil, "../../", nil)
+	chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, "ETH1", spectypes.APIInterfaceJsonRPC, noop, nil, "../../", nil)
 	if closeServer != nil {
 		t.Cleanup(closeServer)
 	}
@@ -263,7 +264,7 @@ func TestSendRelayToDirectEndpoints_RecordsTheCrossValidationGroupLayout(t *test
 			t.Cleanup(releaseHanging) // runs before hanging.Close, which waits for the handler
 
 			noopHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
-			chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(
+			chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(
 				ctx, "LAVA", spectypes.APIInterfaceRest, noopHandler, nil, "../../", nil)
 			if closeServer != nil {
 				t.Cleanup(closeServer)
@@ -321,7 +322,7 @@ func TestSendRelayToDirectEndpoints_RecordsTheCrossValidationGroupLayout(t *test
 				budgetCallSiteStateMachine: budgetCallSiteStateMachine{usedProviders: usedProviders, protocolMessage: protocolMsg},
 				cvParams:                   cvParams,
 			}
-			metricsStub := cvGuardMetrics{}
+			metricsStub := lavaRESTMetrics
 			relayProcessor := relaycore.NewRelayProcessor(ctx, cvParams, metricsStub, metricsStub, sm)
 
 			rpcEndpoint := &routersession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "rest"}

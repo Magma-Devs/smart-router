@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/magma-Devs/smart-router/protocol/chainlibtest"
+
 	"github.com/stretchr/testify/require"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
@@ -152,7 +154,7 @@ func TestDebugRelayAnswers_AnUnlistedRestPathIsWithheld(t *testing.T) {
 	rand.InitRandomSeed()
 	useRelayAnswerRecording(t)
 	noop := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
-	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(context.Background(), "COSMOSHUB", spectypes.APIInterfaceRest, noop, nil, "../../", nil)
+	chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(context.Background(), "COSMOSHUB", spectypes.APIInterfaceRest, noop, nil, "../../", nil)
 	if closeServer != nil {
 		t.Cleanup(closeServer)
 	}
@@ -178,7 +180,7 @@ func TestDebugRelayAnswers_AnUnlistedMethodIsCapped(t *testing.T) {
 	rand.InitRandomSeed()
 	useRelayAnswerRecording(t)
 	noop := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
-	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(context.Background(), "LAVA", spectypes.APIInterfaceTendermintRPC, noop, nil, "../../", nil)
+	chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(context.Background(), "LAVA", spectypes.APIInterfaceTendermintRPC, noop, nil, "../../", nil)
 	if closeServer != nil {
 		t.Cleanup(closeServer)
 	}

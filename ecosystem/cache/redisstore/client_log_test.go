@@ -31,7 +31,7 @@ func TestClientLoggerLimitsFailureLinesPerKind(t *testing.T) {
 	const dialFailed = "redis: connection pool: failed to dial after %d attempts: %v"
 	const askFailed = "sentinel: GetMasterAddrByName name=%q failed: %s"
 
-	logged := captureLog(t, func() {
+	logged := logSink.Capture(t, func() {
 		for range 5 {
 			logger.Printf(context.Background(), dialFailed, 1, "i/o timeout")
 		}
@@ -58,7 +58,7 @@ func TestClientLoggerLimitsFailureLinesPerKind(t *testing.T) {
 func TestClientLoggerPrintsEveryStateChange(t *testing.T) {
 	logger := &clientLogger{now: time.Now}
 
-	logged := captureLog(t, func() {
+	logged := logSink.Capture(t, func() {
 		logger.Printf(context.Background(), "sentinel: new master=%q addr=%q", "mymaster", "10.0.0.1:6379")
 		logger.Printf(context.Background(), "sentinel: new master=%q addr=%q", "mymaster", "10.0.0.2:6379")
 	})

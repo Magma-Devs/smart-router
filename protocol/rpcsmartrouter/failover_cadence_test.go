@@ -8,6 +8,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
+	"github.com/magma-Devs/smart-router/protocol/chainlibtest"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	"github.com/magma-Devs/smart-router/protocol/relaycoretest"
@@ -28,7 +29,7 @@ func TestFailoverCadence_NextEndpointDispatchedAfterOneWindow(t *testing.T) {
 	const window = 300 * time.Millisecond
 
 	ctx := context.Background()
-	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(
+	chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(
 		ctx, "LAVA", spectypes.APIInterfaceRest,
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }),
 		nil, "../../", nil)

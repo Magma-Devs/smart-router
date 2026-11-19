@@ -15,6 +15,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
+	"github.com/magma-Devs/smart-router/protocol/chainlibtest"
 	"github.com/magma-Devs/smart-router/protocol/chainstate"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/endpointtip"
@@ -656,7 +657,7 @@ func TestAppendHeadersToRelayResult_MismatchMetric(t *testing.T) {
 	require.NotNil(t, mm)
 
 	noop := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
-	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, "ETH1", spectypes.APIInterfaceJsonRPC, noop, nil, "../../", nil)
+	chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, "ETH1", spectypes.APIInterfaceJsonRPC, noop, nil, "../../", nil)
 	if closeServer != nil {
 		defer closeServer()
 	}
@@ -774,7 +775,7 @@ func TestWatchCrossValidationStragglers_LauncherGlue(t *testing.T) {
 	mm := metrics.NewSmartRouterMetricsManager(metrics.SmartRouterMetricsManagerOptions{})
 	require.NotNil(t, mm)
 	noop := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
-	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, "ETH1", spectypes.APIInterfaceJsonRPC, noop, nil, "../../", nil)
+	chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, "ETH1", spectypes.APIInterfaceJsonRPC, noop, nil, "../../", nil)
 	if closeServer != nil {
 		defer closeServer()
 	}
@@ -3243,15 +3244,9 @@ func (m *cvGuardStateMachine) GetCrossValidationParams() *common.CrossValidation
 func (m *cvGuardStateMachine) GetUsedProviders() *routersession.UsedProviders   { return m.usedProviders }
 func (m *cvGuardStateMachine) SetResultsChecker(rc relaycore.ResultsCheckerInf) {}
 
-// cvGuardMetrics is a no-op MetricsInterface + ChainIdAndApiInterfaceGetter
-// for the CV-guard test. The early-exit path does not hit metrics callbacks.
-type cvGuardMetrics struct{}
-
-func (cvGuardMetrics) SetRelayNodeErrorMetric(chainId, apiInterface, providerAddress, method string) {
-}
-func (cvGuardMetrics) SetRelayNodeResultMetric(chainId, apiInterface, providerAddress, method string) {
-}
-func (cvGuardMetrics) GetChainIdAndApiInterface() (string, string) { return "LAVA", "rest" }
+// lavaRESTMetrics is a no-op MetricsInterface + ChainIdAndApiInterfaceGetter for the relay
+// processors these tests build by hand, on LAVA's REST interface.
+var lavaRESTMetrics = &relaycoretest.RelayProcessorMetricsMock{ChainID: "LAVA", APIInterface: "rest"}
 
 // TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesAllSessions is the
 // regression catch for commit 97266e4. When filterEndpointsByConsistency drops
@@ -3276,7 +3271,7 @@ func TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesAllSessions(t *t
 	noopHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(
+	chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(
 		ctx, "LAVA", spectypes.APIInterfaceRest, noopHandler, nil, "../../", nil)
 	if closeServer != nil {
 		defer closeServer()
@@ -3338,7 +3333,7 @@ func TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesAllSessions(t *t
 	// CrossValidation, AgreementThreshold=2. Filter drops 2 of 3 → guard fires (1 < 2).
 	cvParams := &common.CrossValidationParams{MaxParticipants: 3, AgreementThreshold: 2}
 	sm := &cvGuardStateMachine{usedProviders: usedProviders, cvParams: cvParams}
-	metricsStub := cvGuardMetrics{}
+	metricsStub := lavaRESTMetrics
 	relayProcessor := relaycore.NewRelayProcessor(
 		ctx, cvParams, metricsStub, metricsStub,
 		sm)
@@ -3802,4 +3797,14 @@ func TestCacheTierHeaders(t *testing.T) {
 		require.NotNil(t, tierOf(metadata))
 		require.Equal(t, common.CacheTierNone, tierOf(metadata).Value)
 	})
+}
+
+// filterEndpointsByConsistency is filterEndpointsByConsistencyWithLag without each failed endpoint's lag.
+func (rpcss *RPCSmartRouterServer) filterEndpointsByConsistency(
+	ctx context.Context,
+	sessions routersession.ConsumerSessionsMap,
+	protocolMessage chainlib.ProtocolMessage,
+) (validSessions routersession.ConsumerSessionsMap, failedSessions routersession.ConsumerSessionsMap, filterErr error) {
+	validSessions, failedSessions, _, filterErr = rpcss.filterEndpointsByConsistencyWithLag(ctx, sessions, protocolMessage)
+	return validSessions, failedSessions, filterErr
 }

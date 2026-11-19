@@ -2,16 +2,14 @@ package performance_test
 
 import (
 	"context"
-	"net"
 	"testing"
 	"time"
 
-	"github.com/magma-Devs/smart-router/ecosystem/cache"
 	"github.com/magma-Devs/smart-router/ecosystem/cache/core"
+	"github.com/magma-Devs/smart-router/internal/testutil/cachetest"
 	"github.com/magma-Devs/smart-router/protocol/performance"
 	relaytypes "github.com/magma-Devs/smart-router/types/relay"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -20,32 +18,8 @@ import (
 // round-trip through the hand-written JSON wire codec end to end, and that a cache backend
 // predating the RPCs is surfaced as an error rather than a fabricated "unclaimed".
 
-func startStickyCacheGRPC(t *testing.T, srv relaytypes.RelayerCacheServer) *performance.Cache {
-	t.Helper()
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	s := grpc.NewServer()
-	relaytypes.RegisterRelayerCacheServer(s, srv)
-	go func() { _ = s.Serve(lis) }()
-	t.Cleanup(s.Stop)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	c, err := performance.InitCache(ctx, lis.Addr().String())
-	require.NoError(t, err)
-	require.Eventually(t, c.CacheActive, 5*time.Second, 10*time.Millisecond)
-	return c
-}
-
-func newStickyCacheServer(t *testing.T) *cache.RelayerCacheServer {
-	t.Helper()
-	cs := &cache.CacheServer{CacheMaxCost: 1 << 20}
-	cs.InitCache(context.Background(), time.Hour, time.Second, time.Second, time.Hour, "disabled", 1, 1)
-	return &cache.RelayerCacheServer{CacheServer: cs}
-}
-
 func TestStickySession_RoundTripOverGRPC(t *testing.T) {
-	client := startStickyCacheGRPC(t, newStickyCacheServer(t))
+	client := cachetest.Serve(t, cachetest.NewServer(t, cachetest.TTLs{Finalized: time.Hour, NonFinalized: time.Second, NodeErrors: time.Second}))
 	ctx := context.Background()
 
 	_, found, err := client.GetStickySession(ctx, "ETH1", "jsonrpc", "base", "digest-1")
@@ -67,9 +41,9 @@ func TestStickySession_RoundTripOverGRPC(t *testing.T) {
 
 // The requirement itself: two routers sharing one backend resolve a session id to one upstream.
 func TestStickySession_TwoRoutersAgreeOnOneUpstream(t *testing.T) {
-	srv := newStickyCacheServer(t)
-	podA := startStickyCacheGRPC(t, srv)
-	podB := startStickyCacheGRPC(t, srv)
+	srv := cachetest.NewServer(t, cachetest.TTLs{Finalized: time.Hour, NonFinalized: time.Second, NodeErrors: time.Second})
+	podA := cachetest.Serve(t, srv)
+	podB := cachetest.Serve(t, srv)
 	ctx := context.Background()
 
 	// Pod A sees the session first and claims its own optimizer pick.
@@ -95,7 +69,7 @@ func TestStickySession_TwoRoutersAgreeOnOneUpstream(t *testing.T) {
 // Under the fail-closed contract the caller turns that into a refused request; a silent
 // fallback to per-pod affinity would be the split the feature exists to remove.
 func TestStickySession_LegacyBackendIsUnimplementedNotSilent(t *testing.T) {
-	client := startStickyCacheGRPC(t, relaytypes.UnimplementedRelayerCacheServer{})
+	client := cachetest.Serve(t, relaytypes.UnimplementedRelayerCacheServer{})
 	ctx := context.Background()
 
 	_, _, err := client.GetStickySession(ctx, "ETH1", "jsonrpc", "base", "digest-1")

@@ -3,7 +3,6 @@ package chainlib
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -23,33 +22,23 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// parsingRelay is a RelaySender that reads the request with the real GraphQL parser and hands the
-// listener whatever that parse returns, which is what the router's relay path does. So a test can
-// send one of the ticket's own reproduction bodies and read the answer the caller would get, rather
-// than injecting an error and trusting that the parse produces it.
-type parsingRelay struct {
-	relayed int
-}
-
-func (r *parsingRelay) SendRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, analytics *metrics.RelayMetrics, metadataValues []pairingtypes.Metadata) (*common.RelayResult, error) {
-	if _, err := rpcInterfaceMessages.ParseGraphQLMsg([]byte(req)); err != nil {
-		// A refusal reaches the listener with no status, exactly as it does in production: the
-		// router asked no provider, so the relay result carries nothing.
-		return &common.RelayResult{}, err
-	}
-	r.relayed++
-	return &common.RelayResult{
-		Reply:      &pairingtypes.RelayReply{Data: []byte(`{"data":{"chainIdentifier":"35834a8a"}}`)},
-		StatusCode: http.StatusOK,
-	}, nil
-}
-
-func (r *parsingRelay) ParseRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, metadata []pairingtypes.Metadata) (ProtocolMessage, error) {
-	return nil, errors.New("not used")
-}
-
-func (r *parsingRelay) SendParsedRelay(ctx context.Context, analytics *metrics.RelayMetrics, protocolMessage ProtocolMessage) (*common.RelayResult, error) {
-	return nil, errors.New("not used")
+// newGraphQLParsingRelay reads the request with the real GraphQL parser and hands the listener
+// whatever that parse returns, which is what the router's relay path does. So a test can send one
+// of the ticket's own reproduction bodies and read the answer the caller would get, rather than
+// injecting an error and trusting that the parse produces it. Its relayed() counts the requests
+// that parsed: the ones that reached a provider.
+func newGraphQLParsingRelay() *recordingRelaySender {
+	return &recordingRelaySender{send: func(call relayCall) (*common.RelayResult, error) {
+		if _, err := rpcInterfaceMessages.ParseGraphQLMsg([]byte(call.req)); err != nil {
+			// A refusal reaches the listener with no status, exactly as it does in production: the
+			// router asked no provider, so the relay result carries nothing.
+			return &common.RelayResult{}, err
+		}
+		return &common.RelayResult{
+			Reply:      &pairingtypes.RelayReply{Data: []byte(`{"data":{"chainIdentifier":"35834a8a"}}`)},
+			StatusCode: http.StatusOK,
+		}, nil
+	}}
 }
 
 // serveGraphQLListener brings up a GraphQL listener over relay and returns a function that POSTs a
@@ -176,7 +165,7 @@ func requireGraphQLErrorEntry(t *testing.T, body string) graphQLErrorEntryForTes
 // The bodies here are the ticket's own reproduction steps 2 and 3, and the controls one step below
 // each limit, which must still be relayed.
 func TestGraphQLListener_RefusalIsAClientErrorWithAGraphQLBody(t *testing.T) {
-	relay := &parsingRelay{}
+	relay := newGraphQLParsingRelay()
 	post := serveGraphQLListenerReplies(t, relay)
 
 	nest := func(levels int) string {
@@ -230,7 +219,7 @@ func TestGraphQLListener_RefusalIsAClientErrorWithAGraphQLBody(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			relayed := relay.relayed
+			relayed := relay.relayed()
 			reply := post(envelope(tc.query))
 			status, body := reply.status, reply.body
 
@@ -247,7 +236,7 @@ func TestGraphQLListener_RefusalIsAClientErrorWithAGraphQLBody(t *testing.T) {
 				"the reply carries the request id in Lava-Guid too, as every relayed reply does")
 			require.NotContains(t, body, "Error_GUID",
 				"the reason must not be JSON inside a JSON string any more")
-			require.Equal(t, relayed, relay.relayed, "a refused request reaches no provider")
+			require.Equal(t, relayed, relay.relayed(), "a refused request reaches no provider")
 		})
 	}
 
@@ -260,10 +249,10 @@ func TestGraphQLListener_RefusalIsAClientErrorWithAGraphQLBody(t *testing.T) {
 		{"fragment spreads at the nesting limit", fragmentChain(rpcInterfaceMessages.MaxGraphQLFragmentNesting)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			relayed := relay.relayed
+			relayed := relay.relayed()
 			reply := post(envelope(tc.query))
 			require.Equal(t, http.StatusOK, reply.status, "body: %s", reply.body)
-			require.Equal(t, relayed+1, relay.relayed, "the control must reach a provider")
+			require.Equal(t, relayed+1, relay.relayed(), "the control must reach a provider")
 		})
 	}
 }
@@ -279,7 +268,7 @@ func TestGraphQLListener_RefusalIsAClientErrorWithAGraphQLBody(t *testing.T) {
 // request id beside it, the same id in Lava-Guid, and reaches no provider. The ticket's two controls
 // are readable, so they are still relayed: an unknown field is the node's to answer.
 func TestGraphQLListener_UnreadableRequestIsRefused(t *testing.T) {
-	relay := &parsingRelay{}
+	relay := newGraphQLParsingRelay()
 	post := serveGraphQLListenerReplies(t, relay)
 
 	const parseFailed = rpcInterfaceMessages.GraphQLParseFailedCode
@@ -305,7 +294,7 @@ func TestGraphQLListener_UnreadableRequestIsRefused(t *testing.T) {
 		{"a body that is JSON but not an object", `null`, refused, "graphql request body is not a JSON object"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			relayed := relay.relayed
+			relayed := relay.relayed()
 			reply := post(tc.body)
 
 			require.Equal(t, graphQLRefusalStatus, reply.status, "a client error, not a server failure: %s", reply.body)
@@ -317,7 +306,7 @@ func TestGraphQLListener_UnreadableRequestIsRefused(t *testing.T) {
 				"Lava-Guid carries the id the body's guid carries")
 			require.NotContains(t, reply.body, "Error_GUID", "the old 500 body")
 			require.NotContains(t, reply.body, "graphQLRequestEnvelope", "a decoder's text names the router's Go types")
-			require.Equal(t, relayed, relay.relayed, "an unreadable request reaches no provider")
+			require.Equal(t, relayed, relay.relayed(), "an unreadable request reaches no provider")
 		})
 	}
 
@@ -328,10 +317,10 @@ func TestGraphQLListener_UnreadableRequestIsRefused(t *testing.T) {
 		{"an unknown field", `{"query":"{ noSuchField }"}`},
 	} {
 		t.Run("control: "+tc.name, func(t *testing.T) {
-			relayed := relay.relayed
+			relayed := relay.relayed()
 			reply := post(tc.body)
 			require.Equal(t, http.StatusOK, reply.status, "body: %s", reply.body)
-			require.Equal(t, relayed+1, relay.relayed, "a readable request reaches a provider")
+			require.Equal(t, relayed+1, relay.relayed(), "a readable request reaches a provider")
 		})
 	}
 }
@@ -371,7 +360,7 @@ func TestGraphQLListener_RefusalLogsTheBodyCutUnlessDebugRelays(t *testing.T) {
 	for _, debugRelays := range []bool{false, true} {
 		t.Run(fmt.Sprintf("debugRelays=%v", debugRelays), func(t *testing.T) {
 			utils.ClearDebugLogBuffer()
-			addr := serveWithFlags(t, newGraphQL, spectypes.APIInterfaceGraphQL, &parsingRelay{}, common.ConsumerCmdFlags{DebugRelays: debugRelays})
+			addr := serveWithFlags(t, newGraphQL, spectypes.APIInterfaceGraphQL, newGraphQLParsingRelay(), common.ConsumerCmdFlags{DebugRelays: debugRelays})
 			requestID := fmt.Sprintf("req-refusal-%v", debugRelays)
 			req, err := http.NewRequest(http.MethodPost, "http://"+addr+"/", strings.NewReader(string(body)))
 			require.NoError(t, err)
@@ -406,7 +395,7 @@ func TestGraphQLListener_RefusalLogsTheBodyCutUnlessDebugRelays(t *testing.T) {
 // router sent a two-root mutation to every primary as it was. A refusal that is not about a write's
 // shape says nothing about a write, and a write the router sends is not refused.
 func TestGraphQLListener_RefusedWriteShapeSaysNotSent(t *testing.T) {
-	relay := &parsingRelay{}
+	relay := newGraphQLParsingRelay()
 	post := serveGraphQLListenerReplies(t, relay)
 	const write = `executeTransaction(transactionDataBcs: \"AA==\", signatures: [\"AA==\"]) { effects { status } }`
 
@@ -419,7 +408,7 @@ func TestGraphQLListener_RefusedWriteShapeSaysNotSent(t *testing.T) {
 		{"a document with a query and a mutation", `{"query":"query R { chainIdentifier } mutation W { ` + write + ` }","operationName":"R"}`, "graphql document holds a mutation beside another operation"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			relayed := relay.relayed
+			relayed := relay.relayed()
 			reply := post(tc.body)
 
 			require.Equal(t, graphQLRefusalStatus, reply.status, "a client error, not a server failure: %s", reply.body)
@@ -429,7 +418,7 @@ func TestGraphQLListener_RefusedWriteShapeSaysNotSent(t *testing.T) {
 			require.Equal(t, rpcInterfaceMessages.GraphQLWriteOutcomeNotSent, reply.header.Get(common.WRITE_OUTCOME_HEADER_NAME),
 				"the caller is told the write was not sent")
 			require.Equal(t, entry.Extensions["guid"], reply.header.Get(common.GUID_HEADER_NAME))
-			require.Equal(t, relayed, relay.relayed, "a refused write reaches no provider")
+			require.Equal(t, relayed, relay.relayed(), "a refused write reaches no provider")
 		})
 	}
 
@@ -445,10 +434,10 @@ func TestGraphQLListener_RefusedWriteShapeSaysNotSent(t *testing.T) {
 		{"a mutation with __typename beside the write", `{"query":"mutation { __typename ` + write + ` }"}`},
 	} {
 		t.Run("control: "+tc.name, func(t *testing.T) {
-			relayed := relay.relayed
+			relayed := relay.relayed()
 			reply := post(tc.body)
 			require.Equal(t, http.StatusOK, reply.status, "body: %s", reply.body)
-			require.Equal(t, relayed+1, relay.relayed, "the write must reach the relay")
+			require.Equal(t, relayed+1, relay.relayed(), "the write must reach the relay")
 		})
 	}
 }

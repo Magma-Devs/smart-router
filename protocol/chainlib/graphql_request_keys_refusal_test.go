@@ -13,7 +13,7 @@ import (
 // answered 400 with a GraphQL error document the caller can read, and no provider is asked. The
 // control, a read with exact keys, is served.
 func TestGraphQLListener_KeysTheNodeWouldReadDifferentlyAreRefusedBeforeAnyProvider(t *testing.T) {
-	relay := &parsingRelay{}
+	relay := newGraphQLParsingRelay()
 	post := serveGraphQLListener(t, relay)
 
 	const mutation = `mutation { executeTransaction(transactionDataBcs: \"x\", signatures: [\"y\"]) { effects { status } } }`
@@ -44,18 +44,18 @@ func TestGraphQLListener_KeysTheNodeWouldReadDifferentlyAreRefusedBeforeAnyProvi
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			relayed := relay.relayed
+			relayed := relay.relayed()
 			status, body := post(tc.body)
 			require.Equal(t, graphQLRefusalStatus, status, "body: %s", body)
 			require.Contains(t, requireGraphQLError(t, body), tc.wantMessage)
-			require.Equal(t, relayed, relay.relayed, "a refused request reaches no provider")
+			require.Equal(t, relayed, relay.relayed(), "a refused request reaches no provider")
 		})
 	}
 
 	t.Run("a request with exact keys is served", func(t *testing.T) {
-		relayed := relay.relayed
+		relayed := relay.relayed()
 		status, body := post(`{"query":"query Q { chainIdentifier }","operationName":"Q","variables":{},"extensions":{}}`)
 		require.Equal(t, http.StatusOK, status, "body: %s", body)
-		require.Equal(t, relayed+1, relay.relayed, "the control must reach a provider")
+		require.Equal(t, relayed+1, relay.relayed(), "the control must reach a provider")
 	})
 }

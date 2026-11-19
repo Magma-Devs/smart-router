@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/magma-Devs/smart-router/protocol/chainlibtest"
+
 	"github.com/stretchr/testify/require"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
@@ -38,7 +40,7 @@ func newRecordedWriteProcessor(t *testing.T, guid uint64, providers ...string) *
 	t.Helper()
 	ctx := utils.WithUniqueIdentifier(context.Background(), guid)
 	noop := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
-	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, "LAVA", spectypes.APIInterfaceRest, noop, nil, "../../", nil)
+	chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, "LAVA", spectypes.APIInterfaceRest, noop, nil, "../../", nil)
 	if closeServer != nil {
 		t.Cleanup(closeServer)
 	}

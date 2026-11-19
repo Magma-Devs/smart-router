@@ -3,36 +3,15 @@ package metrics
 import (
 	"testing"
 
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 )
-
-// newSmartRouterForURLFanoutTest builds a SmartRouterMetricsManager with only the
-// fields the fan-out tests exercise. Gauges/counters are registered without a
-// Registerer to avoid polluting the process-global Prometheus registry across
-// parallel test packages.
-func newSmartRouterForURLFanoutTest() *SmartRouterMetricsManager {
-	endpointLabels := []string{"spec", "apiInterface", "endpoint_id"}
-	return &SmartRouterMetricsManager{
-		endpointLatestBlock:        prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "t_sr_endpoint_latest_block"}, endpointLabels),
-		endpointURLLatestBlock:     prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "t_sr_endpoint_url_latest_block"}, []string{"spec", "apiInterface", "endpoint_id", "url", "internal_path"}),
-		endpointURLAnsweredUntil:   prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "t_sr_endpoint_url_answered_until_seconds"}, []string{"spec", "apiInterface", "endpoint_id", "url", "internal_path"}),
-		endpointURLRelaysServiced:  prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_endpoint_url_relays_serviced_total"}, []string{"spec", "apiInterface", "endpoint_id", "url", "internal_path"}),
-		endpointFetchLatestSuccess: prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_endpoint_fetch_latest_success"}, endpointLabels),
-		endpointFetchLatestFails:   prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_endpoint_fetch_latest_fails"}, endpointLabels),
-		endpointFetchBlockSuccess:  prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_endpoint_fetch_block_success"}, endpointLabels),
-		endpointFetchBlockFails:    prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_endpoint_fetch_block_fails"}, endpointLabels),
-		endpointOverallHealth:      prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "t_sr_endpoint_overall_health"}, endpointLabels),
-		urlToProviderNames:         make(map[string][]string),
-	}
-}
 
 // TestResolveProviderNames_FansOutAcrossSharedURL is the core fan-out guarantee:
 // registering two providers at the same URL must cause resolveProviderNames(URL)
 // to return both, so URL-keyed metric emissions reach every provider.
 func TestResolveProviderNames_FansOutAcrossSharedURL(t *testing.T) {
-	m := newSmartRouterForURLFanoutTest()
+	m := newTestMetricsManager(t)
 	const sharedURL = "https://base.lava.build:443/"
 
 	m.RegisterEndpoint("BASE", "jsonrpc", sharedURL, "endpoint1")
@@ -48,7 +27,7 @@ func TestResolveProviderNames_FansOutAcrossSharedURL(t *testing.T) {
 // pointing at a single upstream). RegisterEndpoint is called once per url, but the
 // set of names per URL should not grow duplicates for the same provider.
 func TestResolveProviderNames_DeduplicatesSameProvider(t *testing.T) {
-	m := newSmartRouterForURLFanoutTest()
+	m := newTestMetricsManager(t)
 	const sharedURL = "https://base.blockpi.network/v1/rpc/abc"
 
 	m.RegisterEndpoint("BASE", "jsonrpc", sharedURL, "blockpi1")
@@ -64,7 +43,7 @@ func TestResolveProviderNames_DeduplicatesSameProvider(t *testing.T) {
 // already knows the provider it's hitting). An unknown key must round-trip as a
 // single-element slice so existing callers keep working.
 func TestResolveProviderNames_FallsBackToInput(t *testing.T) {
-	m := newSmartRouterForURLFanoutTest()
+	m := newTestMetricsManager(t)
 
 	names := m.resolveProviderNames("provider-not-registered-as-url")
 	require.Equal(t, []string{"provider-not-registered-as-url"}, names)
@@ -79,7 +58,7 @@ func TestResolveProviderNames_FallsBackToInput(t *testing.T) {
 // the gauge for every provider sharing that URL. Before the fan-out fix, only the
 // last-registered provider got the metric — the rest stayed at zero.
 func TestSetEndpointLatestBlock_FansOutAcrossSharedURL(t *testing.T) {
-	m := newSmartRouterForURLFanoutTest()
+	m := newTestMetricsManager(t)
 	const sharedURL = "https://base.lava.build:443/"
 	const block int64 = 44615090
 
@@ -98,7 +77,7 @@ func TestSetEndpointLatestBlock_FansOutAcrossSharedURL(t *testing.T) {
 // (chain tracker success/fail counters). Each call must increment counters for
 // every provider on the URL so the fetch success rate reflects reality per-provider.
 func TestRecordBlockFetch_FansOutAcrossSharedURL(t *testing.T) {
-	m := newSmartRouterForURLFanoutTest()
+	m := newTestMetricsManager(t)
 	const sharedURL = "https://base.blockpi.network/v1/rpc/abc"
 
 	m.RegisterEndpoint("BASE", "jsonrpc", sharedURL, "blockpi1")
@@ -117,7 +96,7 @@ func TestRecordBlockFetch_FansOutAcrossSharedURL(t *testing.T) {
 // asserts on, which is exactly the shape that would panic if the helper trusted its counter
 // to be non-nil. The poll goroutine calls this on every upstream request, so it must not.
 func TestRecordTrackerRequest_PartialManagerIsSafe(t *testing.T) {
-	m := newSmartRouterForURLFanoutTest()
+	m := newTestMetricsManager(t)
 	m.RegisterEndpoint("BASE", "jsonrpc", "https://base.example/rpc", "vendor1")
 	require.NotPanics(t, func() {
 		m.RecordTrackerRequest("BASE", "jsonrpc", "https://base.example/rpc", TrackerRequestKindLatestBlock)

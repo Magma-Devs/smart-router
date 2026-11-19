@@ -14,9 +14,10 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
+	"github.com/magma-Devs/smart-router/protocol/chainlibtest/fixture"
 	commonlib "github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
-	"github.com/magma-Devs/smart-router/protocol/statetracker"
+	"github.com/magma-Devs/smart-router/protocol/staticspec"
 	"github.com/stretchr/testify/require"
 )
 
@@ -94,7 +95,7 @@ type fakeUpstreams struct {
 func newFakeUpstreams(t *testing.T) *fakeUpstreams {
 	t.Helper()
 	// Connectors these tests dial log from their own goroutines as they shut down.
-	chainlib.UseMockLogLevel()
+	fixture.UseMockLogLevel()
 	u := &fakeUpstreams{seen: map[string][]string{}}
 	u.http = httptest.NewServer(http.HandlerFunc(u.serveHTTP))
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
@@ -293,7 +294,7 @@ func liveParser(t *testing.T, chainID string, skipWebsocket bool) chainlib.Chain
 	require.NoError(t, err)
 	parser.SetSkipWebsocketVerification(skipWebsocket)
 	endpoint := routersession.RPCEndpoint{ChainID: chainID, ApiInterface: "jsonrpc"}
-	require.NoError(t, statetracker.RegisterForSpecUpdatesOrSetStaticSpecsWithToken(t.Context(), parser, []string{"../../specs/"}, endpoint, "", ""))
+	require.NoError(t, staticspec.Load(t.Context(), parser, []string{"../../specs/"}, endpoint, "", ""))
 	return parser
 }
 

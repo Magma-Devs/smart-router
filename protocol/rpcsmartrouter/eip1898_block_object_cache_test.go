@@ -20,7 +20,7 @@ func TestEIP1898BlockNumberObjectIsCachedLikeTheHexForm(t *testing.T) {
 	const tip = int64(20_000_000)
 	const oldBlock = int64(0x10)
 	chainParser := ethJsonRPCParser(t)
-	primary, rcs := startCacheServerWithShortTempStore(t) // temp entries are gone within 2 s
+	primary, rcs := startCacheServerWithNonFinalizedTTLForTest(t, shortTempStoreTTL) // temp entries are gone within 2 s
 	rpcss := ethCacheTestServer(chainParser, primary)
 	withTip := chainstate.New("ETH1", chainstate.DefaultConfig(12*time.Second))
 	withTip.SetLatestBlock(tip)
