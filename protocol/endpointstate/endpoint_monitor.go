@@ -190,6 +190,11 @@ type EndpointMonitor struct {
 	// onTipObservation. See EndpointChainTrackerConfig.OnPollBlock. Set once at construction;
 	// immutable.
 	onPollBlock func(endpointURL string, block int64)
+	// onAnswer, if set, is invoked with the url and the block of every answer this pod got from a
+	// live tracker's endpoint itself, poll or relay, fired AFTER obsMu is released and after
+	// onTipObservation for the same block. See EndpointChainTrackerConfig.OnAnswer. Set once at
+	// construction; immutable.
+	onAnswer func(endpointURL string, block int64)
 	// onGateSkip, if set, is invoked once per poll cycle the traffic gate suppressed, with the
 	// source that made the poll redundant (metrics.TrackerGateSkipSource*).
 	onGateSkip func(endpointURL, source string)
@@ -253,6 +258,15 @@ type EndpointChainTrackerConfig struct {
 	// not reported (the observation's own generation gate), but the call runs after that
 	// gate's lock is released, so it can land just after the tracker is removed.
 	OnPollBlock func(endpointURL string, block int64)
+	// OnAnswer, if set, is invoked with the url and block of every answer this pod got first-hand
+	// from a live tracker's endpoint: each answered poll (what OnPollBlock reports) and each relay
+	// block RecordRelayObservation takes past the generation gate, whatever the endpoint's tip
+	// store then did with it — a straggler below a still-fresh stored tip is reported too. A peer
+	// pod's observation (the fleet gate) is not an answer and is never reported. It fires after
+	// OnTipObservation for the same block, so the per-chain tip has already judged it. The
+	// per-chain tip reads it to stay fresh past a url whose stored tip sits above the chain, and to
+	// tell a url that keeps answering a head from one that also answers the tip (MAG-5080).
+	OnAnswer func(endpointURL string, block int64)
 
 	// PeerObservations, when set, enables the fleet half of the traffic gate (MAG-2981): this
 	// pod publishes its successful polls to the store and borrows fresh observations from
@@ -341,6 +355,7 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 		onFetchError:       config.OnFetchError,
 		onTipObservation:   config.OnTipObservation,
 		onPollBlock:        config.OnPollBlock,
+		onAnswer:           config.OnAnswer,
 		onGateSkip:         config.OnGateSkip,
 		onGateError:        config.OnGateError,
 		onTrackerRequest:   config.OnTrackerRequest,
