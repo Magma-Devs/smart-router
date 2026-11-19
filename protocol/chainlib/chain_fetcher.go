@@ -1973,6 +1973,14 @@ func (cf *ChainFetcher) fetchLatestBlockNumVia(ctx context.Context, router Chain
 			{Key: "Method", Value: parsing.ApiName},
 		}...)
 	}
+	if notAnAnswer := NotAnAnswerReplyError(chainMessage, reply.RelayReply.Data, reply.StatusCode); notAnAnswer != nil {
+		return spectypes.NOT_APPLICABLE, utils.FormatDebugErr(tagName+" reply carries an error", notAnAnswer, []utils.Attribute{
+			{Key: "chainId", Value: chainId},
+			{Key: "nodeUrl", Value: proxyUrl.Url},
+			{Key: "Method", Value: parsing.ApiName},
+			{Key: "Response", Value: parser.CapStringLen(string(reply.RelayReply.Data))},
+		}...)
+	}
 	parsedInput := parser.ParseBlockFromReply(parserInput, parsing.ResultParsing, parsing.Parsers)
 	blockNum := parsedInput.GetBlock()
 	if blockNum == spectypes.NOT_APPLICABLE {
@@ -2197,6 +2205,32 @@ func rateLimitedClassifiedReply(chainID string, chainMessage ChainMessageForSend
 		return nil
 	}
 	return common.RateLimited(fmt.Errorf("reply error classified as %d: %s", status, message), 0)
+}
+
+// NotAnAnswerReplyError reads a head poll's reply the way a client request's reply is read, for
+// an interface that answers its errors inside a 2xx in its own shape (replyStatusClassifier:
+// GraphQL). It returns an error for any reply the request message does not read as an answer, and
+// nil for an answer and for every interface whose errors the transport already reports.
+//
+// Without it a head poll parses the head out of whatever the reply carries: a GraphQL 200 with an
+// errors list beside a readable head was a healthy poll, and healthy polls are what bring a
+// removed provider back (MAG-5124). The verdict is the message's own (MAG-5121), so a poll and a
+// relay can never disagree about whether an answer is one.
+//
+// Both head fetchers call it after RateLimitedReplyError, which keeps a rate limit typed as the
+// hold-off's 429 (MAG-4378).
+func NotAnAnswerReplyError(chainMessage ChainMessageForSend, data []byte, httpStatusCode int) error {
+	if chainMessage == nil {
+		return nil
+	}
+	if _, ok := chainMessage.GetRPCMessage().(replyStatusClassifier); !ok {
+		return nil
+	}
+	hasError, message := chainMessage.CheckResponseError(data, httpStatusCode)
+	if !hasError {
+		return nil
+	}
+	return fmt.Errorf("reply is not an answer: %s", message)
 }
 
 // RateLimitedErrorBody is RateLimitedReplyError for a caller holding the JSON-RPC error's code
