@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"regexp"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -22,6 +23,10 @@ import (
 
 // addressInText finds an IP address or a port in an error's text.
 var addressInText = regexp.MustCompile(`\d{1,3}(?:\.\d{1,3}){3}|\[[0-9a-fA-F:]*:[0-9a-fA-F:]*\]|:\d{2,5}\b`)
+
+// grpcResetTextWithAddresses is grpc-go's text for a reset connection as a router logged it in
+// production, with both ends of the socket.
+const grpcResetTextWithAddresses = "error reading from server: read tcp 10.42.0.7:51234->34.160.0.9:443: read: connection reset by peer"
 
 // MAG-5130: a status grpc-go writes because the connection or the stream ended, on a call whose
 // stream to the node was open and whose node sent no status, is "no reply": no response, a
@@ -212,7 +217,10 @@ func TestSendRequest_ConnectionCutDuringTheCallIsNoReply(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			addr := startCuttingNode(t, tc.at, tc.reset)
 
-			// What grpc-go itself says: the router's and the node's addresses, when the node reset.
+			// What grpc-go itself says. On some platforms (macOS) a reset names both ends of the
+			// socket, "read tcp <router>-><node>: read: connection reset by peer"; on others (Linux)
+			// it does not. The search must find them when they are there, and always in the wording
+			// production logged.
 			if tc.reset {
 				client, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 				require.NoError(t, err)
@@ -220,7 +228,10 @@ func TestSendRequest_ConnectionCutDuringTheCallIsNoReply(t *testing.T) {
 				libErr := client.Invoke(context.Background(), "/test.v1.Node/Call", []byte{0x08, 0x01}, &reply, grpc.ForceCodec(rawProtoCodec{}))
 				_ = client.Close()
 				require.Equal(t, codes.Unavailable, status.Code(libErr))
-				require.Regexp(t, addressInText, status.Convert(libErr).Message(), "the search finds the addresses in grpc-go's own text")
+				if libText := status.Convert(libErr).Message(); strings.Contains(libText, "read tcp") {
+					require.Regexp(t, addressInText, libText, "the search finds the addresses in grpc-go's own text")
+				}
+				require.Regexp(t, addressInText, grpcResetTextWithAddresses, "the search finds the addresses in the wording production logged")
 			}
 
 			g := directGRPCConnectionTo(t, addr)

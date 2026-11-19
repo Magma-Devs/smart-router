@@ -293,13 +293,18 @@ func TestGRPCListener_OneProviderCutGetsTheRoutersReply(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			addr, node := startCuttingGRPCNode(t, tc.cut)
 
-			// The search, run first on grpc-go's own text, finds the addresses there.
+			// The search, run first on grpc-go's own text, finds the addresses there. On some
+			// platforms (macOS) a reset names both ends of the socket; on others (Linux) it does not.
+			// So the search is also run on the wording production logged, which always has them.
 			direct, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 			require.NoError(t, err)
 			libErr := direct.Invoke(context.Background(), "/"+replyLostMethod, wrapperspb.Int64(5), &wrapperspb.Int64Value{})
 			_ = direct.Close()
 			require.Equal(t, codes.Unavailable, status.Code(libErr))
-			require.Regexp(t, replyAddress, status.Convert(libErr).Message())
+			if libText := status.Convert(libErr).Message(); strings.Contains(libText, "read tcp") {
+				require.Regexp(t, replyAddress, libText)
+			}
+			require.Regexp(t, replyAddress, "error reading from server: read tcp 10.42.0.7:51234->34.160.0.9:443: read: connection reset by peer")
 
 			client := startGRPCRouterOverNodes(t, replyLostAPI(common.NO_STATE), grpcReplyLostNode{"node-a", addr})
 			_, trailer, err := callRouter(t, client, "")
