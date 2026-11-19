@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -961,6 +962,32 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
+// internalPathSpec is the shape of a spec's POST collections on one interface, for
+// TestChainRouterWithInternalPaths: a root collection, disabled when rootDisabled, then one
+// collection per path that inherits the root's APIs. A path listed in subscribing carries a
+// subscribe directive, so it serves websocket subscriptions.
+type internalPathSpec struct {
+	rootDisabled bool
+	paths        []string
+	subscribing  []string
+}
+
+func (s internalPathSpec) collections(apiInterface string) []*spectypes.ApiCollection {
+	data := func(path string) spectypes.CollectionData {
+		return spectypes.CollectionData{ApiInterface: apiInterface, InternalPath: path, Type: "POST", AddOn: ""}
+	}
+	collections := []*spectypes.ApiCollection{{Enabled: !s.rootDisabled, CollectionData: data("")}}
+	for _, path := range s.paths {
+		root := data("")
+		collection := &spectypes.ApiCollection{Enabled: true, CollectionData: data(path), InheritanceApis: []*spectypes.CollectionData{&root}}
+		if slices.Contains(s.subscribing, path) {
+			collection.ParseDirectives = []*spectypes.ParseDirective{{FunctionTag: spectypes.FUNCTION_TAG_SUBSCRIBE}}
+		}
+		collections = append(collections, collection)
+	}
+	return collections
+}
+
 func TestChainRouterWithInternalPaths(t *testing.T) {
 	type play struct {
 		name                       string
@@ -977,19 +1004,9 @@ func TestChainRouterWithInternalPaths(t *testing.T) {
 	for _, apiInterface := range apiInterfaces {
 		playBook = append(playBook, []play{
 			{
-				name:         "no_internal_paths_in_spec__single_http_node_url_configured",
-				apiInterface: apiInterface,
-				specApiCollections: []*spectypes.ApiCollection{
-					{
-						Enabled: true,
-						CollectionData: spectypes.CollectionData{
-							ApiInterface: apiInterface,
-							InternalPath: "",
-							Type:         "POST",
-							AddOn:        "",
-						},
-					},
-				},
+				name:               "no_internal_paths_in_spec__single_http_node_url_configured",
+				apiInterface:       apiInterface,
+				specApiCollections: internalPathSpec{}.collections(apiInterface),
 				nodeUrls: []common.NodeUrl{
 					{
 						Url:          "https://localhost:1234",
@@ -1001,19 +1018,9 @@ func TestChainRouterWithInternalPaths(t *testing.T) {
 				},
 			},
 			{
-				name:         "no_internal_paths_in_spec__multiple_http_node_urls_configured",
-				apiInterface: apiInterface,
-				specApiCollections: []*spectypes.ApiCollection{
-					{
-						Enabled: true,
-						CollectionData: spectypes.CollectionData{
-							ApiInterface: apiInterface,
-							InternalPath: "",
-							Type:         "POST",
-							AddOn:        "",
-						},
-					},
-				},
+				name:               "no_internal_paths_in_spec__multiple_http_node_urls_configured",
+				apiInterface:       apiInterface,
+				specApiCollections: internalPathSpec{}.collections(apiInterface),
 				nodeUrls: []common.NodeUrl{
 					{
 						Url:          "https://localhost:1234",
@@ -1032,19 +1039,9 @@ func TestChainRouterWithInternalPaths(t *testing.T) {
 				},
 			},
 			{
-				name:         "no_internal_paths_in_spec__single_ws_node_url__should_error",
-				apiInterface: apiInterface,
-				specApiCollections: []*spectypes.ApiCollection{
-					{
-						Enabled: true,
-						CollectionData: spectypes.CollectionData{
-							ApiInterface: apiInterface,
-							InternalPath: "",
-							Type:         "POST",
-							AddOn:        "",
-						},
-					},
-				},
+				name:               "no_internal_paths_in_spec__single_ws_node_url__should_error",
+				apiInterface:       apiInterface,
+				specApiCollections: internalPathSpec{}.collections(apiInterface),
 				nodeUrls: []common.NodeUrl{
 					{
 						Url:          "wss://localhost:1234/ws",
@@ -1054,19 +1051,9 @@ func TestChainRouterWithInternalPaths(t *testing.T) {
 				expectedError: true,
 			},
 			{
-				name:         "no_internal_paths_in_spec__both_ws_and_http_node_urls",
-				apiInterface: apiInterface,
-				specApiCollections: []*spectypes.ApiCollection{
-					{
-						Enabled: true,
-						CollectionData: spectypes.CollectionData{
-							ApiInterface: apiInterface,
-							InternalPath: "",
-							Type:         "POST",
-							AddOn:        "",
-						},
-					},
-				},
+				name:               "no_internal_paths_in_spec__both_ws_and_http_node_urls",
+				apiInterface:       apiInterface,
+				specApiCollections: internalPathSpec{}.collections(apiInterface),
 				nodeUrls: []common.NodeUrl{
 					{
 						Url:          "https://localhost:1234",
@@ -1083,53 +1070,9 @@ func TestChainRouterWithInternalPaths(t *testing.T) {
 				},
 			},
 			{
-				name:         "with_internal_paths_in_spec__single_http_node_url_configured__not_covering_all_internal_paths",
-				apiInterface: apiInterface,
-				specApiCollections: []*spectypes.ApiCollection{
-					{
-						Enabled: true,
-						CollectionData: spectypes.CollectionData{
-							ApiInterface: apiInterface,
-							InternalPath: "",
-							Type:         "POST",
-							AddOn:        "",
-						},
-					},
-					{
-						Enabled: true,
-						CollectionData: spectypes.CollectionData{
-							ApiInterface: apiInterface,
-							InternalPath: "/X",
-							Type:         "POST",
-							AddOn:        "",
-						},
-						InheritanceApis: []*spectypes.CollectionData{
-							{
-								ApiInterface: apiInterface,
-								InternalPath: "",
-								Type:         "POST",
-								AddOn:        "",
-							},
-						},
-					},
-					{
-						Enabled: true,
-						CollectionData: spectypes.CollectionData{
-							ApiInterface: apiInterface,
-							InternalPath: "/Y",
-							Type:         "POST",
-							AddOn:        "",
-						},
-						InheritanceApis: []*spectypes.CollectionData{
-							{
-								ApiInterface: apiInterface,
-								InternalPath: "",
-								Type:         "POST",
-								AddOn:        "",
-							},
-						},
-					},
-				},
+				name:               "with_internal_paths_in_spec__single_http_node_url_configured__not_covering_all_internal_paths",
+				apiInterface:       apiInterface,
+				specApiCollections: internalPathSpec{paths: []string{"/X", "/Y"}}.collections(apiInterface),
 				nodeUrls: []common.NodeUrl{
 					{
 						Url:          "https://localhost:1234",
@@ -1143,53 +1086,9 @@ func TestChainRouterWithInternalPaths(t *testing.T) {
 				},
 			},
 			{
-				name:         "with_internal_paths_in_spec__multiple_http_node_urls_configured__covering_some_internal_paths",
-				apiInterface: apiInterface,
-				specApiCollections: []*spectypes.ApiCollection{
-					{
-						Enabled: true,
-						CollectionData: spectypes.CollectionData{
-							ApiInterface: apiInterface,
-							InternalPath: "",
-							Type:         "POST",
-							AddOn:        "",
-						},
-					},
-					{
-						Enabled: true,
-						CollectionData: spectypes.CollectionData{
-							ApiInterface: apiInterface,
-							InternalPath: "/X",
-							Type:         "POST",
-							AddOn:        "",
-						},
-						InheritanceApis: []*spectypes.CollectionData{
-							{
-								ApiInterface: apiInterface,
-								InternalPath: "",
-								Type:         "POST",
-								AddOn:        "",
-							},
-						},
-					},
-					{
-						Enabled: true,
-						CollectionData: spectypes.CollectionData{
-							ApiInterface: apiInterface,
-							InternalPath: "/Y",
-							Type:         "POST",
-							AddOn:        "",
-						},
-						InheritanceApis: []*spectypes.CollectionData{
-							{
-								ApiInterface: apiInterface,
-								InternalPath: "",
-								Type:         "POST",
-								AddOn:        "",
-							},
-						},
-					},
-				},
+				name:               "with_internal_paths_in_spec__multiple_http_node_urls_configured__covering_some_internal_paths",
+				apiInterface:       apiInterface,
+				specApiCollections: internalPathSpec{paths: []string{"/X", "/Y"}}.collections(apiInterface),
 				nodeUrls: []common.NodeUrl{
 					{
 						Url:          "https://localhost:1234",
@@ -1207,53 +1106,9 @@ func TestChainRouterWithInternalPaths(t *testing.T) {
 				},
 			},
 			{
-				name:         "with_internal_paths_in_spec__multiple_http_node_urls_configured__covering_all_internal_paths",
-				apiInterface: apiInterface,
-				specApiCollections: []*spectypes.ApiCollection{
-					{
-						Enabled: true,
-						CollectionData: spectypes.CollectionData{
-							ApiInterface: apiInterface,
-							InternalPath: "",
-							Type:         "POST",
-							AddOn:        "",
-						},
-					},
-					{
-						Enabled: true,
-						CollectionData: spectypes.CollectionData{
-							ApiInterface: apiInterface,
-							InternalPath: "/X",
-							Type:         "POST",
-							AddOn:        "",
-						},
-						InheritanceApis: []*spectypes.CollectionData{
-							{
-								ApiInterface: apiInterface,
-								InternalPath: "",
-								Type:         "POST",
-								AddOn:        "",
-							},
-						},
-					},
-					{
-						Enabled: true,
-						CollectionData: spectypes.CollectionData{
-							ApiInterface: apiInterface,
-							InternalPath: "/Y",
-							Type:         "POST",
-							AddOn:        "",
-						},
-						InheritanceApis: []*spectypes.CollectionData{
-							{
-								ApiInterface: apiInterface,
-								InternalPath: "",
-								Type:         "POST",
-								AddOn:        "",
-							},
-						},
-					},
-				},
+				name:               "with_internal_paths_in_spec__multiple_http_node_urls_configured__covering_all_internal_paths",
+				apiInterface:       apiInterface,
+				specApiCollections: internalPathSpec{paths: []string{"/X", "/Y"}}.collections(apiInterface),
 				nodeUrls: []common.NodeUrl{
 					{
 						Url:          "https://localhost:1234",
@@ -1275,53 +1130,9 @@ func TestChainRouterWithInternalPaths(t *testing.T) {
 				},
 			},
 			{
-				name:         "with_internal_paths_in_spec__multiple_http_node_urls_configured__no_root_internal_path__should_error",
-				apiInterface: apiInterface,
-				specApiCollections: []*spectypes.ApiCollection{
-					{
-						Enabled: true,
-						CollectionData: spectypes.CollectionData{
-							ApiInterface: apiInterface,
-							InternalPath: "",
-							Type:         "POST",
-							AddOn:        "",
-						},
-					},
-					{
-						Enabled: true,
-						CollectionData: spectypes.CollectionData{
-							ApiInterface: apiInterface,
-							InternalPath: "/X",
-							Type:         "POST",
-							AddOn:        "",
-						},
-						InheritanceApis: []*spectypes.CollectionData{
-							{
-								ApiInterface: apiInterface,
-								InternalPath: "",
-								Type:         "POST",
-								AddOn:        "",
-							},
-						},
-					},
-					{
-						Enabled: true,
-						CollectionData: spectypes.CollectionData{
-							ApiInterface: apiInterface,
-							InternalPath: "/Y",
-							Type:         "POST",
-							AddOn:        "",
-						},
-						InheritanceApis: []*spectypes.CollectionData{
-							{
-								ApiInterface: apiInterface,
-								InternalPath: "",
-								Type:         "POST",
-								AddOn:        "",
-							},
-						},
-					},
-				},
+				name:               "with_internal_paths_in_spec__multiple_http_node_urls_configured__no_root_internal_path__should_error",
+				apiInterface:       apiInterface,
+				specApiCollections: internalPathSpec{paths: []string{"/X", "/Y"}}.collections(apiInterface),
 				nodeUrls: []common.NodeUrl{
 					{
 						Url:          "https://localhost:1234/X",
@@ -1335,53 +1146,9 @@ func TestChainRouterWithInternalPaths(t *testing.T) {
 				expectedError: true,
 			},
 			{
-				name:         "with_internal_paths_in_spec__multiple_http_node_urls_and_ws_configured__covering_all_internal_paths",
-				apiInterface: apiInterface,
-				specApiCollections: []*spectypes.ApiCollection{
-					{
-						Enabled: true,
-						CollectionData: spectypes.CollectionData{
-							ApiInterface: apiInterface,
-							InternalPath: "",
-							Type:         "POST",
-							AddOn:        "",
-						},
-					},
-					{
-						Enabled: true,
-						CollectionData: spectypes.CollectionData{
-							ApiInterface: apiInterface,
-							InternalPath: "/X",
-							Type:         "POST",
-							AddOn:        "",
-						},
-						InheritanceApis: []*spectypes.CollectionData{
-							{
-								ApiInterface: apiInterface,
-								InternalPath: "",
-								Type:         "POST",
-								AddOn:        "",
-							},
-						},
-					},
-					{
-						Enabled: true,
-						CollectionData: spectypes.CollectionData{
-							ApiInterface: apiInterface,
-							InternalPath: "/Y",
-							Type:         "POST",
-							AddOn:        "",
-						},
-						InheritanceApis: []*spectypes.CollectionData{
-							{
-								ApiInterface: apiInterface,
-								InternalPath: "",
-								Type:         "POST",
-								AddOn:        "",
-							},
-						},
-					},
-				},
+				name:               "with_internal_paths_in_spec__multiple_http_node_urls_and_ws_configured__covering_all_internal_paths",
+				apiInterface:       apiInterface,
+				specApiCollections: internalPathSpec{paths: []string{"/X", "/Y"}}.collections(apiInterface),
 				nodeUrls: []common.NodeUrl{
 					{
 						Url:          "wss://localhost:1234/ws",
@@ -1408,53 +1175,9 @@ func TestChainRouterWithInternalPaths(t *testing.T) {
 				},
 			},
 			{
-				name:         "with_internal_paths_in_spec__only_root_http_and_ws_configured",
-				apiInterface: apiInterface,
-				specApiCollections: []*spectypes.ApiCollection{
-					{
-						Enabled: true,
-						CollectionData: spectypes.CollectionData{
-							ApiInterface: apiInterface,
-							InternalPath: "",
-							Type:         "POST",
-							AddOn:        "",
-						},
-					},
-					{
-						Enabled: true,
-						CollectionData: spectypes.CollectionData{
-							ApiInterface: apiInterface,
-							InternalPath: "/X",
-							Type:         "POST",
-							AddOn:        "",
-						},
-						InheritanceApis: []*spectypes.CollectionData{
-							{
-								ApiInterface: apiInterface,
-								InternalPath: "",
-								Type:         "POST",
-								AddOn:        "",
-							},
-						},
-					},
-					{
-						Enabled: true,
-						CollectionData: spectypes.CollectionData{
-							ApiInterface: apiInterface,
-							InternalPath: "/Y",
-							Type:         "POST",
-							AddOn:        "",
-						},
-						InheritanceApis: []*spectypes.CollectionData{
-							{
-								ApiInterface: apiInterface,
-								InternalPath: "",
-								Type:         "POST",
-								AddOn:        "",
-							},
-						},
-					},
-				},
+				name:               "with_internal_paths_in_spec__only_root_http_and_ws_configured",
+				apiInterface:       apiInterface,
+				specApiCollections: internalPathSpec{paths: []string{"/X", "/Y"}}.collections(apiInterface),
 				nodeUrls: []common.NodeUrl{
 					{
 						Url:          "https://localhost:1234",
@@ -1473,53 +1196,9 @@ func TestChainRouterWithInternalPaths(t *testing.T) {
 				},
 			},
 			{
-				name:         "with_internal_paths_in_spec__only_root_http_and_ws_and_one_out_of_two_internal_paths_are_configured",
-				apiInterface: apiInterface,
-				specApiCollections: []*spectypes.ApiCollection{
-					{
-						Enabled: true,
-						CollectionData: spectypes.CollectionData{
-							ApiInterface: apiInterface,
-							InternalPath: "",
-							Type:         "POST",
-							AddOn:        "",
-						},
-					},
-					{
-						Enabled: true,
-						CollectionData: spectypes.CollectionData{
-							ApiInterface: apiInterface,
-							InternalPath: "/X",
-							Type:         "POST",
-							AddOn:        "",
-						},
-						InheritanceApis: []*spectypes.CollectionData{
-							{
-								ApiInterface: apiInterface,
-								InternalPath: "",
-								Type:         "POST",
-								AddOn:        "",
-							},
-						},
-					},
-					{
-						Enabled: true,
-						CollectionData: spectypes.CollectionData{
-							ApiInterface: apiInterface,
-							InternalPath: "/Y",
-							Type:         "POST",
-							AddOn:        "",
-						},
-						InheritanceApis: []*spectypes.CollectionData{
-							{
-								ApiInterface: apiInterface,
-								InternalPath: "",
-								Type:         "POST",
-								AddOn:        "",
-							},
-						},
-					},
-				},
+				name:               "with_internal_paths_in_spec__only_root_http_and_ws_and_one_out_of_two_internal_paths_are_configured",
+				apiInterface:       apiInterface,
+				specApiCollections: internalPathSpec{paths: []string{"/X", "/Y"}}.collections(apiInterface),
 				nodeUrls: []common.NodeUrl{
 					{
 						Url:          "https://localhost:1234",
@@ -1542,56 +1221,9 @@ func TestChainRouterWithInternalPaths(t *testing.T) {
 				},
 			},
 			{
-				name:         "with_internal_paths_and_ws_internal_paths_in_spec__only_http_is_configured",
-				apiInterface: apiInterface,
-				specApiCollections: []*spectypes.ApiCollection{
-					{
-						Enabled: true,
-						CollectionData: spectypes.CollectionData{
-							ApiInterface: apiInterface,
-							InternalPath: "",
-							Type:         "POST",
-							AddOn:        "",
-						},
-					},
-					{
-						Enabled: true,
-						CollectionData: spectypes.CollectionData{
-							ApiInterface: apiInterface,
-							InternalPath: "/X",
-							Type:         "POST",
-							AddOn:        "",
-						},
-						InheritanceApis: []*spectypes.CollectionData{
-							{
-								ApiInterface: apiInterface,
-								InternalPath: "",
-								Type:         "POST",
-								AddOn:        "",
-							},
-						},
-					},
-					{
-						Enabled: true,
-						CollectionData: spectypes.CollectionData{
-							ApiInterface: apiInterface,
-							InternalPath: "/WS",
-							Type:         "POST",
-							AddOn:        "",
-						},
-						InheritanceApis: []*spectypes.CollectionData{
-							{
-								ApiInterface: apiInterface,
-								InternalPath: "",
-								Type:         "POST",
-								AddOn:        "",
-							},
-						},
-						ParseDirectives: []*spectypes.ParseDirective{{
-							FunctionTag: spectypes.FUNCTION_TAG_SUBSCRIBE,
-						}},
-					},
-				},
+				name:               "with_internal_paths_and_ws_internal_paths_in_spec__only_http_is_configured",
+				apiInterface:       apiInterface,
+				specApiCollections: internalPathSpec{paths: []string{"/X", "/WS"}, subscribing: []string{"/WS"}}.collections(apiInterface),
 				nodeUrls: []common.NodeUrl{
 					{
 						Url:          "https://localhost:1234",
@@ -1604,56 +1236,9 @@ func TestChainRouterWithInternalPaths(t *testing.T) {
 				},
 			},
 			{
-				name:         "with_internal_paths_and_ws_internal_paths_in_spec__http_and_ws_is_configured",
-				apiInterface: apiInterface,
-				specApiCollections: []*spectypes.ApiCollection{
-					{
-						Enabled: true,
-						CollectionData: spectypes.CollectionData{
-							ApiInterface: apiInterface,
-							InternalPath: "",
-							Type:         "POST",
-							AddOn:        "",
-						},
-					},
-					{
-						Enabled: true,
-						CollectionData: spectypes.CollectionData{
-							ApiInterface: apiInterface,
-							InternalPath: "/X",
-							Type:         "POST",
-							AddOn:        "",
-						},
-						InheritanceApis: []*spectypes.CollectionData{
-							{
-								ApiInterface: apiInterface,
-								InternalPath: "",
-								Type:         "POST",
-								AddOn:        "",
-							},
-						},
-					},
-					{
-						Enabled: true,
-						CollectionData: spectypes.CollectionData{
-							ApiInterface: apiInterface,
-							InternalPath: "/WS",
-							Type:         "POST",
-							AddOn:        "",
-						},
-						InheritanceApis: []*spectypes.CollectionData{
-							{
-								ApiInterface: apiInterface,
-								InternalPath: "",
-								Type:         "POST",
-								AddOn:        "",
-							},
-						},
-						ParseDirectives: []*spectypes.ParseDirective{{
-							FunctionTag: spectypes.FUNCTION_TAG_SUBSCRIBE,
-						}},
-					},
-				},
+				name:               "with_internal_paths_and_ws_internal_paths_in_spec__http_and_ws_is_configured",
+				apiInterface:       apiInterface,
+				specApiCollections: internalPathSpec{paths: []string{"/X", "/WS"}, subscribing: []string{"/WS"}}.collections(apiInterface),
 				nodeUrls: []common.NodeUrl{
 					{
 						Url:          "https://localhost:1234",
@@ -1672,59 +1257,9 @@ func TestChainRouterWithInternalPaths(t *testing.T) {
 				},
 			},
 			{
-				name:         "with_internal_paths_and_multiple_ws_internal_paths_in_spec__http_and_ws_is_configured",
-				apiInterface: apiInterface,
-				specApiCollections: []*spectypes.ApiCollection{
-					{
-						Enabled: true,
-						CollectionData: spectypes.CollectionData{
-							ApiInterface: apiInterface,
-							InternalPath: "",
-							Type:         "POST",
-							AddOn:        "",
-						},
-					},
-					{
-						Enabled: true,
-						CollectionData: spectypes.CollectionData{
-							ApiInterface: apiInterface,
-							InternalPath: "/X",
-							Type:         "POST",
-							AddOn:        "",
-						},
-						InheritanceApis: []*spectypes.CollectionData{
-							{
-								ApiInterface: apiInterface,
-								InternalPath: "",
-								Type:         "POST",
-								AddOn:        "",
-							},
-						},
-						ParseDirectives: []*spectypes.ParseDirective{{
-							FunctionTag: spectypes.FUNCTION_TAG_SUBSCRIBE,
-						}},
-					},
-					{
-						Enabled: true,
-						CollectionData: spectypes.CollectionData{
-							ApiInterface: apiInterface,
-							InternalPath: "/WS",
-							Type:         "POST",
-							AddOn:        "",
-						},
-						InheritanceApis: []*spectypes.CollectionData{
-							{
-								ApiInterface: apiInterface,
-								InternalPath: "",
-								Type:         "POST",
-								AddOn:        "",
-							},
-						},
-						ParseDirectives: []*spectypes.ParseDirective{{
-							FunctionTag: spectypes.FUNCTION_TAG_SUBSCRIBE,
-						}},
-					},
-				},
+				name:               "with_internal_paths_and_multiple_ws_internal_paths_in_spec__http_and_ws_is_configured",
+				apiInterface:       apiInterface,
+				specApiCollections: internalPathSpec{paths: []string{"/X", "/WS"}, subscribing: []string{"/X", "/WS"}}.collections(apiInterface),
 				nodeUrls: []common.NodeUrl{
 					{
 						Url:          "https://localhost:1234",
@@ -1743,56 +1278,9 @@ func TestChainRouterWithInternalPaths(t *testing.T) {
 				},
 			},
 			{
-				name:         "with_internal_paths_and_mixed_internal_paths_in_spec_and_root_is_disabled_http_only_is_configured",
-				apiInterface: apiInterface,
-				specApiCollections: []*spectypes.ApiCollection{
-					{
-						Enabled: false,
-						CollectionData: spectypes.CollectionData{
-							ApiInterface: apiInterface,
-							InternalPath: "",
-							Type:         "POST",
-							AddOn:        "",
-						},
-					},
-					{
-						Enabled: true,
-						CollectionData: spectypes.CollectionData{
-							ApiInterface: apiInterface,
-							InternalPath: "/X",
-							Type:         "POST",
-							AddOn:        "",
-						},
-						InheritanceApis: []*spectypes.CollectionData{
-							{
-								ApiInterface: apiInterface,
-								InternalPath: "",
-								Type:         "POST",
-								AddOn:        "",
-							},
-						},
-					},
-					{
-						Enabled: true,
-						CollectionData: spectypes.CollectionData{
-							ApiInterface: apiInterface,
-							InternalPath: "/WS",
-							Type:         "POST",
-							AddOn:        "",
-						},
-						InheritanceApis: []*spectypes.CollectionData{
-							{
-								ApiInterface: apiInterface,
-								InternalPath: "",
-								Type:         "POST",
-								AddOn:        "",
-							},
-						},
-						ParseDirectives: []*spectypes.ParseDirective{{
-							FunctionTag: spectypes.FUNCTION_TAG_SUBSCRIBE,
-						}},
-					},
-				},
+				name:               "with_internal_paths_and_mixed_internal_paths_in_spec_and_root_is_disabled_http_only_is_configured",
+				apiInterface:       apiInterface,
+				specApiCollections: internalPathSpec{rootDisabled: true, paths: []string{"/X", "/WS"}, subscribing: []string{"/WS"}}.collections(apiInterface),
 				nodeUrls: []common.NodeUrl{
 					{
 						Url:          "wss://localhost:1234",
@@ -1804,56 +1292,9 @@ func TestChainRouterWithInternalPaths(t *testing.T) {
 				},
 			},
 			{
-				name:         "with_internal_paths_and_mixed_internal_paths_in_spec_and_root_is_disabled_ws_only_is_configured",
-				apiInterface: apiInterface,
-				specApiCollections: []*spectypes.ApiCollection{
-					{
-						Enabled: false,
-						CollectionData: spectypes.CollectionData{
-							ApiInterface: apiInterface,
-							InternalPath: "",
-							Type:         "POST",
-							AddOn:        "",
-						},
-					},
-					{
-						Enabled: true,
-						CollectionData: spectypes.CollectionData{
-							ApiInterface: apiInterface,
-							InternalPath: "/X",
-							Type:         "POST",
-							AddOn:        "",
-						},
-						InheritanceApis: []*spectypes.CollectionData{
-							{
-								ApiInterface: apiInterface,
-								InternalPath: "",
-								Type:         "POST",
-								AddOn:        "",
-							},
-						},
-					},
-					{
-						Enabled: true,
-						CollectionData: spectypes.CollectionData{
-							ApiInterface: apiInterface,
-							InternalPath: "/WS",
-							Type:         "POST",
-							AddOn:        "",
-						},
-						InheritanceApis: []*spectypes.CollectionData{
-							{
-								ApiInterface: apiInterface,
-								InternalPath: "",
-								Type:         "POST",
-								AddOn:        "",
-							},
-						},
-						ParseDirectives: []*spectypes.ParseDirective{{
-							FunctionTag: spectypes.FUNCTION_TAG_SUBSCRIBE,
-						}},
-					},
-				},
+				name:               "with_internal_paths_and_mixed_internal_paths_in_spec_and_root_is_disabled_ws_only_is_configured",
+				apiInterface:       apiInterface,
+				specApiCollections: internalPathSpec{rootDisabled: true, paths: []string{"/X", "/WS"}, subscribing: []string{"/WS"}}.collections(apiInterface),
 				nodeUrls: []common.NodeUrl{
 					{
 						Url:          "wss://localhost:1234",
@@ -1865,56 +1306,9 @@ func TestChainRouterWithInternalPaths(t *testing.T) {
 				},
 			},
 			{
-				name:         "with_internal_paths_and_mixed_internal_paths_in_spec_and_root_is_disabled_http_and_ws_is_configured",
-				apiInterface: apiInterface,
-				specApiCollections: []*spectypes.ApiCollection{
-					{
-						Enabled: false,
-						CollectionData: spectypes.CollectionData{
-							ApiInterface: apiInterface,
-							InternalPath: "",
-							Type:         "POST",
-							AddOn:        "",
-						},
-					},
-					{
-						Enabled: true,
-						CollectionData: spectypes.CollectionData{
-							ApiInterface: apiInterface,
-							InternalPath: "/X",
-							Type:         "POST",
-							AddOn:        "",
-						},
-						InheritanceApis: []*spectypes.CollectionData{
-							{
-								ApiInterface: apiInterface,
-								InternalPath: "",
-								Type:         "POST",
-								AddOn:        "",
-							},
-						},
-					},
-					{
-						Enabled: true,
-						CollectionData: spectypes.CollectionData{
-							ApiInterface: apiInterface,
-							InternalPath: "/WS",
-							Type:         "POST",
-							AddOn:        "",
-						},
-						InheritanceApis: []*spectypes.CollectionData{
-							{
-								ApiInterface: apiInterface,
-								InternalPath: "",
-								Type:         "POST",
-								AddOn:        "",
-							},
-						},
-						ParseDirectives: []*spectypes.ParseDirective{{
-							FunctionTag: spectypes.FUNCTION_TAG_SUBSCRIBE,
-						}},
-					},
-				},
+				name:               "with_internal_paths_and_mixed_internal_paths_in_spec_and_root_is_disabled_http_and_ws_is_configured",
+				apiInterface:       apiInterface,
+				specApiCollections: internalPathSpec{rootDisabled: true, paths: []string{"/X", "/WS"}, subscribing: []string{"/WS"}}.collections(apiInterface),
 				nodeUrls: []common.NodeUrl{
 					{
 						Url:          "https://localhost:1234",
