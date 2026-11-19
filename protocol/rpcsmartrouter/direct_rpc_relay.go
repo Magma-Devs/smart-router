@@ -985,7 +985,9 @@ func (d *DirectRPCRelaySender) sendGraphQLRelay(
 		)
 	}
 
-	hasError, errorMessage := chainMessage.CheckResponseError(response.Body, response.StatusCode)
+	// One reading of the body for both the verdict and the status the registry files it under: a
+	// read's reply can be megabytes. chainMessage.CheckResponseError is this same method.
+	hasError, errorMessage, classificationStatus := graphqlMessage.ReplyVerdict(response.Body, response.StatusCode)
 	if hasError && errorMessage != "" {
 		utils.FormatDebug("GraphQL response contains error",
 			utils.LogAttr("endpoint", d.endpointName),
@@ -1030,7 +1032,6 @@ func (d *DirectRPCRelaySender) sendGraphQLRelay(
 		// A GraphQL node error usually arrives inside a 200, so the status alone would leave
 		// the registry with nothing to go on: the reply's verdict stands in for it, as the
 		// status that verdict is filed under (see GraphQLMessage.ClassificationStatus).
-		classificationStatus := graphqlMessage.ClassificationStatus(response.Body, response.StatusCode)
 		result.ApplyNodeErrorClassification(d.chainFamily, common.TransportREST, classificationStatus, errorMessage)
 	}
 
