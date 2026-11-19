@@ -72,9 +72,42 @@ func TestGraphQLDirectRelay(t *testing.T) {
 			reply:  `{"data":{"chainIdentifier":"35834a8a"}}`,
 		},
 		{
-			name:   "an error with no code is the caller's",
-			status: http.StatusOK,
-			reply:  `{"data":null,"errors":[{"message":"Expected input type \"UInt53\", found \"abc\"."}]}`,
+			// When unsure, retry without blame (MAG-5121).
+			name:           "an error with no code is unknown: retried, not blamed",
+			status:         http.StatusOK,
+			reply:          `{"data":null,"errors":[{"message":"Expected input type \"UInt53\", found \"abc\"."}]}`,
+			wantNodeError:  true,
+			wantCapability: true,
+		},
+		{
+			name:            "a validation failure is the caller's: not retried, not blamed",
+			status:          http.StatusOK,
+			reply:           `{"data":null,"errors":[{"message":"Unknown field","extensions":{"code":"GRAPHQL_VALIDATION_FAILED"}}]}`,
+			wantNodeError:   true,
+			wantNonRetrying: true,
+		},
+		{
+			name:            "a parse failure is the caller's",
+			status:          http.StatusOK,
+			reply:           `{"data":null,"errors":[{"message":"recursion limit exceeded.","extensions":{"code":"GRAPHQL_PARSE_FAILED"}}]}`,
+			wantNodeError:   true,
+			wantNonRetrying: true,
+		},
+		{
+			// Read as no code, not as an unreadable reply blamed as a bad gateway (MAG-5121 test 13).
+			name:           "a numeric code is no code",
+			status:         http.StatusOK,
+			reply:          `{"data":null,"errors":[{"message":"bad","extensions":{"code":400}}]}`,
+			wantNodeError:  true,
+			wantCapability: true,
+		},
+		{
+			// A limit on one field, not a vendor quota: no pause.
+			name:           "RESOURCE_EXHAUSTED with a path is unknown, not a rate limit",
+			status:         http.StatusOK,
+			reply:          `{"data":null,"errors":[{"message":"Display output too large","path":["object"],"extensions":{"code":"RESOURCE_EXHAUSTED"}}]}`,
+			wantNodeError:  true,
+			wantCapability: true,
 		},
 		{
 			name:          "a server-fault code inside a 200 is the node's",

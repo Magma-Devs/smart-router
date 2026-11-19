@@ -1028,8 +1028,8 @@ func (d *DirectRPCRelaySender) sendGraphQLRelay(
 	}
 	if hasError {
 		// A GraphQL node error usually arrives inside a 200, so the status alone would leave
-		// the registry with nothing to go on: the message stands in for it (RESOURCE_EXHAUSTED
-		// classifies as a 429, a caller's error on a mutation as a 400).
+		// the registry with nothing to go on: the reply's verdict stands in for it, as the
+		// status that verdict is filed under (see GraphQLMessage.ClassificationStatus).
 		classificationStatus := graphqlMessage.ClassificationStatus(response.Body, response.StatusCode)
 		result.ApplyNodeErrorClassification(d.chainFamily, common.TransportREST, classificationStatus, errorMessage)
 	}

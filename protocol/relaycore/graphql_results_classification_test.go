@@ -138,10 +138,12 @@ func TestResultsManager_GraphQLInBodyFaultIsClassifiedByItsCode(t *testing.T) {
 			wantLevel: "debug",
 		},
 		{
+			// Retried on another provider, not blamed (MAG-5121): filed as the node not
+			// implementing what the query needs.
 			name:      "FEATURE_UNAVAILABLE is a capability this node does not offer",
 			request:   graphQLResultsCheckpointRead,
 			reply:     graphQLErrorReply("not available", "FEATURE_UNAVAILABLE"),
-			wantName:  common.RouterErrorNodeAccessDenied.Name,
+			wantName:  common.RouterErrorNodeUnimplemented.Name,
 			wantLevel: "debug",
 		},
 		{
