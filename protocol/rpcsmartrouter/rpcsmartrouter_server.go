@@ -4141,7 +4141,7 @@ func (rpcss *RPCSmartRouterServer) runProbeCycle(appender probeQoSAppender, cfg 
 	stallPaused := rpcss.headStallPaused(startedAt)
 	rpcss.publishChainIdle(startedAt)
 	scored, reEnabled, syncOmitted := runProbeCycleCore(
-		endpoints,
+		probeScoredEndpoints(endpoints, rpcss.endpointChainTrackerManager.IsUntrackedByDesign),
 		rpcss.endpointChainTrackerManager.GetObservation,
 		baseline, hasBaseline, syncRef, startedAt, cfg, probeAppenderUnlessIdle(appender, feedPaused),
 		rpcss.sessionManager.RestoreRecoveredProvider,
@@ -4152,6 +4152,40 @@ func (rpcss *RPCSmartRouterServer) runProbeCycle(appender probeQoSAppender, cfg 
 		rpcss.runHeadStall(endpoints, startedAt)
 	}
 	rpcss.probeStats.recordCycle(startedAt, time.Since(startedAt), scored, reEnabled, syncOmitted, feedPaused, stallPaused)
+}
+
+// probeScoredEndpoints is the endpoint list the probe cycle judges: all of them except the urls
+// held as not tracked by design (MAG-5349). The probe judges a url by its block polls, and such
+// a url has none, ever, so every cycle would read it as "not alive" and feed its provider
+// availability 0 (or drag a provider that also has tracked urls down by its share). Left out, it
+// counts as neither healthy nor unhealthy — the same treatment a rate-limited url gets — and a
+// provider with no other url sends no probe sample; its score then comes from its relays alone.
+//
+// Nothing is lost on the re-enable side: the probe re-enables only on a successful poll, which
+// this url cannot have. A disabled one returns through the reconnect routine, as before.
+//
+// The head-stall step keeps the full list. It marks a url only once it has shown a block, so
+// it never marks this one, and it must still count it as a url the provider can be reached on.
+func probeScoredEndpoints(endpoints []*routersession.EndpointWithDirectConnection, untrackedByDesign func(url string) bool) []*routersession.EndpointWithDirectConnection {
+	if untrackedByDesign == nil {
+		return endpoints
+	}
+	// The common case has none: return the caller's slice untouched, no allocation per cycle.
+	firstUntracked := slices.IndexFunc(endpoints, func(ep *routersession.EndpointWithDirectConnection) bool {
+		return ep != nil && ep.Endpoint != nil && untrackedByDesign(ep.Endpoint.NetworkAddress)
+	})
+	if firstUntracked < 0 {
+		return endpoints
+	}
+	scored := make([]*routersession.EndpointWithDirectConnection, 0, len(endpoints)-1)
+	scored = append(scored, endpoints[:firstUntracked]...)
+	for _, ep := range endpoints[firstUntracked+1:] {
+		if ep != nil && ep.Endpoint != nil && untrackedByDesign(ep.Endpoint.NetworkAddress) {
+			continue
+		}
+		scored = append(scored, ep)
+	}
+	return scored
 }
 
 // qosFeedPaused is the probe loop's decision to withhold its QoS feed this cycle. Idle mode
@@ -4422,6 +4456,19 @@ func (rpcss *RPCSmartRouterServer) forgetURLLatestBlockIfUntracked(endpointURL s
 	if rpcss.endpointChainTrackerManager == nil || rpcss.smartRouterEndpointMetrics == nil || rpcss.listenEndpoint == nil {
 		return
 	}
+	// A url held as not tracked by design is still configured: it has no tracker to remove,
+	// so no removal to race, and its series (the relays it served, its tracking flag) stay.
+	//
+	// This check comes BEFORE the generation check, and the order matters. The two read under
+	// different locks, and a url can go from not tracked to tracked in between, when another
+	// provider's endpoint that can read the head claims it. That move drops the "not tracked"
+	// entry and sets the generation under one hold of the monitor's lock, so a url read here as
+	// no longer "not tracked" already has its generation by the time the next line asks. In the
+	// other order a relay could read "no generation", then "not held as not tracked", and delete
+	// the series of a url that is configured and now tracked.
+	if rpcss.endpointChainTrackerManager.IsUntrackedByDesign(endpointURL) {
+		return
+	}
 	if _, tracked := rpcss.endpointChainTrackerManager.ObservationGeneration(endpointURL); !tracked {
 		rpcss.smartRouterEndpointMetrics.ForgetEndpointURLLatestBlock(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointURL)
 	}
@@ -4620,9 +4667,12 @@ func (rpcss *RPCSmartRouterServer) ensureEndpointChainTracker(
 		return
 	}
 
-	// Check if ChainTracker already exists
+	// Check if ChainTracker already exists, or the url is held as not tracked by design
 	endpointURL := endpoint.NetworkAddress
 	if _, exists := rpcss.endpointChainTrackerManager.GetTracker(endpointURL); exists {
+		return
+	}
+	if rpcss.endpointChainTrackerManager.IsSettledUntracked(endpoint) {
 		return
 	}
 
@@ -4638,7 +4688,28 @@ func (rpcss *RPCSmartRouterServer) ensureEndpointChainTracker(
 		utils.FormatWarning("failed to create ChainTracker for endpoint", err,
 			utils.LogAttr("endpoint", endpointURL),
 		)
+		return
 	}
+	rpcss.publishBlockTracking(endpointURL)
+}
+
+// publishBlockTracking writes a url's rpc_endpoint_url_block_tracking series from the monitor's
+// decision about it: 1 for a url with a tracker, 0 for one held as not tracked by design
+// (MAG-5349). Called where that decision is made (the relay path, the reconcile pass, the
+// /debug/reset-chaintracker-rows handler), and again for every url on every reconcile pass: the
+// url's series are deleted when it leaves the pairing, and a url that comes back through a path
+// that does not write this one would otherwise have no series until the pod restarts. Never per
+// relay.
+//
+// Like every per-url write, it can land just after the url's removal deleted its series, so it
+// ends with the same check the other writers run.
+func (rpcss *RPCSmartRouterServer) publishBlockTracking(endpointURL string) {
+	if rpcss.endpointChainTrackerManager == nil || rpcss.smartRouterEndpointMetrics == nil || rpcss.listenEndpoint == nil {
+		return
+	}
+	tracked := !rpcss.endpointChainTrackerManager.IsUntrackedByDesign(endpointURL)
+	rpcss.smartRouterEndpointMetrics.SetEndpointURLBlockTracking(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointURL, tracked)
+	rpcss.forgetURLLatestBlockIfUntracked(endpointURL)
 }
 
 // chainTrackerReconcileInterval is how often initializeChainTrackers re-walks the live pairing
@@ -4760,6 +4831,15 @@ func (rpcss *RPCSmartRouterServer) reconcileChainTrackers(ctx context.Context, f
 		}
 		if _, exists := rpcss.endpointChainTrackerManager.GetTracker(ep.Endpoint.NetworkAddress); exists {
 			alreadyPresent++
+			rpcss.publishBlockTracking(ep.Endpoint.NetworkAddress)
+			continue
+		}
+		// Held as not tracked by design (MAG-5349): nothing is missing, so it is not re-tried
+		// and not reported as "had no tracker" on every pass. An endpoint that can read the
+		// head on such a url is not settled: it goes on to get the url its tracker.
+		if rpcss.endpointChainTrackerManager.IsSettledUntracked(ep.Endpoint) {
+			alreadyPresent++
+			rpcss.publishBlockTracking(ep.Endpoint.NetworkAddress)
 			continue
 		}
 		missing = append(missing, ep)
@@ -4800,6 +4880,13 @@ func (rpcss *RPCSmartRouterServer) reconcileChainTrackers(ctx context.Context, f
 				utils.LogAttr("provider", ep.ProviderAddress),
 			)
 			failed++
+			continue
+		}
+		rpcss.publishBlockTracking(ep.Endpoint.NetworkAddress)
+		// The monitor decided on this pass that the url gets no tracker by design: settled, not
+		// created, so it stays out of the "had no tracker" warning below.
+		if rpcss.endpointChainTrackerManager.IsUntrackedByDesign(ep.Endpoint.NetworkAddress) {
+			alreadyPresent++
 			continue
 		}
 		created++

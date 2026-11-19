@@ -97,6 +97,7 @@ func TestPositionalLabels_EveryWrappedMetric(t *testing.T) {
 		{"rpc_endpoint_url_latest_block", func() { m.SetProviderURLLatestBlock(positionalSpec, api, provider, nodeURL, 9, time.Minute) }, byURL},
 		{"rpc_endpoint_url_answered_until_seconds", func() { m.SetProviderURLLatestBlock(positionalSpec, api, provider, nodeURL, 9, time.Minute) }, byURL},
 		{"rpc_endpoint_url_relays_serviced_total", func() { m.AddEndpointURLRelayServiced(positionalSpec, api, provider, nodeURL) }, byURL},
+		{"rpc_endpoint_url_block_tracking", func() { m.SetEndpointURLBlockTracking(positionalSpec, api, nodeURL, false) }, byURL},
 	} {
 		t.Run(c.metric, func(t *testing.T) {
 			c.drive()
@@ -108,7 +109,7 @@ func TestPositionalLabels_EveryWrappedMetric(t *testing.T) {
 	// Forgetting a url deletes its per-url series by the same positional values, so it must
 	// remove exactly the series written above.
 	m.ForgetEndpointURLLatestBlock(positionalSpec, api, nodeURL)
-	for _, metric := range []string{"rpc_endpoint_url_latest_block", "rpc_endpoint_url_answered_until_seconds", "rpc_endpoint_url_relays_serviced_total"} {
+	for _, metric := range []string{"rpc_endpoint_url_latest_block", "rpc_endpoint_url_answered_until_seconds", "rpc_endpoint_url_relays_serviced_total", "rpc_endpoint_url_block_tracking"} {
 		require.NotContains(t, seriesLabels(t, metric), byURL, "%s outlived ForgetEndpointURLLatestBlock", metric)
 	}
 }
