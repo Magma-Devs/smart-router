@@ -2,7 +2,6 @@ package rpcsmartrouter
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -613,29 +612,6 @@ func (restoreRawCodec) Unmarshal(data []byte, v any) error {
 
 func (restoreRawCodec) Name() string { return "proto" }
 
-// restoreRelaySender stands in for the router behind the gRPC listener: it parses with the
-// router's own ParseRelay and serves subscriptions from the real manager.
-type restoreRelaySender struct {
-	rpcss   *RPCSmartRouterServer
-	manager *DirectGRPCSubscriptionManager
-}
-
-func (s *restoreRelaySender) SendRelay(context.Context, string, string, string, string, string, *metrics.RelayMetrics, []pairingtypes.Metadata) (*common.RelayResult, error) {
-	return nil, errors.New("unary relays are not used here")
-}
-
-func (s *restoreRelaySender) ParseRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, metadataValues []pairingtypes.Metadata) (chainlib.ProtocolMessage, error) {
-	return s.rpcss.ParseRelay(ctx, url, req, connectionType, dappID, consumerIp, metadataValues)
-}
-
-func (s *restoreRelaySender) SendParsedRelay(context.Context, *metrics.RelayMetrics, chainlib.ProtocolMessage) (*common.RelayResult, error) {
-	return nil, errors.New("unary relays are not used here")
-}
-
-func (s *restoreRelaySender) GetGRPCSubscriptionManager() chainlib.GRPCSubscriptionManager {
-	return s.manager
-}
-
 type restoreHealthyReporter struct{}
 
 func (restoreHealthyReporter) IsHealthy() bool { return true }
@@ -675,7 +651,7 @@ func dialRestoreListener(t *testing.T, manager *DirectGRPCSubscriptionManager) *
 	connectionForUpstream(t, manager).descriptors.cache.Store("test.v1.Feed.Subscribe", streamingMethodDescriptor(t))
 
 	endpoint := &routersession.RPCEndpoint{NetworkAddress: "127.0.0.1:0", ChainID: "SUI", ApiInterface: spectypes.APIInterfaceGrpc}
-	sender := &restoreRelaySender{rpcss: &RPCSmartRouterServer{chainParser: parser, listenEndpoint: endpoint}, manager: manager}
+	sender := &routerRelaySender{rpcss: &RPCSmartRouterServer{chainParser: parser, listenEndpoint: endpoint}, manager: manager}
 	logger, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
 	require.NoError(t, err)
 

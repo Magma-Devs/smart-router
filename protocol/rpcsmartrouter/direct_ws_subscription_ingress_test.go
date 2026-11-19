@@ -3,7 +3,6 @@ package rpcsmartrouter
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"testing"
 	"time"
 
@@ -12,7 +11,6 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
-	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils/rand"
 	"github.com/stretchr/testify/require"
@@ -28,15 +26,9 @@ func (m *ingressSubscribeMessage) GetParseDirective() *spectypes.ParseDirective 
 	return &spectypes.ParseDirective{ApiName: m.method, FunctionTag: spectypes.FUNCTION_TAG_SUBSCRIBE}
 }
 
-// subscribeOnlyRelaySender parses every frame a client sends as the subscribe it carries. The
-// tests here send nothing else.
-type subscribeOnlyRelaySender struct{}
-
-func (subscribeOnlyRelaySender) SendRelay(context.Context, string, string, string, string, string, *metrics.RelayMetrics, []pairingtypes.Metadata) (*common.RelayResult, error) {
-	return nil, errors.New("not used")
-}
-
-func (subscribeOnlyRelaySender) ParseRelay(_ context.Context, _ string, req string, _ string, _ string, _ string, _ []pairingtypes.Metadata) (chainlib.ProtocolMessage, error) {
+// parseIngressSubscribe parses every frame a client sends as the subscribe it carries. The tests
+// here send nothing else.
+func parseIngressSubscribe(req string) (chainlib.ProtocolMessage, error) {
 	var request struct {
 		Method string        `json:"method"`
 		Params []interface{} `json:"params"`
@@ -50,12 +42,6 @@ func (subscribeOnlyRelaySender) ParseRelay(_ context.Context, _ string, req stri
 	}}, nil
 }
 
-func (subscribeOnlyRelaySender) SendParsedRelay(context.Context, *metrics.RelayMetrics, chainlib.ProtocolMessage) (*common.RelayResult, error) {
-	return nil, errors.New("not used")
-}
-
-func (subscribeOnlyRelaySender) CancelSubscriptionContext(string) {}
-
 // dialIngress serves manager behind the real JSON-RPC listener, as the router does, and returns
 // a client socket connected to it.
 func dialIngress(t *testing.T, manager *DirectWSSubscriptionManager) *websocket.Conn {
@@ -68,7 +54,7 @@ func dialIngress(t *testing.T, manager *DirectWSSubscriptionManager) *websocket.
 	logs, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
 	require.NoError(t, err)
 	endpoint := &routersession.RPCEndpoint{NetworkAddress: "127.0.0.1:0", ChainID: "ETH1", ApiInterface: "jsonrpc", HealthCheckPath: common.DEFAULT_HEALTH_PATH}
-	listener := chainlib.NewJrpcChainListener(ctx, endpoint, subscribeOnlyRelaySender{}, nil, logs, nil, manager)
+	listener := chainlib.NewJrpcChainListener(ctx, endpoint, &routerRelaySender{parse: parseIngressSubscribe}, nil, logs, nil, manager)
 	go listener.Serve(ctx, common.ConsumerCmdFlags{})
 	t.Cleanup(func() {
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Second)
