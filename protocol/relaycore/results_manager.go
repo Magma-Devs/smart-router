@@ -27,10 +27,10 @@ func transportFromProtocolMessage(pm chainlib.ProtocolMessage) common.TransportT
 // (rpcInterfaceMessages.GraphQLMessage). It stands in for the reply's status the way the body's
 // error code does for JSON-RPC.
 type replyStatusClassifier interface {
-	ClassificationStatus(data []byte, httpStatusCode int) int
-	// OwnClassification is the registry entry the interface's own rows file an error reply
-	// under, or nil when the shared rows decide (GraphQL: a read, MAG-5121).
-	OwnClassification(data []byte, httpStatusCode int) *common.RouterError
+	// ReplyVerdict reads the reply once: whether it is an error, its message, the status it stands
+	// for, and the registry entry the interface's own rows file it under, or nil when the shared
+	// rows decide (GraphQL: a write, MAG-5121). Each reading decodes the whole reply.
+	ReplyVerdict(data []byte, httpStatusCode int) (hasError bool, errorMessage string, classificationStatus int, classified *common.RouterError)
 }
 
 type ResultsManager interface {
@@ -200,8 +200,7 @@ func (rp *ResultsManagerInst) setValidResponse(response *RelayResponse, protocol
 		// behind a 503 was an ERROR line with its own name (MAG-4375).
 		var ownClassification *common.RouterError
 		if statusClassifier, ok := protocolMessage.GetRPCMessage().(replyStatusClassifier); ok {
-			errorCode = statusClassifier.ClassificationStatus(response.RelayResult.Reply.Data, response.RelayResult.StatusCode)
-			ownClassification = statusClassifier.OwnClassification(response.RelayResult.Reply.Data, response.RelayResult.StatusCode)
+			_, _, errorCode, ownClassification = statusClassifier.ReplyVerdict(response.RelayResult.Reply.Data, response.RelayResult.StatusCode)
 		}
 		// Resolve chain family so Tier-2 chain-specific matchers win over
 		// Tier-1 generic ones. Without this, chain-native codes like Solana's

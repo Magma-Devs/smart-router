@@ -179,7 +179,7 @@ func TestResultsManager_GraphQLInBodyFaultIsClassifiedByItsCode(t *testing.T) {
 			require.True(t, hasError)
 			statusClassifier, ok := protocolMessage.GetRPCMessage().(replyStatusClassifier)
 			require.True(t, ok, "a GraphQL message classifies its own replies")
-			senderStatus := statusClassifier.ClassificationStatus([]byte(test.reply), http.StatusOK)
+			_, _, senderStatus, _ := statusClassifier.ReplyVerdict([]byte(test.reply), http.StatusOK)
 			sender := common.ClassifyNodeErrorForRetry(common.GetChainFamilyOrDefault("SUI"), common.TransportREST, senderStatus, message)
 			assert.Equal(t, sender.IsNodeAtFault, best.RouterError.EndpointAtFault(), "the results manager blames the endpoint differently from the sender")
 			assert.Equal(t, sender.IsRateLimited, best.RouterError.SubCategory.IsRateLimit())
