@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -28,7 +29,8 @@ import (
 
 // writeUpstream is one upstream of a two-provider write broadcast: what it answers and how long it
 // takes to answer. firstStatus and firstBody, when set, are what it answers its first request
-// with instead.
+// with instead. refuse closes it before the write, so every connection to it is refused, and
+// overTLS dials its plain-HTTP port over https, so the TLS handshake fails.
 type writeUpstream struct {
 	name        string
 	status      int
@@ -36,6 +38,8 @@ type writeUpstream struct {
 	delay       time.Duration
 	firstStatus int
 	firstBody   string
+	refuse      bool
+	overTLS     bool
 }
 
 // writeInterfaceCase is one api interface's write: the request that is stateful on it, and the parser
@@ -79,10 +83,17 @@ func lavaRESTWriteParser(t *testing.T) chainlib.ChainParser {
 // submits transactions with.
 func suiGraphQLWriteParser(t *testing.T) chainlib.ChainParser {
 	t.Helper()
+	return graphQLWriteParser(t, "SUI")
+}
+
+// graphQLWriteParser is suiGraphQLWriteParser's spec under the index given: its chain family, and
+// with it the chain's GraphQL rows, follow the index.
+func graphQLWriteParser(t *testing.T, index string) chainlib.ChainParser {
+	t.Helper()
 	chainParser, err := chainlib.NewGraphQLChainParser()
 	require.NoError(t, err)
 	chainParser.SetSpec(spectypes.Spec{
-		Index:            "SUI",
+		Index:            index,
 		Enabled:          true,
 		AverageBlockTime: 400,
 		ApiCollections: []*spectypes.ApiCollection{{
@@ -172,9 +183,15 @@ func newWriteServer(t *testing.T, tc writeInterfaceCase, chainParser chainlib.Ch
 			_, _ = w.Write([]byte(body))
 		}))
 		t.Cleanup(upstream.Close)
+		if upstreamCfg.refuse {
+			upstream.Close()
+		}
 		// The relay path records a 429 on the process-wide registry, keyed on the provider and the
 		// url it dialed. Clear it, or this upstream's hold-off outlives the test.
 		name, url := upstreamCfg.name, upstream.URL+tc.nodeURLPath
+		if upstreamCfg.overTLS {
+			url = "https://" + strings.TrimPrefix(url, "http://")
+		}
 		t.Cleanup(func() { holdoff.Shared.RecordAnswer(name, url) })
 
 		connection, err := routersession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: url}, 5, "")

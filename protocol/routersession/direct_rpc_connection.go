@@ -887,6 +887,13 @@ const upstreamBodyLogCap = 256
 // (see there), so a log line that wants them asks for them here. The body is cut at 256 bytes and
 // redacted, as any other log field.
 func UpstreamAnswerLogAttrs(err error) []utils.Attribute {
+	return UpstreamAnswerLogAttrsLogged(err, nil)
+}
+
+// UpstreamAnswerLogAttrsLogged is UpstreamAnswerLogAttrs with the body rewritten by logged before
+// the cut, so a cut cannot leave a piece of what logged takes out: a GraphQL write's signed bytes
+// (MAG-5122). nil leaves the body as is.
+func UpstreamAnswerLogAttrsLogged(err error, logged func(string) string) []utils.Attribute {
 	var httpErr *HTTPStatusError
 	if !errors.As(err, &httpErr) {
 		return nil
@@ -896,6 +903,9 @@ func UpstreamAnswerLogAttrs(err error) []utils.Attribute {
 		status = strconv.Itoa(httpErr.StatusCode)
 	}
 	body := httpErr.Body
+	if logged != nil {
+		body = []byte(logged(string(body)))
+	}
 	if len(body) > upstreamBodyLogCap {
 		body = body[:upstreamBodyLogCap]
 	}

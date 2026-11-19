@@ -54,6 +54,17 @@ type httpRelaySpec struct {
 	testMode bool
 	// debugRelays logs whole request bodies instead of their cut form (--debug-relays).
 	debugRelays bool
+	// logSafe rewrites a request or reply body for the log lines, before any cut; nil logs it as
+	// is. The GraphQL listener takes a write's signed bytes out (MAG-5122).
+	logSafe func(body string) string
+}
+
+// logged is body as relayHTTP's log lines print it: through logSafe.
+func (spec httpRelaySpec) logged(body string) string {
+	if spec.logSafe == nil {
+		return body
+	}
+	return spec.logSafe(body)
 }
 
 // relayHTTP is the handler every HTTP listener route relays through.
@@ -66,7 +77,7 @@ func (apil *chainListenerBase) relayHTTP(spec httpRelaySpec) fiber.Handler {
 		req := spec.request(fiberCtx)
 		// A body holds what the client sent, a signed transaction included; the received and
 		// failure lines carry its cut form unless --debug-relays (MAG-4454).
-		req.loggedBody = relayBodyForLog(req.body, spec.debugRelays)
+		req.loggedBody = relayBodyForLog(spec.logged(req.body), spec.debugRelays)
 		dappID := extractDappIDFromFiberContext(fiberCtx)
 		analytics := metrics.NewRelayAnalytics(dappID, chainID, apiInterface)
 		analytics.SetProcessingTimestampBeforeRelay(startTime)
@@ -107,11 +118,11 @@ func (apil *chainListenerBase) relayHTTP(spec httpRelaySpec) fiber.Handler {
 			// MAG-4481: the upstream's own answer as is, or the router's 502/504 when none answered.
 			// The request log records what the client is sent.
 			if failed, ok := buildFailedRelayReply(relayResult, msgSeed, fiberCtx.Body(), spec.noAnswer); ok {
-				apil.logger.LogRequestAndResponse(spec.logModule, true, req.logMethod, req.logPath, req.loggedBody, loggedReply(failed.body), msgSeed, time.Since(startTime), err)
+				apil.logger.LogRequestAndResponse(spec.logModule, true, req.logMethod, req.logPath, req.loggedBody, loggedReply(spec.logged(string(failed.body))), msgSeed, time.Since(startTime), err)
 				return sendFailedRelayReply(fiberCtx, failed, reply.GetMetadata())
 			}
 			response := spec.errorBody(fiberCtx, relayResult, errMasking, msgSeed)
-			apil.logger.LogRequestAndResponse(spec.logModule, true, req.logMethod, req.logPath, req.loggedBody, loggedReply(response), msgSeed, time.Since(startTime), err)
+			apil.logger.LogRequestAndResponse(spec.logModule, true, req.logMethod, req.logPath, req.loggedBody, loggedReply(spec.logged(string(response))), msgSeed, time.Since(startTime), err)
 			fiberCtx.Status(failedRelayStatus(relayResult))
 			return addHeadersAndSendBytes(fiberCtx, reply.GetMetadata(), response)
 		}
@@ -123,11 +134,11 @@ func (apil *chainListenerBase) relayHTTP(spec httpRelaySpec) fiber.Handler {
 		// LogRequestAndResponse writes a success at debug level only. Go evaluates arguments
 		// eagerly, so without the gate every reply body would be copied into a string that is
 		// never printed.
-		var loggedResponse string
+		loggedRequest, loggedResponse := req.body, ""
 		if utils.IsDebugEnabled() {
-			loggedResponse = string(response)
+			loggedRequest, loggedResponse = spec.logged(req.body), spec.logged(string(response))
 		}
-		apil.logger.LogRequestAndResponse(spec.logModule, false, req.logMethod, req.logPath, req.body, loggedResponse, msgSeed, time.Since(startTime), nil)
+		apil.logger.LogRequestAndResponse(spec.logModule, false, req.logMethod, req.logPath, loggedRequest, loggedResponse, msgSeed, time.Since(startTime), nil)
 		if relayResult.GetStatusCode() != 0 {
 			fiberCtx.Status(relayResult.StatusCode)
 		}

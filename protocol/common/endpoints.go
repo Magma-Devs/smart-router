@@ -33,11 +33,14 @@ const (
 	STATEFUL_ALL_PROVIDERS_HEADER_NAME              = "lava-fast-tx-participants"
 	REQUESTED_BLOCK_HEADER_NAME                     = "lava-parsed-requested-block"
 	// WRITE_OUTCOME_HEADER_NAME names a GraphQL write's verdict across the copies it was sent to
-	// (MAG-5122): "accepted" when the chain's write rows read a copy as run (MAG-4909; Sui: the
-	// write field with its effects) or "unknown" today; "rejected" and "not_sent" are not stated
-	// yet, and any other reply carries no header. Absent on a read and on every other interface's
-	// write, which this ticket does not change.
-	WRITE_OUTCOME_HEADER_NAME        = "Lava-Write-Outcome"
+	// (MAG-5122, Part I R-L): accepted, unknown, rejected or not_sent. The one GraphQL write reply
+	// without it is a node's reply forwarded on a chain whose write rows have not shipped (MAG-4909
+	// ships Sui's). Absent on a read and on every other interface's write, which this ticket does
+	// not change.
+	WRITE_OUTCOME_HEADER_NAME = "Lava-Write-Outcome"
+	// TX_HASH_HEADER_NAME is the transaction's id on its chain, beside Lava-Write-Outcome when the
+	// router can compute it from the signed bytes in the request (MAG-5122; Sui: the digest).
+	TX_HASH_HEADER_NAME              = "Lava-Tx-Hash"
 	IDENTIFIED_NODE_ERROR_HEADER     = "lava-identified-node-error"
 	HEDGE_TRIGGERED_HEADER           = "lava-hedge-triggered"
 	SMART_ROUTER_VERSION_HEADER_NAME = "Smart-Router-Version"

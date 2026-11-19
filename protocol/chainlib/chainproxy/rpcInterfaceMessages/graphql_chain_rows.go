@@ -67,6 +67,12 @@ func (gm *GraphQLMessage) hasChainWriteRows() bool {
 	return gm.IsMutation() && gm.chainRows != nil && gm.chainRows.writeCopy != nil
 }
 
+// HasWriteRows reports whether the request is a write on a chain whose list reads write copies: its
+// copies' outcomes come from WriteOutcome.
+func (gm *GraphQLMessage) HasWriteRows() bool {
+	return gm.hasChainWriteRows()
+}
+
 // WriteOutcome is one copy's outcome for a write on a chain whose list reads write copies (MAG-4909
 // write rows). known is false for a read, and for a write on a chain with no write rows, whose
 // replies keep today's handling.

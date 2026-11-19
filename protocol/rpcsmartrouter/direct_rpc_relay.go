@@ -989,7 +989,7 @@ func (d *DirectRPCRelaySender) sendGraphQLRelay(
 	if hasError && errorMessage != "" {
 		utils.FormatDebug("GraphQL response contains error",
 			utils.LogAttr("endpoint", d.endpointName),
-			utils.LogAttr("error", errorMessage),
+			utils.LogAttr("error", rpcInterfaceMessages.RedactGraphQLSignedBytes(errorMessage)),
 		)
 	}
 

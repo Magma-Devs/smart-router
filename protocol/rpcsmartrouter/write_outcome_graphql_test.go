@@ -135,7 +135,8 @@ func TestGraphQLWrite_UnknownReplyCarriesTheDigest(t *testing.T) {
 // each of two primaries answers the write, and Sui's rows read each copy as accepted, refused or "may
 // have run". A copy that ran is the answer, with Lava-Write-Outcome: accepted. With none, a copy that
 // may have run leaves the outcome unknown, and the client gets the router's unknown reply instead of
-// an error that would make it sign again. Copies that were all refused keep the node's reply as is.
+// an error that would make it sign again. Copies that were all refused keep the node's reply as is,
+// with Lava-Write-Outcome: rejected. Every one of those replies carries the digest in Lava-Tx-Hash.
 func TestGraphQLWrite_SuiWriteRowsDecideTheOutcome(t *testing.T) {
 	rand.InitRandomSeed()
 	const (
@@ -171,8 +172,8 @@ func TestGraphQLWrite_SuiWriteRowsDecideTheOutcome(t *testing.T) {
 		{name: "W11 an internal error: may have run", a: internal, b: internal, header: "unknown"},
 		{name: "W11 every copy a bare 503 (MAG-5122 T13)", a: "upstream down", statusA: http.StatusServiceUnavailable, b: "upstream down", statusB: http.StatusServiceUnavailable, header: "unknown"},
 		{name: "a refused copy beside one that may have run", a: refusedBcs, b: networkNo, header: "unknown"},
-		{name: "W6 every copy refused: the node's reply as is", a: refusedBcs, b: refusedBcs, served: refusedBcs},
-		{name: "W12 every copy stopped by the vendor's quota: the node's reply as is", a: vendorStop, b: vendorStop, served: vendorStop},
+		{name: "W6 every copy refused: the node's reply as is", a: refusedBcs, b: refusedBcs, served: refusedBcs, header: "rejected"},
+		{name: "W12 every copy stopped by the vendor's quota: the node's reply as is", a: vendorStop, b: vendorStop, served: vendorStop, header: "rejected"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			chainParser := tc.parser(t)
@@ -184,6 +185,7 @@ func TestGraphQLWrite_SuiWriteRowsDecideTheOutcome(t *testing.T) {
 			require.NotNil(t, result)
 			require.Equal(t, [2]int64{1, 1}, [2]int64{atomic.LoadInt64(&hits[0]), atomic.LoadInt64(&hits[1])}, "one copy per provider")
 			require.Equal(t, c.header, writeOutcomeHeader(t, result))
+			require.Equal(t, suiSnapshotDigest, resultHeader(result, common.TX_HASH_HEADER_NAME), "Lava-Tx-Hash beside every outcome")
 			if c.served == "" {
 				_, extensions := unknownWriteReply(t, result)
 				require.Equal(t, "unknown", extensions["write_outcome"])
@@ -235,13 +237,14 @@ func TestGraphQLWrite_NeverRetriedWhenEveryCopyIsRateLimited(t *testing.T) {
 // writeOutcomeHeader reads Lava-Write-Outcome off a RelayResult's reply, or "" when absent.
 func writeOutcomeHeader(t *testing.T, result *common.RelayResult) string {
 	t.Helper()
+	return resultHeader(result, common.WRITE_OUTCOME_HEADER_NAME)
+}
+
+// resultHeader reads one header off a RelayResult's reply, or "" when absent.
+func resultHeader(result *common.RelayResult, name string) string {
 	if result == nil || result.Reply == nil {
 		return ""
 	}
-	for _, md := range result.Reply.Metadata {
-		if md.Name == common.WRITE_OUTCOME_HEADER_NAME {
-			return md.Value
-		}
-	}
-	return ""
+	value, _ := replyHeader(result.Reply.Metadata, name)
+	return value
 }

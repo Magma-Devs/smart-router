@@ -363,7 +363,9 @@ func (apil *GraphQLChainListener) Serve(ctx context.Context, cmdFlags common.Con
 		},
 		logReceived: logReceivedWithSeedAfterDapp("Consumer received a new GraphQL request"),
 		logModule:   "graphql in/out",
-		noAnswer:    noAnswerJsonError,
+		// A write's signed bytes never reach a log line, --debug-relays included (MAG-5122).
+		logSafe:  rpcInterfaceMessages.RedactGraphQLSignedBytes,
+		noAnswer: noAnswerJsonError,
 		// A request the router refused by one of its OWN limits: too many root fields, too deep a
 		// document, too deep a chain of fragment spreads. Or one whose wrapper keys the router and
 		// the node would read as two different requests, or whose document holds a mutation beside

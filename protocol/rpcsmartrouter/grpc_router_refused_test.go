@@ -57,7 +57,7 @@ func TestSendGRPCRelay_RefusedConnectionIsUnreachable(t *testing.T) {
 	require.Equal(t, routersession.EndpointDisableUnreachable, endpointDisableReasonFor(common.AsRouterError(err)),
 		"a closed gRPC port gives the reason a closed JSON-RPC port gives")
 
-	attempt := relayEndProtocolErrorAttempt(relaycore.RelayError{Err: err, RouterError: common.AsRouterError(err)}, false)
+	attempt := relayEndProtocolErrorAttempt(relaycore.RelayError{Err: err, RouterError: common.AsRouterError(err)}, false, nil)
 	require.Equal(t, attemptOutcomeTransportError, attempt.outcome, "relay_end reads it as a transport error")
 	require.Equal(t, common.RouterErrorConnectionRefused.Name, attempt.errorCode)
 }
