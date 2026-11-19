@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/goccy/go-json"
 	"github.com/stretchr/testify/require"
 )
 
@@ -90,6 +91,69 @@ func TestGraphQLDataOfAnotherShapeIsStillRead(t *testing.T) {
 	require.Equal(t, effectFault, readEffect(t, read, `{"data":[1,2]}`, 200),
 		"a data list with no errors is not a GraphQL response")
 	require.Equal(t, effectAnswer, readEffect(t, read, `{"data":{}}`, 200), "an empty data object is an answer")
+}
+
+// TestGraphQLNoCopyReadingAgreesWithTheRawReading pins that the no-copy reading, and the second
+// reading it falls back to only on a value of the wrong type, tell a GraphQL response apart exactly
+// as one reading that keeps data raw does: a body that is not JSON is not read twice, and no body
+// of another shape is lost by skipping that second reading.
+func TestGraphQLNoCopyReadingAgreesWithTheRawReading(t *testing.T) {
+	rawReading := func(body []byte) (dataIsObject, isResponse bool) {
+		var raw struct {
+			Data   json.RawMessage   `json:"data"`
+			Errors []json.RawMessage `json:"errors"`
+		}
+		if err := json.Unmarshal(body, &raw); err != nil {
+			return false, false
+		}
+		return graphQLDataIsObject(raw.Data), len(raw.Errors) > 0 || graphQLDataIsObject(raw.Data)
+	}
+	answer := largeGraphQLAnswer(64 << 10)
+	bodies := []string{
+		`{"data":{"a":1}}`,
+		`{"data":{}}`,
+		`{"data":null}`,
+		`{}`,
+		`{"data":"x"}`,
+		`{"data":123}`,
+		`{"data":true}`,
+		`{"data":[1,2]}`,
+		`{"data":"x","errors":[{"message":"m"}]}`,
+		`{"data":[1],"errors":[{"message":"m"}]}`,
+		`{"data":{},"data":null}`,
+		`{"data":null,"data":{}}`,
+		`{"data":"x","data":{}}`,
+		`{"data":{},"data":"x"}`,
+		`{"Data":{}}`,
+		`{"data":{"a":1},"errors":null}`,
+		`{"errors":"x","data":{}}`,
+		`{"errors":[1,"text"]}`,
+		`[{"data":{}}]`,
+		`"text"`,
+		`null`,
+		`{"data":{"a":01}}`,
+		`{"data":{"a":1,}}`,
+		`{"data":{"a" 1}}`,
+		`{"data":{"a":tru}}`,
+		`{"data":{"a":"\q"}}`,
+		`{"data":{"a":1}} {"x":1}`,
+		`{"data":"x",`,
+		`{"data":{"a":1}`,
+		`<html><body>502 Bad Gateway</body></html>`,
+		``,
+		string(answer),
+		string(answer[:len(answer)-3]),
+	}
+	for _, body := range bodies {
+		reply, isResponse := readGraphQLReply([]byte(body))
+		wantDataIsObject, wantIsResponse := rawReading([]byte(body))
+		shown := body
+		if len(shown) > 60 {
+			shown = shown[:60] + "…"
+		}
+		require.Equal(t, wantIsResponse, isResponse, "is a GraphQL response: %s", shown)
+		require.Equal(t, wantDataIsObject, reply.dataIsObject, "data is an object: %s", shown)
+	}
 }
 
 func BenchmarkGraphQLReadLargeReply(b *testing.B) {

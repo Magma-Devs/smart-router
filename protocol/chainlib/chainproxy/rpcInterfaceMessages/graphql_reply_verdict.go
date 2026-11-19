@@ -2,6 +2,7 @@ package rpcInterfaceMessages
 
 import (
 	"bytes"
+	"errors"
 	"net/http"
 
 	"github.com/goccy/go-json"
@@ -98,19 +99,26 @@ type graphQLReply struct {
 // keeping any of it, where a json.RawMessage (or any value handed to an UnmarshalJSON method) is a
 // copy of the whole value. A data member of another shape (a string, a list, a number) does not
 // fit that pointer, and the reply is read again keeping data raw, the only case that pays the copy.
+// Only a value of the wrong type calls for that second reading: a body that is not JSON (a cut
+// reply, a page) fails it at the same byte, after walking the whole body once more.
 func readGraphQLReply(body []byte) (reply graphQLReply, isResponse bool) {
 	var envelope struct {
 		Data   *struct{}         `json:"data"`
 		Errors []json.RawMessage `json:"errors"`
 	}
-	if err := json.Unmarshal(body, &envelope); err == nil {
+	err := json.Unmarshal(body, &envelope)
+	if err == nil {
 		return newGraphQLReply(envelope.Data != nil, envelope.Errors)
+	}
+	var wrongType *json.UnmarshalTypeError
+	if !errors.As(err, &wrongType) {
+		return graphQLReply{}, false
 	}
 	var raw struct {
 		Data   json.RawMessage   `json:"data"`
 		Errors []json.RawMessage `json:"errors"`
 	}
-	if err := json.Unmarshal(body, &raw); err != nil {
+	if err = json.Unmarshal(body, &raw); err != nil {
 		return graphQLReply{}, false
 	}
 	return newGraphQLReply(graphQLDataIsObject(raw.Data), raw.Errors)
