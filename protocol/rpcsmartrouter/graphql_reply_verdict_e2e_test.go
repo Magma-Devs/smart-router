@@ -7,7 +7,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/utils/rand"
 )
@@ -18,7 +17,9 @@ import (
 //
 //   - an error the router cannot read (no code, an unknown code, a numeric code, a field limit) is
 //     unknown: when unsure, retry, so the caller gets the peer's answer;
-//   - the caller's own error is served as is, and the peer is never asked: it would say the same.
+//   - the caller's own error is served as is, and the peer is never asked: it would say the same;
+//   - an HTML page is kept and blamed, and JSON cut off on the way is a dropped connection: both go
+//     to the peer.
 func TestGraphQLRelay_ReadVerdictsDecideThePeer(t *testing.T) {
 	rand.InitRandomSeed()
 	ctx := context.Background()
@@ -42,6 +43,8 @@ func TestGraphQLRelay_ReadVerdictsDecideThePeer(t *testing.T) {
 		{"a validation failure is served as is", `{"data":null,"errors":[{"message":"Unknown field","extensions":{"code":"GRAPHQL_VALIDATION_FAILED"}}]}`, false},
 		{"test 11: a parse failure is served as is", `{"data":null,"errors":[{"message":"recursion limit exceeded.","extensions":{"code":"GRAPHQL_PARSE_FAILED"}}]}`, false},
 		{"a bad input is served as is", `{"data":null,"errors":[{"message":"bad","extensions":{"code":"BAD_USER_INPUT"}}]}`, false},
+		{"test 10: an HTML page goes to the peer", graphQLTestPage, true},
+		{"test 10: a reply cut off on the way goes to the peer", graphQLTestCutReply, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -98,14 +101,21 @@ func TestGraphQLRelay_UnknownOnEveryProviderIsServedAsIs(t *testing.T) {
 	require.Equal(t, http.StatusOK, result.StatusCode)
 }
 
+// A 200 whose body is not a GraphQL reply (MAG-5121 test 10): a page from whatever answered, and
+// JSON cut off on the way.
+const (
+	graphQLTestPage     = "<html><head><title>502 Bad Gateway</title></head><body>nginx</body></html>"
+	graphQLTestCutReply = `{"data":{"chainIdentifier":"358`
+)
+
 // TestGraphQLRelay_PageInsteadOfAReply (MAG-5121 test 10) sends reads to two local upstreams that
-// answer a 200 whose body is not a GraphQL reply.
+// both answer a 200 whose body is not a GraphQL reply. One such provider beside a healthy one is
+// covered by TestGraphQLRelay_ReadVerdictsDecideThePeer.
 //
-//   - An HTML or text page is a whole reply from whatever answered: the read goes to the other
-//     provider, and when every provider sends a page the client gets one of them as is, not a
-//     reply of the router's own.
-//   - JSON cut off on the way is a dropped connection: the read goes to the other provider, and
-//     when every provider's reply is cut the client gets the router's own error.
+//   - An HTML or text page is a whole reply from whatever answered: when every provider sends a
+//     page, the client gets one of them as is, not a reply of the router's own.
+//   - JSON cut off on the way is a dropped connection: when every provider's reply is cut, the
+//     client gets the router's own error.
 func TestGraphQLRelay_PageInsteadOfAReply(t *testing.T) {
 	rand.InitRandomSeed()
 	ctx := context.Background()
@@ -113,15 +123,7 @@ func TestGraphQLRelay_PageInsteadOfAReply(t *testing.T) {
 	require.NoError(t, err)
 	chainParser := newGatewayTestGraphQLParser(t)
 
-	const (
-		page = "<html><head><title>502 Bad Gateway</title></head><body>nginx</body></html>"
-		cut  = `{"data":{"chainIdentifier":"358`
-	)
-
-	t.Run("a page from one provider goes to the other", func(t *testing.T) {
-		hits, server := newGatewayTestServer(t, chainParser, logs, refusalReply{http.StatusOK, page}, refusalReply{http.StatusOK, gatewayPeerAnswer})
-		requireFirstFailsOverToPeer(t, ctx, chainParser, server, hits)
-	})
+	page, cut := graphQLTestPage, graphQLTestCutReply
 
 	t.Run("a page from every provider is served as is", func(t *testing.T) {
 		hits, server := newGatewayTestServer(t, chainParser, logs, refusalReply{http.StatusOK, page}, refusalReply{http.StatusOK, page})
@@ -134,11 +136,6 @@ func TestGraphQLRelay_PageInsteadOfAReply(t *testing.T) {
 		require.True(t, result.IsNodeError, "the page carries the node-error flag, so it is never cached")
 	})
 
-	t.Run("a reply cut off on one provider goes to the other", func(t *testing.T) {
-		hits, server := newGatewayTestServer(t, chainParser, logs, refusalReply{http.StatusOK, cut}, refusalReply{http.StatusOK, gatewayPeerAnswer})
-		requireFirstFailsOverToPeer(t, ctx, chainParser, server, hits)
-	})
-
 	t.Run("a reply cut off on every provider is the router's own error", func(t *testing.T) {
 		hits, server := newGatewayTestServer(t, chainParser, logs, refusalReply{http.StatusOK, cut}, refusalReply{http.StatusOK, cut})
 		result, sendErr := sendGatewayTestRequest(t, ctx, chainParser, server, gatewayTestQuery)
@@ -148,24 +145,4 @@ func TestGraphQLRelay_PageInsteadOfAReply(t *testing.T) {
 			require.NotEqual(t, cut, string(result.Reply.Data), "a cut reply is never served")
 		}
 	})
-}
-
-// requireFirstFailsOverToPeer sends the read several times; each time the first upstream is asked
-// first, the peer must be asked too and its answer must reach the caller.
-func requireFirstFailsOverToPeer(t *testing.T, ctx context.Context, chainParser chainlib.ChainParser, server *RPCSmartRouterServer, hits *[2]int64) {
-	t.Helper()
-	firstAskedFirst := 0
-	for i := 0; i < 12; i++ {
-		before := loadRefusalHits(hits)
-		result, sendErr := sendGatewayTestRequest(t, ctx, chainParser, server, gatewayTestQuery)
-		after := loadRefusalHits(hits)
-		require.NoError(t, sendErr)
-		require.JSONEq(t, gatewayPeerAnswer, string(result.Reply.Data), "the caller gets the peer's answer")
-		if after[0] == before[0] {
-			continue
-		}
-		firstAskedFirst++
-		require.Equal(t, int64(1), after[1]-before[1], "the read must be asked of the peer")
-	}
-	require.Positive(t, firstAskedFirst, "the first upstream was never asked first, so this case tested nothing")
 }

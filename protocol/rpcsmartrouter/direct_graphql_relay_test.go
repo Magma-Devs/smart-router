@@ -234,6 +234,15 @@ func TestGraphQLDirectRelay(t *testing.T) {
 			wantTransportFailure: true,
 		},
 		{
+			// Only a 2xx page is new: under an error status a page was always kept and judged by
+			// its status, and stays so.
+			name:          "an HTML page under a 503 is kept, and blamed under its status",
+			status:        http.StatusServiceUnavailable,
+			reply:         "<html><head><title>503 Service Temporarily Unavailable</title></head><body>nginx</body></html>",
+			wantNodeError: true,
+			wantAtFault:   true,
+		},
+		{
 			// A write keeps the transport failure, so the broadcast knows it may have run (MAG-5122).
 			name:                 "an HTML page answering a mutation is still a transport failure",
 			request:              mutationBody,

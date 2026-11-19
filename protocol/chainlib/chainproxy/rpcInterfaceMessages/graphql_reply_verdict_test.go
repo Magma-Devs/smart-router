@@ -160,7 +160,11 @@ func TestGraphQLReadVerdictMessage(t *testing.T) {
 	require.Equal(t, "first", message, "between equal kinds, the first error decides")
 
 	_, message = read.CheckResponseError([]byte(`{}`), 200)
-	require.Contains(t, message, graphQLNotAResponsePrefix)
+	require.Equal(t, graphQLNotAResponsePrefix+"{}", message)
+
+	_, message = read.CheckResponseError([]byte(`<html><body>502 Bad Gateway</body></html>`), 200)
+	require.Equal(t, graphQLNotJSONPrefix+"<html><body>502 Bad Gateway</body></html>", message,
+		"a page is said to be not JSON, not to lack a data object")
 
 	_, message = read.CheckResponseError([]byte(`{"errors":["bad"]}`), 200)
 	require.Equal(t, "bad", message, "an entry that is a string keeps its text, not its JSON quotes")

@@ -979,7 +979,7 @@ func (d *DirectRPCRelaySender) sendGraphQLRelay(
 	// (MAG-5121). A write keeps the transport failure, which tells the broadcast that it may
 	// have run (MAG-5122).
 	if response.StatusCode >= 200 && response.StatusCode < 300 && len(response.Body) > 0 &&
-		(graphqlMessage.IsMutation() || startsLikeJSON(response.Body)) && !json.Valid(response.Body) {
+		(graphqlMessage.IsMutation() || looksLikeJSONOpening(response.Body)) && !json.Valid(response.Body) {
 		utils.FormatDebug("direct GraphQL response is not valid JSON",
 			utils.LogAttr("endpoint", d.endpointName),
 			utils.LogAttr("status_code", response.StatusCode),
@@ -1050,22 +1050,6 @@ func (d *DirectRPCRelaySender) sendGraphQLRelay(
 	)
 
 	return result, nil
-}
-
-// startsLikeJSON reports whether body's first byte past leading whitespace opens a JSON object or
-// array, the only shapes a GraphQL reply (or a JSON envelope in its place) takes.
-func startsLikeJSON(body []byte) bool {
-	for _, b := range body {
-		switch b {
-		case ' ', '\t', '\r', '\n':
-			continue
-		case '{', '[':
-			return true
-		default:
-			return false
-		}
-	}
-	return false
 }
 
 // sendGRPCRelay handles gRPC requests (Phase 6 implementation)
