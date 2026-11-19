@@ -3,6 +3,7 @@ package chainlib
 import (
 	"context"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -174,4 +175,69 @@ func TestListenWithRetry_ShutdownBetweenBindAndServe(t *testing.T) {
 		t.Fatal("the OnListen hook never ran")
 	}
 	requireStopped(t, returned, addr)
+}
+
+// TestListeners_ShutdownOfAnUnservedListener pins Shutdown on a listener that has no app yet: the
+// zero listener shuts down cleanly, and one that serves websockets waits for the connections it
+// counts to drain, and no longer than the caller's context allows.
+func TestListeners_ShutdownOfAnUnservedListener(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		shutdown func(context.Context) error
+	}{
+		{"jsonrpc", (&JsonRPCChainListener{}).Shutdown},
+		{"tendermintrpc", (&TendermintRpcChainListener{}).Shutdown},
+		{"rest", (&RestChainListener{}).Shutdown},
+	} {
+		t.Run(tc.name+"/before Serve", func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			require.NoError(t, tc.shutdown(ctx), "a listener that never served has no app to stop")
+		})
+	}
+
+	for _, tc := range []struct {
+		name string
+		// newListener is a listener that has not served, and the group its websocket
+		// connections are counted in.
+		newListener func() (shutdown func(context.Context) error, connections *sync.WaitGroup)
+	}{
+		{"jsonrpc", func() (func(context.Context) error, *sync.WaitGroup) {
+			listener := &JsonRPCChainListener{}
+			return listener.Shutdown, &listener.wsWG
+		}},
+		{"tendermintrpc", func() (func(context.Context) error, *sync.WaitGroup) {
+			listener := &TendermintRpcChainListener{}
+			return listener.Shutdown, &listener.wsWG
+		}},
+	} {
+		t.Run(tc.name+"/waits for the websockets to drain", func(t *testing.T) {
+			shutdown, connections := tc.newListener()
+			connections.Add(1)
+			go func() {
+				time.Sleep(100 * time.Millisecond)
+				connections.Done()
+			}()
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			start := time.Now()
+			require.NoError(t, shutdown(ctx))
+			elapsed := time.Since(start)
+			require.GreaterOrEqual(t, elapsed, 100*time.Millisecond, "Shutdown waits for the open connection")
+			require.Less(t, elapsed, time.Second, "and not for its whole context")
+		})
+
+		t.Run(tc.name+"/stops at the context's deadline", func(t *testing.T) {
+			shutdown, connections := tc.newListener()
+			connections.Add(1) // held past the deadline, as a stuck websocket goroutine holds it
+			defer connections.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+			defer cancel()
+			start := time.Now()
+			// Fiber may count the empty server idle and answer nil, or answer the context's
+			// error; what matters is that Shutdown does not hang.
+			_ = shutdown(ctx)
+			require.Less(t, time.Since(start), time.Second)
+		})
+	}
 }

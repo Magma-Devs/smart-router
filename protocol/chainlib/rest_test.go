@@ -74,69 +74,16 @@ func TestRestChainProxy(t *testing.T) {
 }
 
 func TestParsingRequestedBlocksHeadersRest(t *testing.T) {
-	ctx := context.Background()
-	callbackHeaderNameToCheck := ""
-	serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Handle the incoming request and provide the desired response
-		w.WriteHeader(http.StatusOK)
-		header := r.Header.Get(callbackHeaderNameToCheck)
-		if header != "" {
-			fmt.Fprint(w, `{"block": { "header": {"height": "244590"}}}`)
-		} else {
-			fmt.Fprint(w, `{"block": { "header": {"height": "244591"}}}`)
-		}
-	})
-	chainParser, chainRouter, _, closeServer, _, err := CreateChainLibMocks(ctx, "LAVA", spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
-	require.NoError(t, err)
-	defer func() {
-		if closeServer != nil {
-			closeServer()
-		}
-	}()
-	parsingForCrafting, apiCollection, ok := chainParser.GetParsingByTag(spectypes.FUNCTION_TAG_GET_BLOCKNUM)
-	require.True(t, ok)
-	collectionData := apiCollection.CollectionData
-	headerParsingDirective, _, ok := chainParser.GetParsingByTag(spectypes.FUNCTION_TAG_SET_LATEST_IN_METADATA)
-	callbackHeaderNameToCheck = headerParsingDirective.GetApiName() // this causes the callback to modify the response to simulate a real behavior
-	require.True(t, ok)
-	block := 244590
-	metadata := []pairingtypes.Metadata{{Name: headerParsingDirective.GetApiName(), Value: fmt.Sprintf(headerParsingDirective.FunctionTemplate, block)}}
-
-	tests := []struct {
-		desc           string
-		metadata       []pairingtypes.Metadata
-		block          int64
-		requestedBlock int64
-	}{
-		{
-			desc:           "no metadata",
-			metadata:       []pairingtypes.Metadata{},
-			block:          244591,
-			requestedBlock: spectypes.LATEST_BLOCK,
-		},
-		{
-			desc:           "with-metadata",
-			metadata:       metadata,
-			block:          244590,
-			requestedBlock: 244590,
-		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.desc, func(t *testing.T) {
-			chainMessage, err := chainParser.ParseMsg(parsingForCrafting.ApiName, []byte{}, collectionData.Type, test.metadata, extensionslib.ExtensionInfo{LatestBlock: 0})
-			require.NoError(t, err)
-			require.NoError(t, err)
-			latestReqBlock, _ := chainMessage.RequestedBlock()
-			require.Equal(t, test.requestedBlock, latestReqBlock)
-			reply, _, _, err := chainRouter.SendNodeMsg(ctx, chainMessage, nil)
-			require.NoError(t, err)
-			parserInput, err := FormatResponseForParsing(reply.RelayReply, chainMessage)
-			require.NoError(t, err)
-			parsedInput := parser.ParseBlockFromReply(parserInput, parsingForCrafting.ResultParsing, nil)
-			require.Equal(t, test.block, parsedInput.GetBlock())
+	requireLatestInMetadataSetsTheRequestedBlock(t, "LAVA", spectypes.APIInterfaceRest, func(headerName *string) http.HandlerFunc {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			if r.Header.Get(*headerName) != "" {
+				fmt.Fprint(w, `{"block": { "header": {"height": "244590"}}}`)
+			} else {
+				fmt.Fprint(w, `{"block": { "header": {"height": "244591"}}}`)
+			}
 		})
-	}
+	})
 }
 
 func TestSettingRequestedBlocksHeadersRest(t *testing.T) {
@@ -283,14 +230,6 @@ func TestRegexParsing(t *testing.T) {
 			assert.ErrorIs(t, err, common.APINotSupportedError)
 		}
 	}
-}
-
-func TestRestChainListener_Shutdown_NilApp(t *testing.T) {
-	listener := &RestChainListener{}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	// Should not panic when Shutdown is called before Serve has captured an app.
-	require.NoError(t, listener.Shutdown(ctx))
 }
 
 // newRestHealthRelay is the rest relay path behind the health route: it answers every relay, and

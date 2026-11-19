@@ -1,10 +1,15 @@
 package chainlib
 
 import (
+	"context"
+	"fmt"
+	"net/http"
 	"testing"
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
+	"github.com/magma-Devs/smart-router/protocol/parser"
+	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 )
@@ -167,6 +172,53 @@ func TestChainParser_GetSupportedApi(t *testing.T) {
 			disabled := tc.serverApis(t, &spectypes.Api{Name: "API1", Enabled: false})
 			_, err = tc.getSupportedApi(disabled, "API1")
 			require.ErrorContains(t, err, "api is disabled")
+		})
+	}
+}
+
+// requireLatestInMetadataSetsTheRequestedBlock pins the spec's SET_LATEST_IN_METADATA header on one
+// interface: a request that carries it asks for the block it names, one without asks for the
+// latest, and the block the node answers with is parsed from the reply. newNode builds the node,
+// which answers block 244590 when the request carries the header *headerName names, and 244591
+// when it does not.
+func requireLatestInMetadataSetsTheRequestedBlock(t *testing.T, chainID, apiInterface string, newNode func(headerName *string) http.HandlerFunc) {
+	t.Helper()
+	ctx := context.Background()
+	headerName := ""
+	chainParser, chainRouter, _, closeServer, _, err := CreateChainLibMocks(ctx, chainID, apiInterface, newNode(&headerName), nil, "../../", nil)
+	require.NoError(t, err)
+	if closeServer != nil {
+		t.Cleanup(closeServer)
+	}
+	parsingForCrafting, apiCollection, ok := chainParser.GetParsingByTag(spectypes.FUNCTION_TAG_GET_BLOCKNUM)
+	require.True(t, ok)
+	collectionData := apiCollection.CollectionData
+	headerParsingDirective, _, ok := chainParser.GetParsingByTag(spectypes.FUNCTION_TAG_SET_LATEST_IN_METADATA)
+	require.True(t, ok)
+	headerName = headerParsingDirective.GetApiName() // the node answers the header's block from now on
+	block := 244590
+	metadata := []pairingtypes.Metadata{{Name: headerParsingDirective.GetApiName(), Value: fmt.Sprintf(headerParsingDirective.FunctionTemplate, block)}}
+
+	for _, test := range []struct {
+		desc           string
+		metadata       []pairingtypes.Metadata
+		block          int64
+		requestedBlock int64
+	}{
+		{desc: "no metadata", metadata: []pairingtypes.Metadata{}, block: 244591, requestedBlock: spectypes.LATEST_BLOCK},
+		{desc: "with-metadata", metadata: metadata, block: 244590, requestedBlock: 244590},
+	} {
+		t.Run(test.desc, func(t *testing.T) {
+			chainMessage, err := chainParser.ParseMsg(parsingForCrafting.ApiName, []byte{}, collectionData.Type, test.metadata, extensionslib.ExtensionInfo{LatestBlock: 0})
+			require.NoError(t, err)
+			requestedBlock, _ := chainMessage.RequestedBlock()
+			require.Equal(t, test.requestedBlock, requestedBlock)
+			reply, _, _, err := chainRouter.SendNodeMsg(ctx, chainMessage, nil)
+			require.NoError(t, err)
+			parserInput, err := FormatResponseForParsing(reply.RelayReply, chainMessage)
+			require.NoError(t, err)
+			parsedInput := parser.ParseBlockFromReply(parserInput, parsingForCrafting.ResultParsing, nil)
+			require.Equal(t, test.block, parsedInput.GetBlock())
 		})
 	}
 }

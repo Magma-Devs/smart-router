@@ -306,41 +306,6 @@ func TestTendermintURIRPC(t *testing.T) {
 	}
 }
 
-func TestTendermintRpcChainListener_Shutdown_DrainsWSWaitGroup(t *testing.T) {
-	listener := &TendermintRpcChainListener{}
-	listener.wsWG.Add(1)
-	go func() {
-		time.Sleep(100 * time.Millisecond)
-		listener.wsWG.Done()
-	}()
-	start := time.Now()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	require.NoError(t, listener.Shutdown(ctx))
-	elapsed := time.Since(start)
-	require.GreaterOrEqual(t, elapsed, 100*time.Millisecond)
-	require.Less(t, elapsed, 1*time.Second)
-}
-
-func TestTendermintRpcChainListener_Shutdown_RespectsContextDeadline(t *testing.T) {
-	listener := &TendermintRpcChainListener{}
-	listener.wsWG.Add(1)
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	defer cancel()
-	start := time.Now()
-	_ = listener.Shutdown(ctx)
-	elapsed := time.Since(start)
-	require.Less(t, elapsed, 1*time.Second)
-	listener.wsWG.Done()
-}
-
-func TestTendermintRpcChainListener_Shutdown_NilApp(t *testing.T) {
-	listener := &TendermintRpcChainListener{}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	require.NoError(t, listener.Shutdown(ctx))
-}
-
 // startTestTendermintListener spins up a TendermintRpcChainListener bound to 127.0.0.1:0
 // and returns the listener plus its dynamic address once Serve is ready.
 func startTestTendermintListener(t *testing.T, ctx context.Context) (*TendermintRpcChainListener, string) {

@@ -566,56 +566,6 @@ func TestJsonRPC_SpecUpdateWithExtensions(t *testing.T) {
 	require.False(t, isExtensionConfigured())
 }
 
-func TestJsonRPCChainListener_Shutdown_DrainsWSWaitGroup(t *testing.T) {
-	listener := &JsonRPCChainListener{}
-	listener.wsWG.Add(1)
-
-	// Goroutine that simulates a WS connection that drains within the timeout.
-	go func() {
-		time.Sleep(100 * time.Millisecond)
-		listener.wsWG.Done()
-	}()
-
-	start := time.Now()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	require.NoError(t, listener.Shutdown(ctx))
-	elapsed := time.Since(start)
-
-	// Should have waited ~100ms for the WG, not the full 2s timeout.
-	require.GreaterOrEqual(t, elapsed, 100*time.Millisecond)
-	require.Less(t, elapsed, 1*time.Second)
-}
-
-func TestJsonRPCChainListener_Shutdown_RespectsContextDeadline(t *testing.T) {
-	listener := &JsonRPCChainListener{}
-	listener.wsWG.Add(1) // never call Done — simulates a stuck WS goroutine
-
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	defer cancel()
-
-	start := time.Now()
-	err := listener.Shutdown(ctx)
-	elapsed := time.Since(start)
-
-	// Should return roughly when ctx deadline fires, not hang.
-	require.Less(t, elapsed, 1*time.Second)
-	// Shutdown propagates ctx error from app.ShutdownWithContext or returns it directly.
-	// Either nil (Fiber considered the empty server idle) or a context error is acceptable;
-	// the key assertion is that we did NOT hang.
-	_ = err
-
-	// Drain the WG so the test doesn't leak the goroutine reference.
-	listener.wsWG.Done()
-}
-
-func TestJsonRPCChainListener_Shutdown_NilApp(t *testing.T) {
-	listener := &JsonRPCChainListener{}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	require.NoError(t, listener.Shutdown(ctx))
-}
-
 // startTestJsonRPCListener spins up a JsonRPCChainListener bound to 127.0.0.1:0
 // and returns the listener plus its dynamic address once Serve is ready.
 func startTestJsonRPCListener(t *testing.T, ctx context.Context, slowHandler bool) (*JsonRPCChainListener, string) {
