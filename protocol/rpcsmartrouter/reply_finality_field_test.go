@@ -260,69 +260,69 @@ func TestCacheWriteOfAByHashReplyThatSaysNotFinalIsNeverFinal(t *testing.T) {
 	}
 }
 
-func TestReplySaysNotFinal(t *testing.T) {
+func TestReplyAllowsFinal(t *testing.T) {
 	cases := []struct {
 		name             string
 		reply            string
 		path, finalValue string
-		notFinal         bool
+		final            bool
 	}{
-		{name: "false", reply: rippleOpenLedger, path: rippleFinalityPath, finalValue: rippleFinalityValue, notFinal: true},
-		{name: "true", reply: rippleValidLedger, path: rippleFinalityPath, finalValue: rippleFinalityValue},
-		{name: "field missing", reply: rippleNoFieldLedger, path: rippleFinalityPath, finalValue: rippleFinalityValue},
-		{name: "field first in the body", reply: rippleOpenLedgerHead + `}}}`, path: rippleFinalityPath, finalValue: rippleFinalityValue, notFinal: true},
-		{name: "field last in a large body", reply: rippleLedgerOfSize(400_000, "false"), path: rippleFinalityPath, finalValue: rippleFinalityValue, notFinal: true},
-		{name: "true last in a large body", reply: rippleLedgerOfSize(400_000, "true"), path: rippleFinalityPath, finalValue: rippleFinalityValue},
-		{name: "leading whitespace and spaced members", reply: " \r\n\t{ \"result\" : { \"validated\" : false } }", path: rippleFinalityPath, finalValue: rippleFinalityValue, notFinal: true},
+		{name: "false", reply: rippleOpenLedger, path: rippleFinalityPath, finalValue: rippleFinalityValue},
+		{name: "true", reply: rippleValidLedger, path: rippleFinalityPath, finalValue: rippleFinalityValue, final: true},
+		{name: "field missing", reply: rippleNoFieldLedger, path: rippleFinalityPath, finalValue: rippleFinalityValue, final: true},
+		{name: "field first in the body", reply: rippleOpenLedgerHead + `}}}`, path: rippleFinalityPath, finalValue: rippleFinalityValue},
+		{name: "field last in a large body", reply: rippleLedgerOfSize(400_000, "false"), path: rippleFinalityPath, finalValue: rippleFinalityValue},
+		{name: "true last in a large body", reply: rippleLedgerOfSize(400_000, "true"), path: rippleFinalityPath, finalValue: rippleFinalityValue, final: true},
+		{name: "leading whitespace and spaced members", reply: " \r\n\t{ \"result\" : { \"validated\" : false } }", path: rippleFinalityPath, finalValue: rippleFinalityValue},
 
 		// The value is compared as raw JSON. Anything that is not the declared value has not
 		// said "final", a quoted copy of it included.
-		{name: `the string "false"`, reply: `{"result":{"validated":"false"}}`, path: rippleFinalityPath, finalValue: rippleFinalityValue, notFinal: true},
-		{name: `the string "true"`, reply: `{"result":{"validated":"true"}}`, path: rippleFinalityPath, finalValue: rippleFinalityValue, notFinal: true},
-		{name: "null", reply: `{"result":{"validated":null}}`, path: rippleFinalityPath, finalValue: rippleFinalityValue, notFinal: true},
-		{name: "a declared string value matches its quoted form", reply: `{"result":{"state":"final"}}`, path: "result.state", finalValue: `"final"`},
-		{name: "a declared string value against another string", reply: `{"result":{"state":"open"}}`, path: "result.state", finalValue: `"final"`, notFinal: true},
+		{name: `the string "false"`, reply: `{"result":{"validated":"false"}}`, path: rippleFinalityPath, finalValue: rippleFinalityValue},
+		{name: `the string "true"`, reply: `{"result":{"validated":"true"}}`, path: rippleFinalityPath, finalValue: rippleFinalityValue},
+		{name: "null", reply: `{"result":{"validated":null}}`, path: rippleFinalityPath, finalValue: rippleFinalityValue},
+		{name: "a declared string value matches its quoted form", reply: `{"result":{"state":"final"}}`, path: "result.state", finalValue: `"final"`, final: true},
+		{name: "a declared string value against another string", reply: `{"result":{"state":"open"}}`, path: "result.state", finalValue: `"final"`},
 
 		// Only the declared place counts: the same name elsewhere, or the same text inside a
 		// value, is not the field.
-		{name: "the name one level deeper", reply: `{"result":{"ledger":{"validated":false}}}`, path: rippleFinalityPath, finalValue: rippleFinalityValue},
-		{name: "the name at the root", reply: `{"validated":false,"result":{}}`, path: rippleFinalityPath, finalValue: rippleFinalityValue},
-		{name: "the text inside a memo", reply: `{"result":{"memo":"\"validated\":false","validated":true}}`, path: rippleFinalityPath, finalValue: rippleFinalityValue},
+		{name: "the name one level deeper", reply: `{"result":{"ledger":{"validated":false}}}`, path: rippleFinalityPath, finalValue: rippleFinalityValue, final: true},
+		{name: "the name at the root", reply: `{"validated":false,"result":{}}`, path: rippleFinalityPath, finalValue: rippleFinalityValue, final: true},
+		{name: "the text inside a memo", reply: `{"result":{"memo":"\"validated\":false","validated":true}}`, path: rippleFinalityPath, finalValue: rippleFinalityValue, final: true},
 
 		// A reply that does not say.
-		{name: "batch reply", reply: `[{"result":{"validated":false}},{"result":{"validated":false}}]`, path: rippleFinalityPath, finalValue: rippleFinalityValue},
-		{name: "empty body", reply: ``, path: rippleFinalityPath, finalValue: rippleFinalityValue},
-		{name: "not JSON", reply: `<html>validated false</html>`, path: rippleFinalityPath, finalValue: rippleFinalityValue},
-		{name: "result is not an object", reply: `{"result":"validated"}`, path: rippleFinalityPath, finalValue: rippleFinalityValue},
-		{name: "above the read limit", reply: rippleLedgerOfSize(maxJSONRPCResponseSizeForBlockExtraction+1, "false"), path: rippleFinalityPath, finalValue: rippleFinalityValue},
+		{name: "batch reply", reply: `[{"result":{"validated":false}},{"result":{"validated":false}}]`, path: rippleFinalityPath, finalValue: rippleFinalityValue, final: true},
+		{name: "empty body", reply: ``, path: rippleFinalityPath, finalValue: rippleFinalityValue, final: true},
+		{name: "not JSON", reply: `<html>validated false</html>`, path: rippleFinalityPath, finalValue: rippleFinalityValue, final: true},
+		{name: "result is not an object", reply: `{"result":"validated"}`, path: rippleFinalityPath, finalValue: rippleFinalityValue, final: true},
+		{name: "above the read limit", reply: rippleLedgerOfSize(maxJSONRPCResponseSizeForBlockExtraction+1, "false"), path: rippleFinalityPath, finalValue: rippleFinalityValue, final: true},
 
 		// No declaration, or half of one: the reply is not looked at.
-		{name: "no declaration", reply: rippleOpenLedger},
-		{name: "path without a value", reply: rippleOpenLedger, path: rippleFinalityPath},
-		{name: "value without a path", reply: rippleOpenLedger, finalValue: rippleFinalityValue},
+		{name: "no declaration", reply: rippleOpenLedger, final: true},
+		{name: "path without a value", reply: rippleOpenLedger, path: rippleFinalityPath, final: true},
+		{name: "value without a path", reply: rippleOpenLedger, finalValue: rippleFinalityValue, final: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			require.Equal(t, tc.notFinal, replySaysNotFinal([]byte(tc.reply), tc.path, tc.finalValue))
+			require.Equal(t, tc.final, replyAllowsFinal([]byte(tc.reply), tc.path, tc.finalValue))
 		})
 	}
 }
 
 // A chain with no declaration pays nothing: the reply is not read, so nothing is allocated,
 // whatever its size.
-func TestReplySaysNotFinalDoesNotReadAReplyWithNoDeclaration(t *testing.T) {
+func TestReplyAllowsFinalDoesNotReadAReplyWithNoDeclaration(t *testing.T) {
 	reply := []byte(rippleLedgerOfSize(400_000, "false"))
 	allocs := testing.AllocsPerRun(100, func() {
-		if replySaysNotFinal(reply, "", "") {
+		if !replyAllowsFinal(reply, "", "") {
 			t.Fatal("no declaration, yet the reply was read")
 		}
 	})
 	require.Zero(t, allocs)
 }
 
-// BenchmarkReplySaysNotFinal measures the check on a ledger-sized reply with the field as its
+// BenchmarkReplyAllowsFinal measures the check on a ledger-sized reply with the field as its
 // last member, the worst case and the one rippled produces: the whole body is walked.
-func BenchmarkReplySaysNotFinal(b *testing.B) {
+func BenchmarkReplyAllowsFinal(b *testing.B) {
 	for _, size := range []struct {
 		name  string
 		bytes int
@@ -335,7 +335,7 @@ func BenchmarkReplySaysNotFinal(b *testing.B) {
 			b.SetBytes(int64(len(reply)))
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
-				if !replySaysNotFinal(reply, rippleFinalityPath, rippleFinalityValue) {
+				if replyAllowsFinal(reply, rippleFinalityPath, rippleFinalityValue) {
 					b.Fatal("the reply says not final")
 				}
 			}

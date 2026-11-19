@@ -4,14 +4,16 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// replySaysNotFinal reports whether a reply's own finality field is present and holds anything
-// other than the value that means final. path and finalValue are the chain's declaration
+// replyAllowsFinal reports whether a reply may be filed as final as far as the reply's own
+// finality field goes: true unless that field is present and holds anything other than the value
+// that means final. path and finalValue are the chain's declaration
 // (spectypes.Spec.FinalityField): on Ripple "result.validated" and "true", where a node that is
 // behind the network answers a numbered ledger read with its own open copy of that ledger,
 // HTTP 200 and "validated": false (MAG-5339).
 //
-// It only ever takes a "final" away, and only on the reply's own word. Everything else is
-// "the reply does not say", and the caller's block-distance decision stands:
+// It never makes a reply final. The caller's block-distance decision comes first, and this can
+// only take that "final" away, and only on the reply's own word. Everything else is "the reply
+// does not say", which allows final, so the block-distance decision stands:
 //   - the chain's spec names no field;
 //   - the field is not in the reply;
 //   - the reply is not a JSON object (a batch reply is an array);
@@ -27,21 +29,21 @@ import (
 // The reply is not decoded and not copied. gjson walks the bytes to the one field, which may be
 // the last in the body (rippled writes "validated" at the very end of a ledger reply), without
 // allocating for the members it passes.
-func replySaysNotFinal(reply []byte, path, finalValue string) bool {
+func replyAllowsFinal(reply []byte, path, finalValue string) bool {
 	if path == "" || finalValue == "" {
-		return false
+		return true
 	}
 	if len(reply) > maxJSONRPCResponseSizeForBlockExtraction {
-		return false
+		return true
 	}
 	if !isJSONObject(reply) {
-		return false
+		return true
 	}
 	field := gjson.GetBytes(reply, path)
 	if !field.Exists() {
-		return false
+		return true
 	}
-	return field.Raw != finalValue
+	return field.Raw == finalValue
 }
 
 // isJSONObject reports whether the body's first byte past JSON whitespace opens an object.

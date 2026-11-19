@@ -5302,11 +5302,10 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 	// with: a node behind the network answers a numbered read with its own copy of that block,
 	// which can still change, and says so in the reply (MAG-5339). Where the chain's spec names
 	// that field, a reply that says "not final" takes the chain's short lifetime, like a block
-	// too close to the tip. The reply itself is untouched; see replySaysNotFinal.
+	// too close to the tip. The reply itself is untouched; see replyAllowsFinal.
 	if finalized {
-		if path, finalValue := rpcss.chainParser.FinalityField(); replySaysNotFinal(relayResult.Reply.Data, path, finalValue) {
-			finalized = false
-		}
+		path, finalValue := rpcss.chainParser.FinalityField()
+		finalized = replyAllowsFinal(relayResult.Reply.Data, path, finalValue)
 	}
 
 	// Convert LATEST_BLOCK to the concrete block the cache key carries. This MUST be the
