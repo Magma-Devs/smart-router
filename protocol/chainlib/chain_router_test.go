@@ -9,13 +9,13 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	gojson "github.com/goccy/go-json"
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/compress"
 	"github.com/gofiber/fiber/v2/middleware/favicon"
 	"github.com/gofiber/websocket/v2"
+	"github.com/magma-Devs/smart-router/internal/testutil"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/chainlibtest/fixture"
@@ -939,20 +939,18 @@ func createRPCServer() net.Listener {
 
 func TestMain(m *testing.M) {
 	listener := createRPCServer()
-	for {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_, err := rpcclient.DialContext(ctx, listenerAddressHttp, nil)
-		_, err2 := rpcclient.DialContext(ctx, listenerAddressWs, nil)
-		if err2 != nil {
-			utils.FormatDebug("waiting for grpc server to launch")
-			continue
+	if err := testutil.WaitForServer(func(ctx context.Context) error {
+		for _, address := range []string{listenerAddressHttp, listenerAddressWs} {
+			client, err := rpcclient.DialContext(ctx, address, nil)
+			if err != nil {
+				return err
+			}
+			client.Close()
 		}
-		if err != nil {
-			utils.FormatDebug("waiting for grpc server to launch")
-			continue
-		}
-		cancel()
-		break
+		return nil
+	}); err != nil {
+		fmt.Println("the test RPC server never answered:", err)
+		os.Exit(1)
 	}
 
 	utils.FormatDebug("listening on", utils.LogAttr("address", listenerAddressHttp))

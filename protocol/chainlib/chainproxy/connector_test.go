@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/magma-Devs/smart-router/internal/testutil"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/utils"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/net/websocket"
 	"google.golang.org/grpc"
@@ -347,15 +347,15 @@ func createRPCServer() net.Listener {
 
 func TestMain(m *testing.M) {
 	listener := createRPCServer()
-	for {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_, err := rpcclient.DialContext(ctx, listenerAddressTcp, nil)
-		if err != nil {
-			utils.FormatDebug("waiting for grpc server to launch")
-			continue
+	if err := testutil.WaitForServer(func(ctx context.Context) error {
+		client, err := rpcclient.DialContext(ctx, listenerAddressTcp, nil)
+		if err == nil {
+			client.Close()
 		}
-		cancel()
-		break
+		return err
+	}); err != nil {
+		fmt.Println("the test RPC server never answered:", err)
+		os.Exit(1)
 	}
 
 	// Start running tests.
