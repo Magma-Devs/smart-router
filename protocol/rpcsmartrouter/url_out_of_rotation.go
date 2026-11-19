@@ -129,6 +129,12 @@ func collectURLsOutOfRotation(endpoints []*routersession.EndpointWithDirectConne
 // publishURLsOutOfRotation wires collectURLsOutOfRotation to this server's metrics. It runs at the
 // end of every probe cycle, after the re-enable pass and the head-stall step, so the gauge shows
 // the state those two left.
+//
+// The cycle reads its endpoints at its start and publishes here at its end. cleanupStaleTrackers can
+// remove a url in between and delete its per-url series; this publish would then create them again,
+// and nothing deletes the counter afterwards (the gauge goes on the next cycle, which no longer lists
+// the url). So each url written to is checked for its tracker after the write, as the relay counter
+// does.
 func (rpcss *RPCSmartRouterServer) publishURLsOutOfRotation(endpoints []*routersession.EndpointWithDirectConnection) {
 	if rpcss.smartRouterEndpointMetrics == nil || rpcss.listenEndpoint == nil {
 		return
@@ -136,4 +142,9 @@ func (rpcss *RPCSmartRouterServer) publishURLsOutOfRotation(endpoints []*routers
 	var urls []metrics.URLOutOfRotation
 	urls, rpcss.urlOutSeen = collectURLsOutOfRotation(endpoints, rpcss.urlOutSeen)
 	rpcss.smartRouterEndpointMetrics.PublishURLsOutOfRotation(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, urls)
+	for _, u := range urls {
+		if len(u.Reasons) > 0 || len(u.WentOut) > 0 {
+			rpcss.forgetURLLatestBlockIfUntracked(u.URL)
+		}
+	}
 }

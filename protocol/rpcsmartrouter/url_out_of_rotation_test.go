@@ -13,7 +13,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// gatheredCounter reads the value of the one series of a counter whose labels are exactly labels.
+// gatheredCounter reads the value of the one series of a counter whose labels are exactly labels, or
+// 0 when there is no such series yet.
 func gatheredCounter(t *testing.T, name string, labels map[string]string) float64 {
 	t.Helper()
 	mfs, err := prometheus.DefaultGatherer.Gather()
@@ -32,7 +33,6 @@ func gatheredCounter(t *testing.T, name string, labels map[string]string) float6
 			}
 		}
 	}
-	t.Fatalf("no %s series with labels %v", name, labels)
 	return 0
 }
 
@@ -248,12 +248,14 @@ func TestURLOutOfRotation_ServerPublishesUnderTheURLsOwnLabels(t *testing.T) {
 	rpcss.publishURLsOutOfRotation(eps)
 	require.Empty(t, urlSeriesLabels(t, "rpc_endpoint_url_out_of_rotation", provider), "in rotation: no series")
 
+	// The tests share the default registry, so a run before this one (go test -count=N) left its count.
+	exitsBefore := gatheredCounter(t, "rpc_endpoint_url_out_of_rotation_exits_total", want)
 	disableForTest(t, e.Endpoint, routersession.EndpointDisableNodeError)
 	rpcss.publishURLsOutOfRotation(eps)
 	rpcss.publishURLsOutOfRotation(eps) // still out on the next cycle: no second exit
 	require.Equal(t, []map[string]string{want}, urlSeriesLabels(t, "rpc_endpoint_url_out_of_rotation", provider))
 	require.Equal(t, []map[string]string{want}, urlSeriesLabels(t, "rpc_endpoint_url_out_of_rotation_exits_total", provider))
-	require.Equal(t, 1.0, gatheredCounter(t, "rpc_endpoint_url_out_of_rotation_exits_total", want))
+	require.Equal(t, 1.0, gatheredCounter(t, "rpc_endpoint_url_out_of_rotation_exits_total", want)-exitsBefore)
 
 	require.True(t, e.Endpoint.ResetHealth())
 	rpcss.publishURLsOutOfRotation(eps)

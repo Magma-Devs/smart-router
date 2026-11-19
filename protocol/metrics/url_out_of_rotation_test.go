@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// MAG-5244 — rpc_endpoint_url_out_of_rotation and its _total counter.
+// MAG-5244 — rpc_endpoint_url_out_of_rotation and its exits counter.
 
 const outSpec = "OUTROT-SPEC-5244"
 
@@ -39,6 +39,19 @@ func outSeries(t *testing.T, metric, provider string) map[string]float64 {
 	return out
 }
 
+// grewBy returns reason → how much each counter series of the provider went up since before. The
+// tests share the default registry, so a counter left by an earlier run (go test -count=N) is read
+// first and subtracted.
+func grewBy(before, after map[string]float64) map[string]float64 {
+	out := map[string]float64{}
+	for reason, v := range after {
+		if d := v - before[reason]; d != 0 {
+			out[reason] = d
+		}
+	}
+	return out
+}
+
 const (
 	outGauge   = "rpc_endpoint_url_out_of_rotation"
 	outCounter = "rpc_endpoint_url_out_of_rotation_exits_total"
@@ -48,6 +61,7 @@ func TestURLOutOfRotation_SetWhileOutAndClearedWhenBack(t *testing.T) {
 	m := NewSmartRouterMetricsManager(SmartRouterMetricsManagerOptions{})
 	const api, provider, url = "rest", "outProvA", "https://out-a.example/rpc"
 	m.RegisterEndpoint(outSpec, api, url, provider)
+	exitsBefore := outSeries(t, outCounter, provider)
 
 	m.PublishURLsOutOfRotation(outSpec, api, []URLOutOfRotation{{Provider: provider, URL: url}})
 	require.Empty(t, outSeries(t, outGauge, provider), "a url in rotation has no series")
@@ -66,7 +80,7 @@ func TestURLOutOfRotation_SetWhileOutAndClearedWhenBack(t *testing.T) {
 
 	m.PublishURLsOutOfRotation(outSpec, api, []URLOutOfRotation{{Provider: provider, URL: url}})
 	require.Empty(t, outSeries(t, outGauge, provider))
-	require.Equal(t, map[string]float64{"head-stalled": 1, "node-error": 1}, outSeries(t, outCounter, provider),
+	require.Equal(t, map[string]float64{"head-stalled": 1, "node-error": 1}, grewBy(exitsBefore, outSeries(t, outCounter, provider)),
 		"the counter keeps what happened after the url came back")
 }
 
@@ -99,12 +113,13 @@ func TestURLOutOfRotation_CounterAddsEveryExit(t *testing.T) {
 	m := NewSmartRouterMetricsManager(SmartRouterMetricsManagerOptions{})
 	const api, provider, url = "rest", "outProvD", "https://out-d.example/rpc"
 	m.RegisterEndpoint(outSpec, api, url, provider)
+	exitsBefore := outSeries(t, outCounter, provider)
 
 	// Went out and came back between two cycles: nothing is out now, but it happened.
 	m.PublishURLsOutOfRotation(outSpec, api, []URLOutOfRotation{{Provider: provider, URL: url, WentOut: map[string]uint64{"head-stalled": 2}}})
 	m.PublishURLsOutOfRotation(outSpec, api, []URLOutOfRotation{{Provider: provider, URL: url, WentOut: map[string]uint64{"head-stalled": 1}}})
 	require.Empty(t, outSeries(t, outGauge, provider))
-	require.Equal(t, map[string]float64{"head-stalled": 3}, outSeries(t, outCounter, provider))
+	require.Equal(t, map[string]float64{"head-stalled": 3}, grewBy(exitsBefore, outSeries(t, outCounter, provider)))
 }
 
 func TestURLOutOfRotation_UnregisteredURLHasNoSeries(t *testing.T) {
