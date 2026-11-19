@@ -275,9 +275,9 @@ func (se *subscriptionEndpoints) endpointsSnapshot() endpointsSnapshot {
 //
 // Callers pass only endpoints that are live in the pairing. Seeding a tier with
 // configured-but-dead endpoints would be worse than an empty tier: selectEndpoint is
-// called once per subscription with no ignore set and no retry loop, so a dead entry
-// is handed straight to the client, and a non-empty primary tier suppresses the
-// primary→backup cascade entirely.
+// called once per subscription with no retry loop, so a dead entry is handed straight
+// to the client, and a non-empty primary tier suppresses the primary→backup cascade
+// entirely.
 //
 // Existing upstream pools are not torn down here. A pool keyed by a URL that just left
 // the tiers still serves its live subscriptions until they close; tearing it down here
@@ -339,7 +339,7 @@ func sameEndpointURLs(a, b []*common.NodeUrl) bool {
 }
 
 // selectEndpoint selects the endpoint a client's new subscription goes to.
-func (se *subscriptionEndpoints) selectEndpoint(ctx context.Context, clientKey string, ignoredEndpoints map[string]struct{}) (*common.NodeUrl, error) {
+func (se *subscriptionEndpoints) selectEndpoint(ctx context.Context, clientKey string) (*common.NodeUrl, error) {
 	// One snapshot for the whole cascade: setEndpoints can swap the tiers underneath
 	// us, and re-reading between tiers could see primary from before the swap and
 	// backup from after.
@@ -349,25 +349,17 @@ func (se *subscriptionEndpoints) selectEndpoint(ctx context.Context, clientKey s
 	if clientKey != "" {
 		if stickySession, exists := se.stickyStore.Get(clientKey); exists {
 			if stickyEndpoint, found := snapshot.byURL[stickySession.Provider]; found {
-				if _, ignored := ignoredEndpoints[stickySession.Provider]; !ignored {
-					utils.FormatDebug(se.logPrefix+": using sticky session endpoint",
-						utils.LogAttr("clientKey", clientKey),
-						utils.LogAttr("endpoint", sanitizeEndpointURL(stickySession.Provider)),
-					)
-					return stickyEndpoint, nil
-				}
-				// Sticky endpoint is ignored — clear and continue to cascade.
-				utils.FormatDebug(se.logPrefix+": sticky endpoint ignored, clearing affinity",
+				utils.FormatDebug(se.logPrefix+": using sticky session endpoint",
 					utils.LogAttr("clientKey", clientKey),
-					utils.LogAttr("ignoredEndpoint", sanitizeEndpointURL(stickySession.Provider)),
+					utils.LogAttr("endpoint", sanitizeEndpointURL(stickySession.Provider)),
 				)
-				se.stickyStore.Delete(clientKey)
+				return stickyEndpoint, nil
 			}
 		}
 	}
 
 	// Tier 1: primary endpoints.
-	ep, primaryErr := se.selectFromTier(ctx, snapshot.primary, snapshot.byURL, ignoredEndpoints)
+	ep, primaryErr := se.selectFromTier(ctx, snapshot.primary, snapshot.byURL)
 	if primaryErr == nil {
 		return ep, nil
 	}
@@ -377,7 +369,7 @@ func (se *subscriptionEndpoints) selectEndpoint(ctx context.Context, clientKey s
 		utils.LogAttr("primaryReason", primaryErr.Error()),
 		utils.LogAttr("backupCount", len(snapshot.backup)),
 	)
-	ep, backupErr := se.selectFromTier(ctx, snapshot.backup, snapshot.byURL, ignoredEndpoints)
+	ep, backupErr := se.selectFromTier(ctx, snapshot.backup, snapshot.byURL)
 	if backupErr == nil {
 		return ep, nil
 	}
@@ -397,23 +389,13 @@ func notHeldOff(registry *holdoff.Registry, tier []*common.NodeUrl) []*common.No
 	return ready
 }
 
-// firstNotIgnored returns the first endpoint of tier that is not in ignoredEndpoints.
-func firstNotIgnored(tier []*common.NodeUrl, ignoredEndpoints map[string]struct{}) *common.NodeUrl {
-	for _, ep := range tier {
-		if _, ignored := ignoredEndpoints[ep.Url]; !ignored {
-			return ep
-		}
-	}
-	return nil
-}
-
 // selectFromTier picks one endpoint from the given tier using the optimizer when
-// available, falling back to first-non-ignored. Tier-agnostic — the cascade order is the
-// caller's responsibility.
+// available, falling back to the tier's first endpoint. Tier-agnostic — the cascade order
+// is the caller's responsibility.
 //
 // tier and byURL come from one endpointsSnapshot so the optimizer's chosen URL is
 // resolved against the same generation of the index it was offered from.
-func (se *subscriptionEndpoints) selectFromTier(ctx context.Context, tier []*common.NodeUrl, byURL map[string]*common.NodeUrl, ignoredEndpoints map[string]struct{}) (*common.NodeUrl, error) {
+func (se *subscriptionEndpoints) selectFromTier(ctx context.Context, tier []*common.NodeUrl, byURL map[string]*common.NodeUrl) (*common.NodeUrl, error) {
 	if len(tier) == 0 {
 		return nil, fmt.Errorf("tier is empty")
 	}
@@ -421,16 +403,13 @@ func (se *subscriptionEndpoints) selectFromTier(ctx context.Context, tier []*com
 	// Rate-limit hold-off: prefer endpoints that are not currently held off after a 429.
 	// Only narrows the tier when something ready remains — a subscription must still be
 	// served when every endpoint is held off, so the full tier stays in that case.
-	if ready := notHeldOff(se.holdoffs(), tier); len(ready) > 0 && len(ready) < len(tier) {
+	if ready := notHeldOff(se.holdoffs(), tier); len(ready) > 0 {
 		tier = ready
 	}
 
-	// Single endpoint or no optimizer: first-non-ignored.
+	// Single endpoint or no optimizer: the tier's first endpoint.
 	if len(tier) == 1 || se.optimizer == nil {
-		if ep := firstNotIgnored(tier, ignoredEndpoints); ep != nil {
-			return ep, nil
-		}
-		return nil, fmt.Errorf("all endpoints in tier are ignored/unavailable")
+		return tier[0], nil
 	}
 
 	// Optimizer over this tier.
@@ -440,14 +419,11 @@ func (se *subscriptionEndpoints) selectFromTier(ctx context.Context, tier []*com
 	}
 
 	// cu=1 and requestedBlock=LATEST_BLOCK (-2) are sensible defaults for subscriptions.
-	selectedURLs := se.optimizer.ChooseUpstream(ctx, allURLs, ignoredEndpoints, 1, -2)
+	selectedURLs := se.optimizer.ChooseUpstream(ctx, allURLs, nil, 1, -2)
 
 	if len(selectedURLs) == 0 {
-		// Optimizer returned nothing — fall back to first-non-ignored within tier.
-		if ep := firstNotIgnored(tier, ignoredEndpoints); ep != nil {
-			return ep, nil
-		}
-		return nil, fmt.Errorf("optimizer returned no endpoints and all fallbacks in tier are ignored")
+		// Optimizer returned nothing — fall back to the tier's first endpoint.
+		return tier[0], nil
 	}
 
 	selectedURL := selectedURLs[0]
