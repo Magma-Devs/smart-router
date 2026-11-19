@@ -322,7 +322,7 @@ func TestSendRelayToDirectEndpoints_RecordsTheCrossValidationGroupLayout(t *test
 				budgetCallSiteStateMachine: budgetCallSiteStateMachine{usedProviders: usedProviders, protocolMessage: protocolMsg},
 				cvParams:                   cvParams,
 			}
-			metricsStub := cvGuardMetrics{}
+			metricsStub := lavaRESTMetrics
 			relayProcessor := relaycore.NewRelayProcessor(ctx, cvParams, metricsStub, metricsStub, sm)
 
 			rpcEndpoint := &routersession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "rest"}

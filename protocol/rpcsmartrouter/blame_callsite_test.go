@@ -104,7 +104,7 @@ func TestBlameAtCallSite(t *testing.T) {
 			require.NoError(t, session.SetUsageForSession(0, nil, usedProviders, routersession.NewRouterKey(nil)))
 
 			sm := &budgetCallSiteStateMachine{usedProviders: usedProviders, protocolMessage: protocolMsg}
-			relayProcessor := relaycore.NewRelayProcessor(ctx, nil, cvGuardMetrics{}, cvGuardMetrics{},
+			relayProcessor := relaycore.NewRelayProcessor(ctx, nil, lavaRESTMetrics, lavaRESTMetrics,
 				sm)
 			// The dispatcher reads this to decide, exactly as ProcessRelaySend sets it before the
 			// deferred cancel that releases the goroutines.

@@ -90,7 +90,7 @@ func sendToEveryEndpointStale(t *testing.T, msg archiveRequest) (*relaycore.Rela
 		"setup: the request's key must differ from the key its sessions were taken under, or this measures nothing")
 
 	sm := &budgetCallSiteStateMachine{usedProviders: usedProviders, protocolMessage: msg}
-	relayProcessor := relaycore.NewRelayProcessor(ctx, nil, cvGuardMetrics{}, cvGuardMetrics{}, sm)
+	relayProcessor := relaycore.NewRelayProcessor(ctx, nil, lavaRESTMetrics, lavaRESTMetrics, sm)
 	rpcEndpoint := &routersession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "rest"}
 	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "LAVA")
 	rpcss := &RPCSmartRouterServer{

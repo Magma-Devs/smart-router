@@ -35,7 +35,7 @@ func newWriteOutcomeProcessor(t *testing.T, msg chainlib.ProtocolMessage, dispat
 		usedProviders.AddUsed(sessions, nil)
 	}
 	sm := &budgetCallSiteStateMachine{usedProviders: usedProviders, protocolMessage: msg}
-	return relaycore.NewRelayProcessor(context.Background(), nil, cvGuardMetrics{}, cvGuardMetrics{},
+	return relaycore.NewRelayProcessor(context.Background(), nil, lavaRESTMetrics, lavaRESTMetrics,
 		sm)
 }
 

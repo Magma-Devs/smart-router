@@ -96,7 +96,7 @@ func TestSendRelayToEndpoint_ThresholdGuardReleasesGatheredSessions(t *testing.T
 	cvParams := &common.CrossValidationParams{MaxParticipants: 3, AgreementThreshold: 3}
 	usedProviders := routersession.NewUsedProviders(nil)
 	sm := &cvGuardStateMachine{usedProviders: usedProviders, cvParams: cvParams, protocolMessage: protocolMsg}
-	metricsStub := cvGuardMetrics{}
+	metricsStub := lavaRESTMetrics
 	relayProcessor := relaycore.NewRelayProcessor(
 		ctx, cvParams, metricsStub, metricsStub, sm)
 
@@ -172,7 +172,7 @@ func TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesASessionlessEntr
 
 	cvParams := &common.CrossValidationParams{MaxParticipants: 2, AgreementThreshold: 2}
 	sm := &cvGuardStateMachine{usedProviders: usedProviders, cvParams: cvParams}
-	metricsStub := cvGuardMetrics{}
+	metricsStub := lavaRESTMetrics
 	relayProcessor := relaycore.NewRelayProcessor(
 		ctx, cvParams, metricsStub, metricsStub, sm)
 
@@ -238,7 +238,7 @@ func TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesADegradedSession
 
 	cvParams := &common.CrossValidationParams{MaxParticipants: 2, AgreementThreshold: 2}
 	sm := &cvGuardStateMachine{usedProviders: usedProviders, cvParams: cvParams}
-	metricsStub := cvGuardMetrics{}
+	metricsStub := lavaRESTMetrics
 	relayProcessor := relaycore.NewRelayProcessor(ctx, cvParams, metricsStub, metricsStub, sm)
 
 	rpcss := &RPCSmartRouterServer{

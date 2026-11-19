@@ -121,7 +121,7 @@ func TestSendRelayToDirectEndpoints_PassesTheBudgetNotTheWindow(t *testing.T) {
 	require.NoError(t, session.SetUsageForSession(0, nil, usedProviders, routersession.NewRouterKey(nil)))
 
 	sm := &budgetCallSiteStateMachine{usedProviders: usedProviders, protocolMessage: protocolMsg}
-	metricsStub := cvGuardMetrics{}
+	metricsStub := lavaRESTMetrics
 	relayProcessor := relaycore.NewRelayProcessor(
 		ctx, nil, metricsStub, metricsStub, sm)
 

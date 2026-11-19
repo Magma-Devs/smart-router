@@ -164,7 +164,7 @@ func TestDataScopeAnswerScoresSyncOnly(t *testing.T) {
 			}
 
 			sm := &budgetCallSiteStateMachine{usedProviders: usedProviders, protocolMessage: protocolMsg}
-			relayProcessor := relaycore.NewRelayProcessor(ctx, nil, cvGuardMetrics{}, cvGuardMetrics{}, sm)
+			relayProcessor := relaycore.NewRelayProcessor(ctx, nil, lavaRESTMetrics, lavaRESTMetrics, sm)
 			require.NoError(t, rpcss.sendRelayToDirectEndpoints(ctx, sessions, protocolMsg, relayProcessor, nil, nil, common.CacheLookupReport{}))
 
 			waitCtx, cancelWait := context.WithTimeout(ctx, 5*time.Second)

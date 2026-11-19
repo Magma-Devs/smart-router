@@ -3244,15 +3244,9 @@ func (m *cvGuardStateMachine) GetCrossValidationParams() *common.CrossValidation
 func (m *cvGuardStateMachine) GetUsedProviders() *routersession.UsedProviders   { return m.usedProviders }
 func (m *cvGuardStateMachine) SetResultsChecker(rc relaycore.ResultsCheckerInf) {}
 
-// cvGuardMetrics is a no-op MetricsInterface + ChainIdAndApiInterfaceGetter
-// for the CV-guard test. The early-exit path does not hit metrics callbacks.
-type cvGuardMetrics struct{}
-
-func (cvGuardMetrics) SetRelayNodeErrorMetric(chainId, apiInterface, providerAddress, method string) {
-}
-func (cvGuardMetrics) SetRelayNodeResultMetric(chainId, apiInterface, providerAddress, method string) {
-}
-func (cvGuardMetrics) GetChainIdAndApiInterface() (string, string) { return "LAVA", "rest" }
+// lavaRESTMetrics is a no-op MetricsInterface + ChainIdAndApiInterfaceGetter for the relay
+// processors these tests build by hand, on LAVA's REST interface.
+var lavaRESTMetrics = &relaycoretest.RelayProcessorMetricsMock{ChainID: "LAVA", APIInterface: "rest"}
 
 // TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesAllSessions is the
 // regression catch for commit 97266e4. When filterEndpointsByConsistency drops
@@ -3339,7 +3333,7 @@ func TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesAllSessions(t *t
 	// CrossValidation, AgreementThreshold=2. Filter drops 2 of 3 → guard fires (1 < 2).
 	cvParams := &common.CrossValidationParams{MaxParticipants: 3, AgreementThreshold: 2}
 	sm := &cvGuardStateMachine{usedProviders: usedProviders, cvParams: cvParams}
-	metricsStub := cvGuardMetrics{}
+	metricsStub := lavaRESTMetrics
 	relayProcessor := relaycore.NewRelayProcessor(
 		ctx, cvParams, metricsStub, metricsStub,
 		sm)

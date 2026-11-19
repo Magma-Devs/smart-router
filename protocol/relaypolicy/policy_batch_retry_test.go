@@ -12,6 +12,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlibtest"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
+	"github.com/magma-Devs/smart-router/protocol/relaycoretest"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
@@ -36,14 +37,6 @@ func (m *batchStateMachine) GetSelection() relaycore.Selection                  
 func (m *batchStateMachine) GetCrossValidationParams() *common.CrossValidationParams { return nil }
 func (m *batchStateMachine) GetUsedProviders() *routersession.UsedProviders          { return m.usedProviders }
 func (m *batchStateMachine) SetResultsChecker(relaycore.ResultsCheckerInf)           {}
-
-type noMetrics struct{}
-
-func (noMetrics) SetRelayNodeErrorMetric(string, string, string, string)  {}
-func (noMetrics) SetRelayNodeResultMetric(string, string, string, string) {}
-func (noMetrics) GetChainIdAndApiInterface() (string, string) {
-	return "ETH1", spectypes.APIInterfaceJsonRPC
-}
 
 // batchRelayProcessor builds a RelayProcessor around a real two-element JSON-RPC batch parsed by
 // the ETH1 spec, with one provider's attempt in flight, so the summary the policy sees is the one
@@ -70,7 +63,8 @@ func batchRelayProcessor(t *testing.T) (*relaycore.RelayProcessor, chainlib.Prot
 	usedProviders.AddUsed(routersession.ConsumerSessionsMap{batchTestProvider: &routersession.SessionInfo{}}, nil)
 
 	stateMachine := &batchStateMachine{protocolMessage: protocolMessage, usedProviders: usedProviders}
-	return relaycore.NewRelayProcessor(ctx, nil, noMetrics{}, noMetrics{}, stateMachine), protocolMessage
+	metrics := &relaycoretest.RelayProcessorMetricsMock{ChainID: "ETH1", APIInterface: spectypes.APIInterfaceJsonRPC}
+	return relaycore.NewRelayProcessor(ctx, nil, metrics, metrics, stateMachine), protocolMessage
 }
 
 // completeAttempt finishes the in-flight attempt the way the relay goroutine does (release the
