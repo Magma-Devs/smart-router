@@ -114,6 +114,12 @@ func TestSpecFinalityFieldDecode(t *testing.T) {
 			}
 		})
 	}
+	// The value is a JSON string in the spec file. A bare boolean is a spec that does not load,
+	// which the comment on Spec.FinalityFieldFinalValue tells a spec author.
+	var bare Spec
+	if err := json.Unmarshal([]byte(`{"index":"X","finality_field_path":"result.validated","finality_field_final_value":true}`), &bare); err == nil {
+		t.Fatal("a bare boolean final value must not decode")
+	}
 	var none *Spec
 	if path, finalValue := none.FinalityField(); path != "" || finalValue != "" {
 		t.Fatalf("a nil spec declares nothing, got %q, %q", path, finalValue)

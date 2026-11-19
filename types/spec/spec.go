@@ -22,9 +22,11 @@ type Spec struct {
 	// FinalityFieldPath and FinalityFieldFinalValue name the field in a reply body by which the
 	// node itself says whether the data it answered with is final, and the value that means it
 	// is: on Ripple "result.validated" and "true". The path is dot-separated from the root of
-	// the reply; the value is compared with the field's raw JSON, so a boolean is written
-	// true, not "true". Both empty (the default) means the chain's replies carry no such field
-	// and block_distance_for_finalized_data alone decides. See Spec.FinalityField.
+	// the reply. The value is the field's raw JSON text, and in the spec file it is always a
+	// JSON string: "true" for a field that holds the boolean true, "\"final\"" for one that
+	// holds the string final. A bare true or a number here does not decode, and the spec does
+	// not load. Both empty (the default) means the chain's replies carry no such field and
+	// block_distance_for_finalized_data alone decides. See Spec.FinalityField.
 	FinalityFieldPath       string `json:"finality_field_path,omitempty"`
 	FinalityFieldFinalValue string `json:"finality_field_final_value,omitempty"`
 }
