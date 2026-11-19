@@ -70,7 +70,7 @@ func TestNewChainTracker_FloorsAnUnsetPollInterval(t *testing.T) {
 		{"set", avg / 4, avg / 4},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			tracker := newCustomChainTracker(&advancingFetcher{}, ChainTrackerConfig{
+			tracker := newCustomChainTracker(newFakeFetcher(0), ChainTrackerConfig{
 				BlocksToSave:          1,
 				AverageBlockTime:      avg,
 				ServerBlockMemory:     100,

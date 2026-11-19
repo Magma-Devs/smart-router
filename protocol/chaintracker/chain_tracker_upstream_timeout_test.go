@@ -6,12 +6,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/stretchr/testify/require"
 )
 
-// timeoutChainFetcher is a minimal ChainFetcher whose latest-block fetch always
+// newTimeoutFetcher is a fetcher whose latest-block fetch always
 // fails with the exact error shape a wss upstream produces on a deadline: a
 // wrappedRouterError (from utils.FormatWarning) wrapping context.DeadlineExceeded.
 //
@@ -21,22 +20,12 @@ import (
 // net.Error — the shape that crashed the tracker in MAG-2219. (HTTP upstreams were
 // shielded because HTTPDirectRPCConnection.SendRequest wraps with fmt.Errorf, so one
 // Unwrap() yields a *fmt.wrapError, not a net.Error.)
-type timeoutChainFetcher struct{}
-
-func (timeoutChainFetcher) FetchLatestBlockNum(ctx context.Context) (int64, error) {
-	return 0, utils.FormatWarning("[test] simulated wss latest-block timeout", context.DeadlineExceeded)
-}
-
-func (timeoutChainFetcher) FetchBlockHashByNum(ctx context.Context, blockNum int64) (string, error) {
-	return "", nil
-}
-
-func (timeoutChainFetcher) FetchEndpoint() routersession.RPCProviderEndpoint {
-	return routersession.RPCProviderEndpoint{}
-}
-
-func (timeoutChainFetcher) CustomMessage(ctx context.Context, path string, data []byte, connectionType string, apiName string) ([]byte, error) {
-	return nil, nil
+func newTimeoutFetcher() *fakeFetcher {
+	f := newFakeFetcher(0)
+	f.latest = func(context.Context, int) (int64, error) {
+		return 0, utils.FormatWarning("[test] simulated wss latest-block timeout", context.DeadlineExceeded)
+	}
+	return f
 }
 
 // TestFetchAllPreviousBlocksIfNecessary_UpstreamTimeoutIsHandled guards MAG-2219.
@@ -56,7 +45,7 @@ func TestFetchAllPreviousBlocksIfNecessary_UpstreamTimeoutIsHandled(t *testing.T
 		ParseDirectiveEnabled: true,
 	}
 
-	tracker, err := NewChainTracker(context.Background(), timeoutChainFetcher{}, config)
+	tracker, err := NewChainTracker(context.Background(), newTimeoutFetcher(), config)
 	require.NoError(t, err)
 
 	cs, ok := tracker.(*ChainTracker)

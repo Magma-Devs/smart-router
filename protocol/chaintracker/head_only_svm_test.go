@@ -1,4 +1,4 @@
-package chaintracker_test
+package chaintracker
 
 // Head-only on the SOLANA/SVM path.
 //
@@ -16,67 +16,34 @@ package chaintracker_test
 import (
 	"context"
 	"fmt"
-	"sync/atomic"
 	"testing"
 	"time"
 
-	chaintracker "github.com/magma-Devs/smart-router/protocol/chaintracker"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
-	"github.com/magma-Devs/smart-router/utils"
 	"github.com/stretchr/testify/require"
 )
 
-// svmHeadOnlyFetcher models a Solana node. getLatestBlockhash (CustomMessage) returns an
-// advancing slot plus its blockhash; getBlock (FetchBlockHashByNum) counts calls and must
-// never be reached in head-only. It also implements chaintracker.PollObserver, which is the
-// ONLY way a Solana endpoint records a poll observation.
-type svmHeadOnlyFetcher struct {
-	slot        atomic.Int64
-	customCalls atomic.Int64
-	hashCalls   atomic.Int64
-
-	observedCalls  atomic.Int64
-	observedBlock  atomic.Int64
-	observedErrors atomic.Int64
-}
-
-func (f *svmHeadOnlyFetcher) FetchEndpoint() routersession.RPCProviderEndpoint {
-	return routersession.RPCProviderEndpoint{ChainID: "SOLANA", ApiInterface: "jsonrpc"}
-}
-
-func (f *svmHeadOnlyFetcher) CustomMessage(ctx context.Context, path string, data []byte, connectionType, apiName string) ([]byte, error) {
-	f.customCalls.Add(1)
-	slot := f.slot.Load()
-	return []byte(fmt.Sprintf(
-		`{"jsonrpc":"2.0","result":{"context":{"slot":%d},"value":{"blockhash":"hash-%d"}},"id":1}`,
-		slot, slot)), nil
-}
-
-func (f *svmHeadOnlyFetcher) FetchBlockHashByNum(ctx context.Context, blockNum int64) (string, error) {
-	f.hashCalls.Add(1)
-	return "", fmt.Errorf("head-only must never fetch a block hash (slot %d)", blockNum)
-}
-
-// Unused on the SVM path (the wrapper polls via CustomMessage) but required by ChainFetcher.
-func (f *svmHeadOnlyFetcher) FetchLatestBlockNum(ctx context.Context) (int64, error) {
-	return f.slot.Load(), nil
-}
-
-func (f *svmHeadOnlyFetcher) FetchChainID(ctx context.Context) (string, string, error) {
-	return "", "", utils.FormatError("FetchChainID not supported", nil)
-}
-
-// ObserveLatestBlockPoll makes this fetcher a chaintracker.PollObserver.
-func (f *svmHeadOnlyFetcher) ObserveLatestBlockPoll(block int64, transportLatency time.Duration, err error) {
-	f.observedCalls.Add(1)
-	f.observedBlock.Store(block)
-	if err != nil {
-		f.observedErrors.Add(1)
+// newSolanaFetcher models a Solana node. getLatestBlockhash (CustomMessage) answers the head as
+// the slot, with that slot's blockhash; getBlock (FetchBlockHashByNum) fails, and must never be
+// reached in head-only. It is a PollObserver, which is the ONLY way a Solana endpoint records a
+// poll observation.
+func newSolanaFetcher(slot int64) *observingFetcher {
+	f := newFakeFetcher(slot)
+	f.endpoint = routersession.RPCProviderEndpoint{ChainID: "SOLANA", ApiInterface: "jsonrpc"}
+	f.custom = func(context.Context) ([]byte, error) {
+		slot := f.headBlock()
+		return []byte(fmt.Sprintf(
+			`{"jsonrpc":"2.0","result":{"context":{"slot":%d},"value":{"blockhash":"hash-%d"}},"id":1}`,
+			slot, slot)), nil
 	}
+	f.hash = func(_ context.Context, block int64) (string, error) {
+		return "", fmt.Errorf("head-only must never fetch a block hash (slot %d)", block)
+	}
+	return &observingFetcher{fakeFetcher: f}
 }
 
-func svmHeadOnlyConfig(headOnly bool) chaintracker.ChainTrackerConfig {
-	return chaintracker.ChainTrackerConfig{
+func svmHeadOnlyConfig(headOnly bool) ChainTrackerConfig {
+	return ChainTrackerConfig{
 		ChainId:               "SOLANA", // selects SVMChainTracker
 		BlocksToSave:          1,        // what the monitor forces for the Solana family
 		AverageBlockTime:      TimeForPollingMock,
@@ -91,10 +58,9 @@ func svmHeadOnlyConfig(headOnly bool) chaintracker.ChainTrackerConfig {
 // Solana tracker makes exactly one upstream call per poll — getLatestBlockhash — and never
 // getBlock.
 func TestHeadOnlySVM_NeverFetchesBlockHashes(t *testing.T) {
-	fetcher := &svmHeadOnlyFetcher{}
-	fetcher.slot.Store(300_000_000)
+	fetcher := newSolanaFetcher(300_000_000)
 
-	tracker, err := chaintracker.NewChainTracker(context.Background(), fetcher, svmHeadOnlyConfig(true))
+	tracker, err := NewChainTracker(context.Background(), fetcher, svmHeadOnlyConfig(true))
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -102,7 +68,7 @@ func TestHeadOnlySVM_NeverFetchesBlockHashes(t *testing.T) {
 	require.NoError(t, tracker.StartAndServe(ctx), "head-only must start without any hash fetch")
 
 	for i := 0; i < 4; i++ {
-		fetcher.slot.Add(1)
+		fetcher.advance()
 		time.Sleep(TimeForPollingMock * 2)
 	}
 	cancel()
@@ -115,10 +81,9 @@ func TestHeadOnlySVM_NeverFetchesBlockHashes(t *testing.T) {
 // works: the tracker's published head follows the node, which is what consistency
 // pre-validation falls back to and what advanceHeadOnly writes.
 func TestHeadOnlySVM_HeadAdvancesAndIsPublished(t *testing.T) {
-	fetcher := &svmHeadOnlyFetcher{}
-	fetcher.slot.Store(300_000_000)
+	fetcher := newSolanaFetcher(300_000_000)
 
-	tracker, err := chaintracker.NewChainTracker(context.Background(), fetcher, svmHeadOnlyConfig(true))
+	tracker, err := NewChainTracker(context.Background(), fetcher, svmHeadOnlyConfig(true))
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -127,7 +92,7 @@ func TestHeadOnlySVM_HeadAdvancesAndIsPublished(t *testing.T) {
 
 	require.Equal(t, int64(300_000_000), tracker.GetAtomicLatestBlockNum(), "init must publish the head")
 
-	fetcher.slot.Store(300_000_007)
+	fetcher.setHead(300_000_007)
 	require.Eventually(t, func() bool {
 		return tracker.GetAtomicLatestBlockNum() == 300_000_007
 	}, time.Second*3, TimeForPollingMock, "the published head must follow the node")
@@ -140,35 +105,37 @@ func TestHeadOnlySVM_HeadAdvancesAndIsPublished(t *testing.T) {
 // is what feeds the endpointtip store, ChainState consensus and consistency pre-validation.
 // If head-only ever short-circuited before it, the tip would silently die.
 func TestHeadOnlySVM_RecordsPollObservations(t *testing.T) {
-	fetcher := &svmHeadOnlyFetcher{}
-	fetcher.slot.Store(300_000_000)
+	fetcher := newSolanaFetcher(300_000_000)
 
-	tracker, err := chaintracker.NewChainTracker(context.Background(), fetcher, svmHeadOnlyConfig(true))
+	tracker, err := NewChainTracker(context.Background(), fetcher, svmHeadOnlyConfig(true))
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	require.NoError(t, tracker.StartAndServe(ctx))
 
-	before := fetcher.observedCalls.Load()
+	before := len(fetcher.observed())
 	require.Positive(t, before, "init's poll must already have been observed")
 
-	fetcher.slot.Add(3)
+	fetcher.setHead(fetcher.headBlock() + 3)
 	require.Eventually(t, func() bool {
-		return fetcher.observedCalls.Load() > before
+		return len(fetcher.observed()) > before
 	}, time.Second*3, TimeForPollingMock, "every poll must record an observation in head-only")
 
-	require.Equal(t, fetcher.slot.Load(), fetcher.observedBlock.Load(), "the observed block must be the polled slot")
-	require.Zero(t, fetcher.observedErrors.Load(), "a healthy head-only poll must not be recorded as failed")
+	observed := fetcher.observed()
+	require.Equal(t, fetcher.headBlock(), observed[len(observed)-1].block, "the observed block must be the polled slot")
+	for _, observation := range observed {
+		require.NoError(t, observation.err, "a healthy head-only poll must not be recorded as failed")
+	}
 }
 
 // TestHeadOnlySVM_MalformedReplyIsAFailedPoll guards the parse itself: head-only returns before
 // the hash work, but it must still read context.slot out of the getLatestBlockhash reply. A
 // malformed reply must be a failed poll, not a silent zero head.
 func TestHeadOnlySVM_MalformedReplyIsAFailedPoll(t *testing.T) {
-	fetcher := &svmBadReplyFetcher{body: []byte("<html>502 bad gateway</html>")}
+	fetcher := newBadReplySolanaFetcher("<html>502 bad gateway</html>")
 
-	tracker, err := chaintracker.NewChainTracker(context.Background(), fetcher, svmHeadOnlyConfig(true))
+	tracker, err := NewChainTracker(context.Background(), fetcher, svmHeadOnlyConfig(true))
 	require.NoError(t, err)
 	// Init fetches the head; a reply that cannot be parsed must fail the tracker's start
 	// rather than publish a zero head.
@@ -192,9 +159,9 @@ func TestHeadOnlySVM_ParseableReplyWithNoSlotIsAFailedPoll(t *testing.T) {
 		{name: "slot explicitly zero", body: `{"jsonrpc":"2.0","result":{"context":{"slot":0}},"id":1}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			fetcher := &svmBadReplyFetcher{body: []byte(tc.body)}
+			fetcher := newBadReplySolanaFetcher(tc.body)
 
-			tracker, err := chaintracker.NewChainTracker(context.Background(), fetcher, svmHeadOnlyConfig(true))
+			tracker, err := NewChainTracker(context.Background(), fetcher, svmHeadOnlyConfig(true))
 			require.NoError(t, err)
 
 			err = tracker.StartAndServe(context.Background())
@@ -205,31 +172,11 @@ func TestHeadOnlySVM_ParseableReplyWithNoSlotIsAFailedPoll(t *testing.T) {
 	}
 }
 
-// svmBadReplyFetcher returns a fixed body for every latest-slot poll, so one type covers both
-// the unparseable and the parses-but-slotless cases.
-type svmBadReplyFetcher struct {
-	body      []byte
-	hashCalls atomic.Int64
+// newBadReplySolanaFetcher answers every latest-slot poll with body, so one fetcher covers both
+// the unparseable and the parses-but-slotless cases. It is not a PollObserver.
+func newBadReplySolanaFetcher(body string) *fakeFetcher {
+	f := newFakeFetcher(0).answerCustom(body, nil)
+	f.endpoint = routersession.RPCProviderEndpoint{ChainID: "SOLANA", ApiInterface: "jsonrpc"}
+	f.hash = func(context.Context, int64) (string, error) { return "", fmt.Errorf("must not be called") }
+	return f
 }
-
-func (f *svmBadReplyFetcher) FetchEndpoint() routersession.RPCProviderEndpoint {
-	return routersession.RPCProviderEndpoint{ChainID: "SOLANA", ApiInterface: "jsonrpc"}
-}
-
-func (f *svmBadReplyFetcher) CustomMessage(ctx context.Context, path string, data []byte, connectionType, apiName string) ([]byte, error) {
-	return f.body, nil
-}
-
-func (f *svmBadReplyFetcher) FetchBlockHashByNum(ctx context.Context, blockNum int64) (string, error) {
-	f.hashCalls.Add(1)
-	return "", fmt.Errorf("must not be called")
-}
-
-func (f *svmBadReplyFetcher) FetchLatestBlockNum(ctx context.Context) (int64, error) { return 0, nil }
-
-func (f *svmBadReplyFetcher) FetchChainID(ctx context.Context) (string, string, error) {
-	return "", "", utils.FormatError("FetchChainID not supported", nil)
-}
-
-// compile-time proof the fetcher really is the observer hook the SVM path looks for.
-var _ chaintracker.PollObserver = (*svmHeadOnlyFetcher)(nil)
