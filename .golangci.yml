@@ -81,12 +81,7 @@ linters:
         linters:
           - dupl
         text: "(jsonRPC|tendermintRPC)\\.go"
-      # Twins whose differences are the point: latency vs sync normalisation (constants, log keys)
-      # and sticky vs fresh selection (log text).
-      - path: protocol/provideroptimizer/(upstream_selector|provider_optimizer)\.go
-        linters:
-          - dupl
-        text: "(upstream_selector|provider_optimizer)\\.go"
+      # Twins whose differences are the point: sticky vs fresh selection (log text).
       - path: protocol/routersession/consumer_session_manager\.go
         linters:
           - dupl
