@@ -11,6 +11,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
+	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/parser"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 )
@@ -607,9 +608,9 @@ func (gm *GraphQLMessage) GetRawRequestHash() ([]byte, error) {
 // CheckResponseError classifies a GraphQL reply: hasError is false only for an answer.
 //
 // GraphQL answers most errors inside an HTTP 200, so the status alone cannot say what a reply
-// means. A read is classified by readVerdict (MAG-5121); a write by writeVerdict, until the write
-// verdicts land (MAG-5122). ClassificationStatus gives the same verdict as the status the error
-// registry files it under.
+// means. A read is classified by readVerdict (MAG-5121) and filed under OwnClassification's entry; a
+// write by writeVerdict, filed by the shared rows under ClassificationStatus, until the write
+// verdicts land (MAG-5122).
 func (gm *GraphQLMessage) CheckResponseError(data []byte, httpStatusCode int) (hasError bool, errorMessage string) {
 	verdict, isError := gm.verdict(data, httpStatusCode)
 	if !isError {
@@ -618,9 +619,10 @@ func (gm *GraphQLMessage) CheckResponseError(data []byte, httpStatusCode int) (h
 	return true, verdict.message
 }
 
-// ClassificationStatus returns the HTTP status the error registry should classify a GraphQL
-// node error under: the status the reply's verdict stands for (see graphQLVerdictKind). For an
-// answer it is the reply's own status.
+// ClassificationStatus returns the HTTP status a GraphQL node error stands for (see
+// graphQLVerdictKind): the code its log line carries, and on a write the status the shared registry
+// rows classify it under. A read is filed by OwnClassification instead. For an answer it is the
+// reply's own status.
 func (gm *GraphQLMessage) ClassificationStatus(data []byte, httpStatusCode int) int {
 	verdict, isError := gm.verdict(data, httpStatusCode)
 	if !isError {
@@ -629,21 +631,38 @@ func (gm *GraphQLMessage) ClassificationStatus(data []byte, httpStatusCode int) 
 	return verdict.status
 }
 
-// ReplyVerdict is CheckResponseError and ClassificationStatus from one reading of the reply, for
-// a caller that needs both: each of them decodes the whole body.
-func (gm *GraphQLMessage) ReplyVerdict(data []byte, httpStatusCode int) (hasError bool, errorMessage string, classificationStatus int) {
+// OwnClassification is the registry entry a read's error reply is filed under by GraphQL's own
+// rows (MAG-5121). It is nil for an answer and for a write: a write is still filed by the shared
+// rows under ClassificationStatus, until the write verdicts land (MAG-5122).
+func (gm *GraphQLMessage) OwnClassification(data []byte, httpStatusCode int) *common.RouterError {
 	verdict, isError := gm.verdict(data, httpStatusCode)
 	if !isError {
-		return false, "", httpStatusCode
+		return nil
 	}
-	return true, verdict.message, verdict.status
+	return verdict.classified
+}
+
+// ReplyVerdict is CheckResponseError, ClassificationStatus and OwnClassification from one reading
+// of the reply, for a caller that needs them all: each of them decodes the whole body.
+func (gm *GraphQLMessage) ReplyVerdict(data []byte, httpStatusCode int) (hasError bool, errorMessage string, classificationStatus int, classified *common.RouterError) {
+	verdict, isError := gm.verdict(data, httpStatusCode)
+	if !isError {
+		return false, "", httpStatusCode, nil
+	}
+	return true, verdict.message, verdict.status, verdict.classified
 }
 
 func (gm *GraphQLMessage) verdict(data []byte, httpStatusCode int) (graphQLVerdict, bool) {
 	if gm.IsMutation() {
 		return writeVerdict(data, httpStatusCode)
 	}
-	return readVerdict(data, httpStatusCode)
+	verdict, isError := readVerdict(data, httpStatusCode)
+	if isError && verdict.classified == nil {
+		// A read's error is never filed by the shared rows: a row that names no registry entry
+		// (a chain's row added without one) is filed by its kind instead (MAG-5121).
+		verdict.classified = graphQLClassifiedOfKind(verdict.kind, verdict.status)
+	}
+	return verdict, isError
 }
 
 // writeVerdict is a mutation's verdict, unchanged by MAG-5121 except that every reply is now

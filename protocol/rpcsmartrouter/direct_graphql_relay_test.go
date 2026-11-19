@@ -119,11 +119,13 @@ func TestGraphQLDirectRelay(t *testing.T) {
 			wantAtFault:   true,
 		},
 		{
-			name:            "a 400 is a node error the registry files as the caller's",
-			status:          http.StatusBadRequest,
-			reply:           `{"errors":[{"message":"bad request"}]}`,
-			wantNodeError:   true,
-			wantNonRetrying: true,
+			// No code under a 400: the status table, where an unnamed 4xx is tried on another
+			// provider without blame (MAG-5121 Change 7). It used to be the caller's.
+			name:           "a codeless error under a 400 is tried on another provider",
+			status:         http.StatusBadRequest,
+			reply:          `{"errors":[{"message":"bad request"}]}`,
+			wantNodeError:  true,
+			wantCapability: true,
 		},
 		{
 			// Sui's 429 arrives inside a 200; it must reach the rate-limit hold-off.

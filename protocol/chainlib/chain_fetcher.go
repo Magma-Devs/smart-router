@@ -2162,7 +2162,10 @@ func RateLimitedReplyError(chainID string, chainMessage ChainMessageForSend, dat
 // can say which HTTP status the error registry should classify a reply under
 // (rpcInterfaceMessages.GraphQLMessage, which maps RESOURCE_EXHAUSTED to a 429).
 type replyStatusClassifier interface {
-	ClassificationStatus(data []byte, httpStatusCode int) int
+	// ReplyVerdict reads the reply once: whether it is an error, its message, the status it stands
+	// for, and the registry entry the interface's own rows file it under, or nil when the shared
+	// rows decide (GraphQL: a write, MAG-5121). Each reading decodes the whole reply.
+	ReplyVerdict(data []byte, httpStatusCode int) (hasError bool, errorMessage string, classificationStatus int, classified *common.RouterError)
 }
 
 // rateLimitedClassifiedReply is RateLimitedReplyError's reading of an error the request message
@@ -2177,7 +2180,9 @@ func rateLimitedClassifiedReply(chainID string, chainMessage ChainMessageForSend
 	if !ok {
 		return nil
 	}
-	hasError, message := chainMessage.CheckResponseError(data, httpStatusCode)
+	// One reading: the message's ReplyVerdict is the CheckResponseError the chain message forwards
+	// to, so the verdict, its status and its own registry entry come from one decode of the reply.
+	hasError, message, status, classified := classifier.ReplyVerdict(data, httpStatusCode)
 	if !hasError {
 		return nil
 	}
@@ -2185,8 +2190,9 @@ func rateLimitedClassifiedReply(chainID string, chainMessage ChainMessageForSend
 	if collection := chainMessage.GetApiCollection(); collection != nil {
 		transport = common.ApiInterfaceToTransport(collection.CollectionData.ApiInterface)
 	}
-	status := classifier.ClassificationStatus(data, httpStatusCode)
-	classified := common.ClassifyError(nil, common.GetChainFamilyOrDefault(chainID), transport, status, message)
+	if classified == nil {
+		classified = common.ClassifyError(nil, common.GetChainFamilyOrDefault(chainID), transport, status, message)
+	}
 	if classified == nil || !classified.Retryable || !classified.SubCategory.IsRateLimit() {
 		return nil
 	}

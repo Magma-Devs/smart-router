@@ -42,7 +42,7 @@ func TestGraphQLReadingALargeReplyDoesNotCopyIt(t *testing.T) {
 	read := parsedRead(t)
 	body := largeGraphQLAnswer(5 << 20)
 
-	hasError, _, _ := read.ReplyVerdict(body, 200)
+	hasError, _, _, _ := read.ReplyVerdict(body, 200)
 	require.False(t, hasError, "the large reply is an answer")
 
 	// The decoder copies its input into a buffer it reuses from one call to the next (goccy/go-json
@@ -76,11 +76,12 @@ func TestGraphQLReplyVerdictAgreesWithItsParts(t *testing.T) {
 	}
 	for _, message := range []*GraphQLMessage{parsedRead(t), write} {
 		for _, reply := range replies {
-			hasError, errorMessage, status := message.ReplyVerdict([]byte(reply.body), reply.status)
+			hasError, errorMessage, status, classified := message.ReplyVerdict([]byte(reply.body), reply.status)
 			wantError, wantMessage := message.CheckResponseError([]byte(reply.body), reply.status)
 			require.Equal(t, wantError, hasError, reply.body)
 			require.Equal(t, wantMessage, errorMessage, reply.body)
 			require.Equal(t, message.ClassificationStatus([]byte(reply.body), reply.status), status, reply.body)
+			require.Equal(t, message.OwnClassification([]byte(reply.body), reply.status), classified, reply.body)
 		}
 	}
 }

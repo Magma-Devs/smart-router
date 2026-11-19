@@ -925,9 +925,9 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 // sendGraphQLRelay posts a GraphQL document to the endpoint's base URL.
 //
 // Every operation shares that one URL, so the body is the request: it is sent exactly as the
-// caller wrote it. Errors are classified on the REST transport, which GraphQL-over-HTTP shares
-// (see common.ApiInterfaceToTransport); what counts as a node error is decided by
-// GraphQLMessage.CheckResponseError, since GraphQL reports most failures inside a 200.
+// caller wrote it. What counts as a node error is decided by GraphQLMessage.CheckResponseError,
+// since GraphQL reports most failures inside a 200. A read's error is filed by GraphQL's own rows
+// (MAG-5121); a write's by the shared REST rows, until MAG-5122.
 func (d *DirectRPCRelaySender) sendGraphQLRelay(
 	ctx context.Context,
 	chainMessage chainlib.ChainMessage,
@@ -993,7 +993,7 @@ func (d *DirectRPCRelaySender) sendGraphQLRelay(
 
 	// One reading of the body for both the verdict and the status the registry files it under: a
 	// read's reply can be megabytes. chainMessage.CheckResponseError is this same method.
-	hasError, errorMessage, classificationStatus := graphqlMessage.ReplyVerdict(response.Body, response.StatusCode)
+	hasError, errorMessage, classificationStatus, ownClassification := graphqlMessage.ReplyVerdict(response.Body, response.StatusCode)
 	if hasError && errorMessage != "" {
 		utils.FormatDebug("GraphQL response contains error",
 			utils.LogAttr("endpoint", d.endpointName),
@@ -1034,10 +1034,14 @@ func (d *DirectRPCRelaySender) sendGraphQLRelay(
 		},
 		IsNodeError: isNodeError,
 	}
-	if hasError {
-		// A GraphQL node error usually arrives inside a 200, so the status alone would leave
-		// the registry with nothing to go on: the reply's verdict stands in for it, as the
-		// status that verdict is filed under (see GraphQLMessage.ClassificationStatus).
+	switch {
+	case ownClassification != nil:
+		// A read is filed by GraphQL's own rows, never by the shared REST rows (MAG-5121).
+		result.ApplyRouterErrorClassification(ownClassification)
+		result.IsOwnVerdict = true
+	case hasError:
+		// A write is still filed by the shared rows under the status its verdict stands for (a
+		// caller's error as a 400), until the write verdicts land (MAG-5122).
 		result.ApplyNodeErrorClassification(d.chainFamily, common.TransportREST, classificationStatus, errorMessage)
 	}
 
