@@ -67,7 +67,7 @@ func TestSendGRPCRelay_RouterDeadlineIsATimeout(t *testing.T) {
 	unhealthy, _ := classifyEndpointHealth(common.AsRouterError(err), false)
 	require.True(t, unhealthy, "the endpoint is still blamed for the timeout")
 
-	attempt := relayEndProtocolErrorAttempt(relaycore.RelayError{Err: err, RouterError: common.AsRouterError(err)}, false)
+	attempt := relayEndProtocolErrorAttempt(relaycore.RelayError{Err: err, RouterError: common.AsRouterError(err)}, false, nil)
 	require.Equal(t, attemptOutcomeTimeout, attempt.outcome, "relay_end reads it as a timeout")
 }
 

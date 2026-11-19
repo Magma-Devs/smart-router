@@ -207,15 +207,22 @@ func (rp *ResultsManagerInst) setValidResponse(response *RelayResponse, protocol
 				common.LogCodedError(description, err, routerError, chainID, chainErrorCode, chainErrorMessage, attributes...)
 			}
 		}
-		logNodeError("received node error reply from provider", err, nodeClassified, rp.chainID, errorCode, err.Error(),
+		// A write's signed bytes never reach a log line (MAG-5122), whether the request carries them
+		// or the node's reply echoes them. They are taken out before any cut: CapStringLen keeps
+		// the request's tail, where a GraphQL write's variables are.
+		loggedErr, loggedMessage := err, chainlib.RedactSignedBytesForLog(protocolMessage, errorMessage)
+		if loggedMessage != errorMessage {
+			loggedErr = fmt.Errorf("%s", loggedMessage)
+		}
+		logNodeError("received node error reply from provider", loggedErr, nodeClassified, rp.chainID, errorCode, loggedMessage,
 			utils.LogAttr("GUID", rp.guid),
 			utils.LogAttr("provider", response.RelayResult.ProviderInfo),
 			utils.LogAttr("statusCode", response.RelayResult.StatusCode),
 			utils.LogAttr("api", protocolMessage.GetApi().Name),
 			utils.LogAttr("requestUrl", requestUrl),
-			utils.LogAttr("payload", parser.CapStringLen(string(response.RelayResult.Reply.Data))),
+			utils.LogAttr("payload", parser.CapStringLen(chainlib.RedactSignedBytesForLog(protocolMessage, string(response.RelayResult.Reply.Data)))),
 			utils.LogAttr("headers", common.RedactMetadata(response.RelayResult.Reply.Metadata)),
-			utils.LogAttr("requestPayload", parser.CapStringLen(reqPayload)),
+			utils.LogAttr("requestPayload", parser.CapStringLen(chainlib.RedactSignedBytesForLog(protocolMessage, reqPayload))),
 			utils.LogAttr("requestHeaders", reqHeaders),
 		)
 		rp.nodeResponseErrors.AddError(RelayError{Err: err, ProviderInfo: response.RelayResult.ProviderInfo, Response: response, RouterError: nodeClassified, JSONRPCErrorCode: jsonRPCErrorCode})

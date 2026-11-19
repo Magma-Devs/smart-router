@@ -49,6 +49,33 @@ func IsGrpcSubscription(chainMessage ChainMessageForSend) bool {
 	return IsFunctionTagOfType(chainMessage, types.FUNCTION_TAG_SUBSCRIBE)
 }
 
+// signedBytesRedactor is a request whose interface knows the encoding its signed bytes take
+// (rpcInterfaceMessages.GraphQLMessage, MAG-5122).
+type signedBytesRedactor interface {
+	RedactSignedBytes(text string) string
+}
+
+// SignedBytesRedactor is what takes the signed bytes out of a request or reply that a log line of
+// chainMessage carries, when the message's interface knows their encoding; nil for every other
+// interface, whose text is logged as is.
+func SignedBytesRedactor(chainMessage ChainMessageForSend) func(text string) string {
+	if chainMessage == nil {
+		return nil
+	}
+	if redactor, ok := chainMessage.GetRPCMessage().(signedBytesRedactor); ok {
+		return redactor.RedactSignedBytes
+	}
+	return nil
+}
+
+// RedactSignedBytesForLog is text through SignedBytesRedactor, or text as is when there is none.
+func RedactSignedBytesForLog(chainMessage ChainMessageForSend, text string) string {
+	if redact := SignedBytesRedactor(chainMessage); redact != nil {
+		return redact(text)
+	}
+	return text
+}
+
 func GetParseDirective(api *types.Api, apiCollection *types.ApiCollection) *types.ParseDirective {
 	chainMessageApiName := api.Name
 	for _, parseDirective := range apiCollection.GetParseDirectives() {

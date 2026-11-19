@@ -111,8 +111,8 @@ func sendFailedRelayReply(fiberCtx *fiber.Ctx, reply failedRelayReply, metadata 
 
 // loggedReply is the reply as the request log records it: capped, and redacted, as any other
 // log field.
-func loggedReply(body []byte) string {
-	return utils.RedactSecrets(parser.CapStringLen(string(body)))
+func loggedReply(body string) string {
+	return utils.RedactSecrets(parser.CapStringLen(body))
 }
 
 func marshalOr(value any, fallback string) []byte {

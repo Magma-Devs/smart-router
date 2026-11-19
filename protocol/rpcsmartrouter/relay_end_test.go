@@ -738,7 +738,7 @@ func TestRelayEnd_AttemptsFollowTheDispatchHistory(t *testing.T) {
 		{Provider: "node-b", Batch: 1, At: start.Add(30 * time.Millisecond)},
 		{Provider: "node-a", Batch: 2, At: start.Add(60 * time.Millisecond)},
 	}
-	attempts := relayEndAttemptsOf(dispatches, start, successes, nil, protocolErrors, false)
+	attempts := relayEndAttemptsOf(dispatches, start, successes, nil, protocolErrors, false, nil)
 	require.Len(t, attempts, 3)
 	require.Equal(t, []string{"node-a", "node-b", "node-a"}, []string{attempts[0].upstream, attempts[1].upstream, attempts[2].upstream})
 	require.Equal(t, attemptOutcomeTransportError, attempts[0].outcome)
@@ -753,11 +753,11 @@ func TestRelayEnd_AttemptsFollowTheDispatchHistory(t *testing.T) {
 		require.Equal(t, want, attempts[i].sentAfter, "silent or not, an attempt's send time is known")
 	}
 
-	cached := relayEndAttemptsOf(nil, start, []common.RelayResult{{Reply: reply, CacheLookup: common.CacheLookupReport{ServedTier: common.CacheTierPrimary}}}, nil, nil, false)
+	cached := relayEndAttemptsOf(nil, start, []common.RelayResult{{Reply: reply, CacheLookup: common.CacheLookupReport{ServedTier: common.CacheTierPrimary}}}, nil, nil, false, nil)
 	require.Len(t, cached, 1)
 	require.False(t, cached[0].sent, "a cache hit was never sent, so it has no batch")
 
-	ranOut := relayEndAttemptsOf([]routersession.Dispatch{{Provider: "node-a", At: start}}, start, nil, nil, nil, true)
+	ranOut := relayEndAttemptsOf([]routersession.Dispatch{{Provider: "node-a", At: start}}, start, nil, nil, nil, true, nil)
 	require.Equal(t, attemptOutcomeTimeout, ranOut[0].outcome, "silent when the budget ran out")
 }
 
@@ -767,12 +767,12 @@ func TestRelayEnd_WriteUnknownCodeComesFromATransportError(t *testing.T) {
 	nodeReply := relayEndNodeErrorAttempt(relaycore.RelayError{
 		Err: errors.New("something odd"), RouterError: common.RouterErrorUnknown,
 		Response: &relaycore.RelayResponse{RelayResult: common.RelayResult{ProviderInfo: common.ProviderInfo{ProviderAddress: "node-a"}}},
-	})
+	}, nil)
 	require.True(t, common.RouterErrorUnknown.MayHaveReachedNode, "the case under test")
 	reset := relayEndProtocolErrorAttempt(relaycore.RelayError{
 		Err: errors.New("connection reset by peer"), RouterError: common.RouterErrorConnectionReset,
 		ProviderInfo: common.ProviderInfo{ProviderAddress: "node-b"},
-	}, false)
+	}, false, nil)
 
 	require.Equal(t, common.RouterErrorConnectionReset.Name, relayEndWriteUnknownCode(nil, relayEndAttempts{nodeReply, reset}, false))
 	require.Equal(t, common.RouterErrorContextDeadline.Name, relayEndWriteUnknownCode(nil, relayEndAttempts{nodeReply, reset}, true))
@@ -782,11 +782,11 @@ func TestRelayEnd_AttemptOutcomes(t *testing.T) {
 	rateLimited := relayEndNodeErrorAttempt(relaycore.RelayError{
 		Err: errors.New("too many requests"), RouterError: common.RouterErrorNodeRateLimited,
 		Response: &relaycore.RelayResponse{RelayResult: common.RelayResult{ProviderInfo: common.ProviderInfo{ProviderAddress: "node-a"}, IsRateLimited: true}},
-	})
+	}, nil)
 	require.Equal(t, attemptOutcomeRateLimited, rateLimited.outcome)
 	require.Equal(t, "node-a", rateLimited.upstream)
 	require.Equal(t, common.RouterErrorNodeRateLimited.Retryable, rateLimited.retryable())
-	unclassified := relayEndNodeErrorAttempt(relaycore.RelayError{Err: errors.New("odd"), Response: &relaycore.RelayResponse{}})
+	unclassified := relayEndNodeErrorAttempt(relaycore.RelayError{Err: errors.New("odd"), Response: &relaycore.RelayResponse{}}, nil)
 	require.Equal(t, common.RouterErrorUnknown.Name, unclassified.errorCode)
 	require.Equal(t, common.RouterErrorUnknown.Retryable, unclassified.retryable(), "an unclassified error takes UNKNOWN_ERROR's verdict")
 
@@ -804,7 +804,7 @@ func TestRelayEnd_AttemptOutcomes(t *testing.T) {
 		{"a reset", errors.New("connection reset by peer"), common.RouterErrorConnectionReset, false, attemptOutcomeTransportError},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			attempt := relayEndProtocolErrorAttempt(relaycore.RelayError{Err: tc.err, RouterError: tc.routerError, ProviderInfo: common.ProviderInfo{ProviderAddress: "node-a"}}, tc.ranOutOfRoad)
+			attempt := relayEndProtocolErrorAttempt(relaycore.RelayError{Err: tc.err, RouterError: tc.routerError, ProviderInfo: common.ProviderInfo{ProviderAddress: "node-a"}}, tc.ranOutOfRoad, nil)
 			require.Equal(t, tc.want, attempt.outcome)
 			require.Equal(t, tc.routerError.Name, attempt.errorCode)
 			require.Equal(t, tc.routerError.Retryable, attempt.retryable(), "the registry's verdict, as the narrative lines print it")

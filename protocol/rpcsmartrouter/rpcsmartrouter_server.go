@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"slices"
 	"sort"
@@ -1340,7 +1341,13 @@ func (rpcss *RPCSmartRouterServer) SendRelay(
 	guid, _ := utils.GetUniqueIdentifier(ctx)
 	tracing.RecordRelayAttributes(span, guid, chainId, apiInterface)
 	if tracing.IsTraceBodyEnabled() {
-		tracing.RecordBody(span, tracing.AttrRelayRequestBody, []byte(req))
+		// Not parsed yet, so the interface decides: a GraphQL write's signed bytes never leave the
+		// router in a span either (MAG-5122).
+		traced := req
+		if apiInterface == spectypes.APIInterfaceGraphQL {
+			traced = rpcInterfaceMessages.RedactGraphQLSignedBytes(req)
+		}
+		tracing.RecordBody(span, tracing.AttrRelayRequestBody, []byte(traced))
 	}
 
 	protocolMessage, err := rpcss.ParseRelay(ctx, url, req, connectionType, dappID, consumerIp, metadata)
@@ -1503,9 +1510,19 @@ func unclearWriteOutcomeFor(protocolMessage chainlib.ProtocolMessage, relayProce
 		// A status the relay failed (a 5xx with no GraphQL body) is a reply too, and the chain's
 		// write rows may read it as "may have run".
 		var httpErr *routersession.HTTPStatusError
-		if errors.As(protocolError.Err, &httpErr) && writeCopyMayHaveRun(protocolMessage, httpErr.Body, httpErr.StatusCode) {
+		isStatus := errors.As(protocolError.Err, &httpErr)
+		if isStatus && writeCopyMayHaveRun(protocolMessage, httpErr.Body, httpErr.StatusCode) {
 			cutOffMidDelivery = true
 			cutOffs.mayHaveRun++
+		}
+		// On a chain whose write rows decide (MAG-4909), a copy's verdict is its own, never the
+		// read-side MayHaveReachedNode flag (Part I R-L): a failure with no status is the
+		// transport's, and only its proof that nothing left makes the copy not sent
+		// (writeCopyNotSent). Any other failure may have run, flag or not: a refused connection
+		// known only from text, an unreachable network on a connection that was already open, a
+		// failed TLS handshake.
+		if !isStatus && graphQLWriteHasRows(protocolMessage) && !writeCopyNotSent(protocolError.Err) {
+			cutOffMidDelivery = true
 		}
 	}
 	// A node error settles its endpoint unless the chain's write rows say the transaction may have
@@ -1549,8 +1566,9 @@ func withUnclearWriteStatus(result *common.RelayResult) *common.RelayResult {
 // relayFailureLogAttrs adds to a failed attempt's log line its classification and, when an
 // upstream answered, the upstream's own status line and body (MAG-4481). The classification is
 // the one the results manager records for the attempt: the sender's own when it wrapped one,
-// otherwise the same message-based fallback.
-func relayFailureLogAttrs(err error, attrs ...utils.Attribute) []utils.Attribute {
+// otherwise the same message-based fallback. logged rewrites the upstream's body before its cut (a
+// GraphQL write's signed bytes, MAG-5122); nil leaves it as is.
+func relayFailureLogAttrs(err error, logged func(string) string, attrs ...utils.Attribute) []utils.Attribute {
 	classified := common.AsRouterError(err)
 	if classified == nil {
 		classified = common.ClassifyError(common.DetectConnectionError(err), common.ChainFamilyUnknown, common.TransportGRPC, 0, err.Error())
@@ -1559,7 +1577,7 @@ func relayFailureLogAttrs(err error, attrs ...utils.Attribute) []utils.Attribute
 		utils.LogAttr("error_code", classified.Code),
 		utils.LogAttr("error_name", classified.Name),
 	)
-	return append(attrs, routersession.UpstreamAnswerLogAttrs(err)...)
+	return append(attrs, routersession.UpstreamAnswerLogAttrsLogged(err, logged)...)
 }
 
 // withNoAnswerTimeout names the request's processing timeout in a 504 reply, which the relay
@@ -1620,6 +1638,95 @@ func graphQLWriteCopyOutcome(message chainlib.ChainMessageForSend, body []byte, 
 	return graphQLMessage.WriteOutcome(body, statusCode)
 }
 
+// graphQLWriteHasRows reports whether message is a GraphQL write on a chain whose write rows read its
+// copies (MAG-4909).
+func graphQLWriteHasRows(message chainlib.ChainMessageForSend) bool {
+	if message == nil {
+		return false
+	}
+	graphQLMessage, ok := message.GetRPCMessage().(*rpcInterfaceMessages.GraphQLMessage)
+	return ok && graphQLMessage != nil && graphQLMessage.HasWriteRows()
+}
+
+// graphQLWriteCopyRefused reports whether one copy's reply refused a GraphQL write (Part I R-L
+// "refused it"): by the chain's write rows where they exist (on Sui, W3-W8 and W12), and otherwise
+// by status alone, the vendor speaking about our traffic or our access: 429, 401, 402, 403.
+func graphQLWriteCopyRefused(message chainlib.ChainMessageForSend, body []byte, statusCode int) bool {
+	if outcome, known := graphQLWriteCopyOutcome(message, body, statusCode); known {
+		return outcome == rpcInterfaceMessages.GraphQLWriteRejected
+	}
+	switch statusCode {
+	case http.StatusTooManyRequests, http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden:
+		return true
+	}
+	return false
+}
+
+// writeCopyNotSent reports whether the router's own transport proves that no byte of a write copy
+// left it (Part I R-L "not sent"): its dialer failed before a connection opened. The name did not
+// resolve, the connection was refused, the network or the host was unreachable, or a proxy's dial
+// failed. Never a timeout, since a timed-out dial and a timed-out reply read the same, and never
+// reply text, since a node's body can say anything.
+func writeCopyNotSent(err error) bool {
+	var netErr net.Error
+	if err == nil || (errors.As(err, &netErr) && netErr.Timeout()) {
+		return false
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) && (opErr.Op == "dial" || opErr.Op == "proxyconnect") {
+		return true
+	}
+	var dnsErr *net.DNSError
+	return errors.As(err, &dnsErr)
+}
+
+// settledGraphQLWriteOutcome is the outcome of a GraphQL write that no copy took and none may have
+// run (unclearWriteOutcomeFor found none), across its copies (Part I R-L):
+//   - rejected: a copy refused it, and every other copy refused it too or was not sent;
+//   - not_sent: every copy was not sent, or none was sent at all.
+//
+// It is "" when a copy's reply is forwarded as today, without a verdict: on a chain whose write rows
+// have not shipped, a node's reply other than a refusal by status (GraphQL interface chapter, section
+// 5, "No write rows yet").
+func settledGraphQLWriteOutcome(protocolMessage chainlib.ProtocolMessage, relayProcessor *relaycore.RelayProcessor) string {
+	if relayProcessor == nil || relayProcessor.GetUsedProviders().SessionsDispatched() == 0 {
+		return graphQLWriteOutcomeNotSent
+	}
+	successResults, nodeErrors, protocolErrors := relayProcessor.GetResultsData()
+	if len(successResults) > 0 {
+		// A served write on a chain with write rows took it; one on a chain without rows is a
+		// node's reply forwarded as is.
+		return ""
+	}
+	refused := false
+	for _, nodeError := range nodeErrors {
+		var body []byte
+		if nodeError.Reply != nil {
+			body = nodeError.Reply.Data
+		}
+		if !graphQLWriteCopyRefused(protocolMessage, body, nodeError.StatusCode) {
+			return ""
+		}
+		refused = true
+	}
+	for _, protocolError := range protocolErrors {
+		var httpErr *routersession.HTTPStatusError
+		switch {
+		case errors.As(protocolError.Err, &httpErr):
+			if !graphQLWriteCopyRefused(protocolMessage, httpErr.Body, httpErr.StatusCode) {
+				return ""
+			}
+			refused = true
+		case !writeCopyNotSent(protocolError.Err):
+			return ""
+		}
+	}
+	if refused {
+		return graphQLWriteOutcomeRejected
+	}
+	return graphQLWriteOutcomeNotSent
+}
+
 // writeCutOffs counts the failures of a write that its unclear reason tells apart.
 type writeCutOffs struct {
 	// timedOut: the endpoint did not answer before a deadline, whichever one ended it. That is what
@@ -1674,15 +1781,17 @@ func unclearWriteReason(answered, dispatched int, cutOffs writeCutOffs) *unclear
 	}
 }
 
-// graphQLWriteOutcomeAccepted and graphQLWriteOutcomeUnknown are the Lava-Write-Outcome values this
-// router can state for a GraphQL write today (MAG-5122, Part I R-L point 4: accepted > unknown >
+// The Lava-Write-Outcome values of a GraphQL write (MAG-5122, Part I R-L: accepted > unknown >
 // rejected > not_sent). accepted comes from the chain's write rows (appendGraphQLWriteAcceptedHeader),
-// unknown from each copy's status, transport and write rows (unclearWriteOutcomeFor). The
-// rejected and not_sent values are not stated yet (MAG-5122): a write whose copies were all refused
-// keeps the node's body as is, with no header.
+// unknown from each copy's status, transport and write rows (unclearWriteOutcomeFor), rejected and
+// not_sent from every copy's refusal or the transport's proof that it was not sent
+// (settledGraphQLWriteOutcome). A node's reply forwarded on a chain whose write rows have not
+// shipped carries none.
 const (
 	graphQLWriteOutcomeAccepted = "accepted"
 	graphQLWriteOutcomeUnknown  = "unknown"
+	graphQLWriteOutcomeRejected = "rejected"
+	graphQLWriteOutcomeNotSent  = "not_sent"
 )
 
 // isGraphQLWrite reports whether protocolMessage is a GraphQL write. MAG-5122 scopes its write-
@@ -1697,21 +1806,28 @@ func isGraphQLWrite(protocolMessage chainlib.ProtocolMessage) bool {
 	return collection != nil && collection.CollectionData.ApiInterface == spectypes.APIInterfaceGraphQL
 }
 
-// ensureWriteOutcomeHeader adds Lava-Write-Outcome to result's reply, unless it is already there:
-// a client reading a repeated header as a list would see the same verdict twice.
-func ensureWriteOutcomeHeader(result *common.RelayResult, outcome string) {
+// ensureReplyHeader adds a header to result's reply, unless it is already there: a client reading a
+// repeated header as a list would see the same value twice.
+func ensureReplyHeader(result *common.RelayResult, name, value string) {
 	if result.Reply == nil {
 		result.Reply = &pairingtypes.RelayReply{}
 	}
 	for _, md := range result.Reply.Metadata {
-		if md.Name == common.WRITE_OUTCOME_HEADER_NAME {
+		if md.Name == name {
 			return
 		}
 	}
-	result.Reply.Metadata = append(result.Reply.Metadata, pairingtypes.Metadata{
-		Name:  common.WRITE_OUTCOME_HEADER_NAME,
-		Value: outcome,
-	})
+	result.Reply.Metadata = append(result.Reply.Metadata, pairingtypes.Metadata{Name: name, Value: value})
+}
+
+// ensureGraphQLWriteOutcomeHeaders puts a GraphQL write's outcome on its reply (MAG-5122, Part I
+// R-L): Lava-Write-Outcome, and Lava-Tx-Hash when the transaction's digest can be computed from the
+// request (graphQLWriteDigest), so a client can look the transaction up whatever the outcome.
+func ensureGraphQLWriteOutcomeHeaders(result *common.RelayResult, protocolMessage chainlib.ProtocolMessage, outcome string) {
+	ensureReplyHeader(result, common.WRITE_OUTCOME_HEADER_NAME, outcome)
+	if digest := graphQLWriteDigest(protocolMessage); digest != "" {
+		ensureReplyHeader(result, common.TX_HASH_HEADER_NAME, digest)
+	}
 }
 
 // appendGraphQLWriteOutcomeHeader adds Lava-Write-Outcome: unknown (MAG-5122) to the reply of a
@@ -1720,22 +1836,79 @@ func (rpcss *RPCSmartRouterServer) appendGraphQLWriteOutcomeHeader(result *commo
 	if result == nil || unclear == nil || !isGraphQLWrite(protocolMessage) {
 		return
 	}
-	ensureWriteOutcomeHeader(result, graphQLWriteOutcomeUnknown)
+	ensureGraphQLWriteOutcomeHeaders(result, protocolMessage, graphQLWriteOutcomeUnknown)
 }
 
 // appendGraphQLWriteAcceptedHeader adds Lava-Write-Outcome: accepted (MAG-5122) to a served GraphQL
 // write whose reply the chain's write rows read as accepted (MAG-4909): on Sui, the write field ran
 // (W1: effects with SUCCESS or FAILURE, a transaction that ran and paid gas counting as accepted,
 // MAG-4742), with or without errors beside it and under any status, or an error below it (W2). No
-// other reply gets the header: not a node error (a refused transaction answers with a GraphQL error
-// inside a 200, which still returns err == nil), and no write on a chain without write rows.
-func (rpcss *RPCSmartRouterServer) appendGraphQLWriteAcceptedHeader(result *common.RelayResult, protocolMessage chainlib.ProtocolMessage) {
+// other reply gets it here: not a node error (a refused transaction answers with a GraphQL error
+// inside a 200, which still returns err == nil), and no write on a chain without write rows. It
+// reports whether it added the header.
+func (rpcss *RPCSmartRouterServer) appendGraphQLWriteAcceptedHeader(result *common.RelayResult, protocolMessage chainlib.ProtocolMessage) bool {
 	if result == nil || result.IsNodeError || result.Reply == nil || !isGraphQLWrite(protocolMessage) {
-		return
+		return false
 	}
 	if outcome, known := graphQLWriteCopyOutcome(protocolMessage, result.Reply.Data, result.StatusCode); known && outcome == rpcInterfaceMessages.GraphQLWriteAccepted {
-		ensureWriteOutcomeHeader(result, graphQLWriteOutcomeAccepted)
+		ensureGraphQLWriteOutcomeHeaders(result, protocolMessage, graphQLWriteOutcomeAccepted)
+		return true
 	}
+	return false
+}
+
+// withSettledGraphQLWriteOutcome answers a GraphQL write that no copy took and none may have run by
+// settledGraphQLWriteOutcome (MAG-5122, Part I R-L):
+//   - rejected: the best-ranked refusal the relay already chose goes back as is, a vendor's 429
+//     included, with Lava-Write-Outcome: rejected;
+//   - not_sent: there is no node reply, so the router speaks (graphQLNotSentWriteStatus).
+//
+// A write with no verdict, a node's reply forwarded on a chain whose write rows have not shipped,
+// comes back unchanged.
+func (rpcss *RPCSmartRouterServer) withSettledGraphQLWriteOutcome(ctx context.Context, result *common.RelayResult, protocolMessage chainlib.ProtocolMessage, relayProcessor *relaycore.RelayProcessor) *common.RelayResult {
+	switch settledGraphQLWriteOutcome(protocolMessage, relayProcessor) {
+	case graphQLWriteOutcomeRejected:
+		if result == nil {
+			return nil
+		}
+		ensureGraphQLWriteOutcomeHeaders(result, protocolMessage, graphQLWriteOutcomeRejected)
+	case graphQLWriteOutcomeNotSent:
+		result = rpcss.graphQLNotSentWriteStatus(ctx, result, protocolMessage)
+		ensureGraphQLWriteOutcomeHeaders(result, protocolMessage, graphQLWriteOutcomeNotSent)
+	}
+	return result
+}
+
+// graphQLNotSentWriteMessage is the sentence of the router's reply to a write no copy of which left
+// it (Part I R-L, not_sent). It names no provider, url, address or transport error: a caller learns
+// only that no provider received the transaction.
+const graphQLNotSentWriteMessage = "no answer from upstream: not sent"
+
+// graphQLNotSentWriteStatus answers a GraphQL write whose copies the transport proved were not sent
+// (Part I R-L, not_sent; GraphQL chapter T16): HTTP 502, the router's GraphQL error document with
+// write_outcome: not_sent, and tx_hash when the digest can be computed. Masked mode leaves it as is,
+// as it does the unknown reply: write_outcome, tx_hash and guid are the client's safety signals, and
+// the sentence holds nothing to mask. result may be nil.
+func (rpcss *RPCSmartRouterServer) graphQLNotSentWriteStatus(ctx context.Context, result *common.RelayResult, protocolMessage chainlib.ProtocolMessage) *common.RelayResult {
+	if result == nil {
+		result = &common.RelayResult{}
+	}
+	stamped := *result
+	stamped.StatusCode = http.StatusBadGateway
+	stamped.ClientFacing = &common.ClientFacingError{
+		UpstreamStatus:      http.StatusBadGateway,
+		UpstreamBody:        chainlib.ConvertToGraphQLWriteOutcomeError(graphQLNotSentWriteMessage, guidOf(ctx), graphQLWriteOutcomeNotSent, graphQLWriteDigest(protocolMessage)),
+		UpstreamContentType: common.JSONContentType,
+	}
+	return &stamped
+}
+
+// guidOf is the request's GUID in decimal, as Lava-Guid carries it, or "" when ctx has none.
+func guidOf(ctx context.Context) string {
+	if guid, found := utils.GetUniqueIdentifier(ctx); found && guid != 0 {
+		return strconv.FormatUint(guid, 10)
+	}
+	return ""
 }
 
 // graphQLUnknownWriteMessage is the ticket's required wording (MAG-5122, GraphQL interface
@@ -1764,8 +1937,8 @@ func graphQLUnknownWriteMessage(digest string) string {
 // GraphQL interface chapter section 5, changed 15 Nov in the chapter's change log): a GraphQL
 // client's retry link re-sends a mutation on a 5xx, which would double-send exactly the write this
 // subtask exists to protect. result may be nil (the early no-results branch in SendParsedRelay has
-// none to copy); the Lava-Write-Outcome header is appendGraphQLWriteOutcomeHeader's job at the call
-// site, not this function's.
+// none to copy); the Lava-Write-Outcome and Lava-Tx-Hash headers are appendGraphQLWriteOutcomeHeader's
+// job at the call site, not this function's.
 //
 // extensions.tx_hash is the transaction's digest by the chain's formula, computed from the
 // transaction bytes in the request (MAG-4909, Sui data 3), so the client can look the transaction up.
@@ -1776,10 +1949,6 @@ func (rpcss *RPCSmartRouterServer) graphQLUnclearWriteStatus(ctx context.Context
 		result = &common.RelayResult{}
 	}
 	stamped := *result
-	guidStr := ""
-	if guid, found := utils.GetUniqueIdentifier(ctx); found && guid != 0 {
-		guidStr = strconv.FormatUint(guid, 10)
-	}
 	stamped.StatusCode = http.StatusOK
 	// Router-authored, not an upstream's bytes: UpstreamStatus/Body/ContentType is the one channel
 	// the listener forwards verbatim — status included, no masking (chainlib.buildFailedRelayReply)
@@ -1787,7 +1956,7 @@ func (rpcss *RPCSmartRouterServer) graphQLUnclearWriteStatus(ctx context.Context
 	digest := graphQLWriteDigest(protocolMessage)
 	stamped.ClientFacing = &common.ClientFacingError{
 		UpstreamStatus:      http.StatusOK,
-		UpstreamBody:        chainlib.ConvertToGraphQLWriteOutcomeError(graphQLUnknownWriteMessage(digest), guidStr, graphQLWriteOutcomeUnknown, digest),
+		UpstreamBody:        chainlib.ConvertToGraphQLWriteOutcomeError(graphQLUnknownWriteMessage(digest), guidOf(ctx), graphQLWriteOutcomeUnknown, digest),
 		UpstreamContentType: common.JSONContentType,
 	}
 	return &stamped
@@ -1967,6 +2136,13 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 			return timedOut, err
 		}
 
+		// A write no copy of which left the router keeps the router's own reply to a request it
+		// could not send, with Lava-Write-Outcome: not_sent (MAG-5122, Part I R-L).
+		if isGraphQLWrite(protocolMessage) && (relayProcessor == nil || relayProcessor.GetUsedProviders().SessionsDispatched() == 0) {
+			notSent := &common.RelayResult{}
+			ensureGraphQLWriteOutcomeHeaders(notSent, protocolMessage, graphQLWriteOutcomeNotSent)
+			return notSent, err
+		}
 		return nil, err
 	}
 
@@ -1976,7 +2152,11 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 		r, e := relayProcessor.ProcessingResult()
 		if r != nil && r.Reply != nil {
 			if tracing.IsTraceBodyEnabled() {
-				tracing.RecordBody(processSpan, tracing.AttrRelayResponseBody, r.Reply.Data)
+				traced := r.Reply.Data
+				if redact := chainlib.SignedBytesRedactor(protocolMessage); redact != nil {
+					traced = []byte(redact(string(traced)))
+				}
+				tracing.RecordBody(processSpan, tracing.AttrRelayResponseBody, traced)
 			}
 		}
 		return r, e
@@ -2016,9 +2196,7 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 	}
 
 	pendingProviders := rpcss.appendHeadersToRelayResult(ctx, returnedResult, relayProcessor.ProtocolErrors(), relayProcessor, protocolMessage, protocolMessage.GetApi().GetName(), analytics, err == nil)
-	if err == nil {
-		rpcss.appendGraphQLWriteAcceptedHeader(returnedResult, protocolMessage)
-	}
+	accepted := err == nil && rpcss.appendGraphQLWriteAcceptedHeader(returnedResult, protocolMessage)
 
 	// Start the async straggler watcher AFTER the headers snapshot (MAG-2187): it becomes the responses
 	// channel's sole reader and resolves the exact pending set the header just reported. No-op when
@@ -2051,6 +2229,12 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 			return unclearResult, unclear
 		}
 		return withUnclearWriteStatus(returnedResult), unclear
+	}
+	// A GraphQL write that no copy took and none may have run: every copy refused it or was not
+	// sent (MAG-5122). Its outcome goes on the reply the relay chose, or, when no copy left, the
+	// router speaks.
+	if !accepted && isGraphQLWrite(protocolMessage) {
+		returnedResult = rpcss.withSettledGraphQLWriteOutcome(ctx, returnedResult, protocolMessage, relayProcessor)
 	}
 	if err != nil {
 		returnedResult = rpcss.withNoAnswerTimeout(returnedResult, protocolMessage)
@@ -3350,6 +3534,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 					logRelayFailure = utils.FormatDebug
 				}
 				logRelayFailure("direct RPC relay failed in goroutine", relayFailureLogAttrs(err,
+					chainlib.SignedBytesRedactor(protocolMessage),
 					utils.LogAttr("endpoint", endpointAddress),
 					utils.LogAttr("error", err.Error()),
 					utils.LogAttr("latency", relayLatency),

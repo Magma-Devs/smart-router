@@ -333,6 +333,8 @@ func (rpcss *RPCSmartRouterServer) buildRelayEnd(ctx context.Context, in relayEn
 	if in.protocolMessage == nil {
 		end.customer = relayEndCustomer(in.dappID)
 	}
+	// A write's signed bytes never reach the line (MAG-5122), whether an error echoes them or not.
+	logged := chainlib.SignedBytesRedactor(in.protocolMessage)
 
 	dispatched := 0
 	if in.processor != nil {
@@ -345,7 +347,7 @@ func (rpcss *RPCSmartRouterServer) buildRelayEnd(ctx context.Context, in relayEn
 		}
 		dispatched = len(dispatches)
 		successes, nodeErrors, protocolErrors := in.processor.GetResultsDetail()
-		end.attempts = relayEndAttemptsOf(dispatches, in.start, successes, nodeErrors, protocolErrors, requestRanOutOfRoad(end.stopReason))
+		end.attempts = relayEndAttemptsOf(dispatches, in.start, successes, nodeErrors, protocolErrors, requestRanOutOfRoad(end.stopReason), logged)
 	}
 
 	served := in.err == nil && in.result != nil && in.result.Reply != nil
@@ -415,7 +417,7 @@ func (rpcss *RPCSmartRouterServer) buildRelayEnd(ctx context.Context, in relayEn
 		}
 		end.errorCode = relayEndErrorCode(cause, in.result, end.attempts)
 		if cause != nil {
-			end.errorText = relayEndText(cause.Error())
+			end.errorText = relayEndTextOf(cause.Error(), logged)
 		}
 	}
 	return end
@@ -426,13 +428,13 @@ func (rpcss *RPCSmartRouterServer) buildRelayEnd(ctx context.Context, in relayEn
 // an attempt with no result has not answered by the time the relay ends. Results without a dispatch
 // (a cache hit) follow. Within one upstream, results pair in the header's order: protocol errors,
 // node errors, successes.
-func relayEndAttemptsOf(dispatched []routersession.Dispatch, start time.Time, successes []common.RelayResult, nodeErrors, protocolErrors []relaycore.RelayError, ranOutOfRoad bool) relayEndAttempts {
+func relayEndAttemptsOf(dispatched []routersession.Dispatch, start time.Time, successes []common.RelayResult, nodeErrors, protocolErrors []relaycore.RelayError, ranOutOfRoad bool, logged func(string) string) relayEndAttempts {
 	recorded := make([]relayEndAttempt, 0, len(successes)+len(nodeErrors)+len(protocolErrors))
 	for i := range protocolErrors {
-		recorded = append(recorded, relayEndProtocolErrorAttempt(protocolErrors[i], ranOutOfRoad))
+		recorded = append(recorded, relayEndProtocolErrorAttempt(protocolErrors[i], ranOutOfRoad, logged))
 	}
 	for i := range nodeErrors {
-		recorded = append(recorded, relayEndNodeErrorAttempt(nodeErrors[i]))
+		recorded = append(recorded, relayEndNodeErrorAttempt(nodeErrors[i], logged))
 	}
 	for i := range successes {
 		recorded = append(recorded, relayEndAttempt{
@@ -485,7 +487,7 @@ func (a *relayEndAttempt) retryable() bool {
 	return a.routerError.Retryable
 }
 
-func relayEndNodeErrorAttempt(nodeError relaycore.RelayError) relayEndAttempt {
+func relayEndNodeErrorAttempt(nodeError relaycore.RelayError, logged func(string) string) relayEndAttempt {
 	attempt := relayEndAttempt{outcome: attemptOutcomeNodeError, routerError: nodeError.RouterError, nodeCode: nodeError.JSONRPCErrorCode}
 	if nodeError.Response != nil {
 		result := &nodeError.Response.RelayResult
@@ -503,12 +505,12 @@ func relayEndNodeErrorAttempt(nodeError relaycore.RelayError) relayEndAttempt {
 	}
 	attempt.errorCode = relayEndCode(nodeError.RouterError)
 	if nodeError.Err != nil {
-		attempt.message = relayEndText(nodeError.Err.Error())
+		attempt.message = relayEndTextOf(nodeError.Err.Error(), logged)
 	}
 	return attempt
 }
 
-func relayEndProtocolErrorAttempt(protocolError relaycore.RelayError, ranOutOfRoad bool) relayEndAttempt {
+func relayEndProtocolErrorAttempt(protocolError relaycore.RelayError, ranOutOfRoad bool, logged func(string) string) relayEndAttempt {
 	attempt := relayEndAttempt{upstream: protocolError.ProviderInfo.ProviderAddress, routerError: protocolError.RouterError, transport: true}
 	if protocolError.Response != nil {
 		attempt.latency = protocolError.Response.RelayResult.AttemptLatency
@@ -516,7 +518,7 @@ func relayEndProtocolErrorAttempt(protocolError relaycore.RelayError, ranOutOfRo
 	attempt.outcome = protocolErrorOutcome(protocolError, ranOutOfRoad)
 	attempt.errorCode = relayEndCode(protocolError.RouterError)
 	if err := protocolError.GetError(); err != nil {
-		attempt.message = relayEndText(err.Error())
+		attempt.message = relayEndTextOf(err.Error(), logged)
 	}
 	return attempt
 }
@@ -735,6 +737,15 @@ func relayEndSelection(selection relaycore.Selection) string {
 
 func relayEndText(text string) string {
 	return utils.FormatLongString(utils.RedactSecrets(text), relayEndTextLimit)
+}
+
+// relayEndTextOf is relayEndText after logged, which rewrites the whole text before the cut; nil
+// leaves it as is.
+func relayEndTextOf(text string, logged func(string) string) string {
+	if logged != nil {
+		text = logged(text)
+	}
+	return relayEndText(text)
 }
 
 // relayEndIDLimit caps customer and the caller's ids, which are what the caller sent.
