@@ -94,49 +94,58 @@ func startTrackers(t *testing.T, ctx context.Context, f *reconcileFixture, urls 
 	}
 }
 
-// A url that meets the head-stall rule in a probe cycle reads head-stalled on the gauge after that
-// same cycle, and its exit is counted. Deleting the publish call from runProbeCycle, or moving it
-// before runHeadStall, fails this test.
-func TestURLOutOfRotation_ProbeCyclePublishesItsOwnHeadStall(t *testing.T) {
+// The gauge after a probe cycle shows what that cycle's head-stall step left. Cycle 1: a url held
+// head-stalled reads head-stalled. Cycle 2: its block moved on, the step releases it, and the gauge is
+// empty after that same cycle. Deleting the publish call from runProbeCycle fails cycle 1; moving it
+// before runHeadStall fails cycle 2. (Marking a url takes the stall grace, 30 s at least, so the
+// test releases one instead.)
+func TestURLOutOfRotation_ProbeCyclePublishesWhatTheHeadStallStepLeft(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	var headA, headB atomic.Int64
-	headA.Store(1000)
+	headA.Store(1100)
 	headB.Store(1000)
 	nodeA, nodeB := blockNode(&headA), blockNode(&headB)
 	defer nodeA.Close()
 	defer nodeB.Close()
 
-	f := newReconcileFixtureWith(t, ctx, func(cfg *endpointstate.EndpointChainTrackerConfig) {
-		cfg.PollIntervalDivisor = 0.25 // N = 3, and the trackers' own timer stays minutes away
-	})
-	n := f.monitor.StallCycleThreshold()
-	require.Equal(t, 3, n)
+	f := newReconcileFixtureWith(t, ctx, nil)
 	startTrackers(t, ctx, f, nodeA.URL, nodeB.URL)
+	for url, want := range map[string]int64{nodeA.URL: 1100, nodeB.URL: 1000} {
+		require.Eventually(t, func() bool {
+			_, _, _ = f.monitor.PollNow(ctx, url)
+			obs, _ := f.monitor.GetObservation(url)
+			return obs.HighestBlockSeen == want
+		}, 10*time.Second, 20*time.Millisecond)
+	}
+	var b *routersession.Endpoint
+	for _, e := range f.csm.GetAllDirectRPCEndpoints() {
+		if e.Endpoint.NetworkAddress == nodeB.URL {
+			b = e.Endpoint
+		}
+	}
+	require.NotNil(t, b)
+	exitsBefore := urlOutSeriesByReason(t, urlOutExits, nodeB.URL)["head-stalled"]
+	require.True(t, b.AddStateReason(routersession.EndpointDisableHeadStalled, time.Now(), 1000))
+	cfg := probeVerdictConfigFor(30*time.Second, nil)
 
-	// B stays on 1000 for N cycles and more; A moves on to 1100.
+	f.server.runProbeCycle(nil, cfg)
+	require.Equal(t, map[string]float64{"head-stalled": 1}, urlOutSeriesByReason(t, urlOutGauge, nodeB.URL),
+		"cycle 1: the url is out")
+	require.Equal(t, 1.0, urlOutSeriesByReason(t, urlOutExits, nodeB.URL)["head-stalled"]-exitsBefore)
+	require.Empty(t, urlOutSeriesByReason(t, urlOutGauge, nodeA.URL), "the url ahead stays in rotation")
+
+	headB.Store(1100)
 	require.Eventually(t, func() bool {
 		_, _, _ = f.monitor.PollNow(ctx, nodeB.URL)
 		obs, _ := f.monitor.GetObservation(nodeB.URL)
-		return obs.SameBlockCycles >= n
-	}, 10*time.Second, 20*time.Millisecond)
-	headA.Store(1100)
-	require.Eventually(t, func() bool {
-		_, _, _ = f.monitor.PollNow(ctx, nodeA.URL)
-		obs, _ := f.monitor.GetObservation(nodeA.URL)
 		return obs.HighestBlockSeen == 1100
 	}, 10*time.Second, 20*time.Millisecond)
-
-	exitsBefore := urlOutSeriesByReason(t, urlOutExits, nodeB.URL)["head-stalled"]
-	require.Empty(t, urlOutSeriesByReason(t, urlOutGauge, nodeB.URL), "nothing is out before the cycle")
-
-	f.server.runProbeCycle(nil, probeVerdictConfigFor(30*time.Second, nil))
-
-	require.Equal(t, map[string]float64{"head-stalled": 1}, urlOutSeriesByReason(t, urlOutGauge, nodeB.URL),
-		"the cycle that marked the url publishes it")
-	require.Equal(t, 1.0, urlOutSeriesByReason(t, urlOutExits, nodeB.URL)["head-stalled"]-exitsBefore)
-	require.Empty(t, urlOutSeriesByReason(t, urlOutGauge, nodeA.URL), "the url ahead stays in rotation")
+	f.server.runProbeCycle(nil, cfg)
+	_, held := b.StateReason(routersession.EndpointDisableHeadStalled)
+	require.False(t, held, "cycle 2: the head-stall step released the url")
+	require.Empty(t, urlOutSeriesByReason(t, urlOutGauge, nodeB.URL), "cycle 2: the gauge shows the release")
 }
 
 // cleanupStaleTrackers can remove a url after a probe cycle read its endpoints and before the cycle

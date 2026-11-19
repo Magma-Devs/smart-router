@@ -248,8 +248,8 @@ type Endpoint struct {
 	stateReasons map[EndpointDisableReason]StateReasonRecord
 	// outOfRotationCounts counts, per reason, how many times this endpoint has left rotation
 	// (MAG-5244): each Enabled→false transition under its disable reason, and each state reason
-	// added. It only goes up, so the metrics publisher can turn it into a counter that a hold
-	// shorter than a scrape cannot hide. Nil until the first time the endpoint goes out.
+	// added. It only goes up, so the metrics publisher can tell from it that the url went out even
+	// when it came back before the publisher looked. Nil until the first time the endpoint goes out.
 	outOfRotationCounts map[EndpointDisableReason]uint64
 	Addons              map[string]struct{}
 	Extensions          map[string]struct{}

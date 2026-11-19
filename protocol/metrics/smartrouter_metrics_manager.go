@@ -326,7 +326,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	// _total, which would declare the gauge's name a second time and make the page invalid.
 	m.endpointURLOutOfRotationExits = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "rpc_endpoint_url_out_of_rotation_exits_total",
-		Help: "Times one node url of a provider left rotation, by reason (as rpc_endpoint_url_out_of_rotation). Counts every time, including a hold shorter than a scrape, which the gauge cannot show.",
+		Help: "Times one node url of a provider went from in rotation to out, under the reason that took it out (one of rpc_endpoint_url_out_of_rotation's). Gaining a second reason while out adds nothing. Counts a hold shorter than a scrape too, which the gauge cannot show. Starts at 0 for unreachable, node-error and head-stalled.",
 	}, urlReasonLabels))
 
 	m.endpointFetchLatestFails = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -1047,8 +1047,8 @@ func (m *SmartRouterMetricsManager) AddEndpointURLRelayServiced(spec, apiInterfa
 }
 
 // URLOutOfRotation is what one node url of a provider reports to PublishURLsOutOfRotation for one
-// probe cycle: the reasons it is out of rotation for right now, and how many times it newly left
-// rotation, per reason, since the cycle before.
+// probe cycle: the reasons it is out of rotation for right now, and how many times it went from in
+// rotation to out since the cycle before, under the reason that took it out.
 type URLOutOfRotation struct {
 	Provider string
 	URL      string
@@ -1059,7 +1059,10 @@ type URLOutOfRotation struct {
 // PublishURLsOutOfRotation publishes, for one chain and interface, why each node url is out of
 // rotation (MAG-5244). urls is every url the caller looked at this cycle, in or out. For each one
 // it sets rpc_endpoint_url_out_of_rotation to 1 under every reason that holds, and adds the new
-// times it left rotation to rpc_endpoint_url_out_of_rotation_exits_total. Then it deletes every gauge
+// times it left rotation to rpc_endpoint_url_out_of_rotation_exits_total. The url's counter series
+// for each of exitReasons is created at 0 first, so its first exit is an increase Prometheus sees:
+// a series born at 1 reads its first sample as its start, and increase() and rate() miss that exit.
+// Then it deletes every gauge
 // series it published for this chain and interface on an earlier cycle that no longer holds: a
 // url that came back, and also a url that is no longer listed at all (its provider left the
 // pairing), which would otherwise stay at 1 for ever.
@@ -1069,7 +1072,7 @@ type URLOutOfRotation struct {
 // the url's other series in ForgetEndpointURLLatestBlock.
 //
 // Only a registered url gets a series, as for the other per-url metrics.
-func (m *SmartRouterMetricsManager) PublishURLsOutOfRotation(spec, apiInterface string, urls []URLOutOfRotation) {
+func (m *SmartRouterMetricsManager) PublishURLsOutOfRotation(spec, apiInterface string, urls []URLOutOfRotation, exitReasons []string) {
 	if m == nil || m.endpointURLOutOfRotation == nil {
 		return
 	}
@@ -1090,6 +1093,9 @@ func (m *SmartRouterMetricsManager) PublishURLsOutOfRotation(spec, apiInterface 
 			now[strings.Join(values, "\x00")] = values
 		}
 		if m.endpointURLOutOfRotationExits != nil {
+			for _, reason := range exitReasons {
+				m.endpointURLOutOfRotationExits.WithLabelValues(append(slices.Clone(base), reason)...)
+			}
 			for reason, n := range u.WentOut {
 				if n > 0 {
 					m.endpointURLOutOfRotationExits.WithLabelValues(append(slices.Clone(base), reason)...).Add(float64(n))

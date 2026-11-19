@@ -79,7 +79,7 @@ func TestPositionalLabels_EveryWrappedMetric(t *testing.T) {
 	publishOut := func() {
 		m.PublishURLsOutOfRotation(positionalSpec, api, []URLOutOfRotation{{
 			Provider: provider, URL: nodeURL, Reasons: []string{"posReason"}, WentOut: map[string]uint64{"posReason": 1},
-		}})
+		}}, nil)
 	}
 
 	for _, c := range []struct {
