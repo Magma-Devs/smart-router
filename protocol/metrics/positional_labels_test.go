@@ -91,7 +91,6 @@ func TestPositionalLabels_EveryWrappedMetric(t *testing.T) {
 		{"rpc_endpoint_total_errored", func() { m.AddEndpointRelayErrored(positionalSpec, api, endpoint, function) }, byFunction},
 		{"rpc_endpoint_total_cancelled", func() { m.AddEndpointRelayCancelled(positionalSpec, api, endpoint, function) }, byFunction},
 		{"rpc_endpoint_requests_in_flight", func() { m.AddEndpointInFlightRequest(positionalSpec, api, endpoint, function) }, byFunction},
-		{"rpc_endpoint_overall_health", func() { m.SetEndpointOverallHealth(positionalSpec, api, endpoint, true) }, byEndpoint},
 		{"rpc_endpoint_latest_block", func() { m.SetEndpointLatestBlock(positionalSpec, api, endpoint, 7) }, byEndpoint},
 		{"rpc_endpoint_fetch_latest_fails", func() { m.AddEndpointFetchLatestFail(positionalSpec, api, endpoint) }, byEndpoint},
 		{"rpc_endpoint_fetch_block_fails", func() { m.AddEndpointFetchBlockFail(positionalSpec, api, endpoint) }, byEndpoint},

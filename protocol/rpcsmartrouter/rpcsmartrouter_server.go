@@ -6241,8 +6241,8 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		// Needed because a budget cancel reaches here indistinguishable from a race loser, and the
 		// client-cancellation carve-out returns early before looking at anything else. That carve-out is
 		// right for a race loser (MAG-2648) but it also swallowed genuine hangs, so a single bad URL
-		// behind a provider with several was never disabled, never probed for recovery, and never moved
-		// the health metric — while the provider's own QoS availability did drop.
+		// behind a provider with several was never disabled and never probed for recovery — while the
+		// provider's own QoS availability did drop.
 		var shouldMarkUnhealthy bool
 		shouldMarkUnhealthy, _ = classifyEndpointHealth(classified, endpointCancellationIsExempt(isClientCancel, budgetExpired))
 
@@ -6262,7 +6262,6 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		// Apply health tracking based on error classification.
 		if shouldMarkUnhealthy && targetEndpoint != nil {
 			targetEndpoint.MarkUnhealthy(endpointDisableReasonFor(classified))
-			rpcss.smartRouterEndpointMetrics.SetEndpointOverallHealth(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointName, false)
 		}
 
 		return relayLatency, err
@@ -6302,7 +6301,6 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 
 		if shouldMarkUnhealthy && targetEndpoint != nil {
 			targetEndpoint.MarkUnhealthy(endpointDisableReasonFor(statusClassified))
-			rpcss.smartRouterEndpointMetrics.SetEndpointOverallHealth(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointName, false)
 			utils.FormatDebug("endpoint returned error status",
 				utils.LogAttr("status", statusCode),
 				utils.LogAttr("endpoint", singleConsumerSession.Parent.PublicAddress),
@@ -6361,7 +6359,6 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		// its own failure: that is the definition of node-error, and unreachable is unrepresentable
 		// here by construction — a stronger guarantee than the category check the other arms need.
 		targetEndpoint.MarkUnhealthy(routersession.EndpointDisableNodeError)
-		rpcss.smartRouterEndpointMetrics.SetEndpointOverallHealth(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointName, false)
 	} else if targetEndpoint != nil && relayProvesEndpointHealthy(result) {
 		// Reset only on POSITIVE proof the endpoint served — see relayProvesEndpointHealthy for why
 		// this is no longer the negation of the failure gate.
@@ -6383,8 +6380,8 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		if healthCheckOnASwitchedOffEndpoint {
 			utils.FormatDebug("health check answered on a switched-off endpoint; it stays off until a client request or the prober brings it back",
 				utils.LogAttr("endpoint", endpointName))
-		} else if targetEndpoint.ResetHealth() {
-			rpcss.smartRouterEndpointMetrics.SetEndpointOverallHealth(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointName, true)
+		} else {
+			targetEndpoint.ResetHealth()
 		}
 	}
 
