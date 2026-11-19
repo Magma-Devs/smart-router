@@ -348,46 +348,13 @@ func startTestTendermintListener(t *testing.T, ctx context.Context) (*Tendermint
 	return startTestTendermintListenerWithOptions(t, ctx, common.DEFAULT_HEALTH_PATH, nil)
 }
 
-// tendermintGetRelayStub is the slice of RelaySender the URI-style GET path uses: it
-// records what it was asked for and answers with a fixed reply.
-type tendermintGetRelayStub struct {
-	mu      sync.Mutex
-	urls    []string
-	tracing []tracingIds // the caller ids on each SendRelay context, in call order
-}
-
+// tendermintGetStubReply is what the relay path answers a plain GET with.
 const tendermintGetStubReply = `{"jsonrpc":"2.0","id":-1,"result":{"stub":true}}`
 
-func (s *tendermintGetRelayStub) SendRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, analytics *metrics.RelayMetrics, metadataValues []pairingtypes.Metadata) (*common.RelayResult, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.urls = append(s.urls, url)
-	s.tracing = append(s.tracing, tracingIdsFromContext(ctx))
-	return &common.RelayResult{Reply: &pairingtypes.RelayReply{Data: []byte(tendermintGetStubReply)}, StatusCode: http.StatusOK}, nil
-}
-
-// lastTracing reports the caller ids seen on the most recent call, and whether there was one.
-func (s *tendermintGetRelayStub) lastTracing() (tracingIds, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if len(s.tracing) == 0 {
-		return tracingIds{}, false
-	}
-	return s.tracing[len(s.tracing)-1], true
-}
-
-func (s *tendermintGetRelayStub) ParseRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, metadata []pairingtypes.Metadata) (ProtocolMessage, error) {
-	return nil, errors.New("not used")
-}
-
-func (s *tendermintGetRelayStub) SendParsedRelay(ctx context.Context, analytics *metrics.RelayMetrics, protocolMessage ProtocolMessage) (*common.RelayResult, error) {
-	return nil, errors.New("not used")
-}
-
-func (s *tendermintGetRelayStub) seen() []string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return append([]string(nil), s.urls...)
+// newTendermintGetRelay is the relay path a plain GET reaches: it answers every relay with
+// tendermintGetStubReply.
+func newTendermintGetRelay() *recordingRelaySender {
+	return &recordingRelaySender{send: answering(tendermintGetStubReply)}
 }
 
 // startTestTendermintListenerWithOptions serves a listener with its health route on
@@ -504,7 +471,7 @@ func TestTendermintRpcChainListener_WebSocketUpgradesOnTheHealthPath(t *testing.
 		t.Run(healthPath, func(t *testing.T) {
 			serveCtx, cancelServe := context.WithCancel(context.Background())
 			defer cancelServe()
-			_, addr := startTestTendermintListenerWithOptions(t, serveCtx, healthPath, &tendermintGetRelayStub{})
+			_, addr := startTestTendermintListenerWithOptions(t, serveCtx, healthPath, newTendermintGetRelay())
 
 			client, resp, err := websocket.DefaultDialer.Dial("ws://"+addr+healthPath, nil)
 			require.NoError(t, err, "an upgrade on the health path must be served as a websocket")
@@ -529,7 +496,7 @@ func TestTendermintRpcChainListener_WebSocketUpgradesOnTheHealthPath(t *testing.
 func TestTendermintRpcChainListener_PlainGetReachesTheRelayPath(t *testing.T) {
 	serveCtx, cancelServe := context.WithCancel(context.Background())
 	defer cancelServe()
-	stub := &tendermintGetRelayStub{}
+	stub := newTendermintGetRelay()
 	_, addr := startTestTendermintListenerWithOptions(t, serveCtx, common.DEFAULT_HEALTH_PATH, stub)
 
 	httpClient := &http.Client{Timeout: 2 * time.Second}
@@ -540,46 +507,24 @@ func TestTendermintRpcChainListener_PlainGetReachesTheRelayPath(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	require.JSONEq(t, tendermintGetStubReply, string(body), "the relay path's reply must reach the caller")
-	require.Equal(t, []string{"status?height=7"}, stub.seen(), "the relay path must see the path and query the client sent")
+	require.Equal(t, []string{"status?height=7"}, stub.sentURLs(), "the relay path must see the path and query the client sent")
 
 	client, wsResp, err := websocket.DefaultDialer.Dial("ws://"+addr+"/status", nil)
 	require.NoError(t, err, "an upgrade on a query path is still a websocket")
 	require.Equal(t, http.StatusSwitchingProtocols, wsResp.StatusCode)
 	_ = client.Close()
-	require.Len(t, stub.seen(), 1, "an upgrade must never reach the relay path")
+	require.Len(t, stub.sentURLs(), 1, "an upgrade must never reach the relay path")
 }
 
-// tendermintParsingRelaySender parses each websocket message with the real LAVA
-// Tendermint parser, as the router's ParseRelay does, so the manager sees the function
-// tag a client's request really gets. Sending a relay is not used and errors.
-type tendermintParsingRelaySender struct {
-	parser ChainParser
-}
-
-func newTendermintParsingRelaySender(t *testing.T) tendermintParsingRelaySender {
+// newTendermintParsingRelaySender parses every request with a real Tendermint parser.
+func newTendermintParsingRelaySender(t *testing.T) *recordingRelaySender {
 	t.Helper()
 	parser, _, _, closeServer, _, err := CreateChainLibMocks(context.Background(), "LAVA", spectypes.APIInterfaceTendermintRPC, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), nil, "../../", nil)
 	if closeServer != nil {
 		t.Cleanup(closeServer)
 	}
 	require.NoError(t, err)
-	return tendermintParsingRelaySender{parser: parser}
-}
-
-func (tendermintParsingRelaySender) SendRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, analytics *metrics.RelayMetrics, metadataValues []pairingtypes.Metadata) (*common.RelayResult, error) {
-	return nil, errors.New("not used")
-}
-
-func (s tendermintParsingRelaySender) ParseRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, metadata []pairingtypes.Metadata) (ProtocolMessage, error) {
-	chainMessage, err := s.parser.ParseMsg(url, []byte(req), connectionType, metadata, extensionslib.ExtensionInfo{})
-	if err != nil {
-		return nil, err
-	}
-	return NewProtocolMessage(chainMessage, nil, nil, dappID, consumerIp), nil
-}
-
-func (tendermintParsingRelaySender) SendParsedRelay(ctx context.Context, analytics *metrics.RelayMetrics, protocolMessage ProtocolMessage) (*common.RelayResult, error) {
-	return nil, errors.New("not used")
+	return &recordingRelaySender{parser: parser}
 }
 
 // unsubscribeAllRecorder is the slice of WSSubscriptionManager an unsubscribe_all uses.

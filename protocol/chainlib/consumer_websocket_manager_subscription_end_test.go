@@ -41,7 +41,7 @@ func dialSubscriptionListener(t *testing.T, manager WSSubscriptionManager) *webs
 	t.Cleanup(cancelServe)
 	logger, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
 	require.NoError(t, err)
-	listener, addr := startTestJsonRPCListenerWithSubscriptions(t, serveCtx, common.DEFAULT_HEALTH_PATH, wsSubscribeStub{}, logger, manager)
+	listener, addr := startTestJsonRPCListenerWithSubscriptions(t, serveCtx, common.DEFAULT_HEALTH_PATH, newWSSubscribeRelay(), logger, manager)
 	t.Cleanup(func() {
 		shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancelShutdown()

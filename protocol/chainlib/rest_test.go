@@ -2,13 +2,11 @@ package chainlib
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -295,32 +293,10 @@ func TestRestChainListener_Shutdown_NilApp(t *testing.T) {
 	require.NoError(t, listener.Shutdown(ctx))
 }
 
-// restHealthRelayStub is the slice of RelaySender the rest relay path uses: it records
-// what it was asked to relay, so a test can prove the relay was never reached.
-type restHealthRelayStub struct {
-	mu   sync.Mutex
-	urls []string
-}
-
-func (s *restHealthRelayStub) SendRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, analytics *metrics.RelayMetrics, metadataValues []pairingtypes.Metadata) (*common.RelayResult, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.urls = append(s.urls, url)
-	return &common.RelayResult{Reply: &pairingtypes.RelayReply{Data: []byte(`{"relayed":true}`)}, StatusCode: http.StatusOK}, nil
-}
-
-func (s *restHealthRelayStub) ParseRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, metadata []pairingtypes.Metadata) (ProtocolMessage, error) {
-	return nil, errors.New("not used")
-}
-
-func (s *restHealthRelayStub) SendParsedRelay(ctx context.Context, analytics *metrics.RelayMetrics, protocolMessage ProtocolMessage) (*common.RelayResult, error) {
-	return nil, errors.New("not used")
-}
-
-func (s *restHealthRelayStub) seen() []string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return append([]string(nil), s.urls...)
+// newRestHealthRelay is the rest relay path behind the health route: it answers every relay, and
+// its sentURLs() tells a test whether the relay was reached.
+func newRestHealthRelay() *recordingRelaySender {
+	return &recordingRelaySender{send: answering(`{"relayed":true}`)}
 }
 
 // The health route hands a websocket upgrade past the health handler so a client
@@ -338,7 +314,7 @@ func TestRestChainListener_HealthPathNeverReachesTheRelay(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 
-			stub := &restHealthRelayStub{}
+			stub := newRestHealthRelay()
 			logger, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
 			require.NoError(t, err)
 			endpoint := &routersession.RPCEndpoint{
@@ -386,36 +362,9 @@ func TestRestChainListener_HealthPathNeverReachesTheRelay(t *testing.T) {
 			require.Equal(t, "Health status OK", string(upgradeBody),
 				"an upgrade on the health path must still be answered by the health check, not the chain")
 
-			require.Empty(t, stub.seen(), "the health path must never reach the relay")
+			require.Empty(t, stub.sentURLs(), "the health path must never reach the relay")
 		})
 	}
-}
-
-// restBodyRelayStub records the method and body of every request the listener relays.
-type restBodyRelayStub struct {
-	restHealthRelayStub
-	relayed []restRelayedRequest
-}
-
-type restRelayedRequest struct {
-	method string
-	body   string
-}
-
-func (s *restBodyRelayStub) SendRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, analytics *metrics.RelayMetrics, metadataValues []pairingtypes.Metadata) (*common.RelayResult, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.relayed = append(s.relayed, restRelayedRequest{method: connectionType, body: req})
-	return &common.RelayResult{Reply: &pairingtypes.RelayReply{Data: []byte(`{}`)}, StatusCode: http.StatusOK}, nil
-}
-
-func (s *restBodyRelayStub) last() restRelayedRequest {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if len(s.relayed) == 0 {
-		return restRelayedRequest{}
-	}
-	return s.relayed[len(s.relayed)-1]
 }
 
 // The listener routes POST to its own handler and every other method to the catch-all.
@@ -429,7 +378,7 @@ func TestRestChainListener_RelaysTheBodyOfMethodsThatCarryOne(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	stub := &restBodyRelayStub{}
+	stub := &recordingRelaySender{send: answering(`{}`)}
 	logger, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
 	require.NoError(t, err)
 	endpoint := &routersession.RPCEndpoint{
@@ -472,19 +421,11 @@ func TestRestChainListener_RelaysTheBodyOfMethodsThatCarryOne(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, http.StatusOK, resp.StatusCode)
 
-			got := stub.last()
-			require.Equal(t, tc.method, got.method)
-			require.Equal(t, tc.wantBody, got.body)
+			got := stub.lastSend()
+			require.Equal(t, tc.method, got.connectionType)
+			require.Equal(t, tc.wantBody, got.req)
 		})
 	}
-}
-
-// restRefusingRelayStub answers every relay with APINotSupportedError, the error ParseRelay
-// returns for a verb the spec does not declare.
-type restRefusingRelayStub struct{ restHealthRelayStub }
-
-func (s *restRefusingRelayStub) SendRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, analytics *metrics.RelayMetrics, metadataValues []pairingtypes.Metadata) (*common.RelayResult, error) {
-	return nil, common.APINotSupportedError
 }
 
 // The catch-all handler maps an undeclared api to 501; the POST handler used to answer the same
@@ -502,7 +443,7 @@ func TestRestListener_UndeclaredVerbIs501OnEveryHandler(t *testing.T) {
 		ChainID:         "LAV1",
 		ApiInterface:    "rest",
 		HealthCheckPath: common.DEFAULT_HEALTH_PATH,
-	}, &restRefusingRelayStub{}, alwaysHealthyReporter{}, logger)
+	}, &recordingRelaySender{send: answeringWith(nil, common.APINotSupportedError)}, alwaysHealthyReporter{}, logger)
 	go listener.Serve(ctx, common.ConsumerCmdFlags{})
 	var addr string
 	for deadline := time.Now().Add(3 * time.Second); addr == "" && time.Now().Before(deadline); {
