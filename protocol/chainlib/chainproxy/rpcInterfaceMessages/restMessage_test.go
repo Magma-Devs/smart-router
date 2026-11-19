@@ -233,61 +233,20 @@ func TestCheckResponseError_CosmosTransaction_SequenceMismatch(t *testing.T) {
 
 // TestCheckResponseError_CosmosTransaction_VariousErrorCodes tests various Cosmos transaction error codes
 func TestCheckResponseError_CosmosTransaction_VariousErrorCodes(t *testing.T) {
-	testCases := []struct {
-		name        string
-		code        int
-		rawLog      string
-		expectError bool
-	}{
-		{
-			name:        "Success (code=0)",
-			code:        0,
-			rawLog:      "[]",
-			expectError: false,
-		},
-		{
-			name:        "Invalid Signature (code=4)",
-			code:        4,
-			rawLog:      "signature verification failed",
-			expectError: true,
-		},
-		{
-			name:        "Out of Gas (code=11)",
-			code:        11,
-			rawLog:      "out of gas",
-			expectError: true,
-		},
-		{
-			name:        "Insufficient Fee (code=13)",
-			code:        13,
-			rawLog:      "insufficient fees",
-			expectError: true,
-		},
-		{
-			name:        "Invalid Transaction (code=18)",
-			code:        18,
-			rawLog:      "invalid transaction: must contain at least one message",
-			expectError: true,
-		},
-		{
-			name:        "TX Already in Cache (code=19)",
-			code:        19,
-			rawLog:      "tx already exists in cache",
-			expectError: true,
-		},
-		{
-			name:        "Sequence Mismatch (code=32)",
-			code:        32,
-			rawLog:      "account sequence mismatch",
-			expectError: true,
-		},
-	}
+	requireResponseErrors(t, []responseErrorCase{
+		{name: "Success (code=0)", response: cosmosTxReply(0, "[]"), httpStatus: 200, expectedError: false},
+		{name: "Invalid Signature (code=4)", response: cosmosTxReply(4, "signature verification failed"), httpStatus: 200, expectedError: true, wantMessage: "signature verification failed"},
+		{name: "Out of Gas (code=11)", response: cosmosTxReply(11, "out of gas"), httpStatus: 200, expectedError: true, wantMessage: "out of gas"},
+		{name: "Insufficient Fee (code=13)", response: cosmosTxReply(13, "insufficient fees"), httpStatus: 200, expectedError: true, wantMessage: "insufficient fees"},
+		{name: "Invalid Transaction (code=18)", response: cosmosTxReply(18, "invalid transaction: must contain at least one message"), httpStatus: 200, expectedError: true, wantMessage: "invalid transaction: must contain at least one message"},
+		{name: "TX Already in Cache (code=19)", response: cosmosTxReply(19, "tx already exists in cache"), httpStatus: 200, expectedError: true, wantMessage: "tx already exists in cache"},
+		{name: "Sequence Mismatch (code=32)", response: cosmosTxReply(32, "account sequence mismatch"), httpStatus: 200, expectedError: true, wantMessage: "account sequence mismatch"},
+	})
+}
 
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			restMsg := RestMessage{}
-
-			response := fmt.Sprintf(`{
+// cosmosTxReply is a Cosmos transaction reply carrying code and rawLog.
+func cosmosTxReply(code int, rawLog string) string {
+	return fmt.Sprintf(`{
 				"tx_response": {
 					"height": "12345",
 					"txhash": "ABC123DEF456",
@@ -297,13 +256,27 @@ func TestCheckResponseError_CosmosTransaction_VariousErrorCodes(t *testing.T) {
 					"gas_wanted": "200000",
 					"gas_used": "150000"
 				}
-			}`, tc.code, tc.rawLog)
+			}`, code, rawLog)
+}
 
-			hasError, errorMessage := restMsg.CheckResponseError([]byte(response), 200)
+// responseErrorCase is one reply CheckResponseError reads: its body and status, whether it is a
+// node error, and, when wantMessage is set, the error message it must give.
+type responseErrorCase struct {
+	name          string
+	response      string
+	httpStatus    int
+	expectedError bool
+	wantMessage   string
+}
 
-			require.Equal(t, tc.expectError, hasError, "Error detection mismatch for %s", tc.name)
-			if tc.expectError {
-				require.Equal(t, tc.rawLog, errorMessage, "Error message should match raw_log for %s", tc.name)
+func requireResponseErrors(t *testing.T, cases []responseErrorCase) {
+	t.Helper()
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			hasError, errorMessage := RestMessage{}.CheckResponseError([]byte(tc.response), tc.httpStatus)
+			require.Equal(t, tc.expectedError, hasError, "Error detection mismatch for %s", tc.name)
+			if tc.wantMessage != "" {
+				require.Equal(t, tc.wantMessage, errorMessage, "Error message should match raw_log for %s", tc.name)
 			}
 		})
 	}
@@ -391,12 +364,7 @@ func TestCheckResponseError_HTTPStatusCodeVariations(t *testing.T) {
 
 // TestCheckResponseError_NonTransactionCalls tests non-transaction REST calls (regression)
 func TestCheckResponseError_NonTransactionCalls(t *testing.T) {
-	testCases := []struct {
-		name          string
-		response      string
-		httpStatus    int
-		expectedError bool
-	}{
+	requireResponseErrors(t, []responseErrorCase{
 		{
 			name: "Query Balance - Success",
 			response: `{
@@ -441,27 +409,12 @@ func TestCheckResponseError_NonTransactionCalls(t *testing.T) {
 			httpStatus:    200,
 			expectedError: false,
 		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			restMsg := RestMessage{}
-
-			hasError, _ := restMsg.CheckResponseError([]byte(tc.response), tc.httpStatus)
-
-			require.Equal(t, tc.expectedError, hasError, "Error detection mismatch for %s", tc.name)
-		})
-	}
+	})
 }
 
 // TestCheckResponseError_EdgeCases tests edge cases and malformed data
 func TestCheckResponseError_EdgeCases(t *testing.T) {
-	testCases := []struct {
-		name          string
-		response      string
-		httpStatus    int
-		expectedError bool
-	}{
+	requireResponseErrors(t, []responseErrorCase{
 		{
 			name:          "Empty Response",
 			response:      "",
@@ -524,17 +477,7 @@ func TestCheckResponseError_EdgeCases(t *testing.T) {
 			httpStatus:    200,
 			expectedError: false, // Nested structure won't be parsed as tx_response
 		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			restMsg := RestMessage{}
-
-			hasError, _ := restMsg.CheckResponseError([]byte(tc.response), tc.httpStatus)
-
-			require.Equal(t, tc.expectedError, hasError, "Error detection mismatch for %s", tc.name)
-		})
-	}
+	})
 }
 
 // TestCheckResponseError_RealWorldScenarios tests real-world response examples
