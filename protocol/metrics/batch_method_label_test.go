@@ -10,23 +10,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// newSmartRouterForBatchLabelTest extends the request-group test manager with the
-// batch-shape collaborators, so normalization admits real signatures instead of
-// degrading to BatchMethodOther on a nil registry.
-func newSmartRouterForBatchLabelTest() *SmartRouterMetricsManager {
-	m := newSmartRouterForRequestGroupTest()
-	m.batchSize = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{Name: "t_sr_batch_size", Buckets: []float64{2, 5, 10, 50}},
-		[]string{"spec", "apiInterface"},
-	)
-	m.batchSignatureOverflow = prometheus.NewCounterVec(
-		prometheus.CounterOpts{Name: "t_sr_batch_overflow"},
-		[]string{"spec", "reason"},
-	)
-	m.batchSignatures = newBatchSignatureRegistry()
-	return m
-}
-
 // joinedBatchName builds a raw batch api name the way chainlib does.
 func joinedBatchName(methods ...string) string {
 	return strings.Join(methods, batchMethodSeparator)
@@ -127,7 +110,7 @@ func TestBuildBatchSignature(t *testing.T) {
 // this change safe to deploy: non-batch traffic keeps its exact method label, so
 // every existing dashboard and alert keyed on method="eth_call" is untouched.
 func TestNormalizeMethodLabelLeavesSingleMethodsAlone(t *testing.T) {
-	m := newSmartRouterForBatchLabelTest()
+	m := newTestMetricsManager(t)
 	for _, method := range []string{"eth_call", "eth_getBlockByNumber", "debug_traceTransaction", ""} {
 		require.Equal(t, method, m.normalizeMethodLabel("ETH1", method))
 	}
@@ -135,7 +118,7 @@ func TestNormalizeMethodLabelLeavesSingleMethodsAlone(t *testing.T) {
 }
 
 func TestNormalizeMethodLabelIsIdempotent(t *testing.T) {
-	m := newSmartRouterForBatchLabelTest()
+	m := newTestMetricsManager(t)
 	raw := joinedBatchName(append(repeatMethod("eth_call", 4), "eth_getBalance")...)
 
 	once := m.normalizeMethodLabel("ETH1", raw)
@@ -149,7 +132,7 @@ func TestNormalizeMethodLabelIsIdempotent(t *testing.T) {
 // cardinality blowup: every ordering and length of the same method set must land on
 // a single label value, where the raw joined name produced one series each.
 func TestNormalizeMethodLabelCollapsesPermutations(t *testing.T) {
-	m := newSmartRouterForBatchLabelTest()
+	m := newTestMetricsManager(t)
 
 	raw := []string{
 		joinedBatchName("eth_call", "eth_getBalance"),
@@ -172,7 +155,7 @@ func TestNormalizeMethodLabelCollapsesPermutations(t *testing.T) {
 // even against an adversarial client cycling through method sets, and that hitting
 // the cap is observable rather than silent.
 func TestNormalizeMethodLabelCapsSignaturesPerSpec(t *testing.T) {
-	m := newSmartRouterForBatchLabelTest()
+	m := newTestMetricsManager(t)
 
 	distinct := make(map[string]struct{})
 	for i := range maxBatchSignaturesPerSpec * 4 {
@@ -192,7 +175,7 @@ func TestNormalizeMethodLabelCapsSignaturesPerSpec(t *testing.T) {
 // TestNormalizeMethodLabelBudgetsPerSpec checks one chatty spec cannot consume
 // another spec's signature budget.
 func TestNormalizeMethodLabelBudgetsPerSpec(t *testing.T) {
-	m := newSmartRouterForBatchLabelTest()
+	m := newTestMetricsManager(t)
 
 	for i := range maxBatchSignaturesPerSpec * 2 {
 		m.normalizeMethodLabel("ETH1", joinedBatchName("eth_call", fmt.Sprintf("eth_method_%d", i)))
@@ -207,7 +190,7 @@ func TestNormalizeMethodLabelBudgetsPerSpec(t *testing.T) {
 // hazard: relay start and relay end normalize independently, so an unstable mapping
 // would Add one series and Sub another, leaving a gauge stuck above zero forever.
 func TestNormalizeMethodLabelIsStablePerSignature(t *testing.T) {
-	m := newSmartRouterForBatchLabelTest()
+	m := newTestMetricsManager(t)
 	raw := joinedBatchName("eth_call", "eth_getBalance")
 
 	first := m.normalizeMethodLabel("ETH1", raw)
@@ -225,7 +208,7 @@ func TestNormalizeMethodLabelIsStablePerSignature(t *testing.T) {
 // batch names that used to mint a series each now share one, and the batch counter
 // still segments them.
 func TestRecordDirectRelayEndCollapsesBatchLabel(t *testing.T) {
-	m := newSmartRouterForBatchLabelTest()
+	m := newTestMetricsManager(t)
 
 	for size := 2; size <= 40; size++ {
 		apiName := joinedBatchName(append(repeatMethod("eth_call", size), "eth_getBalance")...)
@@ -246,7 +229,7 @@ func TestRecordDirectRelayEndCollapsesBatchLabel(t *testing.T) {
 // RecordDirectRelayEnd fans out to several recorders that each normalize, but only
 // one of them may observe the size histogram.
 func TestRecordDirectRelayEndObservesBatchSizeOnce(t *testing.T) {
-	m := newSmartRouterForBatchLabelTest()
+	m := newTestMetricsManager(t)
 	apiName := joinedBatchName(repeatMethod("eth_call", 5)...)
 
 	m.RecordDirectRelayEnd("ETH1", "jsonrpc", "ep1", apiName, 10, RelayOutcomeSuccess, &RelayMetrics{IsBatch: true})
@@ -260,7 +243,7 @@ func TestRecordDirectRelayEndObservesBatchSizeOnce(t *testing.T) {
 // spot: a single-element batch produces an api name with no separator, so it is
 // indistinguishable from a plain single request at the metrics layer.
 func TestRecordDirectRelayEndSkipsBatchSizeForSingleMethods(t *testing.T) {
-	m := newSmartRouterForBatchLabelTest()
+	m := newTestMetricsManager(t)
 
 	m.RecordDirectRelayEnd("ETH1", "jsonrpc", "ep1", "eth_call", 10, RelayOutcomeSuccess, &RelayMetrics{IsBatch: true})
 
@@ -274,7 +257,7 @@ func TestRecordDirectRelayEndSkipsBatchSizeForSingleMethods(t *testing.T) {
 // the raw api name, as the router does, and asserts the in-flight gauge settles back
 // at zero rather than leaking a stuck series.
 func TestInFlightGaugeReturnsToZeroForBatches(t *testing.T) {
-	m := newSmartRouterForBatchLabelTest()
+	m := newTestMetricsManager(t)
 	apiName := joinedBatchName(append(repeatMethod("eth_call", 7), "eth_getLogs")...)
 
 	m.RecordDirectRelayStart("ETH1", "jsonrpc", "ep1", apiName)
@@ -296,7 +279,7 @@ func TestInFlightGaugeReturnsToZeroForBatches(t *testing.T) {
 // TestRecordCacheHitRequestCollapsesBatchLabel covers the cache-hit path, which
 // bypasses RecordDirectRelayEnd entirely.
 func TestRecordCacheHitRequestCollapsesBatchLabel(t *testing.T) {
-	m := newSmartRouterForBatchLabelTest()
+	m := newTestMetricsManager(t)
 
 	for size := 2; size <= 10; size++ {
 		apiName := joinedBatchName(repeatMethod("eth_call", size)...)

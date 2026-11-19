@@ -11,22 +11,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// newSmartRouterForCustomerTest extends the default-label test manager with the per-customer
-// family, so SetRelayMetrics runs the real method normalization too.
-func newSmartRouterForCustomerTest() *SmartRouterMetricsManager {
-	m := newSmartRouterForDefaultLabelTest()
-	labels := []string{"spec", "apiInterface", "customer", "method"}
-	m.customerRequestsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_customer_total"}, labels)
-	m.customerRequestsFailed = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_customer_failed"}, labels)
-	m.customerEndToEndLatency = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{Name: "t_sr_customer_latency", Buckets: latencyBuckets},
-		[]string{"spec", "apiInterface", "customer"},
-	)
-	m.customerOverflow = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_customer_overflow"}, []string{"spec"})
-	m.customers = newCustomerRegistry()
-	return m
-}
-
 // customerRequest builds the RelayMetrics a listener hands to SetRelayMetrics, with Success
 // already set the way RPCConsumerLogs.AddMetricFor* sets it.
 func customerRequest(customer, method string, success bool, latencyMs int64) *RelayMetrics {
@@ -38,7 +22,7 @@ func customerRequest(customer, method string, success bool, latencyMs int64) *Re
 }
 
 func TestSetRelayMetrics_CountsOncePerRequestByCustomerAndMethod(t *testing.T) {
-	m := newSmartRouterForCustomerTest()
+	m := newTestMetricsManager(t)
 
 	m.SetRelayMetrics(customerRequest("acme", "eth_call", true, 40), nil)
 	m.SetRelayMetrics(customerRequest("acme", "eth_call", false, 0), fmt.Errorf("upstream failed"))
@@ -55,7 +39,7 @@ func TestSetRelayMetrics_CountsOncePerRequestByCustomerAndMethod(t *testing.T) {
 // Latency is observed for successful requests only, like smartrouter_end_to_end_latency: a failed
 // request has no completion latency (SendParsedRelay stamps Latency on success only).
 func TestSetRelayMetrics_ObservesLatencyOnSuccessOnly(t *testing.T) {
-	m := newSmartRouterForCustomerTest()
+	m := newTestMetricsManager(t)
 
 	m.SetRelayMetrics(customerRequest("acme", "eth_call", true, 40), nil)
 	m.SetRelayMetrics(customerRequest("acme", "eth_call", false, 0), fmt.Errorf("upstream failed"))
@@ -67,7 +51,7 @@ func TestSetRelayMetrics_ObservesLatencyOnSuccessOnly(t *testing.T) {
 }
 
 func TestSetRelayMetrics_SkipsWhatIsNotARequest(t *testing.T) {
-	m := newSmartRouterForCustomerTest()
+	m := newTestMetricsManager(t)
 
 	// A push on an open subscription is usage the OTel sink bills, not a request the client made.
 	m.SetRelayMetrics(customerRequest("acme", SubscriptionDeliveryMethod, true, 0), nil)
@@ -80,7 +64,7 @@ func TestSetRelayMetrics_SkipsWhatIsNotARequest(t *testing.T) {
 }
 
 func TestSetRelayMetrics_BatchMethodIsCollapsed(t *testing.T) {
-	m := newSmartRouterForCustomerTest()
+	m := newTestMetricsManager(t)
 
 	m.SetRelayMetrics(customerRequest("acme", joinedBatchName("eth_call", "eth_call", "eth_getBalance"), true, 30), nil)
 
@@ -91,7 +75,7 @@ func TestSetRelayMetrics_BatchMethodIsCollapsed(t *testing.T) {
 }
 
 func TestNormalizeCustomerLabel_CapsPerSpecAndIsStable(t *testing.T) {
-	m := newSmartRouterForCustomerTest()
+	m := newTestMetricsManager(t)
 
 	first := m.normalizeCustomerLabel("ETH1", "customer-0")
 	require.Equal(t, "customer-0", first)
@@ -115,7 +99,7 @@ func TestNormalizeCustomerLabel_CapsPerSpecAndIsStable(t *testing.T) {
 }
 
 func TestNormalizeCustomerLabel_CollapsesOverlongValues(t *testing.T) {
-	m := newSmartRouterForCustomerTest()
+	m := newTestMetricsManager(t)
 
 	require.Equal(t, CustomerOther, m.normalizeCustomerLabel("ETH1", strings.Repeat("x", maxCustomerLabelLength+1)))
 	require.Equal(t, 1.0, testutil.ToFloat64(m.customerOverflow.WithLabelValues("ETH1")))
@@ -133,7 +117,7 @@ func histogramSampleCount(t *testing.T, h prometheus.Histogram) int {
 }
 
 func TestNormalizeCustomerLabel_CollapsesInvalidUTF8WithoutSpendingBudget(t *testing.T) {
-	m := newSmartRouterForCustomerTest()
+	m := newTestMetricsManager(t)
 
 	require.NotPanics(t, func() {
 		m.SetRelayMetrics(customerRequest("\xff\xfe", "eth_call", true, 40), nil)
@@ -144,7 +128,7 @@ func TestNormalizeCustomerLabel_CollapsesInvalidUTF8WithoutSpendingBudget(t *tes
 }
 
 func TestNormalizeCustomerLabel_EmptyValueIsNoCustomer(t *testing.T) {
-	m := newSmartRouterForCustomerTest()
+	m := newTestMetricsManager(t)
 
 	m.SetRelayMetrics(customerRequest("", "eth_call", true, 40), nil)
 	require.Equal(t, 1.0, testutil.ToFloat64(m.customerRequestsTotal.WithLabelValues("ETH1", "jsonrpc", CustomerNone, "eth_call")))
