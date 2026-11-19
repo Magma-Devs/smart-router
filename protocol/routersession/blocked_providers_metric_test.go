@@ -88,6 +88,13 @@ func TestPerProviderGauge_ClearedByThePoolEmptyRelease(t *testing.T) {
 	for len(csm.validAddresses) > 0 {
 		blockOneProvider(t, csm, csm.validAddresses[0])
 	}
+	// Each block has published its provider by the time blockProvider returns. Published from a
+	// goroutine, a block could land after the release below and read blocked again (MAG-4919).
+	edges := rec.providerBlockedSnapshot()
+	require.Len(t, edges, len(csm.pairing), "every block publishes its own provider")
+	for address, isBlocked := range edges {
+		require.True(t, isBlocked, "%s was published blocked by its own block", address)
+	}
 	csm.publishStateSizes()
 
 	duringOutage := rec.providerBlockedSnapshot()
