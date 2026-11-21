@@ -1931,14 +1931,21 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 			return timedOut, err
 		}
 
-		// A GraphQL write pinned to a lava-select-provider name the router does not have is refused
-		// before any provider is asked, so its reply says the write was never sent, as the
-		// listener's other refusals of a GraphQL write do (MAG-3800; Part I R-Q, Part II Q8). The
-		// listener writes the refusal and passes this reply's headers on; only this function knows
-		// the request is a write.
-		if isGraphQLWrite(protocolMessage) && errors.Is(err, routersession.SelectedProviderNotConfiguredError) {
+		// A request pinned to a provider the router cannot use is refused before that provider is
+		// asked. The refusal is still this request's reply, so it carries this request's headers:
+		// Lava-Guid, the id the body and the router's log carry, and Lava-User-Request-Type. It
+		// names no provider, since the pinned one was not asked (MAG-5076). Returning nil sent the
+		// 500 with no lava-* header at all, and the 400 with only the Lava-Guid its listener adds.
+		if relayProcessor != nil && relaycore.PinnedUpstreamUnservable(err) {
 			refused := &common.RelayResult{}
-			ensureWriteOutcomeHeader(refused, rpcInterfaceMessages.GraphQLWriteOutcomeNotSent)
+			rpcss.appendHeadersToRelayResult(ctx, refused, relayProcessor.ProtocolErrors(), relayProcessor, protocolMessage, protocolMessage.GetApi().GetName(), analytics, false)
+			// A GraphQL write pinned to a name the router does not have also says the write was
+			// never sent, as the listener's other refusals of a GraphQL write do (MAG-3800; Part I
+			// R-Q, Part II Q8). The listener writes the refusal and passes this reply's headers on;
+			// only this function knows the request is a write.
+			if isGraphQLWrite(protocolMessage) && errors.Is(err, routersession.SelectedProviderNotConfiguredError) {
+				ensureWriteOutcomeHeader(refused, rpcInterfaceMessages.GraphQLWriteOutcomeNotSent)
+			}
 			return refused, err
 		}
 		return nil, err
