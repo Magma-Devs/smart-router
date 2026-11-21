@@ -1102,8 +1102,9 @@ func (csm *ConsumerSessionManager) probeDirectRPCEndpoints(
 }
 
 // csm needs to be locked here
-// setValidAddressesToDefaultValue refills validAddresses from the pairing and drops the whole
-// regular blocked list at once.
+// setValidAddressesToDefaultValue refills validAddresses from the pairing and drops the regular
+// blocked list at once: the whole list for the default collection, and for an add-on or extension
+// only the providers that serve it.
 //
 // route names who is doing it — the pool-empty last resort, an operator reset, or an epoch rebuild.
 // This is the bulk counterpart to logProviderReleased: one line naming every address released
@@ -1112,15 +1113,26 @@ func (csm *ConsumerSessionManager) probeDirectRPCEndpoints(
 //
 // Backup blocks are NOT touched here, so their reason records deliberately survive.
 //
-// One caveat on the line it logs: with a non-empty addon the branch below APPENDS only the providers
-// that support that addon rather than replacing the list, so a released provider that does not
-// support it is out of the blocked list but not back in validAddresses. The line names it as
-// released, which is true of the blocked list and overstates it as routing. Pre-existing limbo, not
-// introduced here.
+// With a non-empty addon or extensions the branch below APPENDS only the providers that serve them,
+// so only those leave the blocked list. Releasing the rest as well left each of them neither valid
+// nor blocked until the next pairing rebuild: out of routing even once healthy, out of the blocked
+// count and the last-chance walk while still dead, and back in the pool at the next epoch with no
+// block carried over (MAG-5078).
 func (csm *ConsumerSessionManager) setValidAddressesToDefaultValue(addon string, extensions []string, ctx context.Context, route ReleaseRoute) {
 	released := csm.currentlyBlockedProviderAddresses
-	csm.currentlyBlockedProviderAddresses = make([]string, 0) // reset currently blocked provider addresses
-	// Emptied first, then the records: releaseBlockRecordLocked answers "is this provider still
+	stillBlocked := make([]string, 0)
+	if addon != "" || len(extensions) > 0 {
+		released = make([]string, 0, len(csm.currentlyBlockedProviderAddresses))
+		for _, address := range csm.currentlyBlockedProviderAddresses {
+			if provider := csm.pairing[address]; provider != nil && provider.IsSupportingAddon(addon) && provider.IsSupportingExtensions(extensions, ctx) {
+				released = append(released, address)
+			} else {
+				stillBlocked = append(stillBlocked, address)
+			}
+		}
+	}
+	csm.currentlyBlockedProviderAddresses = stillBlocked
+	// The list first, then the records: releaseBlockRecordLocked answers "is this provider still
 	// blocked anywhere", and it has to see the store as it now is. A provider whose BACKUP block
 	// still stands keeps its record — deleting it here would leave a genuinely blocked provider with
 	// no reason, absent from the gauge, and eventually released with no log line.
@@ -4703,12 +4715,24 @@ func (csm *ConsumerSessionManager) stickyClaimTTL() time.Duration {
 // using the ordinary optimizer path. Held under the read lock only for the pick itself: the
 // fleet-store round trip that follows must never happen while csm.lock is held, or a slow
 // backend would stall pairing updates and provider blocking fleet-wide.
+//
+// A primary none of whose urls can take a relay (inRotation) is no candidate, blocked or not. A
+// provider joins the blocked list only once a request picks it and finds nothing to dial, so until
+// then selection still offers it, and a claim on it held the session to a dead node on every
+// replica until the claim expired, two epochs later (MAG-5078). With no candidate left this returns
+// PairingListEmptyError, and the request is served unclaimed, as during an outage of every primary.
 func (csm *ConsumerSessionManager) stickyCandidate(ctx context.Context, cuNeededForSession uint64, requestedBlock int64, addon string, extensions []string, internalPath *string, stateful uint32) (string, error) {
 	csm.lock.RLock()
 	defer csm.lock.RUnlock()
+	outOfRotation := map[string]struct{}{}
+	for _, address := range csm.getValidAddresses(addon, extensions, ctx) {
+		if provider := csm.pairing[address]; provider == nil || !provider.inRotation() {
+			outOfRotation[address] = struct{}{}
+		}
+	}
 	// A single pick even for a write: the claim pins the whole session to the first address, so it
 	// is chosen among providers the hold-off is not holding off, as a read's provider is.
-	addresses, err := csm.selectProviderAddresses(ctx, 1, map[string]struct{}{}, nil, cuNeededForSession, requestedBlock, addon, extensions, internalPath, stateful, "", "", true)
+	addresses, err := csm.selectProviderAddresses(ctx, 1, outOfRotation, nil, cuNeededForSession, requestedBlock, addon, extensions, internalPath, stateful, "", "", true)
 	if err != nil {
 		return "", err
 	}

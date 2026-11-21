@@ -292,6 +292,40 @@ func TestBlockRelease_BulkClearsEveryRecord(t *testing.T) {
 	}
 }
 
+// An add-on request that finds its pool empty releases only the blocked providers that serve the
+// add-on, because only those are put back. A blocked provider that does not serve it stays blocked,
+// with its record (MAG-5078). The release used to drop it from the blocked list without readmitting
+// it, so it sat neither valid nor blocked until the next pairing rebuild.
+func TestPoolEmptyRelease_AddonReleasesOnlyWhatItReadmits(t *testing.T) {
+	csm := CreateConsumerSessionManager()
+	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, createPairingList("", true), nil))
+	ctx := context.Background()
+
+	// provider0-3 serve "addon" (createPairingList) and provider4 does not. Blocking the five empties
+	// the add-on pool, while plain traffic still has provider5-9.
+	addonProviders := []string{"provider0", "provider1", "provider2", "provider3"}
+	const notServingAddon = "provider4"
+	for _, address := range append(slices.Clone(addonProviders), notServingAddon) {
+		require.NoError(t, csm.blockProvider(ctx, address, BlockReasonAllEndpointsDisabled, false, csm.atomicReadCurrentEpoch(), 0, 0, nil))
+	}
+	recordBefore := blockedRecord(t, csm, notServingAddon)
+
+	sessions, err := csm.GetSessions(ctx, 1, cuForFirstRequest, NewUsedProviders(nil), servicedBlockNumber, "addon", nil, common.NO_STATE, 0, "", "")
+	require.NoError(t, err, "the last resort releases the add-on's providers and serves the request")
+	for provider := range sessions {
+		require.Contains(t, addonProviders, provider)
+	}
+
+	csm.lock.RLock()
+	valid := slices.Clone(csm.validAddresses)
+	blocked := slices.Clone(csm.currentlyBlockedProviderAddresses)
+	csm.lock.RUnlock()
+	require.Subset(t, valid, addonProviders, "the add-on's providers are back in rotation")
+	require.Equal(t, []string{notServingAddon}, blocked, "a provider the release did not put back must not leave the blocked list")
+	require.NotContains(t, valid, notServingAddon)
+	require.Equal(t, recordBefore, blockedRecord(t, csm, notServingAddon), "its block stands as it was")
+}
+
 // The per-reason gauge is level-triggered: every reason is republished on every tick, zeros
 // included. Without the zeros, a provider re-blocked under a different reason would leave the old
 // reason's series stuck at 1 and a sum() over the gauge would double-count.
