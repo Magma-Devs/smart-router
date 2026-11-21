@@ -76,6 +76,7 @@ Errors returned by the blockchain node itself (not execution/state errors).
 | 2019 | `NODE_ABORTED` | Node aborted the operation. On Sui (the only sender), the validators' answer to a submitted transaction: consensus rejection, expired status, an input object that does not exist yet, already finalized under other signatures, or another transient processing failure. Sui's own message calls it retriable with another submission, which is the client's call; not evidence against the endpoint, so not scored | No | gRPC 10 |
 | 2020 | `NODE_UNRECOGNIZED_ERROR` | GraphQL only (MAG-5121): an error the router has no row for, an error with no code or an unknown code inside a 200, or a 4xx status GraphQL's status table does not name (400, 409, 410, 413, 415, 422, ...). The router cannot tell whose mistake it is, so it asks another provider and does not blame this one; when every provider says the same, a provider's reply is served as is | Yes | GraphQL |
 | 2021 | `NODE_URL_REFUSED` | GraphQL only (MAG-5121): HTTP 404, 405 or a redirect on GraphQL's one url. Says the configured url is wrong, so every request to it fails the same way: retried and blamed on the endpoint | Yes | HTTP 404, 405, 3xx (GraphQL) |
+| 2022 | `NODE_UNLISTED_SERVER_ERROR` | REST (MAG-5490): a 5xx no status row names. A provider fault: retried and blamed. May have reached the node, like a 502 or 504 | Yes | HTTP 505–511, 528, 529, 531–599 (REST) |
 
 > **SubCategoryDataScope is no longer 2017 alone.** FAILOVER-TASKS section 2 extended it to every
 > "the answer you want is not here" code: 2012, 2013, 3201-3206, and the chain-specific not-found
@@ -707,6 +708,7 @@ caller's bad request instead of going to another provider.
 | `500` `503` `520`–`530`, otherwise | `NODE_INTERNAL_ERROR` / `NODE_SERVICE_UNAVAILABLE` / `NODE_SERVER_ERROR` | yes | **yes** |
 | `501` | `NODE_UNIMPLEMENTED` | yes | no (node-capability) |
 | `502` `504` | `NODE_BAD_GATEWAY` / `NODE_GATEWAY_TIMEOUT` | yes | yes |
+| any other `5xx` (`505`–`511`, `528`, `529`, `531`–`599`) | `NODE_UNLISTED_SERVER_ERROR` (2022) | yes | yes |
 | no row (including every `3xx`) | `UNKNOWN_ERROR` | yes | no, but **scored** by the availability gate |
 
 Two rules hold the "at fault" column together:

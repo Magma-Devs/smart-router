@@ -23,6 +23,7 @@ func TestRESTStatusRows(t *testing.T) {
 	// retryable, and NOT at fault: another provider can serve it, and the endpoint that refused
 	// answered truthfully about its own configuration.
 	accessDenied := verdict{RouterErrorNodeAccessDenied, true, false, false}
+	unlistedServerError := verdict{RouterErrorNodeUnlistedServerError, true, true, false}
 	cases := map[int]verdict{
 		400: userError,
 		401: accessDenied,
@@ -59,6 +60,10 @@ func TestRESTStatusRows(t *testing.T) {
 		504: {RouterErrorNodeGatewayTimeout, true, true, false},
 		520: {RouterErrorNodeServerError, true, true, false},
 		524: {RouterErrorNodeGatewayTimeout, true, true, false},
+		// A 5xx no row names is a provider fault too (MAG-5490): it was UNKNOWN_ERROR.
+		505: unlistedServerError, 506: unlistedServerError, 507: unlistedServerError, 508: unlistedServerError,
+		509: unlistedServerError, 510: unlistedServerError, 511: unlistedServerError, 528: unlistedServerError,
+		529: unlistedServerError, 531: unlistedServerError, 599: unlistedServerError,
 	}
 	for status, want := range cases {
 		t.Run(fmt.Sprintf("REST %d", status), func(t *testing.T) {
@@ -80,6 +85,7 @@ func TestRESTStatusRowsDoNotReachOtherTransports(t *testing.T) {
 		407: RouterErrorUnknown, 408: RouterErrorUnknown, 409: RouterErrorUnknown, 410: RouterErrorUnknown,
 		422: RouterErrorUnknown, 451: RouterErrorUnknown,
 		401: RouterErrorNodeUnauthorized, 404: RouterErrorNodeEndpointNotFound,
+		505: RouterErrorUnknown, 599: RouterErrorUnknown,
 	}
 	for status, want := range unchanged {
 		msg := fmt.Sprintf("HTTP %d: malformed JSON-RPC response: body is not valid JSON", status)
@@ -113,7 +119,7 @@ func TestRESTBeyondHeadIsRetryable(t *testing.T) {
 // scored by the availability gate. Every row in TestRESTStatusRows is a deliberate departure from
 // this, so the default itself has to be pinned or "deliberate" means nothing.
 func TestRESTUnmappedStatusIsUnknownAndScored(t *testing.T) {
-	for _, status := range []int{304, 418, 421, 423, 509, 599} {
+	for _, status := range []int{304, 418, 421, 423} {
 		got := ClassifyError(nil, ChainFamilyUnknown, TransportREST, status, fmt.Sprintf("HTTP %d", status))
 		require.Same(t, RouterErrorUnknown, got, "REST %d", status)
 		require.True(t, got.Retryable, "REST %d is retried", status)
@@ -121,6 +127,20 @@ func TestRESTUnmappedStatusIsUnknownAndScored(t *testing.T) {
 		require.False(t, got.SubCategory.IsDataScope(), "REST %d is not excused by the availability gate", status)
 		require.False(t, got.SubCategory.IsNodeCapability(), "REST %d is not excused by the availability gate", status)
 	}
+}
+
+// A 5xx no row names may have reached the node, as UNKNOWN_ERROR did, so a write answered with one
+// stays unclear and a JSON body under one is not served as the node's reply (MAG-5490). A listed 5xx
+// keeps its own verdict: 501 is a node refusal, not a fault.
+func TestRESTUnlistedServerErrorMayHaveReachedTheNode(t *testing.T) {
+	for _, status := range []int{505, 511, 599} {
+		got := ClassifyError(nil, ChainFamilyUnknown, TransportREST, status, "")
+		require.Same(t, RouterErrorNodeUnlistedServerError, got, "REST %d", status)
+		require.True(t, got.MayHaveReachedNode, "REST %d", status)
+	}
+	require.Same(t, RouterErrorNodeUnimplemented, ClassifyError(nil, ChainFamilyUnknown, TransportREST, 501, ""))
+	require.Same(t, RouterErrorChainStatePruned, ClassifyError(nil, ChainFamilyUnknown, TransportREST, 500, "height 5 is not available, lowest height is 10"),
+		"a row on the body still decides before the status")
 }
 
 // TestRESTMessageRowsBeatTheStatusRow: the status code is the FALLBACK, never the specialisation.
