@@ -3,6 +3,7 @@ package rpcInterfaceMessages
 import (
 	"fmt"
 	"reflect"
+	"strings"
 
 	"github.com/goccy/go-json"
 
@@ -14,6 +15,19 @@ import (
 type TendermintrpcMessage struct {
 	JsonrpcMessage
 	Path string
+	// FromURI says the client sent the request as a GET URI, Path being its own path and query.
+	// It goes to the node as that GET, not rewritten into a JSON-RPC POST (MAG-5267). The router's
+	// own crafted requests set Path too, but never this.
+	FromURI bool `json:"-"`
+}
+
+// URIRequest returns the client's own path and query when the request came as a GET URI, without
+// the lone "?" the listener adds when the query is empty.
+func (tm *TendermintrpcMessage) URIRequest() (string, bool) {
+	if tm == nil || !tm.FromURI {
+		return "", false
+	}
+	return strings.TrimSuffix(tm.Path, "?"), true
 }
 
 // get msg hash byte array containing all the relevant information for a unique request. (headers / api / params)

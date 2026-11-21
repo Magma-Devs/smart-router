@@ -570,6 +570,19 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 		Headers:     chainMessage.GetRPCMessage().GetHeaders(), // Preserves duplicates, empty value = delete
 		ContentType: common.JSONContentType,
 	}
+	// A client's Tendermint GET goes to the node as that GET, with the client's own path and query
+	// and no body. It used to be rewritten into a JSON-RPC POST built from the parsed method and
+	// params (MAG-5267); the router is a proxy (Part I R-0). The parsed message still drives routing
+	// and caching. CometBFT serves both forms on the same port.
+	if tendermintMessage, ok := chainMessage.GetRPCMessage().(*rpcInterfaceMessages.TendermintrpcMessage); ok {
+		if uri, fromURI := tendermintMessage.URIRequest(); fromURI {
+			fullURL, err := common.JoinURLPath(nodeUrl.Url, uri)
+			if err != nil {
+				return nil, fmt.Errorf("failed to build Tendermint RPC URL: %w", err)
+			}
+			httpParams.Method, httpParams.URL, httpParams.Body = http.MethodGet, fullURL, nil
+		}
+	}
 
 	requestCtx, span := tracing.StartClientSpan(requestCtx, tracing.SpanSendJSONRPCRelay)
 	defer span.End()
