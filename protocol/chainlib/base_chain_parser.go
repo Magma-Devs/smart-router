@@ -587,6 +587,21 @@ func (apip *BaseChainParser) getSupportedApi(apiKey ApiKey) (*ApiContainer, erro
 	return &apiCont, nil
 }
 
+// specEntry returns the spec's own entry for apiKey and the collection it came from, switched off
+// or not, and logs nothing. ok is false when the spec does not list it.
+func (apip *BaseChainParser) specEntry(apiKey ApiKey) (api *spectypes.Api, collection *spectypes.ApiCollection, ok bool) {
+	if apip == nil {
+		return nil, nil, false
+	}
+	apip.rwLock.RLock()
+	defer apip.rwLock.RUnlock()
+	apiCont, ok := apip.serverApis[apiKey]
+	if !ok || apiCont.api == nil {
+		return nil, nil, false
+	}
+	return apiCont.api, apip.apiCollections[apiCont.collectionKey], true
+}
+
 // ApiHasStatefulCategory reports whether any supported API named `name` is a write / stateful method
 // (Category.Stateful == CONSISTENCY_SELECT_ALL_PROVIDERS). Used by the cross-validation policy guard to
 // reject an enabled per-method CV policy on a write method, where cross-validating the response is a
