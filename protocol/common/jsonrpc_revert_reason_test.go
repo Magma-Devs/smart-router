@@ -34,10 +34,10 @@ func TestJSONRPC_ARevertIsReadBeforeWhatItsReasonSays(t *testing.T) {
 		"a chain family with no table of its own reads the same generic row")
 }
 
-// What a node says about itself keeps its verdict. Its own rate limit is still one, and a standard
-// code still wins over the message.
+// What a node says about itself keeps its verdict, and a standard code still wins over the message.
+// "rate limit" wording is no row of its own (MAG-5487), so under -32000 it is the -32000 row's.
 func TestJSONRPC_TheRevertRowLeavesTheNodesOwnWordsAlone(t *testing.T) {
-	require.Same(t, RouterErrorNodeRateLimited, ClassifyError(nil, ChainFamilyEVM, TransportJsonRPC, -32000, "rate limit exceeded"))
+	require.Same(t, RouterErrorNodeServerError, ClassifyError(nil, ChainFamilyEVM, TransportJsonRPC, -32000, "rate limit exceeded"))
 	require.Same(t, RouterErrorNodeRateLimited, ClassifyError(nil, ChainFamilyEVM, TransportJsonRPC, -32000, "Too many requests, please slow down"))
 	require.Same(t, RouterErrorNodeRateLimited, ClassifyError(nil, ChainFamilyEVM, TransportJsonRPC, 429, "Too Many Requests"))
 	require.Same(t, RouterErrorNodeMethodNotFound, ClassifyError(nil, ChainFamilyEVM, TransportJsonRPC, 0, "the method eth_foo does not exist/is not available: method not found"))

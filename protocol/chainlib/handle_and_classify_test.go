@@ -40,13 +40,13 @@ func TestHandleAndClassify_NonRetryableError(t *testing.T) {
 }
 
 func TestHandleAndClassify_RetryableError(t *testing.T) {
-	// GIVEN a retryable error (e.g., rate limit)
+	// GIVEN a retryable error (e.g., a syncing node)
 	// WHEN handleAndClassify processes it
 	// THEN it is wrapped (classified) but not as unsupported-method or non-retryable
-	err := errors.New("rate limit exceeded")
+	err := errors.New("node is syncing")
 	result := handleAndClassify(context.Background(), err, common.TransportJsonRPC, common.ChainFamilyEVM, "", &genericErrorHandler{})
 	require.NotNil(t, result)
-	assert.True(t, errors.Is(result, common.RouterErrorNodeRateLimited))
+	assert.True(t, errors.Is(result, common.RouterErrorNodeSyncing))
 	assert.False(t, IsUnsupportedMethodErrorType(result))
 	assert.False(t, IsSolanaNonRetryableErrorType(result))
 }
@@ -232,8 +232,8 @@ func TestHandleAndClassify_SingleMetricPerCall(t *testing.T) {
 		},
 		{
 			name:         "classified retryable",
-			err:          errors.New("rate limit exceeded"),
-			expectedCode: common.RouterErrorNodeRateLimited.Code,
+			err:          errors.New("node is syncing"),
+			expectedCode: common.RouterErrorNodeSyncing.Code,
 		},
 		{
 			name:         "Unknown fall-through (handleGenericErrors returns nil)",

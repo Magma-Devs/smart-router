@@ -221,7 +221,7 @@ func TestIsDataScopeRelayOutcome(t *testing.T) {
 		{name: "missing trie node", result: classified(-32000, "missing trie node 1a2b (path )"), want: true},
 		{name: "transaction not found", result: classified(-32000, "transaction not found"), want: true},
 		{name: "internal error", result: classified(-32603, "internal error"), want: false},
-		{name: "rate limited", result: classified(-32000, "rate limit exceeded, please slow down"), want: false},
+		{name: "rate limited", result: classified(429, "Too Many Requests"), want: false},
 		{name: "a result", result: &common.RelayResult{StatusCode: http.StatusOK}, want: false},
 		// Since REST non-2xx became node errors, a REST "not found" takes this path too,
 		// including a 404 for a route the node does not serve.

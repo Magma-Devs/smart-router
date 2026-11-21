@@ -791,8 +791,8 @@ func TestDetectConnectionError_NeverProducesUnknown(t *testing.T) {
 }
 
 func TestDetectConnectionError_GOAWAYEnhanceYourCalmNotCaught(t *testing.T) {
-	// ENHANCE_YOUR_CALM GOAWAY is a rate-limit signal — DetectConnectionError must NOT catch it
-	// so that transport-specific matchers can classify it as RouterErrorNodeRateLimited.
+	// gRPC reads an ENHANCE_YOUR_CALM GOAWAY as a rate limit — DetectConnectionError must NOT catch
+	// it, so the gRPC table's rate-limit texts (GRPCRateLimitTexts) can.
 	err := fmt.Errorf(`http2: server sent GOAWAY and closed the connection; ErrCode=ENHANCE_YOUR_CALM, debug=""`)
 	connErr := DetectConnectionError(err)
 	assert.Nil(t, connErr, "ENHANCE_YOUR_CALM GOAWAY should not be caught by DetectConnectionError")
@@ -817,7 +817,7 @@ func TestDetectConnectionError_StringFallbackTable(t *testing.T) {
 		{"remote grpc canceled", "rpc error: code = Canceled desc = context canceled", nil},
 		// Row 3: HTTP/2 GOAWAY → connection reset
 		{"goaway protocol_error", `http2: server sent goaway and closed the connection; errcode=protocol_error`, RouterErrorConnectionReset},
-		// Row 3 carve-out: ENHANCE_YOUR_CALM → falls through (rate-limit, not connection)
+		// Row 3 carve-out: ENHANCE_YOUR_CALM → falls through (gRPC reads it as a rate limit)
 		{"goaway enhance_your_calm", `http2: server sent goaway; errcode=enhance_your_calm`, nil},
 		// Row 4: HTTP/2 RST_STREAM
 		{"stream error", "stream error: stream id 77; internal_error; received from peer", RouterErrorConnectionReset},
@@ -984,7 +984,7 @@ func TestClassifyError_GenericJsonRPCMappings(t *testing.T) {
 		{"execution reverted", 0, "execution reverted", RouterErrorChainExecutionReverted},
 		{"already known", 0, "already known", RouterErrorChainTxAlreadyKnown},
 		{"out of gas", 0, "out of gas", RouterErrorChainOutOfGas},
-		{"rate limit message", 0, "rate limit exceeded", RouterErrorNodeRateLimited},
+		{"rate limit wording is no row (MAG-5487)", 0, "rate limit exceeded", RouterErrorUnknown},
 		{"missing trie node", 0, "missing trie node abcdef", RouterErrorChainStatePruned},
 		{"block not found", 0, "block not found", RouterErrorChainBlockNotFound},
 		{"underpriced", 0, "transaction underpriced", RouterErrorChainTxUnderpriced},

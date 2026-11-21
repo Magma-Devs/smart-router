@@ -287,9 +287,10 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 		{MessageContains("hex string has odd length"), RouterErrorUserInvalidHex}, // Geth
 		{MessageContains("invalid hex"), RouterErrorUserInvalidHex},
 
-		// Rate limiting
-		{MessageContains("rate limit"), RouterErrorNodeRateLimited},
-		{MessageContains("enhance_your_calm"), RouterErrorNodeRateLimited}, // HTTP/2 GOAWAY with ENHANCE_YOUR_CALM — server-side rate limit
+		// Rate limiting. No row reads "rate limit" or "enhance_your_calm" in the text: wording decides
+		// only through a chain row (rulebook Part IV 3.3), and a rate limit is an HTTP 429 or a chain's
+		// own rate-limit or quota row. Read on every chain, those two phrases made any error that said
+		// them a rate limit, and a write whose every copy said so was sent again (MAG-5487).
 		// A 429 a gateway mirrors into the error body — of a 200, or of a reply on an open
 		// WebSocket connection, where no HTTP status reaches the transport layer. JSON-RPC's
 		// standard codes are negative and no chain this router serves defines 429, so the code
@@ -1011,7 +1012,8 @@ var stringConnectionFallbacks = []stringConnectionFallback{
 		result:         RouterErrorContextCanceled,
 	},
 	// HTTP/2 GOAWAY closes the whole connection. Exclude ENHANCE_YOUR_CALM —
-	// that's a server-side rate-limit signal handled by the transport matchers.
+	// gRPC reads it as a rate limit (GRPCRateLimitTexts). The JSON-RPC and REST
+	// tables have no row for it, so there it is an unclassified failure (MAG-5487).
 	{
 		mustContain:    []string{"goaway"},
 		mustNotContain: []string{"enhance_your_calm"},
