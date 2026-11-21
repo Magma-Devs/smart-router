@@ -296,7 +296,7 @@ func TestHarvest_MovesTheRelayedToURLsSeries(t *testing.T) {
 	require.NoError(t, perr)
 	var cm chainlib.ChainMessage = tipMsg
 
-	rpcss.harvestAndUpdateTipFromRelay(ep, cm, &pairingtypes.RelayReply{LatestBlock: 20_000_000}, gen, provider)
+	rpcss.harvestAndUpdateTipFromRelay(ep, cm, &pairingtypes.RelayReply{LatestBlock: 20_000_000}, 0, gen, provider)
 
 	require.Equal(t, map[string]float64{metrics.URLFingerprint(url): 20_000_000}, urlBlocks(t, provider))
 	require.Contains(t, answeredUntil(t, provider), metrics.URLFingerprint(url))
@@ -351,7 +351,7 @@ func TestHarvest_LateWriteForARemovedURLIsUndone(t *testing.T) {
 	require.NoError(t, perr)
 	var cm chainlib.ChainMessage = tipMsg
 
-	rpcss.harvestAndUpdateTipFromRelay(ep, cm, &pairingtypes.RelayReply{LatestBlock: 20_000_000}, gen, provider)
+	rpcss.harvestAndUpdateTipFromRelay(ep, cm, &pairingtypes.RelayReply{LatestBlock: 20_000_000}, 0, gen, provider)
 
 	_, tracked := m.ObservationGeneration(url)
 	require.False(t, tracked, "the cleanup ran inside the harvest")

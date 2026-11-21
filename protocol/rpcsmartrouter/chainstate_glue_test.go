@@ -338,7 +338,7 @@ func TestCacheServedReply_DoesNotMoveTip(t *testing.T) {
 	// dispatched endpoint (targetEndpoint == nil, as a cache hit is). harvestAndUpdateTipFromRelay
 	// returns early on a nil endpoint, so the tip must not move.
 	cacheReply := &pairingtypes.RelayReply{LatestBlock: 17_460_400}
-	rpcss.harvestAndUpdateTipFromRelay(nil, cm, cacheReply, 1, "")
+	rpcss.harvestAndUpdateTipFromRelay(nil, cm, cacheReply, 0, 1, "")
 
 	require.Equal(t, int64(0), cs.GetLatestBlockAllowStale(),
 		"Finding 1: a cache-served reply (no attributed endpoint) must not move the tip")
@@ -409,20 +409,20 @@ func TestHarvest_ArchiveRoutingTipGuardedByChainState(t *testing.T) {
 	cm := &mockChainMessage{api: &spectypes.Api{Name: "eth_blockNumber"}, requestedBlock: spectypes.LATEST_BLOCK}
 
 	// An honest tip-eligible harvest moves the tip (ChainState accepts it).
-	rpcss.harvestAndUpdateTipFromRelay(ep, cm, &pairingtypes.RelayReply{LatestBlock: 1000}, gen, "provider1")
+	rpcss.harvestAndUpdateTipFromRelay(ep, cm, &pairingtypes.RelayReply{LatestBlock: 1000}, 0, gen, "provider1")
 	require.Equal(t, uint64(1000), rpcss.getLatestBlockAllowStale(), "an accepted harvest moves the last-known tip")
 	require.Equal(t, float64(1000), routerLatestBlock(t), "an accepted harvest reports the router-wide metric")
 
 	// A plausible advance moves the tip (ChainState accepts; the store accepts a higher block).
 	// Ordered BEFORE the lie so the block-monotonic store does not retain a higher value that would
 	// reject it — see the T4 note below.
-	rpcss.harvestAndUpdateTipFromRelay(ep, cm, &pairingtypes.RelayReply{LatestBlock: 1050}, gen, "provider1")
+	rpcss.harvestAndUpdateTipFromRelay(ep, cm, &pairingtypes.RelayReply{LatestBlock: 1050}, 0, gen, "provider1")
 	require.Equal(t, uint64(1050), rpcss.getLatestBlockAllowStale(), "a plausible advance moves the last-known tip")
 	require.Equal(t, float64(1050), routerLatestBlock(t), "a plausible advance is reported to the metric")
 
 	// A lying-high harvest passes the per-endpoint store guard (higher block, no anti-lie at that
 	// layer) but ChainState rejects it (fresh-tip anti-lie guard) → the archive-routing tip must NOT move.
-	rpcss.harvestAndUpdateTipFromRelay(ep, cm, &pairingtypes.RelayReply{LatestBlock: 1_000_000}, gen, "provider1")
+	rpcss.harvestAndUpdateTipFromRelay(ep, cm, &pairingtypes.RelayReply{LatestBlock: 1_000_000}, 0, gen, "provider1")
 	require.Equal(t, uint64(1050), rpcss.getLatestBlockAllowStale(),
 		"a harvest ChainState rejects as an outlier must not move the last-known tip archive routing serves")
 	// The T3 metric contract: harvestAndUpdateTipFromRelay reports the GUARDED tip, not the raw
@@ -436,7 +436,7 @@ func TestHarvest_ArchiveRoutingTipGuardedByChainState(t *testing.T) {
 	// stale, so a subsequent honest-but-lower harvest is rejected and the harvest bails. This is the
 	// conscious trade for fixing F2 — only a liar's own tip is inflated (F19, accepted); the global
 	// tip stays protected by ChainState's guard.
-	rpcss.harvestAndUpdateTipFromRelay(ep, cm, &pairingtypes.RelayReply{LatestBlock: 1051}, gen, "provider1")
+	rpcss.harvestAndUpdateTipFromRelay(ep, cm, &pairingtypes.RelayReply{LatestBlock: 1051}, 0, gen, "provider1")
 	require.Equal(t, uint64(1050), rpcss.getLatestBlockAllowStale(),
 		"a lower harvest is rejected while the higher lie is still fresh")
 	require.Equal(t, float64(1050), routerLatestBlock(t),
@@ -569,7 +569,7 @@ func TestEndpointSyncGap_NoBaselinePodFallsBackToObservedTip(t *testing.T) {
 		if url == laggardURL {
 			block = 900 // 100 behind → beyond BucketWidth, destroys the 2-node majority by itself
 		}
-		rpcss.harvestAndUpdateTipFromRelay(&routersession.Endpoint{NetworkAddress: url, Enabled: true}, cm, &pairingtypes.RelayReply{LatestBlock: block}, gen, url)
+		rpcss.harvestAndUpdateTipFromRelay(&routersession.Endpoint{NetworkAddress: url, Enabled: true}, cm, &pairingtypes.RelayReply{LatestBlock: block}, 0, gen, url)
 	}
 
 	// The two nodes are 100 apart → no strict-majority cluster forms.
