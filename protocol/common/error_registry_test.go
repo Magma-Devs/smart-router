@@ -998,6 +998,28 @@ func TestClassifyError_GenericJsonRPCMappings(t *testing.T) {
 	}
 }
 
+// The generic duplicate rows are the EVM node software's words, read on EVM chains only (rulebook
+// R-0.2, R-L). On any other chain, any -32000 that said "already known" was a duplicate: a read ended
+// on the first node and the node was never blamed (MAG-5489). There the -32000 row decides, and a
+// chain's own duplicate row still does.
+func TestClassifyError_AlreadyKnownRowsAreEVMOnly(t *testing.T) {
+	messages := []string{"already known", "AlreadyKnown", "known transaction: 0xabc"}
+	for _, message := range messages {
+		assert.Same(t, RouterErrorChainTxAlreadyKnown, ClassifyError(nil, ChainFamilyEVM, TransportJsonRPC, -32000, message), "EVM, %q", message)
+		for _, family := range []ChainFamily{
+			ChainFamilySolana, ChainFamilyBitcoin, ChainFamilyStarknet, ChainFamilyNEAR, ChainFamilyXRP,
+			ChainFamilyCosmosSDK, ChainFamilySubstrate, ChainFamilyUnknown,
+		} {
+			assert.Same(t, RouterErrorNodeServerError, ClassifyError(nil, family, TransportJsonRPC, -32000, message), "%s, %q", family, message)
+		}
+	}
+	assert.Same(t, RouterErrorChainTxAlreadyKnown, ClassifyError(nil, ChainFamilyXRP, TransportJsonRPC, 0, "tefALREADY"))
+	assert.Same(t, RouterErrorChainBitcoinAlreadyInChain, ClassifyError(nil, ChainFamilyBitcoin, TransportJsonRPC, -27, "Transaction already in block chain"))
+	assert.Same(t, RouterErrorChainStarknetDuplicateTx, ClassifyError(nil, ChainFamilyStarknet, TransportJsonRPC, 59, "A transaction with the same hash already exists in the mempool"))
+	assert.Same(t, RouterErrorChainExecutionReverted, ClassifyError(nil, ChainFamilyEVM, TransportJsonRPC, 3, "execution reverted: already known"),
+		"on EVM the rows keep their place: a revert is still read first")
+}
+
 // Besu's duplicate-submission wording is matched on whole words: "unknown transaction" is not a
 // duplicate, and reading it as one would stop the retry and pin a wallet to a node that never
 // took its transaction (MAG-4032).
