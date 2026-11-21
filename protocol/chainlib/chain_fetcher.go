@@ -1981,7 +1981,6 @@ func (cf *ChainFetcher) fetchLatestBlockNumVia(ctx context.Context, router Chain
 			{Key: "nodeUrl", Value: proxyUrl.Url},
 			{Key: "Method", Value: parsing.ApiName},
 			{Key: "Response", Value: parser.CapStringLen(string(reply.RelayReply.Data))},
-			{Key: "error", Value: err},
 		}...)
 	}
 	atomic.StoreInt64(&cf.latestBlock, blockNum)
@@ -2214,7 +2213,7 @@ func FormatResponseForParsing(reply *pairingtypes.RelayReply, chainMessage Chain
 	var parserInput parser.RPCInput
 	respData := reply.Data
 	if len(respData) == 0 {
-		return nil, utils.FormatDebug("result (reply.Data) is empty, can't be formatted for parsing", utils.Attribute{Key: "error", Value: err})
+		return nil, utils.FormatDebug("result (reply.Data) is empty, can't be formatted for parsing")
 	}
 	rpcMessage := chainMessage.GetRPCMessage()
 	if customParsingMessage, ok := rpcMessage.(chainproxy.CustomParsingMessage); ok {

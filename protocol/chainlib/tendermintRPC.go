@@ -133,6 +133,10 @@ func (apip *TendermintChainParser) ParseMsg(urlPath string, data []byte, connect
 	var blockFold requestedBlockFold
 	blockHashes := []string{}
 	parsedDefault := true
+	// This batch walk and JsonRPCChainParser.ParseMsg's share two blocks, an element's requested
+	// block and the batch's combined api, and stay two walks until an owner question is answered: a
+	// one-element batch gets its api's parse directive here and none on JSON-RPC (each parser's
+	// newBatchChainMessage). One walk would have to pick an answer.
 	for idx, msg := range msgs {
 		parsedInput := parser.NewParsedInput()
 		// Check api is supported and save it in nodeMsg
