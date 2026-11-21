@@ -52,6 +52,31 @@ var chainErrorMappings = map[ChainFamily][]errorMapping{
 		{CodeEquals(-26), RouterErrorChainBitcoinVerifyRejected},         // RPC_VERIFY_REJECTED
 		{CodeEquals(-27), RouterErrorChainBitcoinAlreadyInChain},         // RPC_VERIFY_ALREADY_IN_CHAIN
 		{CodeEquals(-6), RouterErrorChainBitcoinWalletInsufficientFunds}, // RPC_WALLET_INSUFFICIENT_FUNDS
+		// RPC_INVALID_PARAMETER (-8) and RPC_INVALID_ADDRESS_OR_KEY (-5) each carry several meanings
+		// (MAG-4448; bitcoind src/rpc/blockchain.cpp, rawtransaction.cpp, mempool.cpp). None of these
+		// rows makes either the caller's: another provider is asked and the endpoint is not blamed,
+		// whatever the HTTP status (bitcoind answers a JSON-RPC 1.0 request's error with 500). A row
+		// that makes one of their messages the caller's needs a production example (rulebook Q229).
+		//
+		// A height this node does not have: the "behind" row (rulebook Reference Q146). A node that
+		// is behind says it, and so does every node for a height past the chain's tip. getblockhash
+		// gives the same message to a negative height, which every node refuses, so the ticket's
+		// getblockhash -1 reaches each provider up to the error limit; no endpoint is blamed for it.
+		{CodeAndMessage(-8, "block height out of range"), RouterErrorChainBlockNotFound}, // getblockhash
+		{CodeAndMessage(-8, "after current tip"), RouterErrorChainBlockNotFound},         // the hash_or_height RPCs
+		{CodeEquals(-8), RouterErrorChainBitcoinInvalidParameter},
+		// A transaction this node cannot look up because it keeps no transaction index, or has not
+		// finished building it: a node started with -txindex may answer.
+		{CodeAndMessage(-5, "use -txindex"), RouterErrorNodeDataNotHeld},
+		{CodeAndMessage(-5, "still in the process of being indexed"), RouterErrorNodeDataNotHeld},
+		{CodeAndMessage(-5, "block not found"), RouterErrorChainBlockNotFound},
+		{CodeAndMessage(-5, "block hash not found"), RouterErrorChainBlockNotFound}, // getrawtransaction with a block hash
+		{CodeAndMessage(-5, "no such"), RouterErrorChainTxNotFound},                 // getrawtransaction
+		{CodeAndMessage(-5, "transaction not in mempool"), RouterErrorChainTxNotFound},
+		// The one -5 the generic table already read as the caller's ("invalid address", e.g.
+		// verifymessage), kept as it was so this row changes nothing for it.
+		{CodeAndMessage(-5, "invalid address"), RouterErrorUserInvalidAddress},
+		{CodeEquals(-5), RouterErrorChainBitcoinInvalidAddressOrKey},
 		// Message-based: UTXO already spent / double-spend detection.
 		// Bitcoin Core returns these through sendrawtransaction rejections.
 		{MessageContains("already spent"), RouterErrorChainDoubleSpend},

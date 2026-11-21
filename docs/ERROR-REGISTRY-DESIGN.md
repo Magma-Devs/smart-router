@@ -165,6 +165,8 @@ Uses a **tiered classification system** (see Section 3 for details):
 | 3342 | `CHAIN_BITCOIN_VERIFY_REJECTED` | Transaction rejected by rules (-26 / RPC_VERIFY_REJECTED) | No | Bitcoin/UTXO |
 | 3343 | `CHAIN_BITCOIN_ALREADY_IN_CHAIN` | Transaction already confirmed (-27 / RPC_VERIFY_ALREADY_IN_CHAIN) | No | Bitcoin/UTXO |
 | 3344 | `CHAIN_BITCOIN_WALLET_INSUFFICIENT_FUNDS` | Wallet UTXO coin selection failed (-6 / RPC_WALLET_INSUFFICIENT_FUNDS). Distinct from EVM CHAIN_INSUFFICIENT_FUNDS (3003) which is a tx submission failure. | No | Bitcoin/UTXO |
+| 3345 | `CHAIN_BITCOIN_INVALID_PARAMETER` | Invalid parameter, or a parameter this node cannot serve (-8 / RPC_INVALID_PARAMETER) that no narrower row reads. Data scope: another provider is asked, the endpoint is not blamed. A height above the node's tip (-8 "Block height out of range", "after current tip") is CHAIN_BLOCK_NOT_FOUND | Yes | Bitcoin/UTXO |
+| 3346 | `CHAIN_BITCOIN_INVALID_ADDRESS_OR_KEY` | Invalid address or key, or an object not found on this node (-5 / RPC_INVALID_ADDRESS_OR_KEY) that no narrower row reads. Data scope: another provider is asked, the endpoint is not blamed. Narrower -5 rows: block not found (CHAIN_BLOCK_NOT_FOUND), transaction not found (CHAIN_TX_NOT_FOUND), no -txindex (NODE_DATA_NOT_HELD), "invalid address" (USER_INVALID_ADDRESS) | Yes | Bitcoin/UTXO |
 | **NEAR-Specific (3360-3379) — Tier 2** |||||
 | 3360 | `CHAIN_NEAR_UNKNOWN_BLOCK` | Block not found or garbage-collected (UNKNOWN_BLOCK) | Yes | NEAR |
 | 3361 | `CHAIN_NEAR_UNKNOWN_CHUNK` | Chunk not found (UNKNOWN_CHUNK) | Yes | NEAR |

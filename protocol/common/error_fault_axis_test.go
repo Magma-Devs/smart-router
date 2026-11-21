@@ -65,6 +65,8 @@ var faultAxisTable = []faultAxisCase{
 	{3332, "CHAIN_STARKNET_TX_HASH_NOT_FOUND", SubCategoryDataScope, true, ""},
 	{3360, "CHAIN_NEAR_UNKNOWN_BLOCK", SubCategoryDataScope, true, "not found or garbage-collected"},
 	{3361, "CHAIN_NEAR_UNKNOWN_CHUNK", SubCategoryDataScope, true, ""},
+	{3345, "CHAIN_BITCOIN_INVALID_PARAMETER", SubCategoryDataScope, true, "bitcoind -8: the caller's parameter or this node's own state (MAG-4448)"},
+	{3346, "CHAIN_BITCOIN_INVALID_ADDRESS_OR_KEY", SubCategoryDataScope, true, "bitcoind -5: the caller's key or an object this node does not hold (MAG-4448)"},
 
 	// The endpoint's fault — it is telling us it is broken or not ready.
 	{2003, "NODE_INTERNAL_ERROR", SubCategoryNone, true, ""},
