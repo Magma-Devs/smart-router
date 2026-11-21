@@ -34,6 +34,12 @@ type ProtoFileRegistry interface {
 	Close() error
 }
 
+// heldDescriptorSource is a ProtoFileRegistry that can tell which descriptors it already holds
+// without asking an upstream for them.
+type heldDescriptorSource interface {
+	HeldDescriptorByName(name protoreflect.FullName) (protoreflect.Descriptor, error)
+}
+
 type Registry struct {
 	remote ProtoFileRegistry
 
@@ -129,6 +135,27 @@ func (r *Registry) FindDescriptorByName(name protoreflect.FullName) (protoreflec
 			defer r.mu.RUnlock()
 			return r.prefFiles.FindDescriptorByName(name)
 		})
+}
+
+// HeldDescriptorByName returns name's descriptor when the registry already holds it, or its
+// remote does without asking an upstream. It never waits on a lookup, so it suits a check that
+// runs on every request; ok is false when neither holds the name.
+func (r *Registry) HeldDescriptorByName(name protoreflect.FullName) (protoreflect.Descriptor, bool) {
+	if r == nil {
+		return nil, false
+	}
+	r.mu.RLock()
+	d, err := r.prefFiles.FindDescriptorByName(name)
+	r.mu.RUnlock()
+	if err == nil {
+		return d, true
+	}
+	if held, ok := r.remote.(heldDescriptorSource); ok {
+		if d, err := held.HeldDescriptorByName(name); err == nil {
+			return d, true
+		}
+	}
+	return nil, false
 }
 
 // newFile builds a file descriptor from a fetched proto, resolving its imports through the
