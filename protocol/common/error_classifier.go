@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 	"syscall"
+	"time"
 
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 )
@@ -1077,19 +1078,25 @@ func DetectConnectionErrorInReplyText(text string) *RouterError {
 
 // IsClientCancellation reports whether err represents a request that was
 // cancelled by the client / relay orchestration, as opposed to an upstream
-// (provider/endpoint) fault. Two scenarios reach this path:
+// (provider/endpoint) fault. Three scenarios reach this path:
 //
 //  1. Relay race: multiple goroutines race in parallel. When one wins, the
 //     parent context's cancel() fires and the losing goroutines observe
 //     context.Canceled as their result — no provider is at fault.
 //  2. Client disconnect: the upstream caller closed the connection before we
 //     responded, producing context.Canceled on the in-flight request.
+//  3. The caller's own deadline: a gRPC client's grpc-timeout ran out while
+//     the attempt was still waiting. The call ends with
+//     context.DeadlineExceeded, as the router's own timeout does, but nobody
+//     is blamed for a deadline the caller chose (rulebook D10). It counts only
+//     when that deadline is the one bounding ctx (CallerDeadlinePassed); the
+//     router's own, earlier deadline still blames the endpoint.
 //
-// The rule is: the error must be context.Canceled AND the context itself must
-// now carry an error. A standalone context.Canceled without ctx.Err() would
-// be suspicious — it should never happen in practice, but the conjunction
-// guards against misclassifying a provider-emitted "context canceled" string
-// as a client cancellation.
+// The rule for the first two: the error must be context.Canceled AND the
+// context itself must now carry an error. A standalone context.Canceled
+// without ctx.Err() would be suspicious — it should never happen in practice,
+// but the conjunction guards against misclassifying a provider-emitted
+// "context canceled" string as a client cancellation.
 //
 // Call this at endpoint-health / refusal-counter decision points instead of
 // hand-rolling an errors.Is(err, context.Canceled) check — having one rule in
@@ -1099,5 +1106,8 @@ func IsClientCancellation(err error, ctx context.Context) bool {
 	if err == nil || ctx == nil {
 		return false
 	}
-	return errors.Is(err, context.Canceled) && ctx.Err() != nil
+	if errors.Is(err, context.Canceled) && ctx.Err() != nil {
+		return true
+	}
+	return errors.Is(err, context.DeadlineExceeded) && CallerDeadlinePassed(ctx, time.Now())
 }

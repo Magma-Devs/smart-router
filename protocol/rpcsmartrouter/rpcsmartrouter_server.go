@@ -6210,7 +6210,8 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		//    returns and its defer cancel() cancels the parent ctx, which cancels all still-in-flight
 		//    goroutines — those see context.Canceled as a result.
 		// 2. Client disconnect: the upstream caller closed the connection before we responded.
-		// Neither case is a provider fault — classifyEndpointHealth handles the carve-out
+		// The caller's own gRPC deadline running out is read the same way (D10).
+		// None of these is a provider fault — classifyEndpointHealth handles the carve-out
 		// using common.IsClientCancellation so every endpoint-health decision site uses the
 		// same rule.
 		//
