@@ -391,6 +391,50 @@ func TestFailedRelayReply_BudgetExpiryKeepsTheRequestHeaders_MAG3980(t *testing.
 	require.Equal(t, "true", read.header.Get(common.HEDGE_TRIGGERED_HEADER))
 }
 
+// MAG-5076: a request the router ends before asking any provider, a pin on a provider it cannot use
+// or a router with no provider at all, still carries the request's headers: Lava-Guid, the guid the
+// body names, lava-user-request-type, and Lava-Relay-Timeout-Applied for the lava-relay-timeout
+// every request here sends. It used to carry none, so the guid was only in the body. No attempt went
+// out, so it names no provider and no retry. The status and the body are unchanged.
+func TestFailedRelayReply_ARequestRefusedBeforeDispatchKeepsTheRequestHeaders_MAG5076(t *testing.T) {
+	if !rand.Initialized() {
+		rand.InitRandomSeed()
+	}
+	// upstream-9 is in no pool. The router keeps no list of configured names here, so the pin is
+	// not the caller's mistake (MAG-3800): it is the provider-unavailable 500.
+	cases := []struct {
+		name      string
+		headers   map[string]string
+		upstreams int
+	}{
+		{"pin", map[string]string{common.SELECT_PROVIDER_HEADER_NAME: "upstream-9"}, 1},
+		{"strict pin", map[string]string{common.SELECT_PROVIDER_HEADER_NAME: "upstream-9", common.SELECT_PROVIDER_STRICT_HEADER_NAME: "true"}, 1},
+		{"no provider", nil, 0},
+	}
+	for _, iface := range failedReplyInterfaces() {
+		for _, tc := range cases {
+			t.Run(iface.name+"/"+tc.name, func(t *testing.T) {
+				iface.headers = tc.headers
+				var arrivals atomic.Int32
+				upstreams := make([]string, tc.upstreams)
+				for i := range upstreams {
+					upstreams[i] = hangingUpstream(t, &arrivals)
+				}
+				read := startFailedReplyRouter(t, iface, upstreams...)()
+				require.Equal(t, http.StatusInternalServerError, read.status, read.body)
+				require.Zero(t, arrivals.Load(), "setup: the request must end before any provider is asked")
+
+				require.NotEmpty(t, read.guid, "the reply carries no Lava-Guid")
+				require.Contains(t, read.body, read.guid, "the header names the request the body names")
+				require.NotEmpty(t, read.header.Get(common.USER_REQUEST_TYPE), "the reply carries no lava-user-request-type")
+				require.Equal(t, failedReplyRelayTimeout.String(), read.header.Get(common.RELAY_TIMEOUT_APPLIED_HEADER_NAME))
+				require.Empty(t, read.header.Get(common.PROVIDER_ADDRESS_HEADER_NAME), "no provider was asked")
+				require.Empty(t, read.header.Get(common.RETRY_COUNT_HEADER_NAME), "no attempt went out")
+			})
+		}
+	}
+}
+
 // MAG-3980: a cross-validated request whose budget runs out while every upstream is quiet fails as
 // one with too few answers does. Its reply names the reason, insufficient-responses, as every
 // other cross-validation failure does, and every upstream asked is still pending.
