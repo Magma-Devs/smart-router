@@ -73,6 +73,30 @@ const (
 	minStalenessWindow = 2 * time.Second
 )
 
+// The bound on Recompute's sole-voter pull-up (MAG-5080): a sole voter's head more than
+// OutlierThreshold over the fresh tip is followed only once its url has answered above that guard
+// soleVoterJumpAnswers times in a row, with no answer at or below it in between, and the first of
+// those answers is at least StalenessWindow/soleVoterJumpHoldDivisor old (two block times at
+// DefaultStalenessMultiplier).
+//
+// The count is what tells a load balancer with one bad backend from a block storm: every answer
+// from the good backend is at or below the guard and starts the count over, so a bad backend
+// behind a 1-of-2 balancer passes with chance 2^-31 per run. A time window alone holds only as
+// many answers as the url gives in it, which is 4 polls in two block times on a 12 s chain: there
+// a 1-of-2 bad backend was followed within minutes in simulation. The hold covers the other end:
+// a busy router gets 32 relay answers in under a second, and those can all come over one
+// keep-alive connection that the balancer pinned to one backend.
+//
+// The cost is a slower storm: on a 600 s chain, polled once a minute, the head is taken after 32
+// answers, about half an hour, plus up to one consensus tick. Relay traffic makes it sooner; a pod
+// that shares its polls with peers (the fleet gate) counts only its own answers, which makes it
+// later, though never later than the tip going stale a TTL after its last confirmation. A url that
+// answers nothing but the absurd block is followed at the same point.
+const (
+	soleVoterJumpAnswers     = 32
+	soleVoterJumpHoldDivisor = 5
+)
+
 // BlockObservation is the minimal per-endpoint observation ChainState needs to compute
 // consensus: which endpoint, what block, observed when. It is the decoupled subset of
 // endpointstate.EndpointObservation — ChainState pulls these as snapshots (Recompute) and
@@ -204,6 +228,12 @@ type ChainState struct {
 	// Recompute compares it with a sole voter's endpointtip stamp to tell a head the endpoint keeps
 	// answering (a block storm) from one it answered once (a glitch).
 	rejectedSince time.Time
+	// jumpRuns holds, per url, the run of answers that url has given above the fresh-tip guard
+	// (more than OutlierThreshold over the tip), fed by NoteAnswer (MAG-5080). Recompute follows a
+	// sole voter's jump only once its url's run is long enough. An answer at or below the guard
+	// deletes the url's entry and Recompute drops an entry with no answer for a StalenessWindow, so
+	// the map holds only urls that answered above the guard lately, however many urls come and go.
+	jumpRuns map[string]jumpRun
 	// initialized is a STICKY flag: true once any positive observation has ever been accepted.
 	// SetLatestBlock reads it to know whether a REFERENCE exists to guard the next observation
 	// against — the very first observation has none, which is why no anti-lie check can fire on it.
@@ -223,6 +253,14 @@ type ChainState struct {
 	// measured from ("how long ago did this become the tip"), so a baseline stuck at N accrues real
 	// first-block lag instead of looking forever-fresh. Distinct from baselineAt (Finding 3).
 	baselineSince time.Time
+}
+
+// jumpRun is one url's run of answers above the fresh-tip guard (see ChainState.jumpRuns). Both
+// stamps are on the real base clock, like every stored ChainState timestamp.
+type jumpRun struct {
+	answers int       // answers in the run
+	firstAt time.Time // when the run's first answer came
+	lastAt  time.Time // when its latest answer came
 }
 
 // New builds a ChainState with the production clock. Zero-valued Config fields fall back to
@@ -303,6 +341,7 @@ func (cs *ChainState) Reset() {
 	cs.lastObservedAt = time.Time{}
 	cs.latestSince = time.Time{}
 	cs.rejectedSince = time.Time{}
+	cs.jumpRuns = nil
 	cs.initialized = false
 	cs.baseline = 0
 	cs.hasBaseline = false
@@ -332,9 +371,9 @@ func (cs *ChainState) Reset() {
 //     against transient lies/glitches, and the stale-tip re-adoption above bounds a successful
 //     poisoning of THIS tip to ~one TTL instead of the process lifetime. The plausibility premise
 //     fails in a block storm (a bitcoin testnet made 80 blocks in five minutes), so on an interface
-//     with ONE voter Recompute pulls the tip up to a rejected head once that endpoint has answered
-//     it again (MAG-4964); with two or more voters the head waits for a majority, or for the tip
-//     to go a TTL unconfirmed.
+//     with ONE voter Recompute pulls the tip up to a rejected head once that endpoint has kept
+//     answering above the guard (MAG-4964, MAG-5080); with two or more voters the head waits for a
+//     majority, or for the tip to go a TTL unconfirmed.
 //
 // Caveat: the guard cannot fire on the VERY FIRST observation (no reference exists yet), so a
 // cold-start lie is accepted here. It is bounded, not permanent: the stale-tip re-adoption above
@@ -361,36 +400,43 @@ func (cs *ChainState) SetLatestBlock(block int64) (latest int64, at time.Time, a
 	}()
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
+	latest, at, advanced, regressedFrom = cs.setLatestBlockLocked(block, cs.now())
+	return latest, at, advanced
+}
 
+// setLatestBlockLocked is SetLatestBlock's body, for a caller that already holds cs.mu (NoteAnswer
+// too). nowReal is the real base clock. Besides SetLatestBlock's results it returns the tip a
+// stale-tip re-adoption moved down from (0 if none), which the caller must report through
+// reportRegression after releasing the lock.
+func (cs *ChainState) setLatestBlockLocked(block int64, nowReal time.Time) (latest int64, at time.Time, advanced bool, regressedFrom int64) {
 	if block <= 0 {
-		return cs.latestBlock, cs.lastObservedAt, false
+		return cs.latestBlock, cs.lastObservedAt, false, 0
 	}
 	// Freshness is EVALUATED against the warped clock, but the stored lastObservedAt uses the real
 	// base clock — a debug warp must never write a future-dated timestamp that reads as artificially
 	// fresh once the warp is cleared (real - future = negative age; MAG-2307 review).
-	nowReal := cs.now()
 	_, tipFresh := cs.freshLatestLocked(nowReal.Add(cs.warpOffsetDuration()))
 	if cs.initialized {
 		if block < cs.latestBlock {
 			if tipFresh {
-				return cs.latestBlock, cs.lastObservedAt, false
+				return cs.latestBlock, cs.lastObservedAt, false, 0
 			}
 			// Stale-tip downward re-adoption (self-heal from a poisoned/frozen tip).
 			regressedFrom = cs.latestBlock
 			cs.latestBlock = block
 			cs.lastObservedAt = nowReal
 			cs.latestSince = nowReal // the tip block CHANGED — re-establish its age
-			return cs.latestBlock, cs.lastObservedAt, false
+			return cs.latestBlock, cs.lastObservedAt, false, regressedFrom
 		}
 		if block == cs.latestBlock {
 			cs.lastObservedAt = nowReal // equal-block confirmation refreshes freshness (Finding 4)
-			return cs.latestBlock, cs.lastObservedAt, false
+			return cs.latestBlock, cs.lastObservedAt, false, 0
 		}
 	}
 	// block > latestBlock, or the very first observation.
 	if cs.hasBaseline {
 		if block > cs.baseline+cs.cfg.OutlierThreshold {
-			return cs.latestBlock, cs.lastObservedAt, false
+			return cs.latestBlock, cs.lastObservedAt, false, 0
 		}
 	} else if cs.initialized && tipFresh && block > cs.latestBlock+cs.cfg.OutlierThreshold {
 		// No-baseline anti-lie guard, anchored on the fresh tip (see doc block above). Stamp the first
@@ -398,13 +444,59 @@ func (cs *ChainState) SetLatestBlock(block int64) (latest int64, at time.Time, a
 		if cs.rejectedSinceLocked(nowReal.Add(cs.warpOffsetDuration())).IsZero() {
 			cs.rejectedSince = nowReal
 		}
-		return cs.latestBlock, cs.lastObservedAt, false
+		return cs.latestBlock, cs.lastObservedAt, false, 0
 	}
 	cs.latestBlock = block
 	cs.lastObservedAt = nowReal
 	cs.latestSince = nowReal // advance (or first observation) — the tip block CHANGED
 	cs.initialized = true
-	return cs.latestBlock, cs.lastObservedAt, true
+	return cs.latestBlock, cs.lastObservedAt, true, 0
+}
+
+// NoteAnswer takes one block a url answered this router with first-hand: a poll it answered, or a
+// relay whose reply carried its head, whatever the url's own tip store then did with the block
+// (MAG-5080). The router calls it after the OnTipObservation feed for the same answer, and never
+// for a peer pod's observation or a copy of the tip, which are not answers. It does two things:
+//   - an answer at or above the tip and at most OutlierThreshold over it is taken as SetLatestBlock
+//     takes it. The tip store keeps a url's highest block and drops lower answers as stragglers, so
+//     once a load balancer's bad backend has put an absurd block there, the good backend's answers
+//     never reach SetLatestBlock. Without this the tip goes stale, the fresh-tip guard switches off,
+//     and the next absurd answer becomes the tip directly;
+//   - it keeps the url's run of answers above the guard (jumpRuns), which Recompute's sole-voter
+//     pull-up requires. An answer above the guard extends the run; any other answer ends it.
+//
+// Returns whether the tip moved up.
+func (cs *ChainState) NoteAnswer(url string, block int64) (advanced bool) {
+	if block <= 0 {
+		return false
+	}
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	if !cs.initialized {
+		return false // no tip yet, so no guard to answer above
+	}
+	nowReal := cs.now()
+	if block > cs.latestBlock+cs.cfg.OutlierThreshold {
+		run := cs.jumpRuns[url]
+		// A run with no answer for a StalenessWindow has ended, as the url's vote has aged out.
+		if run.answers == 0 || nowReal.Add(cs.warpOffsetDuration()).Sub(run.lastAt) > cs.cfg.StalenessWindow {
+			run = jumpRun{firstAt: nowReal}
+		}
+		run.answers++
+		run.lastAt = nowReal
+		if cs.jumpRuns == nil {
+			cs.jumpRuns = make(map[string]jumpRun)
+		}
+		cs.jumpRuns[url] = run
+		return false
+	}
+	delete(cs.jumpRuns, url)
+	if block < cs.latestBlock {
+		return false
+	}
+	// block is in [tip, tip+OutlierThreshold], so this never moves the tip down: no regression to report.
+	_, _, advanced, _ = cs.setLatestBlockLocked(block, nowReal)
+	return advanced
 }
 
 // GetLatestBlock returns THE tip — the one answer to "what block is the chain at" — and whether
@@ -539,15 +631,24 @@ func (cs *ChainState) rejectedSinceLocked(now time.Time) time.Time {
 	return cs.rejectedSince
 }
 
+// jumpHeldLocked reports whether url's run of answers above the fresh-tip guard is long enough for
+// Recompute to follow its jump (MAG-5080): soleVoterJumpAnswers answers, the first of them at least
+// StalenessWindow/soleVoterJumpHoldDivisor before now (the warped evaluation clock). The caller
+// holds cs.mu and has pruned the runs that ended.
+func (cs *ChainState) jumpHeldLocked(url string, now time.Time) bool {
+	run, ok := cs.jumpRuns[url]
+	return ok && run.answers >= soleVoterJumpAnswers && now.Sub(run.firstAt) >= cs.cfg.StalenessWindow/soleVoterJumpHoldDivisor
+}
+
 // Recompute pulls a snapshot of per-endpoint observations, recomputes the strict-majority
 // consensus baseline, and applies the EDGE CORRECTION to the tip (D3): snap it down when it leads
 // the majority by more than OutlierThreshold (a poisoned tip, or a chain revert), pull it up when
 // it trails the majority, and otherwise leave the optimistic lead untouched. A single fresh voter
 // never forms a majority; for it, Recompute pulls the tip up to a head the outlier guard rejected
-// once that voter has answered it again (MAG-4964, the sole-voter case below). This is the windowed,
-// off-hot-path consensus step (T2): the caller (Topic B/C wiring) provides the snapshots by
-// pulling EndpointMonitor.SnapshotObservations; ChainState computes consensus itself — nothing
-// external sets the baseline.
+// once that voter has kept answering above the guard (MAG-4964, the sole-voter case below). This
+// is the windowed, off-hot-path consensus step (T2): the caller (Topic B/C wiring) provides the
+// snapshots by pulling EndpointMonitor.SnapshotObservations; ChainState computes consensus itself
+// — nothing external sets the baseline.
 //
 // An EMPTY (or sub-majority) snapshot clears the baseline rather than leaving a stale one
 // active (Finding 5): computeMajorityBaseline returns (0, false), which resets hasBaseline.
@@ -582,6 +683,13 @@ func (cs *ChainState) Recompute(snapshots []BlockObservation) {
 	}()
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
+	// A run with no answer for a StalenessWindow has ended (NoteAnswer would start it over). Dropping
+	// it here keeps jumpRuns to the urls that answered above the guard lately.
+	for url, run := range cs.jumpRuns {
+		if evalNow.Sub(run.lastAt) > cs.cfg.StalenessWindow {
+			delete(cs.jumpRuns, url)
+		}
+	}
 	prevBaseline := cs.baseline
 	prevHasBaseline := cs.hasBaseline
 	cs.hasBaseline = ok
@@ -625,7 +733,8 @@ func (cs *ChainState) Recompute(snapshots []BlockObservation) {
 			// fallbacks cannot mistake a consensus-seeded tip for "never observed anything".
 			cs.initialized = true
 		}
-	} else if since := cs.rejectedSinceLocked(evalNow); !since.IsZero() && sole.ObservedAt.After(since) && sole.Block > cs.latestBlock {
+	} else if since := cs.rejectedSinceLocked(evalNow); !since.IsZero() && sole.ObservedAt.After(since) && sole.Block > cs.latestBlock &&
+		cs.jumpHeldLocked(sole.URL, evalNow) {
 		// Sole-voter pull-up (MAG-4964). With one fresh voter there is no majority to lift the tip past
 		// a head SetLatestBlock's no-baseline guard rejected, and the guard's premise (the chain cannot
 		// outrun OutlierThreshold within a TTL) fails in a block storm: such a tip froze for 28 hours.
@@ -633,13 +742,18 @@ func (cs *ChainState) Recompute(snapshots []BlockObservation) {
 		// endpointtip entry keeps that answer's stamp, since later, lower answers are stragglers that
 		// refresh nothing, so a stamp newer than the guard's first rejection means the endpoint has
 		// answered its head again since: the min-2 rule applied across time instead of across
-		// endpoints. One repeat is the fewest that separates a glitch from a storm; more would only
-		// delay a real head, since no count tells a persistent liar from a sole honest endpoint. The
-		// repeat is read from the endpoint's own record, so a copy of a tip (a peer pod's, or a cache
-		// echo) never counts as one. Dropping the guard for a sole voter, or making its block a
-		// one-endpoint baseline, would follow that same stored glitch and hold the tip there for a TTL.
-		// Following a voter that has a peer would let one endpoint's repeated absurd block drag a
-		// multi-endpoint tip (MAG-4632), so two or more voters still need a majority.
+		// endpoints. One repeat does not separate a storm from a load balancer with one bad backend,
+		// which repeats its block every few answers while the good backend's answers never reach this
+		// record (MAG-5080). What does is that the balanced url also answers at the tip, so the voter's
+		// url must have answered above the guard soleVoterJumpAnswers times in a row, over at least the
+		// hold (jumpHeldLocked; the numbers are argued at soleVoterJumpAnswers). A url that answers
+		// nothing but the absurd block is still followed then: no count tells a persistent liar from a
+		// sole honest endpoint in a storm. The repeat is read from the endpoint's own record and its
+		// first-hand answers, so a copy of a tip (a peer pod's, or a cache echo) never counts as one.
+		// Dropping the guard for a sole voter, or making its block a one-endpoint baseline, would
+		// follow that same stored glitch and hold the tip there for a TTL. Following a voter that has a
+		// peer would let one endpoint's repeated absurd block drag a multi-endpoint tip (MAG-4632), so
+		// two or more voters still need a majority.
 		cs.latestBlock = sole.Block
 		cs.lastObservedAt = nowReal
 		cs.latestSince = nowReal

@@ -709,6 +709,44 @@ func TestOnTipObservation_GaugeAdvancesUnderPollOnlyTraffic(t *testing.T) {
 	(&RPCSmartRouterServer{chainState: cs}).onTipObservation("https://poll.example", 1, false)
 }
 
+// MAG-5080: onEndpointAnswer hands ChainState the answers a url's tip store dropped, here every one of
+// them (a load balancer's bad backend holds the url's stored block), so OnTipObservation never fires. They
+// still move the tip and keep it fresh, and the router-wide gauge follows. A head-stalled url's answers
+// are left out, like its repeat votes in onTipObservation: they must not keep a wrong tip fresh (MAG-3986).
+func TestOnEndpointAnswer_FeedsTheTipAndSkipsAStalledURL(t *testing.T) {
+	mm := metrics.NewSmartRouterMetricsManager(metrics.SmartRouterMetricsManagerOptions{})
+	clk := &manualClock{t: time.Unix(1_758_784_000, 0)}
+	cs := chainstate.NewWithClock("ETH1", chainstate.Config{
+		BucketWidth: 5, OutlierThreshold: 512, StalenessWindow: 10 * time.Second, TTL: 10 * time.Second,
+	}, clk.now)
+	rpcss := &RPCSmartRouterServer{
+		chainState:                 cs,
+		smartRouterEndpointMetrics: mm,
+		listenEndpoint:             &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+	}
+	const head = int64(25_000_000)
+	rpcss.onTipObservation("https://lb", head, false)
+
+	for i := int64(1); i <= 15; i++ { // 15 s of answers: past the 10 s TTL
+		clk.advance(time.Second)
+		rpcss.onEndpointAnswer("https://lb", head+i)
+	}
+	tip, fresh := cs.GetLatestBlock()
+	require.True(t, fresh, "answers the url's store dropped keep the tip fresh")
+	require.Equal(t, head+15, tip)
+	require.Equal(t, float64(head+15), readRouterLatestBlockGauge(t), "the gauge follows a tip an answer moved")
+
+	rpcss.headStall.sync(map[string]struct{}{"https://stuck": {}}, nil)
+	for i := 0; i < 15; i++ {
+		clk.advance(time.Second)
+		rpcss.onEndpointAnswer("https://stuck", head+15)
+	}
+	_, fresh = cs.GetLatestBlock()
+	require.False(t, fresh, "a head-stalled url's answers do not keep the tip fresh")
+
+	(&RPCSmartRouterServer{}).onEndpointAnswer("https://lb", 1) // no ChainState wired: no panic
+}
+
 // readBlockRegressions reads smartrouter_latest_block_regressions_total for ETH1/jsonrpc and one
 // reason off the default registry; 0 when the series does not exist yet. Shared registry, so
 // callers assert on a before/after delta.

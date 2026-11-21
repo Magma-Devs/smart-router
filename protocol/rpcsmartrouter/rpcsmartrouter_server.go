@@ -311,6 +311,9 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 		// Feed every positive poll/relay block into the per-chain tip (cheap monotonic write)
 		// and mirror the resulting guarded tip into the router-wide latest-block gauge (MAG-2629).
 		OnTipObservation: rpcss.onTipObservation,
+		// Every block a url answered this pod with, polls and relays, into the per-chain tip's
+		// freshness and its bound on a sole voter's jump (MAG-5080).
+		OnAnswer: rpcss.onEndpointAnswer,
 		// Each url's head on rpc_endpoint_url_latest_block, on every answered poll (MAG-4204).
 		OnPollBlock: rpcss.onEndpointPollBlock,
 		// Fleet tracker gate (MAG-2981): with --shared-state AND a cache backend, pods share
@@ -4381,6 +4384,29 @@ func (rpcss *RPCSmartRouterServer) onTipObservation(endpointURL string, block in
 		return
 	}
 	rpcss.chainState.SetLatestBlock(block)
+	rpcss.mirrorRouterLatestBlock()
+}
+
+// onEndpointAnswer is the EndpointMonitor's OnAnswer hook: it hands ChainState every block a url
+// answered this pod with first-hand, polls and relays alike, including the ones the url's tip store
+// dropped (ChainState.NoteAnswer, MAG-5080). That keeps the tip fresh past a load balancer whose bad
+// backend's block sits in the url's store, and it is what lets ChainState tell such a url from one in
+// a block storm before following a sole voter's jump. A url held as head-stalled is left out, as its
+// repeat votes are in onTipObservation: its answers at the tip are what kept a wrong tip fresh
+// (MAG-3986). A block that is news for it still reaches the tip through onTipObservation, because
+// its store takes a higher block. When the answer moves the tip up, the router-wide gauge follows.
+func (rpcss *RPCSmartRouterServer) onEndpointAnswer(endpointURL string, block int64) {
+	if rpcss.chainState == nil || rpcss.headStall.isStalled(endpointURL) {
+		return
+	}
+	if rpcss.chainState.NoteAnswer(endpointURL, block) {
+		rpcss.mirrorRouterLatestBlock()
+	}
+}
+
+// mirrorRouterLatestBlock writes the guarded tip to the router-wide smartrouter_latest_block gauge
+// when it is fresh, and leaves the gauge alone otherwise (see onTipObservation for why).
+func (rpcss *RPCSmartRouterServer) mirrorRouterLatestBlock() {
 	if rpcss.smartRouterEndpointMetrics == nil || rpcss.listenEndpoint == nil {
 		return
 	}
