@@ -3,6 +3,7 @@ package rpcsmartrouter
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
@@ -25,7 +26,7 @@ type subscriptionManagerCase struct {
 
 // subscriptionCascade is what the table reads off a built manager.
 type subscriptionCascade struct {
-	selectEndpoint func(ctx context.Context, clientKey string, ignored map[string]struct{}) (*common.NodeUrl, error)
+	selectEndpoint func(ctx context.Context, clientKey string) (*common.NodeUrl, error)
 	stickyStore    *routersession.StickySessionStore
 	endpointsByURL map[string]*common.NodeUrl
 }
@@ -56,6 +57,11 @@ func subscriptionManagerCases() []subscriptionManagerCase {
 // TestSelectEndpoint_Cascade runs the sticky → primary → backup cascade matrix against both
 // subscription managers. Endpoints are named; each manager's url func gives them its scheme.
 //
+// The held-off rows pin the rate-limit narrowing inside a tier: a held-off endpoint is
+// skipped, on the optimizer path and the first-available path alike, while another endpoint
+// of the tier is ready; when none is, the full tier serves rather than the backup tier or an
+// error.
+//
 // Every row also checks the sticky store afterwards: selectEndpoint must never write it,
 // because the write belongs to createNewSubscription once the upstream connection is
 // verified. A sticky entry written here would pin a client to a primary that then fails to
@@ -68,8 +74,9 @@ func TestSelectEndpoint_Cascade(t *testing.T) {
 		// emptyBackup passes a non-nil empty backup slice, which must behave as nil.
 		emptyBackup bool
 		// sticky pre-seeds the client's sticky session.
-		sticky  string
-		ignored []string
+		sticky string
+		// heldOff are the endpoints on a rate-limit hold-off.
+		heldOff []string
 		// pick, when set, is the optimizer: it gets the tier's endpoint names and returns
 		// the chosen ones. Unset means no optimizer.
 		pick func(tier []string) []string
@@ -95,22 +102,26 @@ func TestSelectEndpoint_Cascade(t *testing.T) {
 	scenarios := []scenario{
 		{name: "primary only, nil backup: first primary", primary: []string{"primary-1", "primary-2"}, want: "primary-1"},
 		{name: "primary only, empty backup: same as nil", primary: []string{"primary-1"}, emptyBackup: true, want: "primary-1"},
-		{name: "primary exhausted: falls back to backup", primary: []string{"primary-1", "primary-2"}, backup: []string{"backup-1"}, ignored: []string{"primary-1", "primary-2"}, want: "backup-1"},
 		{name: "primary empty: first backup", backup: []string{"backup-1", "backup-2"}, want: "backup-1"},
-		{name: "both exhausted: error", primary: []string{"primary-1"}, backup: []string{"backup-1"}, ignored: []string{"primary-1", "backup-1"}},
 		{name: "both empty: error"},
-		{name: "first primary ignored: second primary, not backup", primary: []string{"primary-1", "primary-2"}, backup: []string{"backup-1"}, ignored: []string{"primary-1"}, want: "primary-2"},
 
 		{name: "sticky on primary wins over first-available", primary: []string{"primary-1", "primary-2"}, backup: []string{"backup-1"}, sticky: "primary-2", want: "primary-2", wantStickyAfter: "primary-2"},
 		{name: "sticky on backup resolves across tiers", primary: []string{"primary-1"}, backup: []string{"backup-1"}, sticky: "backup-1", want: "backup-1", wantStickyAfter: "backup-1"},
-		{name: "ignored sticky is cleared and the cascade runs", primary: []string{"primary-1"}, backup: []string{"backup-1"}, sticky: "primary-1", ignored: []string{"primary-1"}, want: "backup-1"},
 		{name: "sticky on an unknown endpoint is kept and skipped", primary: []string{"primary-1"}, sticky: "gone-1", want: "primary-1", wantStickyAfter: "gone-1"},
 
 		{name: "optimizer picks within primary, backup never consulted", primary: []string{"primary-1", "primary-2"}, backup: []string{"backup-1", "backup-2"}, pick: pickIfPresent("primary-2"), want: "primary-2", wantOptimizerCalls: 1},
 		{name: "optimizer empty over primary falls back to first primary", primary: []string{"primary-1", "primary-2"}, backup: []string{"backup-1", "backup-2"}, pick: pickIfPresent("backup-2"), want: "primary-1", wantOptimizerCalls: 1},
-		{name: "optimizer over backup once primary is ignored", primary: []string{"primary-1", "primary-2"}, backup: []string{"backup-1", "backup-2"}, ignored: []string{"primary-1", "primary-2"}, pick: pickIfPresent("backup-2"), want: "backup-2", wantOptimizerCalls: 2},
 		{name: "optimizer over backup when primary is empty", backup: []string{"backup-1", "backup-2"}, pick: pickIfPresent("backup-2"), want: "backup-2", wantOptimizerCalls: 1},
 		{name: "single-endpoint tier skips the optimizer", primary: []string{"primary-1"}, pick: pickIfPresent("primary-1"), want: "primary-1"},
+
+		{name: "held-off primary skipped: next primary, not backup", primary: []string{"primary-1", "primary-2"}, backup: []string{"backup-1"}, heldOff: []string{"primary-1"}, want: "primary-2"},
+		{name: "every primary held off: full primary tier, not backup", primary: []string{"primary-1", "primary-2"}, backup: []string{"backup-1"}, heldOff: []string{"primary-1", "primary-2"}, want: "primary-1"},
+		{name: "held-off backup skipped when primary is empty", backup: []string{"backup-1", "backup-2"}, heldOff: []string{"backup-1"}, want: "backup-2"},
+		{name: "held-off endpoint is not offered to the optimizer", primary: []string{"primary-1", "primary-2", "primary-3"}, heldOff: []string{"primary-1"}, pick: pickIfPresent("primary-1"), want: "primary-2", wantOptimizerCalls: 1},
+		{name: "optimizer picks among the ready endpoints", primary: []string{"primary-1", "primary-2", "primary-3"}, heldOff: []string{"primary-1"}, pick: pickIfPresent("primary-3"), want: "primary-3", wantOptimizerCalls: 1},
+		{name: "every endpoint held off: optimizer is offered the full tier", primary: []string{"primary-1", "primary-2", "primary-3"}, backup: []string{"backup-1"}, heldOff: []string{"primary-1", "primary-2", "primary-3"}, pick: pickIfPresent("primary-3"), want: "primary-3", wantOptimizerCalls: 1},
+		{name: "one ready endpoint left: single-endpoint path, optimizer skipped", primary: []string{"primary-1", "primary-2"}, heldOff: []string{"primary-1"}, pick: pickIfPresent("primary-1"), want: "primary-2"},
+		{name: "single-endpoint tier held off: still serves", primary: []string{"primary-1"}, backup: []string{"backup-1"}, heldOff: []string{"primary-1"}, pick: pickIfPresent("backup-1"), want: "primary-1"},
 	}
 
 	for _, manager := range subscriptionManagerCases() {
@@ -142,7 +153,7 @@ func TestSelectEndpoint_Cascade(t *testing.T) {
 						for _, name := range append(append([]string{}, sc.primary...), sc.backup...) {
 							nameOf[manager.url(name)] = name
 						}
-						optimizer = &fakeSubscriptionOptimizer{chooseFn: func(addresses []string, _ map[string]struct{}) []string {
+						optimizer = &fakeSubscriptionOptimizer{chooseFn: func(addresses []string) []string {
 							optimizerCalls++
 							names := make([]string, 0, len(addresses))
 							for _, address := range addresses {
@@ -157,19 +168,18 @@ func TestSelectEndpoint_Cascade(t *testing.T) {
 						}}
 					}
 
+					// Before build: the gRPC manager takes its registry at construction.
+					reg := withFreshRelayHoldoff(t)
+					for _, name := range sc.heldOff {
+						reg.RecordRateLimit(manager.url(name), manager.url(name), time.Minute)
+					}
+
 					cascade := manager.build(nodeURLs(sc.primary), backup, optimizer)
 					if sc.sticky != "" {
 						cascade.stickyStore.Set("client-1", &routersession.StickySession{Provider: manager.url(sc.sticky)})
 					}
-					var ignored map[string]struct{}
-					if sc.ignored != nil {
-						ignored = map[string]struct{}{}
-						for _, name := range sc.ignored {
-							ignored[manager.url(name)] = struct{}{}
-						}
-					}
 
-					ep, err := cascade.selectEndpoint(context.Background(), "client-1", ignored)
+					ep, err := cascade.selectEndpoint(context.Background(), "client-1")
 					if sc.want == "" {
 						require.EqualError(t, err, manager.exhausted)
 					} else {

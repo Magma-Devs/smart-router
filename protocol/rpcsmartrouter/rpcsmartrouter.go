@@ -4492,7 +4492,7 @@ type subscriptionEndpointSetter interface {
 // session maps, which is the same source of truth publishServingTierLocked reads. Only
 // live endpoints go in: a configured-but-dead endpoint in the primary tier would be
 // handed to a subscription with no fallback, and would suppress the primary→backup
-// cascade, which only fires when the primary tier is empty or fully ignored.
+// cascade, which only fires when the primary tier is empty.
 func (rpsr *RPCSmartRouter) republishSubscriptionEndpointsLocked(chainKey string) {
 	server := rpsr.rpcServers[chainKey]
 	if server == nil {
