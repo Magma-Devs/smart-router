@@ -47,13 +47,16 @@ func (s *State) CacheStep() Nav {
 	return Next
 }
 
-// DashboardStep toggles the observability dashboard. Esc → Back.
+// DashboardStep toggles the observability dashboard. The dashboard is its own
+// stack in the smart-router-dashboard repo; enabling it keeps router metrics on
+// and makes the run panel print the command that attaches it. Esc → Back.
 func (s *State) DashboardStep() Nav {
 	fmt.Println(ui.Section(5, "Dashboard"))
 	fmt.Println(ui.Panel.Width(72).Render(
 		ui.Accent.Render("Observability dashboard") + "\n" +
-			"Prometheus + smart-router-dashboard (UI :3000, API :8000, Prom :9090).\n" +
-			"Needs router metrics ON. Login admin / password."))
+			"Runs from a smart-router-dashboard checkout (UI :3000, API :8000,\n" +
+			"Prom :9090) and reads this router's metrics on :7779. Needs router\n" +
+			"metrics ON; the run step prints the command to start it."))
 
 	dash := s.Dashboard
 	if nav := runForm(huh.NewGroup(

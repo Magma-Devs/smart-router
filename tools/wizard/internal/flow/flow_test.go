@@ -295,15 +295,37 @@ func TestComposeFiles(t *testing.T) {
 	}{
 		{false, false, "-f docker/docker-compose.yml"},
 		{true, false, "-f docker/docker-compose.yml -f docker/docker-compose.cache.yml"},
-		{false, true, "-f docker/docker-compose.dashboard.yml"},
-		{true, true, "-f docker/docker-compose.dashboard.yml -f docker/docker-compose.cache.yml"},
+		// The dashboard runs from its own repo, so it adds no compose file here.
+		{false, true, "-f docker/docker-compose.yml"},
+		{true, true, "-f docker/docker-compose.yml -f docker/docker-compose.cache.yml"},
 	}
 	for _, c := range cases {
 		s := &State{Cache: c.cache, Dashboard: c.dash}
-		got := strings.Join(s.composeFiles(), " ")
+		files := s.composeFiles()
+		got := strings.Join(files, " ")
 		if got != c.want {
 			t.Errorf("cache=%v dash=%v: got %q want %q", c.cache, c.dash, got, c.want)
 		}
+		// Every file the up command names must exist in the repo: the dashboard
+		// overlay was deleted while this list still named it, and the printed
+		// `docker compose up` failed before starting anything.
+		for i := 1; i < len(files); i += 2 {
+			if _, err := os.Stat(filepath.Join("..", "..", "..", "..", files[i])); err != nil {
+				t.Errorf("cache=%v dash=%v: compose file %s: %v", c.cache, c.dash, files[i], err)
+			}
+		}
+	}
+}
+
+func TestDashboardUpCommandMountsTheRenderedConfig(t *testing.T) {
+	got := dashboardUpCommand("/repo/config/local/x.yml")
+	for _, want := range []string{"SR_CONFIG_HOST=/repo/config/local/x.yml", "ROUTER_RELAY_HOST=host.docker.internal", "docker compose up"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("dashboardUpCommand = %q, missing %q", got, want)
+		}
+	}
+	if strings.Contains(got, "-f ") {
+		t.Errorf("dashboardUpCommand = %q names a compose file; the dashboard repo's default file is the one to run", got)
 	}
 }
 
