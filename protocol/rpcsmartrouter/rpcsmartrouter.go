@@ -3243,6 +3243,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 		)
 		// Start background cleanup goroutine
 		directWSManager.SetEndpointNames(providerNamesByURL(relevantStaticProviderList, relevantBackupProviderList))
+		directWSManager.SetURLLendRank(sessionManager.URLLendRank)
 		directWSManager.Start(ctx)
 		wsSubscriptionManager = directWSManager
 		utils.FormatInfo("Using DirectWSSubscriptionManager for direct WebSocket subscriptions",
@@ -3289,6 +3290,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 		)
 		// Start background cleanup goroutine
 		grpcSubManager.SetEndpointNames(providerNamesByURL(relevantStaticProviderList, relevantBackupProviderList))
+		grpcSubManager.SetURLLendRank(sessionManager.URLLendRank)
 		grpcSubManager.Start(ctx)
 		rpcSmartRouterServer.grpcSubscriptionManager = grpcSubManager
 		utils.FormatInfo("Using DirectGRPCSubscriptionManager for gRPC streaming subscriptions",
@@ -4492,7 +4494,9 @@ type subscriptionEndpointSetter interface {
 // session maps, which is the same source of truth publishServingTierLocked reads. Only
 // live endpoints go in: a configured-but-dead endpoint in the primary tier would be
 // handed to a subscription with no fallback, and would suppress the primary→backup
-// cascade, which only fires when the primary tier is empty or fully ignored.
+// cascade, which only fires when the primary tier is empty, fully ignored, or wholly out
+// of rotation. The session manager knows nothing against a url it holds no endpoint for,
+// so such an entry counts as in rotation (ConsumerSessionManager.URLLendRank).
 func (rpsr *RPCSmartRouter) republishSubscriptionEndpointsLocked(chainKey string) {
 	server := rpsr.rpcServers[chainKey]
 	if server == nil {
