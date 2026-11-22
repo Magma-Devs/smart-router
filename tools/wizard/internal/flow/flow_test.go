@@ -2,6 +2,7 @@ package flow
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -295,14 +296,60 @@ func TestComposeFiles(t *testing.T) {
 	}{
 		{false, false, "-f docker/docker-compose.yml"},
 		{true, false, "-f docker/docker-compose.yml -f docker/docker-compose.cache.yml"},
-		{false, true, "-f docker/docker-compose.dashboard.yml"},
-		{true, true, "-f docker/docker-compose.dashboard.yml -f docker/docker-compose.cache.yml"},
+		// The dashboard runs from its own repo, so it adds no compose file here.
+		{false, true, "-f docker/docker-compose.yml"},
+		{true, true, "-f docker/docker-compose.yml -f docker/docker-compose.cache.yml"},
 	}
 	for _, c := range cases {
 		s := &State{Cache: c.cache, Dashboard: c.dash}
-		got := strings.Join(s.composeFiles(), " ")
+		files := s.composeFiles()
+		got := strings.Join(files, " ")
 		if got != c.want {
 			t.Errorf("cache=%v dash=%v: got %q want %q", c.cache, c.dash, got, c.want)
+		}
+		// Every file the up command names must exist in the repo: the dashboard
+		// overlay was deleted while this list still named it, and the printed
+		// `docker compose up` failed before starting anything.
+		for i := 1; i < len(files); i += 2 {
+			if _, err := os.Stat(filepath.Join("..", "..", "..", "..", files[i])); err != nil {
+				t.Errorf("cache=%v dash=%v: compose file %s: %v", c.cache, c.dash, files[i], err)
+			}
+		}
+	}
+}
+
+func TestDashboardUpCommandMountsTheRenderedConfig(t *testing.T) {
+	got := dashboardUpCommand("/repo/config/local/x.yml")
+	for _, want := range []string{"SR_CONFIG_HOST=/repo/config/local/x.yml", "ROUTER_RELAY_HOST=host.docker.internal", "docker compose up"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("dashboardUpCommand = %q, missing %q", got, want)
+		}
+	}
+	if strings.Contains(got, "-f ") {
+		t.Errorf("dashboardUpCommand = %q names a compose file; the dashboard repo's default file is the one to run", got)
+	}
+}
+
+// A repo checked out under a path with a space, or a quote, still gets a command
+// that sets SR_CONFIG_HOST to the whole path: sh runs the printed command, with the
+// docker call swapped for printenv, which prints what the variable became.
+func TestDashboardUpCommandQuotesAPathAShellWouldSplit(t *testing.T) {
+	for _, path := range []string{
+		"/Users/jane/My Projects/smart-router/config/local/x.yml",
+		"/Users/jane/it's/smart-router/config/local/x.yml",
+		"/Users/jane/$HOME/x.yml",
+	} {
+		cmd := dashboardUpCommand(path)
+		if _, err := exec.LookPath("sh"); err != nil {
+			t.Skip("no sh to run the command with")
+		}
+		if _, err := exec.LookPath("printenv"); err != nil {
+			t.Skip("no printenv to read the variable with")
+		}
+		probe := strings.Replace(cmd, "docker compose up --build", "printenv SR_CONFIG_HOST", 1)
+		out, err := exec.Command("sh", "-c", probe).CombinedOutput()
+		if err != nil || strings.TrimSuffix(string(out), "\n") != path {
+			t.Errorf("dashboardUpCommand(%q) = %q: sh set SR_CONFIG_HOST to %q (err %v)", path, cmd, out, err)
 		}
 	}
 }
