@@ -64,6 +64,9 @@ var chainErrorMappings = map[ChainFamily][]errorMapping{
 		// getblockhash -1 reaches each provider up to the error limit; no endpoint is blamed for it.
 		{CodeAndMessage(-8, "block height out of range"), RouterErrorChainBlockNotFound}, // getblockhash
 		{CodeAndMessage(-8, "after current tip"), RouterErrorChainBlockNotFound},         // the hash_or_height RPCs
+		// Zebra (Zcash) answers getblock and getblockhash for a block it does not have with -8. The
+		// generic "block not found" row labelled it so before the catch-all below existed.
+		{CodeAndMessage(-8, "block not found"), RouterErrorChainBlockNotFound},
 		{CodeEquals(-8), RouterErrorChainBitcoinInvalidParameter},
 		// A transaction this node cannot look up because it keeps no transaction index, or has not
 		// finished building it: a node started with -txindex may answer.
@@ -73,6 +76,9 @@ var chainErrorMappings = map[ChainFamily][]errorMapping{
 		{CodeAndMessage(-5, "block hash not found"), RouterErrorChainBlockNotFound}, // getrawtransaction with a block hash
 		{CodeAndMessage(-5, "no such"), RouterErrorChainTxNotFound},                 // getrawtransaction
 		{CodeAndMessage(-5, "transaction not in mempool"), RouterErrorChainTxNotFound},
+		// Zebra (Zcash) getrawtransaction: "Transaction not found in mempool or best chain". The
+		// generic "transaction not found" row labelled it so before the catch-all below existed.
+		{CodeAndMessage(-5, "transaction not found"), RouterErrorChainTxNotFound},
 		// The one -5 the generic table already read as the caller's ("invalid address", e.g.
 		// verifymessage), kept as it was so this row changes nothing for it.
 		{CodeAndMessage(-5, "invalid address"), RouterErrorUserInvalidAddress},
