@@ -158,7 +158,13 @@ func TestGRPCListener_CallsEndingAtTheCallersDeadlineLeaveEveryProviderOn(t *tes
 		nodeAddrs = append(nodeAddrs, addr)
 		nodeCalls = append(nodeCalls, calls)
 	}
-	client, endpoints := startGRPCRouterOverSlowNodes(t, nodeAddrs)
+	client, endpoints, names, optimizer := startGRPCRouterOverSlowNodes(t, nodeAddrs)
+	availabilityBefore := make([]float64, len(names))
+	for i, name := range names {
+		report, _ := optimizer.GetReputationReportForProvider(name)
+		require.NotNil(t, report, name)
+		availabilityBefore[i] = report.Availability
+	}
 
 	const callers = 30
 	var wg sync.WaitGroup
@@ -197,11 +203,23 @@ func TestGRPCListener_CallsEndingAtTheCallersDeadlineLeaveEveryProviderOn(t *tes
 		}
 		return false
 	}, time.Second, 20*time.Millisecond, "a provider was counted for a call that ended at its caller's deadline")
+
+	// Nor is any attempt released as an availability failure. Each session goes back as a hang-up's
+	// does, with no QoS sample, so the optimizer still scores every provider as before the burst.
+	// The refusal count above cannot see this half: it is decided apart, where the attempt's session
+	// is released.
+	for i, name := range names {
+		report, _ := optimizer.GetReputationReportForProvider(name)
+		require.NotNil(t, report, name)
+		require.InDelta(t, availabilityBefore[i], report.Availability, 1e-9,
+			"%s: a call that ended at its caller's deadline was scored as an availability failure", name)
+	}
 }
 
 // startGRPCRouterOverSlowNodes is startRelayEndGRPCRouter over one provider per node address, each with
-// one endpoint. It returns a client of the listener and the providers' endpoints.
-func startGRPCRouterOverSlowNodes(t *testing.T, nodeAddrs []string) (*grpc.ClientConn, []*routersession.Endpoint) {
+// one endpoint. It returns a client of the listener, the providers' endpoints and names, and the
+// optimizer that scores them.
+func startGRPCRouterOverSlowNodes(t *testing.T, nodeAddrs []string) (*grpc.ClientConn, []*routersession.Endpoint, []string, *provideroptimizer.ProviderOptimizer) {
 	t.Helper()
 	if !rand.Initialized() {
 		rand.InitRandomSeed()
@@ -275,5 +293,5 @@ func startGRPCRouterOverSlowNodes(t *testing.T, nodeAddrs []string) (*grpc.Clien
 	client, err := grpc.NewClient(listener.GetListeningAddress(), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = client.Close() })
-	return client, endpoints
+	return client, endpoints, names, optimizer
 }
