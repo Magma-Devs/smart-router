@@ -77,3 +77,7 @@ Claude.md
 /license.key
 debugging/logs/
 config/local/
+
+# Python bytecode caches (a run of docker/sticky-test/qa_scenarios.py writes one)
+__pycache__/
+*.py[cod]
