@@ -3,6 +3,7 @@ package routersession
 import (
 	"context"
 	"fmt"
+	"maps"
 	"slices"
 	"strconv"
 	"sync"
@@ -115,6 +116,7 @@ type ProviderOptimizer interface {
 	AppendSyncData(providerAddress string, syncBlock uint64, syncRef provideroptimizer.SyncReference)
 	ChooseUpstream(ctx context.Context, allAddresses []string, ignoredProviders map[string]struct{}, cu uint64, requestedBlock int64) (addresses []string)
 	ChooseUpstreamWithStats(ctx context.Context, allAddresses []string, ignoredProviders map[string]struct{}, cu uint64, requestedBlock int64) (addresses []string, stats *provideroptimizer.SelectionStats)
+	KnownBelowBlock(providerAddress string, block int64) bool
 	GetReputationReportForProvider(string) (*pairingtypes.QualityOfServiceReport, time.Time)
 	Strategy() provideroptimizer.Strategy
 	UpdateWeights(map[string]int64, uint64)
@@ -133,6 +135,12 @@ type ignoredProviders struct {
 	// because this is the one piece of per-request state every level of selection receives. It
 	// survives the epoch reset that clears providers: it names a choice, not a failure.
 	preferredProvider string
+	// crossValidation is this request's GetSessionsOptions.CrossValidation, carried here for the
+	// same reason as preferredProvider.
+	crossValidation bool
+	// requiredBlock is this request's GetSessionsOptions.RequiredBlock, carried here for the same
+	// reason as preferredProvider.
+	requiredBlock int64
 }
 
 // markTried adds a provider to triedByThisRequest.
@@ -238,8 +246,13 @@ type Endpoint struct {
 	// accident. The endpoint is usable only when Enabled AND this map is empty (usableLocked).
 	// Nil until the first state reason is added.
 	stateReasons map[EndpointDisableReason]StateReasonRecord
-	Addons       map[string]struct{}
-	Extensions   map[string]struct{}
+	// outOfRotationCounts counts, per reason, how many times this endpoint has left rotation
+	// (MAG-5244): each Enabled→false transition under its disable reason, and each state reason
+	// added. It only goes up, so the metrics publisher can tell from it that the url went out even
+	// when it came back before the publisher looked. Nil until the first time the endpoint goes out.
+	outOfRotationCounts map[EndpointDisableReason]uint64
+	Addons              map[string]struct{}
+	Extensions          map[string]struct{}
 	// StandaloneAddons mirrors common.NodeUrl.StandaloneAddons: this endpoint
 	// serves ONLY the collections its Addons name, not those plus the base one.
 	// Set for a url whose add-on REPLACES the base api surface rather than
@@ -257,7 +270,7 @@ type Endpoint struct {
 	// it does not serve, and the vendor's 404 then reads as a verdict on the
 	// request.
 	InternalPath string
-	mu           sync.RWMutex // Protects Connections, ConnectionRefusals, Enabled, consecutiveHealthyProbes, disabledAt, disableReason, lastRecoveryPoll, probeReenabled, reenableProbeFlaps, stateReasons
+	mu           sync.RWMutex // Protects Connections, ConnectionRefusals, Enabled, consecutiveHealthyProbes, disabledAt, disableReason, lastRecoveryPoll, probeReenabled, reenableProbeFlaps, stateReasons, outOfRotationCounts
 
 	// Per-endpoint observed tip lives in the shared endpointtip store (single source of
 	// truth), keyed by chain+apiInterface+NetworkAddress — not on the Endpoint — so the
@@ -350,6 +363,9 @@ type EndpointHealthSnapshot struct {
 	// StateReasons lists the state-type reasons (head-stalled) this endpoint is out for, in a stable
 	// order, each with when it was added and the block it was recorded at. Empty when none.
 	StateReasons []StateReasonRecord
+	// OutOfRotationCounts is how many times the endpoint has left rotation, per reason, since it was
+	// created (MAG-5244). A copy; nil when it never went out.
+	OutOfRotationCounts map[EndpointDisableReason]uint64
 }
 
 // HealthSnapshot returns the endpoint's enable/recovery state under e.mu. Read-only companion to
@@ -368,6 +384,7 @@ func (e *Endpoint) HealthSnapshot() EndpointHealthSnapshot {
 		ReenableProbeFlaps:       e.reenableProbeFlaps,
 		Usable:                   e.usableLocked(),
 		StateReasons:             e.stateReasonsLocked(),
+		OutOfRotationCounts:      maps.Clone(e.outOfRotationCounts),
 	}
 }
 
@@ -492,6 +509,7 @@ func (e *Endpoint) disableLocked(at time.Time, reason EndpointDisableReason) {
 		reason = EndpointDisableUnspecified
 	}
 	e.Enabled = false
+	e.countOutOfRotationLocked(reason)
 	e.disabledAt = at
 	// Edge-triggered with disabledAt, and for the same reason: the reason belongs to the failure that
 	// actually took the endpoint out. A later failure of a different kind against an already-disabled

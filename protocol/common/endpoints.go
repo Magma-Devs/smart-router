@@ -658,6 +658,10 @@ type RelayResult struct {
 	// opposed to answering truthfully about a request it cannot satisfy. This is what the
 	// endpoint-health counter reads; see RouterError.EndpointAtFault for why it is not Retryable.
 	IsNodeAtFault bool
+	// IsOwnVerdict — the sender filed this reply by its interface's own rows (a GraphQL read,
+	// MAG-5121): the flags above are that verdict, read from the body, so a status-only step must
+	// not decide the reply again by its status (sendRelayToDirectEndpoints).
+	IsOwnVerdict bool
 	// ClientFacing is what the listener shows the caller when the relay ends in a protocol error:
 	// the upstream's own answer when it gave one, else the leaf cause (MAG-4218).
 	ClientFacing *ClientFacingError

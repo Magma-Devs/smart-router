@@ -242,8 +242,13 @@ func CreateMockSpec() spectypes.Spec {
 // CreateMockXRPLSpec returns the part of an XRP Ledger spec a transaction submission needs: one
 // JSON-RPC collection holding submit and submit_multisigned, stateful and hanging as in the
 // catalog's ripple.json, beside one read (account_info). The router's bundled specs carry no XRPL
-// chain.
+// chain, so it registers ripple.json's families itself, as loading the catalog would: XRPT takes
+// the XRP family from its import of XRP.
 func CreateMockXRPLSpec(index string) spectypes.Spec {
+	common.RegisterChainFamilies(map[string]spectypes.Spec{
+		"XRP":  {Index: "XRP"},
+		"XRPT": {Index: "XRPT", Imports: []string{"XRP"}},
+	})
 	api := func(name string, category spectypes.SpecCategory) *spectypes.Api {
 		return &spectypes.Api{
 			Name:         name,
@@ -300,6 +305,14 @@ func CreateChainLibMocks(
 		cancelConnector()
 		return nil, nil, nil, nil, nil, err
 	}
+	// As the router does when it loads a catalog: a chain such as ARBITRUM takes its family from
+	// its imports, and the parser reads it in SetSpec.
+	catalog, err := specutils.GetAllSpecsFromLocalDir(getToTopMostPath + "specs/")
+	if err != nil {
+		cancelConnector()
+		return nil, nil, nil, nil, nil, err
+	}
+	common.RegisterChainFamilies(catalog)
 	index, err := strconv.Atoi(apiInterface)
 	if err == nil && index < len(spec.ApiCollections) {
 		apiInterface = spec.ApiCollections[index].CollectionData.ApiInterface

@@ -111,6 +111,7 @@ type relayEndAttempt struct {
 	errorCode        string
 	message          string
 	nodeCode         int           // the code of the node's JSON-RPC error reply; 0 when there is none
+	grpcStatus       int           // the status of a gRPC node error; 0 when there is none
 	latency          time.Duration // zero when unknown
 	returnedToClient bool
 	sent             bool // went out as a dispatch, so batch and sentAfter are known
@@ -239,6 +240,9 @@ func (a *relayEndAttempt) MarshalZerologObject(event *zerolog.Event) {
 		Str("message", a.message)
 	if a.nodeCode != 0 {
 		event.Int("node_code", a.nodeCode)
+	}
+	if a.grpcStatus != 0 {
+		event.Int("grpc_status", a.grpcStatus)
 	}
 	if a.errorCode != "" {
 		event.Bool("retryable", a.retryable())
@@ -486,7 +490,7 @@ func (a *relayEndAttempt) retryable() bool {
 }
 
 func relayEndNodeErrorAttempt(nodeError relaycore.RelayError) relayEndAttempt {
-	attempt := relayEndAttempt{outcome: attemptOutcomeNodeError, routerError: nodeError.RouterError, nodeCode: nodeError.JSONRPCErrorCode}
+	attempt := relayEndAttempt{outcome: attemptOutcomeNodeError, routerError: nodeError.RouterError, nodeCode: nodeError.JSONRPCErrorCode, grpcStatus: nodeError.GRPCStatus}
 	if nodeError.Response != nil {
 		result := &nodeError.Response.RelayResult
 		attempt.upstream = relayEndUpstream(result)
@@ -719,6 +723,17 @@ func relayEndNamedByURL(protocolMessage chainlib.ProtocolMessage, apiInterface s
 		return len(protocolMessage.RelayPrivateData().GetData()) == 0
 	}
 	return true
+}
+
+// relayAnswerMethod names a request on the debug answer ring (GET /debug/relay-answers) the way
+// relay_end names it: without the leading slash, an unlisted api named by URL withheld, and capped
+// at relayEndMethodLimit. The ring keeps the last few thousand answers, so the raw api name would
+// put a caller's own path on the debug route and let one entry be as long as the request.
+func relayAnswerMethod(protocolMessage chainlib.ProtocolMessage, apiInterface string) string {
+	if protocolMessage == nil || protocolMessage.GetApi() == nil {
+		return ""
+	}
+	return relayEndMethod(protocolMessage.GetApi().Name, relayEndNamedByURL(protocolMessage, apiInterface))
 }
 
 func relayEndSelection(selection relaycore.Selection) string {

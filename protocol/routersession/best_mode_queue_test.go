@@ -83,6 +83,9 @@ func (f *fixedScoreOptimizer) AppendRelayDataConsensus(string, time.Duration, ui
 }
 func (f *fixedScoreOptimizer) AppendSyncData(string, uint64, provideroptimizer.SyncReference) {}
 
+// KnownBelowBlock reports nothing: these tests pin QoS alone, and no provider's block is known.
+func (f *fixedScoreOptimizer) KnownBelowBlock(string, int64) bool { return false }
+
 func (f *fixedScoreOptimizer) GetReputationReportForProvider(address string) (*pairingtypes.QualityOfServiceReport, time.Time) {
 	return f.qos[address], time.Time{}
 }

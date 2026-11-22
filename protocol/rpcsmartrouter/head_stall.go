@@ -34,11 +34,7 @@ import (
 //     the counter restarted, which also happens when a tracker is recreated;
 //   - never take out the last usable endpoint of this chain and interface, across both tiers (D13);
 //     re-checked every cycle, releasing the stuck endpoint on the highest block when nothing else is
-//     usable (D22, D26);
-//   - the provider health gauge reads 0 while any of its endpoints holds head-stalled (D24). This step
-//     is the only code that writes the gauge for head-stall: it re-asserts 0 every cycle, so an epoch
-//     reset or a relay success on a sibling url that sets it back to 1 is corrected within one cycle,
-//     and it sets 1 when the last stalled url of a provider comes back with every url usable.
+//     usable (D22, D26).
 
 // headStallState is the router-side state of the head-stall step. The stalled url set is read on the
 // hot path (every tip observation) and written by the probe loop; kept is touched only by the probe
@@ -116,14 +112,12 @@ func runHeadStallStep(
 	grace time.Duration,
 	now time.Time,
 	onRecover func(provider string),
-	setProviderHealth func(provider string, healthy bool),
 	state *headStallState,
 	logAttrs []utils.Attribute,
 ) (res headStallResult) {
-	// One entry per *Endpoint, and each provider's endpoints for the gauge rule.
+	// One entry per *Endpoint.
 	unique := make([]*routersession.EndpointWithDirectConnection, 0, len(endpoints))
 	seen := make(map[*routersession.Endpoint]struct{}, len(endpoints))
-	byProvider := make(map[string][]*routersession.Endpoint)
 	for _, ep := range endpoints {
 		if ep == nil || ep.Endpoint == nil {
 			continue
@@ -132,7 +126,6 @@ func runHeadStallStep(
 			continue
 		}
 		seen[ep.Endpoint] = struct{}{}
-		byProvider[ep.ProviderAddress] = append(byProvider[ep.ProviderAddress], ep.Endpoint)
 		// Only endpoints that can answer a relay take part: a ws/wss url is never selected for a
 		// relay (Endpoint.ServesDirectRelays), so counting it as "usable" would let never-empty
 		// keep a websocket url while taking out the provider's only https url — leaving nothing
@@ -184,17 +177,6 @@ func runHeadStallStep(
 		return n
 	}
 
-	// providerAllUsable: every url of the provider can be routed to — the only state in which this
-	// step sets the provider's gauge back to 1.
-	providerAllUsable := func(provider string) bool {
-		for _, e := range byProvider[provider] {
-			if !e.IsUsable() {
-				return false
-			}
-		}
-		return true
-	}
-
 	// stuckRecord returns the head-stalled record of the url, if any of its endpoints holds one.
 	stuckRecord := func(g *urlGroup) (routersession.StateReasonRecord, bool) {
 		for _, ep := range g.eps {
@@ -212,8 +194,7 @@ func runHeadStallStep(
 	}
 
 	// release takes head-stalled off every endpoint of the url and, for each that becomes usable,
-	// returns its provider to the valid list (H1) and its gauge to 1 when every url of the provider
-	// is usable (D24). It reports whether anything was released.
+	// returns its provider to the valid list (H1). It reports whether anything was released.
 	release := func(g *urlGroup, why string) bool {
 		rec, held := stuckRecord(g)
 		if !held {
@@ -245,9 +226,6 @@ func runHeadStallStep(
 			if onRecover != nil {
 				onRecover(ep.ProviderAddress)
 			}
-			if setProviderHealth != nil && providerAllUsable(ep.ProviderAddress) {
-				setProviderHealth(ep.ProviderAddress, true)
-			}
 		}
 		return true
 	}
@@ -270,8 +248,7 @@ func runHeadStallStep(
 	// chainHigh is the highest block any url of this chain and interface has shown. A url is only
 	// stalled when another one has gone above it: if nothing is ahead, the chain itself is quiet
 	// (a testnet with no traffic, a halt), every url answers the same block, and none of them is
-	// at fault. Marking them would hold every provider's health gauge at 0, and the production
-	// EndpointHealthDegraded alert pages critical after 15 minutes of that.
+	// at fault. Marking them would take every url out of rotation for nothing.
 	// Every url counts as evidence the chain moved, including ws/wss urls that never serve a relay.
 	var chainHigh int64
 	for e := range seen {
@@ -372,25 +349,18 @@ func runHeadStallStep(
 		}
 	}
 
-	// Publish this cycle's stalled set, and hold the gauge of every provider with a stalled url at 0.
+	// Publish this cycle's stalled set.
 	stalledURLs := make(map[string]struct{})
-	stalledProviders := make(map[string]struct{})
 	liveURLs := make(map[string]struct{}, len(groups))
 	for _, g := range groups {
 		liveURLs[g.url] = struct{}{}
 		for _, ep := range g.eps {
 			if holdsStall(ep.Endpoint) {
 				stalledURLs[g.url] = struct{}{}
-				stalledProviders[ep.ProviderAddress] = struct{}{}
 			}
 		}
 	}
 	state.sync(stalledURLs, liveURLs)
-	if setProviderHealth != nil {
-		for provider := range stalledProviders {
-			setProviderHealth(provider, false)
-		}
-	}
 	return res
 }
 
@@ -403,12 +373,6 @@ func (rpcss *RPCSmartRouterServer) runHeadStall(endpoints []*routersession.Endpo
 	if rpcss.listenEndpoint != nil {
 		chainID, apiInterface = rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface
 	}
-	var setHealth func(string, bool)
-	if rpcss.smartRouterEndpointMetrics != nil {
-		setHealth = func(provider string, healthy bool) {
-			rpcss.smartRouterEndpointMetrics.SetEndpointOverallHealth(chainID, apiInterface, provider, healthy)
-		}
-	}
 	var onRecover func(string)
 	if rpcss.sessionManager != nil {
 		onRecover = rpcss.sessionManager.RestoreRecoveredProvider
@@ -418,7 +382,7 @@ func (rpcss *RPCSmartRouterServer) runHeadStall(endpoints []*routersession.Endpo
 		rpcss.endpointChainTrackerManager.GetObservation,
 		rpcss.endpointChainTrackerManager.StallCycleThreshold(),
 		rpcss.endpointChainTrackerManager.StallGrace(),
-		now, onRecover, setHealth, &rpcss.headStall,
+		now, onRecover, &rpcss.headStall,
 		[]utils.Attribute{utils.LogAttr("chainID", chainID), utils.LogAttr("apiInterface", apiInterface)},
 	)
 	rpcss.probeStats.recordHeadStall(res)

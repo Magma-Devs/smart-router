@@ -12,7 +12,7 @@
 # Smart Router
 
 [![Build and Test](https://github.com/Magma-Devs/smart-router/actions/workflows/smartrouter.yml/badge.svg?branch=main)](https://github.com/Magma-Devs/smart-router/actions/workflows/smartrouter.yml)
-[![Release](https://img.shields.io/badge/release-v1.5.10-brightgreen)](https://github.com/Magma-Devs/smart-router/releases/latest)
+[![Release](https://img.shields.io/badge/release-v1.6.8-brightgreen)](https://github.com/Magma-Devs/smart-router/releases/latest)
 [![Go](https://img.shields.io/badge/go-1.26%2B-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![License](https://img.shields.io/badge/license-source--available-orange.svg)](LICENSE.md)
 
@@ -445,7 +445,7 @@ When started with `--debug-address <addr>` (and `devMode.enabled=true`), the rou
 
 The reset tests rely on is **`POST /debug/reset-all`**, which drains the router's internal state stores (optimizer scores, Ristretto, seen-block caches, session-manager state) and — so a single call returns the router to a serving state after an all-providers-down stress burst — also **re-enables endpoint health and cold-rebuilds pairing**.
 
-Why that matters: an endpoint that hits `MaxConsecutiveConnectionAttempts` consecutive connection failures is disabled (`Endpoint.Enabled=false`), and the only paths back are a successful relay or the ~15-minute epoch tick. After a stress test drives every provider down, those endpoints stay disabled and contaminate later tests until a pod restart. `reset-all` now re-enables them (mirroring the reset onto the Prometheus health gauge) and re-admits demoted providers via a cold `rebuildPairingFromConfig` (no re-probing). Every existing `reset-all` caller inherits this — no test migration.
+Why that matters: an endpoint that hits `MaxConsecutiveConnectionAttempts` consecutive connection failures is disabled (`Endpoint.Enabled=false`), and the only paths back are a successful relay or the ~15-minute epoch tick. After a stress test drives every provider down, those endpoints stay disabled and contaminate later tests until a pod restart. `reset-all` now re-enables them and re-admits demoted providers via a cold `rebuildPairingFromConfig` (no re-probing). Every existing `reset-all` caller inherits this — no test migration.
 
 For tests that only need the endpoint-health reset, **`POST /debug/reset-endpoint-health`** does exactly that and nothing else; its name mirrors `Endpoint.ResetHealth()` in the source. Response (any method other than `POST` returns 405):
 

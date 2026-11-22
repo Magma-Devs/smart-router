@@ -76,7 +76,9 @@ another registry, and tests use `NewRegistry` or the jitter-free `NewRegistryWit
   (`common/error_classifier.go`, JSON-RPC table). On GraphQL, an error coded
   RESOURCE_EXHAUSTED inside a 200 (Sui's rate and query-cost limit), read through the request
   message's own classification on the relay path and by both head-poll fetchers alike
-  (MAG-4378).
+  (MAG-4378). On a read only one without a `path` holds off: with a `path` it is a limit on one
+  field, not a quota on our traffic, and is retried on another provider without a hold-off
+  (MAG-5121). A mutation still holds off on either.
 
 ## Query APIs
 

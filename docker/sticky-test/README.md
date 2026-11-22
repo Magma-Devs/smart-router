@@ -151,8 +151,8 @@ Theory predicts roughly a third of unpinned rounds should fail with heads at H, 
 # Production-readiness scenarios (`run-qa.sh`)
 
 ```bash
-docker/sticky-test/run-qa.sh                          # 7 scenarios, ~6 min
-STICKY_SHARED_STATE=false docker/sticky-test/run-qa.sh # negative control: 5 of 7 MUST fail
+docker/sticky-test/run-qa.sh                          # 8 scenarios, ~6 min
+STICKY_SHARED_STATE=false docker/sticky-test/run-qa.sh # negative control: all but select-provider MUST fail
 ```
 
 Brings the stack up once and runs every scenario against it, including the ones that need the
@@ -160,17 +160,54 @@ infrastructure disturbed — a replica restarted, the registry stopped and start
 
 | Scenario | What it proves | Detects a broken feature? |
 |---|---|---|
-| Customer sequence across replicas | head-then-fetch over 3 replicas, no false gaps | yes |
+| Customer sequence across replicas | head-then-fetch over 3 replicas: both on one upstream, no false gaps | yes |
 | Session id on every call | the id must be on the head request too, not only the fetch | yes |
-| Concurrent requests on one id | simultaneous requests do not split across upstreams | weakly |
+| Concurrent requests on one id | simultaneous requests for one id do not split across upstreams | yes |
 | `router-select-provider` beats a claim | naming a provider explicitly still wins | no, by design |
-| A replica restarts | a pod with an empty table adopts the fleet's claim | yes |
+| Claims hold before a restart | each id stays on one upstream across all 3 replicas; records the claims | yes |
+| A replica restarts | the restarted pod, its table empty, adopts the claims made before the restart | yes |
 | Registry unreachable | sticky fails closed; traffic without the header is unaffected | yes |
 | Registry restored | sticky works again | yes |
 
-Two of these do not discriminate, and that is stated on purpose rather than left to look stronger
-than it is: `select-provider` does not depend on shared state at all, and the concurrency check
-passed once with the feature disabled.
+One of these does not discriminate, and that is stated on purpose rather than left to look
+stronger than it is: `select-provider` does not depend on shared state at all.
+
+**Every affinity check asks with 6 session ids** (MAG-4129). Without the registry each replica
+picks for itself, and the three pick the same upstream by chance at least one time in nine (2 of
+24 trials), so a check that asked with one id passed with the feature disabled: concurrency did,
+and so did the restart check, once in three runs. A replica sends its share of a session's
+requests almost entirely to one upstream, so more requests per id barely help; more ids do.
+Every one of 6 has to hold, so a feature-off run passes a check by chance about once in half a
+million.
+
+**The head-then-fetch checks assert the pin, not only the gap.** A false gap needs the head and
+the fetch on different upstreams *and* the fetch's upstream behind, so with the feature off only
+9 of 36 rounds gapped while 23 of 36 split, and a run that counted gaps alone passed about one
+time in twenty (once in four negative-control runs). The customer and id-on-every-call scenarios
+now also require every pinned round's two replies to name the same upstream: 0 of 40 split with
+the feature on.
+
+**The restart check needs claims older than the restart.** `claims-before-restart` makes them,
+one request per replica per id, and writes them to `$STICKY_QA_STATE` (`run-qa.sh` gives each run
+its own file); `restarted-pod` reads them back after router-a restarts and requires every id to
+keep its upstream. It used to make its claim after the restart, which tested a fresh claim, not
+an adopted one. Run by hand against a `KEEP=1` stack, the order is the same: `claims-before-restart`,
+`docker compose -f docker-compose.falsegap.yml restart router-a`, `restarted-pod`.
+
+**Reading a failure.** The harness reads `Router-Provider-Address` to identify the upstream and
+fails if a successful reply omits it. On a cache hit, the fake node's `servedBy` field still names
+the upstream that filled the cache, while the header says `Cached`. A sticky reply that
+says `Cached` fails the scenario as a MAG-4122 regression instead of being counted as an upstream.
+A false gap in a round that carries the id on both calls prints both replies' upstream,
+`Router-Retries` and replica, and names the path that produced it.
+
+**Refused rounds are not gaps.** A pinned call fails rather than move to another upstream when
+the router believes the pinned one is more than 10 blocks behind the tip (MAG-4123). The fakes
+advance a block a second, faster than the router polls their heads, so here about one pinned head
+call in ten is refused with `pinned provider is too far behind the chain tip`. The customer and
+id-on-every-call scenarios report those rounds and leave them out of the gap count: the caller saw
+an error, which a silent gap is not. A scenario fails when fewer than half its rounds were
+answered, because too few are then left to judge the pin.
 
 **Closed gap.** A sticky request used to be answered from the response cache before any upstream
 was chosen, so the pin was not consulted: on a cold start, 24 sticky requests produced 19 claim

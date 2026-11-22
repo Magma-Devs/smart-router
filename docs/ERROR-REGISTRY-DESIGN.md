@@ -74,6 +74,8 @@ Errors returned by the blockchain node itself (not execution/state errors).
 | 2018 | `NODE_ACCESS_DENIED` | Endpoint refused the router itself — credentials, plan or quota, WAF or IP rule, proxy auth, protocol, region | Yes | REST HTTP 401, 402, 403, 407, 426, 451 |
 | 2017 | `NODE_DATA_NOT_HELD` | Endpoint does not hold the requested data — pruned or never existed (SubCategoryDataScope) | Yes | gRPC 5, gRPC 11 |
 | 2019 | `NODE_ABORTED` | Node aborted the operation. On Sui (the only sender), the validators' answer to a submitted transaction: consensus rejection, expired status, an input object that does not exist yet, already finalized under other signatures, or another transient processing failure. Sui's own message calls it retriable with another submission, which is the client's call; not evidence against the endpoint, so not scored | No | gRPC 10 |
+| 2020 | `NODE_UNRECOGNIZED_ERROR` | GraphQL only (MAG-5121): an error the router has no row for, an error with no code or an unknown code inside a 200, or a 4xx status GraphQL's status table does not name (400, 409, 410, 413, 415, 422, ...). The router cannot tell whose mistake it is, so it asks another provider and does not blame this one; when every provider says the same, a provider's reply is served as is | Yes | GraphQL |
+| 2021 | `NODE_URL_REFUSED` | GraphQL only (MAG-5121): HTTP 404, 405 or a redirect on GraphQL's one url. Says the configured url is wrong, so every request to it fails the same way: retried and blamed on the endpoint | Yes | HTTP 404, 405, 3xx (GraphQL) |
 
 > **SubCategoryDataScope is no longer 2017 alone.** FAILOVER-TASKS section 2 extended it to every
 > "the answer you want is not here" code: 2012, 2013, 3201-3206, and the chain-specific not-found
@@ -211,25 +213,30 @@ Errors are classified using a two-level lookup with chain-family awareness.
 
 ### Chain Families
 
-The authoritative map lives in `protocol/common/error_registry.go` (`chainFamilyMap`). `GetChainFamilyOrDefault` returns `ChainFamilyUnknown` (a dedicated sentinel, NOT `EVM`) when a chain ID is not registered — Tier-2 lookups against the sentinel intentionally miss so classification falls through to transport-scoped Tier-1 matchers rather than silently inheriting another family's semantics.
+A chain's family comes from its spec's imports. `protocol/common/error_registry.go` names the family of each spec that imports nothing (`rootChainFamilies`); when the router loads its spec catalog (`statetracker.RegisterForSpecUpdatesOrSetStaticSpecsWithToken`), `RegisterChainFamilies` gives every other spec the family of its first import that has one, through the imports' own imports. HOD1 imports ETH1 and is `EVM`; PEP imports DOGE, which imports BTC, and is `Bitcoin`; CANTO imports ETH1 before the Cosmos SDK specs and is `EVM`, EVMOS imports COSMOSSDK50 first and is `CosmosSDK`. A spec added to lava-specs is classified with its parent's rows without a router release, and a spec with imports is never listed by hand, so its family cannot disagree with them (MAG-5246).
 
-Two helper functions (`common.IsSolanaFamily` etc.) delegate to this map so there is a single source of truth.
+`GetChainFamilyOrDefault` returns `ChainFamilyUnknown` (a dedicated sentinel, NOT `EVM`) when a chain has no family — Tier-2 lookups against the sentinel intentionally miss so classification falls through to transport-scoped Tier-1 matchers rather than silently inheriting another family's semantics.
 
-| ChainFamily | Chain IDs |
+`common.IsSolanaFamily` and chainlib's `isUTXOFamily` (the JSON-RPC 1.0 reply fixup) read the same families, so there is a single source of truth. `TestEveryLavaSpecHasAChainFamily` reads lava-specs main in the `lava-specs chain families` check (on every PR, on main and nightly) and fails when a spec gets no family, when a spec with imports is listed in `rootChainFamilies`, or when a chain is `Bitcoin` without importing BTC. That check is not required, so a spec merged in lava-specs never blocks a smart-router merge; the required unit-tests skip the test.
+
+| ChainFamily | Root specs (every spec importing one takes its family) |
 |-------------|-----------|
-| `EVM` | ETH1, SEP1, HOL1, ARBITRUM, POLYGON, BASE, OPTM, AVAX, BSC, BLAST, FTM250, SONIC, ... |
-| `Solana` | SOLANA, SOLANAT, KOII, KOIIT |
-| `Bitcoin` | BTC, BTCT, LTC, LTCT, DOGE, DOGET, BCH, BCHT |
-| `CosmosSDK` | COSMOSHUB, LAVA, LAV1, AXELAR, EVMOS, OSMOSIS, JUN1, CELESTIA, ... |
+| `EVM` | ETH1, HYPERLIQUID, ETHBEACON |
+| `Solana` | SOLANA |
+| `Bitcoin` | BTC |
+| `CosmosSDK` | IBC, TENDERMINT, ETHERMINT, COSMOSWASM, COSMOSSDK45DEP |
 | `Starknet` | STRK, STRKS |
 | `Aptos` | APT1 |
-| `Sui` | SUIT |
-| `NEAR` | NEAR, NEART |
-| `XRP` | XRP, XRPT |
-| `Stellar` | XLM, XLMT |
-| `TON` | TON, TONT |
-| `Tron` | TRX, TRXT |
-| `Cardano` | CARDANO, CARDANOT |
+| `Sui` | SUI |
+| `NEAR` | NEAR |
+| `XRP` | XRP |
+| `Stellar` | XLM |
+| `TON` | TON |
+| `Tron` | TRX |
+| `Cardano` | CARDANO |
+| `Tezos` | TEZOS |
+| `Substrate` | POLKADOT, POLKADOTASSETHUB, KUSAMA, KUSAMAASSETHUB, POLYMESH, ACA, AVT, BITTENSOR, BSX, ENJ, ENJIN, HYDRATION, LIT, TRAC, XRT |
+| One chain each | ALEO, ALGORAND, ARWEAVE, AVALANCHEP, CANTON, CASPER, CONCORDIUM, DCR, FUELNETWORK, ICP, ION, IOTA, KASPA, MINA, MONERO, MORALIS, MULTIVERSX, QUAI, SC, SQDSUBGRAPH, STACKS, VECHAIN — no rows yet |
 | `PolygonZkEVM` | (no chain IDs currently map to this family — matchers live in Tier-1 EVM) |
 | `Unknown` | sentinel — Tier-2 lookups miss and fall through to Tier-1 |
 
@@ -399,7 +406,7 @@ var GenericErrorMappings = map[TransportType][]GenericMapping{
 ```
 
 ### Adding a New Chain
-1. **If it uses standard protocols (EVM, JSON-RPC):** Assign a `ChainFamily` → generic mappings handle it automatically. Zero code changes.
+1. **If its spec imports one that has a family (an EVM chain importing ETH1, say):** it takes that family when the router loads the catalog. Zero code changes. **If its spec imports nothing:** name its family in `rootChainFamilies`; the `lava-specs chain families` check fails until it has one.
 2. **If it has unique errors with different retryability:** Add entries to `ChainErrorMappings` and define new `RouterError` constants in the registry.
 
 ---
