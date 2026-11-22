@@ -3,9 +3,14 @@ package common
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"regexp"
 	"strings"
+	"sync"
+	"sync/atomic"
+
+	spectypes "github.com/magma-Devs/smart-router/types/spec"
 )
 
 // ---------------------------------------------------------------------------
@@ -209,7 +214,7 @@ func (le *RouterError) IsRateLimited() bool {
 
 type ChainFamily int
 
-// ChainFamilyUnknown is a sentinel returned for chains not registered in chainFamilyMap.
+// ChainFamilyUnknown is a sentinel returned for chains with no chain family (GetChainFamily).
 // Tier-2 lookups against this value intentionally miss so classification falls through
 // to transport-scoped Tier-1 matchers instead of inheriting another family's semantics.
 // Defined explicitly as -1 to avoid colliding with the iota-numbered real families below.
@@ -230,6 +235,34 @@ const (
 	ChainFamilyCardano
 	ChainFamilyTron
 	ChainFamilySui
+	ChainFamilyTezos
+	// Substrate: Polkadot, Kusama, their parachains and other chains built on the Substrate
+	// framework, which answer the same JSON-RPC methods and Sidecar REST routes.
+	ChainFamilySubstrate
+	// One chain each: a root spec with its own node software and no rows yet. Each is its own
+	// family so a row written for one never reaches another chain.
+	ChainFamilyAleo
+	ChainFamilyAlgorand
+	ChainFamilyArweave
+	ChainFamilyAvalancheP
+	ChainFamilyCanton
+	ChainFamilyCasper
+	ChainFamilyConcordium
+	ChainFamilyDecred
+	ChainFamilyFuel
+	ChainFamilyICP
+	ChainFamilyION
+	ChainFamilyIOTA
+	ChainFamilyKaspa
+	ChainFamilyMina
+	ChainFamilyMonero
+	ChainFamilyMoralis
+	ChainFamilyMultiversX
+	ChainFamilyQuai
+	ChainFamilySia
+	ChainFamilyStacks
+	ChainFamilySubsquid
+	ChainFamilyVeChain
 )
 
 func (cf ChainFamily) String() string {
@@ -264,113 +297,201 @@ func (cf ChainFamily) String() string {
 		return "Tron"
 	case ChainFamilySui:
 		return "Sui"
+	case ChainFamilyTezos:
+		return "Tezos"
+	case ChainFamilySubstrate:
+		return "Substrate"
+	case ChainFamilyAleo:
+		return "Aleo"
+	case ChainFamilyAlgorand:
+		return "Algorand"
+	case ChainFamilyArweave:
+		return "Arweave"
+	case ChainFamilyAvalancheP:
+		return "AvalancheP"
+	case ChainFamilyCanton:
+		return "Canton"
+	case ChainFamilyCasper:
+		return "Casper"
+	case ChainFamilyConcordium:
+		return "Concordium"
+	case ChainFamilyDecred:
+		return "Decred"
+	case ChainFamilyFuel:
+		return "Fuel"
+	case ChainFamilyICP:
+		return "ICP"
+	case ChainFamilyION:
+		return "ION"
+	case ChainFamilyIOTA:
+		return "IOTA"
+	case ChainFamilyKaspa:
+		return "Kaspa"
+	case ChainFamilyMina:
+		return "Mina"
+	case ChainFamilyMonero:
+		return "Monero"
+	case ChainFamilyMoralis:
+		return "Moralis"
+	case ChainFamilyMultiversX:
+		return "MultiversX"
+	case ChainFamilyQuai:
+		return "Quai"
+	case ChainFamilySia:
+		return "Sia"
+	case ChainFamilyStacks:
+		return "Stacks"
+	case ChainFamilySubsquid:
+		return "Subsquid"
+	case ChainFamilyVeChain:
+		return "VeChain"
 	default:
 		return fmt.Sprintf("ChainFamily(%d)", int(cf))
 	}
 }
 
-// chainFamilyMap maps chain ID strings (from spec JSON files) to their chain family.
-// Sourced from specs/mainnet-1/specs/ and specs/testnet-2/specs/.
-//
-// INVARIANT: populated at package-init time and never mutated at runtime.
-// Read paths (GetChainFamily, GetChainFamilyOrDefault, ClassifyError) rely on
-// this for lock-free concurrent access. If a future change needs dynamic
-// registration, it must introduce explicit synchronisation — do NOT mutate
-// this map from anywhere other than its literal declaration below.
-var chainFamilyMap = map[string]ChainFamily{
+// rootChainFamilies names the family of each spec that imports nothing, and so has no parent to
+// take one from. Every other spec takes its family from its imports when the router loads its
+// catalog (RegisterChainFamilies): HOD1 and AVALANCHEC import ETH1, so they are EVM; PEP imports
+// DOGE, which imports BTC, so it is Bitcoin. A spec with imports is never listed here, so its family
+// cannot disagree with them: AGR and MOVEMENT once sat here as EVM while importing Cosmos SDK and
+// Aptos, and three hand-kept lists drifted from lava-specs (MAG-3077, Sui mainnet, MAG-5246).
+// TestEveryLavaSpecHasAChainFamily holds lava-specs to both rules.
+var rootChainFamilies = map[string]ChainFamily{
 	// EVM — all jsonrpc chains with EVM execution semantics
-	"ETH1": ChainFamilyEVM, "SEP1": ChainFamilyEVM, "HOL1": ChainFamilyEVM,
-	"ARBITRUM": ChainFamilyEVM, "ARBITRUMN": ChainFamilyEVM, "ARBITRUMS": ChainFamilyEVM,
-	"POLYGON": ChainFamilyEVM, "POLYGONA": ChainFamilyEVM,
-	"BASE": ChainFamilyEVM, "BASES": ChainFamilyEVM,
-	"OPTM": ChainFamilyEVM, "OPTMS": ChainFamilyEVM,
-	"AVAX": ChainFamilyEVM, "AVAXT": ChainFamilyEVM,
-	"AVAXC": ChainFamilyEVM, "AVAXCT": ChainFamilyEVM,
-	"AVAXP": ChainFamilyEVM, "AVAXPT": ChainFamilyEVM,
-	"BSC": ChainFamilyEVM, "BSCT": ChainFamilyEVM,
-	"BLAST": ChainFamilyEVM, "BLASTSP": ChainFamilyEVM,
-	"FTM250": ChainFamilyEVM, "FTM4002": ChainFamilyEVM,
-	"SONIC": ChainFamilyEVM, "SONICT": ChainFamilyEVM,
-	"CELO": ChainFamilyEVM, "ALFAJORES": ChainFamilyEVM,
-	"FUSE": ChainFamilyEVM,
-	"FVM":  ChainFamilyEVM, "FVMT": ChainFamilyEVM,
-	"HEDERA": ChainFamilyEVM, "HEDERAT": ChainFamilyEVM,
-	"HYPERLIQUID": ChainFamilyEVM, "HYPERLIQUIDT": ChainFamilyEVM,
-	"WORLDCHAIN": ChainFamilyEVM, "WORLDCHAINS": ChainFamilyEVM,
-	"AGR": ChainFamilyEVM, "AGRT": ChainFamilyEVM,
-	"BERA": ChainFamilyEVM, "BERAT": ChainFamilyEVM, "BERAT2": ChainFamilyEVM,
-	"CANTO":     ChainFamilyEVM,
-	"KAKAROTT":  ChainFamilyEVM,
-	"SPARK":     ChainFamilyEVM,
-	"ETHBEACON": ChainFamilyEVM,
-	"MOVEMENT":  ChainFamilyEVM, "MOVEMENTT": ChainFamilyEVM,
+	"ETH1": ChainFamilyEVM, "HYPERLIQUID": ChainFamilyEVM, "ETHBEACON": ChainFamilyEVM,
 
 	// Solana
-	"SOLANA": ChainFamilySolana, "SOLANAT": ChainFamilySolana,
+	"SOLANA": ChainFamilySolana,
 
 	// Bitcoin/UTXO
-	"BTC": ChainFamilyBitcoin, "BTCT": ChainFamilyBitcoin,
-	"LTC": ChainFamilyBitcoin, "LTCT": ChainFamilyBitcoin,
-	"DOGE": ChainFamilyBitcoin, "DOGET": ChainFamilyBitcoin,
-	"BCH": ChainFamilyBitcoin, "BCHT": ChainFamilyBitcoin,
+	"BTC": ChainFamilyBitcoin,
 
-	// Cosmos SDK — chains with grpc/rest/tendermintrpc interfaces
-	"COSMOSHUB": ChainFamilyCosmosSDK, "COSMOSHUBT": ChainFamilyCosmosSDK,
-	"LAVA": ChainFamilyCosmosSDK, "LAV1": ChainFamilyCosmosSDK,
-	"AXELAR": ChainFamilyCosmosSDK, "AXELART": ChainFamilyCosmosSDK,
-	"EVMOS": ChainFamilyCosmosSDK, "EVMOST": ChainFamilyCosmosSDK,
-	"OSMOSIS": ChainFamilyCosmosSDK, "OSMOSIST": ChainFamilyCosmosSDK,
-	"JUN1": ChainFamilyCosmosSDK, "JUNT1": ChainFamilyCosmosSDK,
-	"CELESTIA": ChainFamilyCosmosSDK, "CELESTIATA": ChainFamilyCosmosSDK, "CELESTIATM": ChainFamilyCosmosSDK,
-	"STRGZ": ChainFamilyCosmosSDK, "STRGZT": ChainFamilyCosmosSDK,
-	"SECRET": ChainFamilyCosmosSDK, "SECRETP": ChainFamilyCosmosSDK,
-	"IBC":       ChainFamilyCosmosSDK,
-	"COSMOSSDK": ChainFamilyCosmosSDK, "COSMOSSDK50": ChainFamilyCosmosSDK,
-	"COSMOSSDK45DEP": ChainFamilyCosmosSDK, "COSMOSSDKFULL": ChainFamilyCosmosSDK,
-	"COSMOSWASM": ChainFamilyCosmosSDK,
-	"ETHERMINT":  ChainFamilyCosmosSDK,
-	"TENDERMINT": ChainFamilyCosmosSDK,
-	"UNIONT":     ChainFamilyCosmosSDK,
+	// Cosmos SDK — the base specs every Cosmos chain imports
+	"IBC": ChainFamilyCosmosSDK, "TENDERMINT": ChainFamilyCosmosSDK, "ETHERMINT": ChainFamilyCosmosSDK,
+	"COSMOSWASM": ChainFamilyCosmosSDK, "COSMOSSDK45DEP": ChainFamilyCosmosSDK,
 
-	// Starknet
+	// Starknet — starknet.json declares its testnet without importing the mainnet
 	"STRK": ChainFamilyStarknet, "STRKS": ChainFamilyStarknet,
 
 	// Aptos
 	"APT1": ChainFamilyAptos,
 
 	// Sui — shares Move heritage with Aptos but has a distinct JSON-RPC surface
-	// and error taxonomy, so it gets its own family. SUI is mainnet, SUIT testnet,
-	// SUID devnet; sui.json declares all three. Listing only the testnet left
-	// mainnet traffic falling through to ChainFamilyUnknown, which skips every
-	// family-scoped matcher — on the network customers actually run.
-	"SUI": ChainFamilySui, "SUIT": ChainFamilySui, "SUID": ChainFamilySui,
+	// and error taxonomy, so it gets its own family.
+	"SUI": ChainFamilySui,
 
 	// NEAR
-	"NEAR": ChainFamilyNEAR, "NEART": ChainFamilyNEAR,
+	"NEAR": ChainFamilyNEAR,
 
 	// XRP
-	"XRP": ChainFamilyXRP, "XRPT": ChainFamilyXRP,
+	"XRP": ChainFamilyXRP,
 
 	// Stellar
-	"XLM": ChainFamilyStellar, "XLMT": ChainFamilyStellar,
+	"XLM": ChainFamilyStellar,
 
 	// TON
-	"TON": ChainFamilyTON, "TONT": ChainFamilyTON,
+	"TON": ChainFamilyTON,
 
 	// Tron — REST-based with own error format (string enums like CONTRACT_EXE_ERROR)
-	"TRX": ChainFamilyTron, "TRXT": ChainFamilyTron,
+	"TRX": ChainFamilyTron,
 
 	// Cardano
-	"CARDANO": ChainFamilyCardano, "CARDANOT": ChainFamilyCardano,
+	"CARDANO": ChainFamilyCardano,
 
-	// Koii
-	"KOII": ChainFamilySolana, "KOIIT": ChainFamilySolana,
+	// Tezos — REST (Octez RPC)
+	"TEZOS": ChainFamilyTezos,
+
+	// Substrate — relay chains, asset hubs and parachains, each its own spec
+	"POLKADOT": ChainFamilySubstrate, "POLKADOTASSETHUB": ChainFamilySubstrate,
+	"KUSAMA": ChainFamilySubstrate, "KUSAMAASSETHUB": ChainFamilySubstrate,
+	"POLYMESH": ChainFamilySubstrate, "ACA": ChainFamilySubstrate, "AVT": ChainFamilySubstrate,
+	"BITTENSOR": ChainFamilySubstrate, "BSX": ChainFamilySubstrate, "ENJ": ChainFamilySubstrate,
+	"ENJIN": ChainFamilySubstrate, "HYDRATION": ChainFamilySubstrate, "LIT": ChainFamilySubstrate,
+	"TRAC": ChainFamilySubstrate, "XRT": ChainFamilySubstrate,
+
+	// One chain each
+	"ALEO": ChainFamilyAleo, "ALGORAND": ChainFamilyAlgorand, "ARWEAVE": ChainFamilyArweave,
+	"CANTON": ChainFamilyCanton, "CASPER": ChainFamilyCasper, "CONCORDIUM": ChainFamilyConcordium,
+	"DCR": ChainFamilyDecred, "FUELNETWORK": ChainFamilyFuel, "ICP": ChainFamilyICP,
+	"ION": ChainFamilyION, "IOTA": ChainFamilyIOTA, "KASPA": ChainFamilyKaspa,
+	"MINA": ChainFamilyMina, "MORALIS": ChainFamilyMoralis, "MULTIVERSX": ChainFamilyMultiversX,
+	"QUAI": ChainFamilyQuai, "SC": ChainFamilySia, "SQDSUBGRAPH": ChainFamilySubsquid,
+	"STACKS": ChainFamilyStacks, "VECHAIN": ChainFamilyVeChain,
+	// The P-Chain's platform.* API; the EVM C-Chain is AVALANCHEC, which imports ETH1.
+	"AVALANCHEP": ChainFamilyAvalancheP,
+	// monero.json imports nothing and monerod speaks JSON-RPC 2.0: not a Bitcoin Core derivative.
+	"MONERO": ChainFamilyMonero,
+}
+
+// chainFamilies is the family of every chain id the router can classify: rootChainFamilies, plus
+// every spec of each catalog the router has loaded. It is nil until the first catalog loads, and
+// GetChainFamily reads rootChainFamilies until then.
+//
+// Thread safety: readers load the map without a lock on the classification path, so a published
+// map is never written. RegisterChainFamilies builds a new map and swaps it in, and
+// chainFamiliesWriteMu keeps two registrations from losing each other's chains.
+var (
+	chainFamilies        atomic.Pointer[map[string]ChainFamily]
+	chainFamiliesWriteMu sync.Mutex
+)
+
+// RegisterChainFamilies gives every spec in specs its family, so a chain is classified by its
+// family's rows from the moment its spec loads, with no list to update when lava-specs adds one. A
+// spec in rootChainFamilies keeps that family. Any other takes the family of its first import that
+// has one, following the imports' own imports: CANTO imports ETH1 first and is EVM, EVMOS imports
+// COSMOSSDK50 first and is Cosmos SDK. A spec none of whose ancestors has a family is left out and
+// reads as ChainFamilyUnknown, as an unlisted chain always has. The same catalog registered twice
+// changes nothing, so every endpoint registers the catalog it loaded.
+func RegisterChainFamilies(specs map[string]spectypes.Spec) {
+	resolved := make(map[string]ChainFamily, len(specs))
+	for index := range specs {
+		if family, ok := resolveChainFamily(index, specs, map[string]bool{}); ok {
+			resolved[index] = family
+		}
+	}
+
+	chainFamiliesWriteMu.Lock()
+	defer chainFamiliesWriteMu.Unlock()
+	var families map[string]ChainFamily
+	if registered := chainFamilies.Load(); registered != nil {
+		families = maps.Clone(*registered)
+	} else {
+		families = maps.Clone(rootChainFamilies)
+	}
+	maps.Copy(families, resolved)
+	chainFamilies.Store(&families)
+}
+
+// resolveChainFamily is index's family: its rootChainFamilies entry, else the family of the first of
+// its imports that resolves to one. visiting holds the specs being followed, so an import loop, which
+// spec expansion refuses anyway, ends here instead of recursing forever.
+func resolveChainFamily(index string, specs map[string]spectypes.Spec, visiting map[string]bool) (ChainFamily, bool) {
+	if family, ok := rootChainFamilies[index]; ok {
+		return family, true
+	}
+	spec, ok := specs[index]
+	if !ok || visiting[index] {
+		return ChainFamilyUnknown, false
+	}
+	visiting[index] = true
+	defer delete(visiting, index)
+	for _, parent := range spec.Imports {
+		if family, ok := resolveChainFamily(parent, specs, visiting); ok {
+			return family, true
+		}
+	}
+	return ChainFamilyUnknown, false
 }
 
 // GetChainFamily returns the chain family for a given chain ID.
 // Returns ok=false for unknown chains; the caller is responsible for handling that case.
 func GetChainFamily(chainID string) (ChainFamily, bool) {
-	family, ok := chainFamilyMap[chainID]
+	families := rootChainFamilies
+	if registered := chainFamilies.Load(); registered != nil {
+		families = *registered
+	}
+	family, ok := families[chainID]
 	return family, ok
 }
 
@@ -380,7 +501,7 @@ func GetChainFamily(chainID string) (ChainFamily, bool) {
 // unregistered chains — the sentinel ensures Tier-2 lookups miss and classification
 // falls back to transport-scoped Tier-1 matchers instead.
 func GetChainFamilyOrDefault(chainID string) ChainFamily {
-	if family, ok := chainFamilyMap[chainID]; ok {
+	if family, ok := GetChainFamily(chainID); ok {
 		return family
 	}
 	return ChainFamilyUnknown

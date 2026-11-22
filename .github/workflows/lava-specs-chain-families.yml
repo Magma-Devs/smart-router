@@ -1,0 +1,59 @@
+name: lava-specs chain families
+
+# Holds every spec in lava-specs main to the router's chain families
+# (protocol/common TestEveryLavaSpecHasAChainFamily, MAG-5246). It fails when
+# a spec gets no family, when a spec with imports is named in
+# rootChainFamilies, or when a chain is Bitcoin without importing BTC.
+#
+# Not a required check, on purpose. lava-specs main moves on its own: between
+# 2026-08-31 and 2026-11-08 it added 12 specs that import nothing (seven
+# Substrate chains, ICP, Kaspa, Quai, Sia and Decred), on six different days.
+# A required check reading it would have turned every smart-router PR, and
+# main, red on each of those days until a PR named the new root's family.
+# Here the failure shows on every PR, on main and on the nightly run, without
+# blocking a merge. The required unit-tests run the same test without the
+# checkout, and it skips there.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  schedule:
+    - cron: "30 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  lava-specs-chain-families:
+    name: lava-specs chain families
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CGO_ENABLED: "0"
+      LAVA_SPECS_DIR: ${{ github.workspace }}/.lava-specs
+      # Here a missing checkout fails the test instead of skipping it.
+      LAVA_SPECS_REQUIRED: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # lava-specs main. After the router checkout, which would clean it
+      # away; the leading dot keeps it out of `go list ./...`.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Magma-Devs/lava-specs
+          path: .lava-specs
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Check every lava-specs spec has a chain family
+        run: go test ./protocol/common -run '^TestEveryLavaSpecHasAChainFamily$' -count=1 -v

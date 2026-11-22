@@ -65,6 +65,10 @@ jobs:
       # tools/wizard's icon test downloads an SVG from the docs site; OFFLINE
       # skips it so the gate does not depend on the network.
       OFFLINE: "1"
+      # No lava-specs checkout here: protocol/common's
+      # TestEveryLavaSpecHasAChainFamily skips without LAVA_SPECS_DIR and runs
+      # in lava-specs-chain-families.yml, which is not required, so a spec
+      # merged in lava-specs cannot block this check (MAG-5246).
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 

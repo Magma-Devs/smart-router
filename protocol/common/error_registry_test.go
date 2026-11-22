@@ -639,6 +639,13 @@ func TestIsNonRetryableNodeErrorWithContext_JSONRPCBodyCode(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestChainFamily_GetByChainID(t *testing.T) {
+	// The child chains below take their family from their imports, which the router learns when it
+	// loads the catalog.
+	RegisterChainFamilies(specsImporting(map[string][]string{
+		"ARBITRUM": {"ETH1"}, "SOLANAT": {"SOLANA"}, "BTCT": {"BTC"}, "NEART": {"NEAR"},
+		"COSMOSSDK": {"IBC", "TENDERMINT"}, "COSMOSSDK50": {"COSMOSSDK"},
+		"COSMOSHUB": {"COSMOSSDK50", "COSMOSWASM"}, "EVMOS": {"COSMOSSDK50", "ETHERMINT", "ETH1"},
+	}))
 	tests := []struct {
 		chainID  string
 		expected ChainFamily
@@ -1333,11 +1340,13 @@ func checkShadow(t *testing.T, i, j int, a, b errorMapping) {
 // TestSuiNetworksAllMapToSuiFamily guards the gap this test was added for: sui.json declares
 // SUI (mainnet), SUIT (testnet) and SUID (devnet), but only the testnet was registered, so
 // mainnet and devnet traffic fell through to ChainFamilyUnknown and skipped every family-scoped
-// matcher — on the network customers actually run.
+// matcher — on the network customers actually run. SUIT and SUID import SUI, and now take its
+// family from that.
 func TestSuiNetworksAllMapToSuiFamily(t *testing.T) {
+	RegisterChainFamilies(specsImporting(map[string][]string{"SUI": nil, "SUIT": {"SUI"}, "SUID": {"SUI"}}))
 	for _, chainID := range []string{"SUI", "SUIT", "SUID"} {
 		family, registered := GetChainFamily(chainID)
-		require.True(t, registered, "chain %s is not registered in chainFamilyMap", chainID)
+		require.True(t, registered, "chain %s has no chain family", chainID)
 		require.Equal(t, ChainFamilySui, family, "chain %s should map to the Sui family", chainID)
 	}
 }
