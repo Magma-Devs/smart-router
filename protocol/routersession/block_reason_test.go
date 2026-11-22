@@ -11,6 +11,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/holdoff"
+	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 )
 
@@ -324,6 +325,38 @@ func TestPoolEmptyRelease_AddonReleasesOnlyWhatItReadmits(t *testing.T) {
 	require.Equal(t, []string{notServingAddon}, blocked, "a provider the release did not put back must not leave the blocked list")
 	require.NotContains(t, valid, notServingAddon)
 	require.Equal(t, recordBefore, blockedRecord(t, csm, notServingAddon), "its block stands as it was")
+}
+
+// The same holds for an extension with no add-on, such as archive, which takes the same branch of
+// the release (MAG-5078): only the blocked providers that serve the extension leave the blocked list.
+func TestPoolEmptyRelease_ExtensionReleasesOnlyWhatItReadmits(t *testing.T) {
+	csm := CreateConsumerSessionManager()
+	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, createPairingList("", true), nil))
+	ctx := context.Background()
+
+	// provider2 and provider3 serve "ext1" (createPairingList) and provider4 does not. Blocking the
+	// three empties the extension's pool, while plain traffic still has the other providers.
+	extensionProviders := []string{"provider2", "provider3"}
+	const notServingExtension = "provider4"
+	for _, address := range append(slices.Clone(extensionProviders), notServingExtension) {
+		require.NoError(t, csm.blockProvider(ctx, address, BlockReasonAllEndpointsDisabled, false, csm.atomicReadCurrentEpoch(), 0, 0, nil))
+	}
+	recordBefore := blockedRecord(t, csm, notServingExtension)
+
+	sessions, err := csm.GetSessions(ctx, 1, cuForFirstRequest, NewUsedProviders(nil), servicedBlockNumber, "", []*spectypes.Extension{{Name: "ext1"}}, common.NO_STATE, 0, "", "")
+	require.NoError(t, err, "the last resort releases the extension's providers and serves the request")
+	for provider := range sessions {
+		require.Contains(t, extensionProviders, provider)
+	}
+
+	csm.lock.RLock()
+	valid := slices.Clone(csm.validAddresses)
+	blocked := slices.Clone(csm.currentlyBlockedProviderAddresses)
+	csm.lock.RUnlock()
+	require.Subset(t, valid, extensionProviders, "the extension's providers are back in rotation")
+	require.Equal(t, []string{notServingExtension}, blocked, "a provider the release did not put back must not leave the blocked list")
+	require.NotContains(t, valid, notServingExtension)
+	require.Equal(t, recordBefore, blockedRecord(t, csm, notServingExtension), "its block stands as it was")
 }
 
 // The per-reason gauge is level-triggered: every reason is republished on every tick, zeros
