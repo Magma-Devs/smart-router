@@ -1,6 +1,7 @@
 package chainlib
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"math"
@@ -8,12 +9,22 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
+	"github.com/magma-Devs/smart-router/protocol/chainlib/grpcproxy"
 	dyncodec "github.com/magma-Devs/smart-router/protocol/chainlib/grpcproxy/dyncodec"
+	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
+	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/reflection/grpc_reflection_v1"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/prototext"
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
@@ -316,6 +327,67 @@ func TestCheckGrpcRequestMessage_ReadsWithTheBuildTheUpstreamServesNow(t *testin
 
 	remote.serving.Store(buildOfQueryGet(t, `type: TYPE_STRING`))
 	require.NoError(t, checkGrpcRequestMessage(registry, "chainlib_test.build.Query/Get", newRequest), "field 2 is a string in the build served now")
+}
+
+// parseFirstRelaySender sends a relay the way the router does: it parses the request first and
+// fails with the parse's error. sent counts the requests that got past the parse.
+type parseFirstRelaySender struct {
+	*stubRelaySender
+	manager *stubGRPCSubscriptionManager
+	sent    *atomic.Int32
+}
+
+func (s parseFirstRelaySender) SendRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, _ *metrics.RelayMetrics, metadataValues []pairingtypes.Metadata) (*common.RelayResult, error) {
+	if _, err := s.ParseRelay(ctx, url, req, connectionType, dappID, consumerIp, metadataValues); err != nil {
+		return nil, err
+	}
+	s.sent.Add(1)
+	return &common.RelayResult{Reply: &pairingtypes.RelayReply{Data: []byte{}}}, nil
+}
+
+func (s parseFirstRelaySender) GetGRPCSubscriptionManager() GRPCSubscriptionManager { return s.manager }
+
+// A server-streaming call whose body is not a protobuf message gets the unary call's refusal: the
+// stream path hands a failed parse back to the unary path, which refuses it, and no subscription
+// starts.
+func TestGrpcListener_RefusesAStreamCallWhoseBodyIsNotAProtobufMessage(t *testing.T) {
+	manager := newStubGRPCSubscriptionManager()
+	sender := parseFirstRelaySender{stubRelaySender: &stubRelaySender{parser: grpcParserWithSubscription()}, manager: manager, sent: &atomic.Int32{}}
+	newGrpc := func(ctx context.Context, endpoint *routersession.RPCEndpoint, relay RelaySender, logger *metrics.RPCConsumerLogs) ChainListener {
+		return NewGrpcChainListener(ctx, endpoint, relay, alwaysHealthyReporter{}, logger, sender.parser)
+	}
+	addr := serveWithFlags(t, newGrpc, spectypes.APIInterfaceGrpc, sender, common.ConsumerCmdFlags{})
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	require.NoError(t, err)
+	defer conn.Close()
+	subscribe := func(body []byte) (grpc.ClientStream, context.CancelFunc) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		stream, err := conn.NewStream(ctx, &grpc.StreamDesc{ServerStreams: true}, "/"+streamingApiName, grpc.ForceCodec(grpcproxy.RawBytesCodec{}), grpc.WaitForReady(true))
+		require.NoError(t, err)
+		require.NoError(t, stream.SendMsg(body))
+		require.NoError(t, stream.CloseSend())
+		return stream, cancel
+	}
+
+	// A subscription that starts streams this message, so a call that gets it was served as one.
+	manager.replies <- &pairingtypes.RelayReply{Data: []byte("checkpoint-1")}
+	for name, body := range map[string][]byte{"a cut-off field": {0x0a, 0x05, 0x61}, "wire type 7": {0x0f}} {
+		stream, cancel := subscribe(body)
+		var reply []byte
+		err := stream.RecvMsg(&reply)
+		require.Equal(t, codes.InvalidArgument, status.Code(err), "%s: %v", name, err)
+		require.Equal(t, GrpcRequestNotProtobufError.Error(), status.Convert(err).Message(), name)
+		require.NotEmpty(t, stream.Trailer().Get(common.GUID_HEADER_NAME), name)
+		cancel()
+	}
+	require.Zero(t, sender.sent.Load(), "nothing is sent")
+
+	// A readable subscribe is served as a stream, and gets the message no refused call took.
+	stream, cancel := subscribe([]byte(wire(nil).varint(1, 1)))
+	defer cancel()
+	var reply []byte
+	require.NoError(t, stream.RecvMsg(&reply))
+	require.Equal(t, []byte("checkpoint-1"), reply)
 }
 
 // The refusal sentence is fixed: the decoder's own words stay in the router's log.

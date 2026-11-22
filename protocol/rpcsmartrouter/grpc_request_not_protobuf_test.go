@@ -3,8 +3,11 @@ package rpcsmartrouter
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"strconv"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -23,8 +26,16 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/reflection"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/encoding/prototext"
+	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protodesc"
+	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/reflect/protoregistry"
+	"google.golang.org/protobuf/types/descriptorpb"
+	"google.golang.org/protobuf/types/dynamicpb"
 )
 
 const (
@@ -35,9 +46,24 @@ const (
 // rawBytesCodec sends and receives a call's message as its wire bytes.
 type rawBytesCodec struct{}
 
-func (rawBytesCodec) Marshal(v any) ([]byte, error)   { return *(v.(*[]byte)), nil }
-func (rawBytesCodec) Unmarshal(d []byte, v any) error { *(v.(*[]byte)) = d; return nil }
-func (rawBytesCodec) Name() string                    { return "proto" }
+func (rawBytesCodec) Marshal(v any) ([]byte, error) {
+	b, ok := v.(*[]byte)
+	if !ok {
+		return nil, fmt.Errorf("raw bytes codec: cannot marshal %T", v)
+	}
+	return *b, nil
+}
+
+func (rawBytesCodec) Unmarshal(d []byte, v any) error {
+	b, ok := v.(*[]byte)
+	if !ok {
+		return fmt.Errorf("raw bytes codec: cannot unmarshal into %T", v)
+	}
+	*b = d
+	return nil
+}
+
+func (rawBytesCodec) Name() string { return "proto" }
 
 // startDecodingNode starts a gRPC node that decodes every request as a real server does, with
 // grpc-go's protobuf codec: a request it cannot decode is answered INTERNAL by grpc-go itself. Every
@@ -48,6 +74,11 @@ func startDecodingNode(t *testing.T) (addr string, calls *atomic.Int32) {
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	srv := grpc.NewServer(grpc.UnknownServiceHandler(func(_ any, stream grpc.ServerStream) error {
+		// Once its connection is up, the router asks the node for reflection. This node serves
+		// none, and that stream is not one of the test's requests.
+		if method, _ := grpc.MethodFromServerStream(stream); strings.HasPrefix(method, "/grpc.reflection.") {
+			return status.Error(codes.Unimplemented, "this node serves no reflection")
+		}
 		calls.Add(1)
 		request := &healthpb.HealthCheckRequest{}
 		if err := stream.RecvMsg(request); err != nil {
@@ -65,6 +96,14 @@ func startDecodingNode(t *testing.T) (addr string, calls *atomic.Int32) {
 // the listener and the providers' endpoints.
 func startProtobufCheckRouter(t *testing.T, nodeAddrs ...string) (*grpc.ClientConn, []*routersession.Endpoint) {
 	t.Helper()
+	client, endpoints, _ := startProtobufCheckRouterServing(t, protobufCheckReadMethod, protobufCheckWriteMethod, nodeAddrs...)
+	return client, endpoints
+}
+
+// startProtobufCheckRouterServing is startProtobufCheckRouter for a given read and write method. It
+// also returns the router.
+func startProtobufCheckRouterServing(t *testing.T, readMethod, writeMethod string, nodeAddrs ...string) (*grpc.ClientConn, []*routersession.Endpoint, *RPCSmartRouterServer) {
+	t.Helper()
 	if !rand.Initialized() {
 		rand.InitRandomSeed()
 	}
@@ -78,8 +117,8 @@ func startProtobufCheckRouter(t *testing.T, nodeAddrs ...string) (*grpc.ClientCo
         "enabled": true,
         "collection_data": {"api_interface": "grpc", "internal_path": "", "type": "", "add_on": ""},
         "apis": [
-          {"name": "`+protobufCheckReadMethod+`", "enabled": true, "compute_units": 10, "category": {"deterministic": false, "stateful": 0}},
-          {"name": "`+protobufCheckWriteMethod+`", "enabled": true, "compute_units": 10, "category": {"deterministic": false, "stateful": 1}}
+          {"name": "`+readMethod+`", "enabled": true, "compute_units": 10, "category": {"deterministic": false, "stateful": 0}},
+          {"name": "`+writeMethod+`", "enabled": true, "compute_units": 10, "category": {"deterministic": false, "stateful": 1}}
         ]
       }]
     }`), &spec))
@@ -135,7 +174,7 @@ func startProtobufCheckRouter(t *testing.T, nodeAddrs ...string) (*grpc.ClientCo
 	client, err := grpc.NewClient(listener.GetListeningAddress(), grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithDefaultCallOptions(grpc.ForceCodec(rawBytesCodec{})))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = client.Close() })
-	return client, endpoints
+	return client, endpoints, server
 }
 
 // invokeRaw calls method on the router with body as the request's wire bytes.
@@ -227,4 +266,110 @@ func TestGRPCListener_UndecodableRequestsLeaveEveryProviderOn(t *testing.T) {
 		}
 		return true
 	}, 5*time.Second, 20*time.Millisecond, "the write reached every node")
+}
+
+const (
+	reflectedReadMethod  = "routertest.reflected.v1.Query/Get"
+	reflectedWriteMethod = "routertest.reflected.v1.Tx/Broadcast"
+)
+
+// reflectedFile declares the services a reflecting node serves. Their request has a nested
+// message, inner = 2, so a body can be readable as fields and not as the message.
+var reflectedFile = sync.OnceValue(func() protoreflect.FileDescriptor {
+	fdp := &descriptorpb.FileDescriptorProto{}
+	if err := prototext.Unmarshal([]byte(`
+name: "routertest/reflected.proto" package: "routertest.reflected.v1" syntax: "proto3"
+message_type { name: "Inner" field { name: "a" number: 1 label: LABEL_OPTIONAL type: TYPE_INT64 } }
+message_type {
+  name: "Request"
+  field { name: "id" number: 1 label: LABEL_OPTIONAL type: TYPE_UINT64 }
+  field { name: "inner" number: 2 label: LABEL_OPTIONAL type: TYPE_MESSAGE type_name: ".routertest.reflected.v1.Inner" }
+}
+message_type { name: "Reply" }
+service { name: "Query" method { name: "Get" input_type: ".routertest.reflected.v1.Request" output_type: ".routertest.reflected.v1.Reply" } }
+service { name: "Tx" method { name: "Broadcast" input_type: ".routertest.reflected.v1.Request" output_type: ".routertest.reflected.v1.Reply" } }
+`), fdp); err != nil {
+		panic(err)
+	}
+	fd, err := protodesc.NewFile(fdp, protoregistry.GlobalFiles)
+	if err != nil {
+		panic(err)
+	}
+	// Registered so the node's reflection serves it.
+	if err := protoregistry.GlobalFiles.RegisterFile(fd); err != nil {
+		panic(err)
+	}
+	return fd
+})
+
+// startReflectingNode starts a node that serves reflectedFile's methods, decoding each request as
+// its type, and answers reflection for them, as most chains' nodes do. calls counts the requests
+// its methods received.
+func startReflectingNode(t *testing.T) (addr string, calls *atomic.Int32) {
+	t.Helper()
+	file := reflectedFile()
+	request, reply := file.Messages().ByName("Request"), file.Messages().ByName("Reply")
+	calls = &atomic.Int32{}
+	handler := func(_ any, _ context.Context, decode func(any) error, _ grpc.UnaryServerInterceptor) (any, error) {
+		calls.Add(1)
+		if err := decode(dynamicpb.NewMessage(request)); err != nil {
+			return nil, err
+		}
+		return dynamicpb.NewMessage(reply), nil
+	}
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	srv := grpc.NewServer()
+	for service, method := range map[string]string{"routertest.reflected.v1.Query": "Get", "routertest.reflected.v1.Tx": "Broadcast"} {
+		srv.RegisterService(&grpc.ServiceDesc{
+			ServiceName: service,
+			HandlerType: (*any)(nil),
+			Methods:     []grpc.MethodDesc{{MethodName: method, Handler: handler}},
+			Metadata:    file.Path(),
+		}, struct{}{})
+	}
+	reflection.Register(srv)
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(srv.Stop)
+	return lis.Addr().String(), calls
+}
+
+// With the node's reflection snapshot held, the router reads a request inside its nested message
+// too: a request whose fields read but whose inner message does not is refused like any other
+// body that is not a protobuf message, as a read and as a write, and no node receives it.
+func TestGRPCListener_RefusesANestedMessageThatDoesNotReadOnceTheSnapshotIsHeld(t *testing.T) {
+	addr, calls := startReflectingNode(t)
+	client, _, server := startProtobufCheckRouterServing(t, reflectedReadMethod, reflectedWriteMethod, addr)
+
+	id := protowire.AppendVarint(protowire.AppendTag(nil, 1, protowire.VarintType), 7)
+	readable := protowire.AppendBytes(protowire.AppendTag(append([]byte(nil), id...), 2, protowire.BytesType), protowire.AppendVarint(protowire.AppendTag(nil, 1, protowire.VarintType), 1))
+	// inner says nine bytes follow, and one does.
+	nestedCutOff := protowire.AppendBytes(protowire.AppendTag(append([]byte(nil), id...), 2, protowire.BytesType), []byte{0x0a, 0x09, 'x'})
+
+	// The first request opens the connection, which takes the node's reflection snapshot.
+	_, _, err := invokeRaw(t, client, reflectedReadMethod, readable)
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		snapshot, err := server.ReflectionSnapshot(ctx)
+		if err != nil {
+			return false
+		}
+		_, err = snapshot.FindDescriptorByName("routertest.reflected.v1.Query.Get")
+		return err == nil
+	}, 10*time.Second, 20*time.Millisecond, "the router holds the node's snapshot")
+
+	before := calls.Load()
+	for _, method := range []string{reflectedReadMethod, reflectedWriteMethod} {
+		_, trailer, err := invokeRaw(t, client, method, nestedCutOff)
+		require.Equal(t, codes.InvalidArgument, status.Code(err), "%s: %v", method, err)
+		require.Equal(t, chainlib.GrpcRequestNotProtobufError.Error(), status.Convert(err).Message())
+		require.NotEmpty(t, trailer.Get(common.GUID_HEADER_NAME))
+	}
+	require.Equal(t, before, calls.Load(), "no node receives them")
+
+	_, _, err = invokeRaw(t, client, reflectedWriteMethod, readable)
+	require.NoError(t, err)
+	require.Equal(t, before+1, calls.Load(), "a readable request is still served")
 }
