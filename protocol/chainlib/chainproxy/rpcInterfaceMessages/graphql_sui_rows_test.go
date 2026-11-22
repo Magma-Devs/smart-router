@@ -14,22 +14,6 @@ import (
 // strings in its source (sui-indexer-alt-graphql, sui-rpc-api, sui-core's transaction driver, and
 // the async-graphql fork it runs on), checked at v1.71.1, v1.82.3 and main.
 
-// suiEffect is readEffect with the registry read for Sui, as the sender reads it.
-func suiEffect(t *testing.T, message *GraphQLMessage, body string, status int) graphQLEffect {
-	t.Helper()
-	hasError, errorMessage := message.CheckResponseError([]byte(body), status)
-	if !hasError {
-		return effectAnswer
-	}
-	classified := common.ClassifyError(nil, common.ChainFamilySui, common.TransportREST, message.ClassificationStatus([]byte(body), status), errorMessage)
-	return graphQLEffect{
-		nodeError: true,
-		retried:   classified.Retryable,
-		blamed:    classified.EndpointAtFault(),
-		paused:    classified.SubCategory.IsRateLimit(),
-	}
-}
-
 func parsedSuiRequest(t *testing.T, body string) *GraphQLMessage {
 	t.Helper()
 	message, err := ParseGraphQLMsg([]byte(body))
@@ -131,7 +115,7 @@ func TestSuiGraphQLReadRows(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			require.Equal(t, tc.want, suiEffect(t, tc.request, tc.body, tc.status))
+			require.Equal(t, tc.want, readEffect(t, tc.request, tc.body, tc.status))
 		})
 	}
 }
@@ -139,7 +123,7 @@ func TestSuiGraphQLReadRows(t *testing.T) {
 // TestSuiGraphQLRowsOnlyOnSui: the same reply on a chain without a list keeps the default rows.
 func TestSuiGraphQLRowsOnlyOnSui(t *testing.T) {
 	timeout := `{"errors":[{"message":"Query timed out after 40.00s","extensions":{"code":"REQUEST_TIMEOUT"}}]}`
-	require.Equal(t, effectElsewhere, suiEffect(t, parsedSuiRequest(t, suiCheckpointRead), timeout, 200), "Sui's R20")
+	require.Equal(t, effectElsewhere, readEffect(t, parsedSuiRequest(t, suiCheckpointRead), timeout, 200), "Sui's R20")
 
 	other, err := ParseGraphQLMsg([]byte(suiCheckpointRead))
 	require.NoError(t, err)
@@ -155,6 +139,8 @@ func TestSuiGraphQLWriteRows(t *testing.T) {
 	write := parsedSuiRequest(t, suiExecuteWrite)
 	aliased := parsedSuiRequest(t, `{"query":"mutation { submitted: executeTransaction(transactionDataBcs: \"AA==\", signatures: [\"AA==\"]) { effects { status } } }"}`)
 	noEffects := parsedSuiRequest(t, `{"query":"mutation { executeTransaction(transactionDataBcs: \"AA==\", signatures: [\"AA==\"]) { __typename } }"}`)
+	merged := parsedSuiRequest(t, `{"query":"mutation($include: Boolean! = true) { tx: executeTransaction(transactionDataBcs: \"AA==\", signatures: []) { tag: __typename ...F @include(if: $include) } tx: executeTransaction(transactionDataBcs: \"AA==\", signatures: []) { other: effects { status } } } fragment F on ExecutionResult { ... on ExecutionResult { fx: effects { status } } }"}`)
+	skippedEffects := parsedSuiRequest(t, `{"query":"mutation($skip: Boolean! = true) { executeTransaction(transactionDataBcs: \"AA==\", signatures: []) { effects: __typename ...F @skip(if: $skip) } } fragment F on ExecutionResult { fx: effects { status } }"}`)
 
 	tests := []struct {
 		name    string
@@ -172,6 +158,12 @@ func TestSuiGraphQLWriteRows(t *testing.T) {
 		{"W1 inside a 429", write, 429, `{"data":{"executeTransaction":{"effects":{"status":"SUCCESS"}}}}`, GraphQLWriteAccepted, effectAnswer},
 		{"W1 inside a 500", write, 500, `{"data":{"executeTransaction":{"effects":{"status":"SUCCESS"}}}}`, GraphQLWriteAccepted, effectAnswer},
 		{"W1 the field resolved without effects selected", noEffects, 200, `{"data":{"executeTransaction":{"__typename":"ExecutionResult"}}}`, GraphQLWriteAccepted, effectAnswer},
+		{"W1 effects selected by a named fragment", merged, 200, `{"data":{"tx":{"tag":"ExecutionResult","fx":{"status":"SUCCESS"},"other":null}}}`, GraphQLWriteAccepted, effectAnswer},
+		{"W1 effects contributed by a repeated root", merged, 200, `{"data":{"tx":{"tag":"ExecutionResult","fx":null,"other":{"status":"SUCCESS"}}}}`, GraphQLWriteAccepted, effectAnswer},
+		{"W1 skipped effects and a typename alias", skippedEffects, 200, `{"data":{"executeTransaction":{"effects":"ExecutionResult"}}}`, GraphQLWriteAccepted, effectAnswer},
+		{"W11 neither projection has effects", merged, 200, `{"data":{"tx":{"tag":"ExecutionResult","fx":null,"other":null}}}`, GraphQLWriteMayHaveRun, effectElsewhere},
+		{"W11 a requested projection is missing", write, 200, `{"data":{"executeTransaction":{}}}`, GraphQLWriteMayHaveRun, effectElsewhere},
+		{"W2 an error below an aliased root", merged, 502, `{"data":{"tx":{"fx":null,"other":null}},"errors":[{"message":"failed to resolve effects","path":["tx","fx"]}]}`, GraphQLWriteAccepted, effectAnswer},
 		{"W2 an error below the field", write, 200, `{"data":{"executeTransaction":{"effects":null}},"errors":[{"message":"Failed to read effects","path":["executeTransaction","effects"],"extensions":{"code":"INTERNAL_SERVER_ERROR"}}]}`, GraphQLWriteAccepted, effectAnswer},
 		{"W2 only below the write field", write, 200, `{"data":{"executeTransaction":{"effects":null}},"errors":[{"message":"Failed to execute transaction","path":["other","effects"],"extensions":{"code":"INTERNAL_SERVER_ERROR"}}]}`, GraphQLWriteMayHaveRun, effectFault},
 		// A path alone is no run: Sui's query-limit refusals carry the query's path, with data null.
@@ -211,7 +203,7 @@ func TestSuiGraphQLWriteRows(t *testing.T) {
 			outcome, known := tc.request.WriteOutcome([]byte(tc.body), tc.status)
 			require.True(t, known)
 			require.Equal(t, tc.outcome, outcome)
-			require.Equal(t, tc.effect, suiEffect(t, tc.request, tc.body, tc.status))
+			require.Equal(t, tc.effect, readEffect(t, tc.request, tc.body, tc.status))
 		})
 	}
 }
@@ -249,7 +241,8 @@ func TestSuiTransactionDigest(t *testing.T) {
 		{"under an alias", `{"query":"mutation { s: executeTransaction(transactionDataBcs: \"` + suiSnapshotBcs + `\", signatures: []) { effects { status } } }"}`, suiSnapshotDigest},
 		{"bytes that are not Base64", `{"query":"mutation { executeTransaction(transactionDataBcs: \"not base64!\", signatures: []) { effects { status } } }"}`, ""},
 		{"no bytes", `{"query":"mutation Submit($tx: Base64!) { executeTransaction(transactionDataBcs: $tx, signatures: []) { effects { status } } }"}`, ""},
-		{"two writes name no single transaction", `{"query":"mutation { a: executeTransaction(transactionDataBcs: \"` + suiSnapshotBcs + `\", signatures: []) { effects { status } } b: executeTransaction(transactionDataBcs: \"` + suiSnapshotBcs + `\", signatures: []) { effects { status } } }"}`, ""},
+		{"a variable default", `{"query":"mutation Submit($tx: Base64! = \"` + suiSnapshotBcs + `\") { executeTransaction(transactionDataBcs: $tx, signatures: []) { effects { status } } }"}`, suiSnapshotDigest},
+		{"a skipped transaction has none", `{"query":"mutation { executeTransaction(transactionDataBcs: \"` + suiSnapshotBcs + `\", signatures: []) @skip(if: true) { effects { status } } }"}`, ""},
 		{"a read has none", `{"query":"{ checkpoint(sequenceNumber: 1) { digest } }"}`, ""},
 	}
 	for _, tc := range tests {

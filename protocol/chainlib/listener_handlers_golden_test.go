@@ -118,9 +118,11 @@ func TestListenerHandlers_Golden(t *testing.T) {
 	}{
 		{"jsonrpc POST", spectypes.APIInterfaceJsonRPC, http.MethodPost, "/sub/path?q=1", jsonBody},
 		{"jsonrpc GET", spectypes.APIInterfaceJsonRPC, http.MethodGet, "/", ""},
+		{"jsonrpc DELETE", spectypes.APIInterfaceJsonRPC, http.MethodDelete, "/sub/path", `{"ignored":1}`},
 		{"tendermintrpc POST", spectypes.APIInterfaceTendermintRPC, http.MethodPost, "/sub/path?q=1", jsonBody},
 		{"tendermintrpc GET", spectypes.APIInterfaceTendermintRPC, http.MethodGet, "/status?height=7", ""},
 		{"tendermintrpc GET with body", spectypes.APIInterfaceTendermintRPC, http.MethodGet, "/status", jsonBody},
+		{"tendermintrpc DELETE", spectypes.APIInterfaceTendermintRPC, http.MethodDelete, "/status", `{"ignored":1}`},
 		{"rest POST", spectypes.APIInterfaceRest, http.MethodPost, "/cosmos/tx/v1beta1/simulate?x=1", `{"tx":1}`},
 		{"rest GET", spectypes.APIInterfaceRest, http.MethodGet, "/cosmos/base/v1beta1/blocks/latest?x=1", ""},
 		{"rest PUT", spectypes.APIInterfaceRest, http.MethodPut, "/v1/thing", `{"put":1}`},
@@ -163,7 +165,8 @@ func TestListenerHandlers_Golden(t *testing.T) {
 				if name == "Date" || name == "Content-Length" {
 					continue
 				}
-				headerLines = append(headerLines, name+": "+strings.Join(values, ", "))
+				// Lava-Guid carries the per-request GUID too, so it is masked like the body's.
+				headerLines = append(headerLines, name+": "+guidPattern.ReplaceAllString(strings.Join(values, ", "), "<GUID>"))
 			}
 			sort.Strings(headerLines)
 			relay.mu.Lock()

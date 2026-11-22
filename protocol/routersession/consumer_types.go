@@ -3,6 +3,7 @@ package routersession
 import (
 	"context"
 	"fmt"
+	"maps"
 	"slices"
 	"strconv"
 	"sync"
@@ -115,6 +116,7 @@ type ProviderOptimizer interface {
 	AppendSyncData(providerAddress string, syncBlock uint64, syncRef provideroptimizer.SyncReference)
 	ChooseUpstream(ctx context.Context, allAddresses []string, ignoredProviders map[string]struct{}, cu uint64, requestedBlock int64) (addresses []string)
 	ChooseUpstreamWithStats(ctx context.Context, allAddresses []string, ignoredProviders map[string]struct{}, cu uint64, requestedBlock int64) (addresses []string, stats *provideroptimizer.SelectionStats)
+	KnownBelowBlock(providerAddress string, block int64) bool
 	GetReputationReportForProvider(string) (*pairingtypes.QualityOfServiceReport, time.Time)
 	Strategy() provideroptimizer.Strategy
 	UpdateWeights(map[string]int64, uint64)
@@ -133,6 +135,12 @@ type ignoredProviders struct {
 	// because this is the one piece of per-request state every level of selection receives. It
 	// survives the epoch reset that clears providers: it names a choice, not a failure.
 	preferredProvider string
+	// crossValidation is this request's GetSessionsOptions.CrossValidation, carried here for the
+	// same reason as preferredProvider.
+	crossValidation bool
+	// requiredBlock is this request's GetSessionsOptions.RequiredBlock, carried here for the same
+	// reason as preferredProvider.
+	requiredBlock int64
 }
 
 // markTried adds a provider to triedByThisRequest.
@@ -238,8 +246,13 @@ type Endpoint struct {
 	// accident. The endpoint is usable only when Enabled AND this map is empty (usableLocked).
 	// Nil until the first state reason is added.
 	stateReasons map[EndpointDisableReason]StateReasonRecord
-	Addons       map[string]struct{}
-	Extensions   map[string]struct{}
+	// outOfRotationCounts counts, per reason, how many times this endpoint has left rotation
+	// (MAG-5244): each Enabled→false transition under its disable reason, and each state reason
+	// added. It only goes up, so the metrics publisher can tell from it that the url went out even
+	// when it came back before the publisher looked. Nil until the first time the endpoint goes out.
+	outOfRotationCounts map[EndpointDisableReason]uint64
+	Addons              map[string]struct{}
+	Extensions          map[string]struct{}
 	// StandaloneAddons mirrors common.NodeUrl.StandaloneAddons: this endpoint
 	// serves ONLY the collections its Addons name, not those plus the base one.
 	// Set for a url whose add-on REPLACES the base api surface rather than
@@ -257,7 +270,7 @@ type Endpoint struct {
 	// it does not serve, and the vendor's 404 then reads as a verdict on the
 	// request.
 	InternalPath string
-	mu           sync.RWMutex // Protects Connections, ConnectionRefusals, Enabled, consecutiveHealthyProbes, disabledAt, disableReason, lastRecoveryPoll, probeReenabled, reenableProbeFlaps, stateReasons
+	mu           sync.RWMutex // Protects Connections, ConnectionRefusals, Enabled, consecutiveHealthyProbes, disabledAt, disableReason, lastRecoveryPoll, probeReenabled, reenableProbeFlaps, stateReasons, outOfRotationCounts
 
 	// Per-endpoint observed tip lives in the shared endpointtip store (single source of
 	// truth), keyed by chain+apiInterface+NetworkAddress — not on the Endpoint — so the
@@ -350,6 +363,9 @@ type EndpointHealthSnapshot struct {
 	// StateReasons lists the state-type reasons (head-stalled) this endpoint is out for, in a stable
 	// order, each with when it was added and the block it was recorded at. Empty when none.
 	StateReasons []StateReasonRecord
+	// OutOfRotationCounts is how many times the endpoint has left rotation, per reason, since it was
+	// created (MAG-5244). A copy; nil when it never went out.
+	OutOfRotationCounts map[EndpointDisableReason]uint64
 }
 
 // HealthSnapshot returns the endpoint's enable/recovery state under e.mu. Read-only companion to
@@ -368,6 +384,7 @@ func (e *Endpoint) HealthSnapshot() EndpointHealthSnapshot {
 		ReenableProbeFlaps:       e.reenableProbeFlaps,
 		Usable:                   e.usableLocked(),
 		StateReasons:             e.stateReasonsLocked(),
+		OutOfRotationCounts:      maps.Clone(e.outOfRotationCounts),
 	}
 }
 
@@ -492,6 +509,7 @@ func (e *Endpoint) disableLocked(at time.Time, reason EndpointDisableReason) {
 		reason = EndpointDisableUnspecified
 	}
 	e.Enabled = false
+	e.countOutOfRotationLocked(reason)
 	e.disabledAt = at
 	// Edge-triggered with disabledAt, and for the same reason: the reason belongs to the failure that
 	// actually took the endpoint out. A later failure of a different kind against an already-disabled
@@ -931,7 +949,7 @@ func (cswp *ConsumerSessionsWithProvider) GetConsumerSessionInstanceFromEndpoint
 	}
 
 	// try to lock an existing session, if can't create a new one
-	for _, session := range cswp.Sessions {
+	for sessionID, session := range cswp.Sessions {
 		// Match session to connection (different logic for provider-relay vs direct RPC)
 		var matchesConnection bool
 		if isProviderRelay {
@@ -942,21 +960,37 @@ func (cswp *ConsumerSessionsWithProvider) GetConsumerSessionInstanceFromEndpoint
 		}
 
 		if !matchesConnection {
-			// skip sessions that don't belong to the active connection
+			// A session belonging to another connection cannot serve this request — but a
+			// permanently retired one (BlockListed) is dead weight whichever connection it was
+			// created for, and it is never going to serve anyone again. Reclaim it here, on the
+			// one path that already walks every session this provider holds, so it stops
+			// counting against the ceiling below once the node that produced it has moved on
+			// (MAG-5063): otherwise a retired session outlives the failures that retired it for
+			// the rest of the epoch, no matter how long the node has been healthy again.
+			if session.isReclaimable() {
+				cswp.reclaimSession(sessionID, qosManager)
+			}
 			continue
 		}
-		if _, ok := session.TryUseSession(); ok {
+		if blocked, ok := session.TryUseSession(); ok {
 			return session, cswp.PairingEpoch, nil
+		} else if blocked {
+			// TryUseSession has already confirmed, under the session's own lock, that it is
+			// BlockListed and not in use: reclaim it the same way as the non-matching case above.
+			cswp.reclaimSession(sessionID, qosManager)
 		}
 	}
 
-	// No free session, so create one — bounded only by the total-session ceiling below.
+	// No free session, so create one — bounded only by the total-session ceiling below, which now
+	// counts only sessions the loop above could not already reclaim: one still in flight, or one
+	// genuinely live and in use. A session that failed enough to be retired no longer costs the
+	// provider any of this budget once nothing is using it (MAG-5063).
 	//
 	// There used to be a second, lower ceiling here: a provider was refused a new session once
 	// MaxSessionsAllowedPerProvider/3 of its sessions had been retired, and the count grew by that
 	// same third on every pool reset. It is gone (FAILOVER-TASKS section 2).
 	//
-	// It could not be kept once the provider block was dropped. Retired sessions are never
+	// It could not be kept once the provider block was dropped. Retired sessions were then never
 	// reclaimed inside an epoch, and the only thing that raised that ceiling was the reset the
 	// block itself triggered — so with the block gone the ceiling was fixed at a third, and an
 	// upstream that reached it was refused every session for the rest of the epoch while answering
@@ -1008,6 +1042,18 @@ func (cswp *ConsumerSessionsWithProvider) GetConsumerSessionInstanceFromEndpoint
 		utils.LogAttr("isDirectRPC", !isProviderRelay),
 	)
 	return consumerSession, cswp.PairingEpoch, nil
+}
+
+// reclaimSession drops a retired session from the pool together with the QoS reports filed for it.
+// Nothing reads a retired session's reports, and they would otherwise stay until the QoS manager
+// purges the epoch after next: about 200 bytes per retired session, one session per 16 failed
+// relays, with no ceiling on how many an outage retires now that the pool no longer stops it
+// (MAG-5063). The caller holds cswp.Lock.
+func (cswp *ConsumerSessionsWithProvider) reclaimSession(sessionID int64, qosManager *qos.QoSManager) {
+	delete(cswp.Sessions, sessionID)
+	if qosManager != nil {
+		qosManager.ForgetSession(sessionID)
+	}
 }
 
 func (cswp *ConsumerSessionsWithProvider) sortEndpointsByLatency(endpointInfos []EndpointInfo) {

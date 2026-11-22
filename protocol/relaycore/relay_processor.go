@@ -79,6 +79,10 @@ type RelayProcessor struct {
 	// from "the request is over and nothing will ever read this". Read-only after construction, so
 	// it needs no lock. See SetResponse.
 	ctx context.Context
+
+	// startedAt is when the request's relay processing started, the zero of an answer's Elapsed on
+	// the debug answer record. Read-only after construction.
+	startedAt time.Time
 }
 
 // quorumStat is the per-hash agreement tally for cross-validation: how many providers returned this exact
@@ -147,6 +151,7 @@ func NewRelayProcessor(
 	chainID, _ := chainIdAndApiInterfaceGetter.GetChainIdAndApiInterface()
 	relayProcessor := &RelayProcessor{
 		ctx:                          ctx,
+		startedAt:                    time.Now(),
 		crossValidationParams:        crossValidationParams,
 		responses:                    make(chan *RelayResponse, responseBufferSize(selection, crossValidationParams)), // buffered to prevent blocking
 		ResultsManager:               NewResultsManager(guid, chainID),
@@ -557,6 +562,7 @@ func (rp *RelayProcessor) SetResponse(response *RelayResponse) {
 	if response == nil {
 		return
 	}
+	rp.recordAnswer(response)
 	select {
 	case rp.responses <- response:
 		return
@@ -813,6 +819,9 @@ func (rp *RelayProcessor) handleResponse(response *RelayResponse) {
 	}
 
 	nodeError := rp.ResultsManager.SetResponse(response, rp.RelayStateMachine.GetProtocolMessage())
+	if response != nil {
+		recordAnswerOutcome(response, nodeError)
+	}
 
 	// send relay error metrics only on non stateful queries, as stateful queries always return X-1/X errors.
 	if nodeError != nil && rp.selection != Stateful {
@@ -824,6 +833,20 @@ func (rp *RelayProcessor) handleResponse(response *RelayResponse) {
 			recorder.RecordNodeError(chainId, apiInterface, response.RelayResult.ProviderInfo.ProviderAddress, rp.RelayStateMachine.GetProtocolMessage().GetApi().Name)
 		}
 		utils.FormatInfo("Relay received a node error", utils.LogAttr("GUID", rp.guid), utils.LogAttr("Error", nodeError), utils.LogAttr("provider", response.RelayResult.ProviderInfo), utils.LogAttr("Request", rp.RelayStateMachine.GetProtocolMessage().GetApi().Name))
+	}
+
+	// A client read the provider answered with a result. rpc_endpoint_total_relays_serviced counts
+	// every relay the node answered, an error body included, so a reader asking "is this provider
+	// serving clients" needs this count instead (MAG-5179). Left out, each for its own reason:
+	//   - a node error: metered above;
+	//   - an attempt with no answer (response.Err, or no reply): the protocol-error counter's;
+	//   - a stateful request: a write goes to every provider and only one accepts it, so its answers
+	//     say nothing about who serves reads, and the refusals are kept off the node-error counter;
+	//   - the router's own health check: not a client's request.
+	if nodeError == nil && response != nil && response.Err == nil && response.RelayResult.GetReply() != nil &&
+		rp.selection != Stateful && !rp.GetUsedProviders().IsRouterHealthCheck() {
+		chainId, apiInterface := rp.chainIdAndApiInterfaceGetter.GetChainIdAndApiInterface()
+		rp.metricsInf.SetRelayNodeResultMetric(chainId, apiInterface, response.RelayResult.ProviderInfo.ProviderAddress, rp.RelayStateMachine.GetProtocolMessage().GetApi().Name)
 	}
 
 	// Only successful responses (not errors) count toward cross-validation quorum, though every

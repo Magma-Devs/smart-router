@@ -13,6 +13,7 @@ import (
 // elsewhere cite. A reply no row matches falls to the interface's default rows (MAG-5121).
 var suiGraphQLRows = graphQLChainRows{
 	readError:         suiReadError,
+	writeField:        suiExecuteTransactionField,
 	writeCopy:         suiWriteCopy,
 	transactionDigest: suiTransactionDigest,
 }
@@ -115,10 +116,11 @@ const (
 
 // suiRequestCannotRun is the rest of R12 and W7: async-graphql's codeless refusals of a request it
 // cannot run, the same on every provider. "Variable {name} is not defined." (context.rs, an
-// execution error) and `Unknown operation named "{name}"` (schema.rs).
+// execution error), an unknown operation, and a value of the wrong input type.
 func suiRequestCannotRun(message string) bool {
 	return (strings.HasPrefix(message, "Variable ") && strings.HasSuffix(message, " is not defined.")) ||
-		strings.HasPrefix(message, "Unknown operation named ")
+		strings.HasPrefix(message, "Unknown operation named ") ||
+		strings.HasPrefix(message, `Expected input type "`)
 }
 
 // suiFilterNotSupported is R17: a filter Sui supports on no provider (api/types/event/filter.rs;
@@ -131,19 +133,13 @@ const suiFilterNotSupported = "Filtering by both emitting module and event type 
 const suiFieldLimitText = "Exceeded the maximum number"
 
 func suiCaller(message string) graphQLVerdict {
-	return graphQLVerdict{kind: graphQLVerdictCaller, status: http.StatusBadRequest, message: message}
+	verdict := graphQLCallerRow
+	verdict.message = message
+	return verdict
 }
 
 func suiElsewhere(message string) graphQLVerdict {
-	return graphQLVerdict{kind: graphQLVerdictElsewhere, status: graphQLRetryElsewhereStatus, message: message}
-}
-
-func suiThrottled(message string) graphQLVerdict {
-	return graphQLVerdict{kind: graphQLVerdictThrottled, status: http.StatusTooManyRequests, message: message}
-}
-
-func suiFault(message string, status int) graphQLVerdict {
-	return graphQLVerdict{kind: graphQLVerdictFault, status: status, message: message}
+	return statusTableVerdict(http.StatusNotImplemented, message)
 }
 
 // suiReadError reads one error of a read's reply through Sui's read rows (MAG-4909, section 3,
@@ -167,7 +163,7 @@ func suiReadError(request *GraphQLMessage, replyError graphQLReplyError) (graphQ
 		case suiCheckpointInTheFuture(message): // R5, with no number
 			return suiElsewhere(message), true
 		}
-		return suiFault(message, http.StatusInternalServerError), true // R19
+		return statusTableVerdict(http.StatusInternalServerError, message), true // R19
 	case suiCodeValidationFailed:
 		if suiProviderRefusedTheRequest(message) { // R8, R9
 			return suiElsewhere(message), true
@@ -180,7 +176,7 @@ func suiReadError(request *GraphQLMessage, replyError graphQLReplyError) (graphQ
 	case suiCodeResourceExhausted:
 		switch {
 		case !replyError.hasPath: // R14: the vendor's quota on our traffic
-			return suiThrottled(message), true
+			return graphQLThrottled(message), true
 		case strings.Contains(message, suiFieldLimitText): // R15
 			return suiElsewhere(message), true
 		}
@@ -243,25 +239,25 @@ func suiSimulateObjectNotYetApplied(request *GraphQLMessage, replyError graphQLR
 //	        may have run.
 //	W4-W12  each error through the write rows. The copy is rejected only when every error is a
 //	        rejection row; any other error leaves it "may have run" (W9-W11).
-func suiWriteCopy(request *GraphQLMessage, body []byte, httpStatusCode int) graphQLWriteCopy {
+func suiWriteCopy(field *graphQLMutationField, body []byte, httpStatusCode int) graphQLWriteCopy {
 	reply, isResponse := readGraphQLReply(body)
-	if isResponse && suiWriteRan(request, body, reply.errors) {
+	if reply.dataIsObject && suiWriteRan(field, body, reply.errors) {
 		return graphQLWriteCopy{outcome: GraphQLWriteAccepted}
 	}
 
 	is2xx := httpStatusCode == 0 || (httpStatusCode >= 200 && httpStatusCode < 300)
 	switch httpStatusCode {
 	case http.StatusTooManyRequests, http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden:
-		return graphQLWriteCopy{outcome: GraphQLWriteRejected, verdict: statusTableVerdict(body, httpStatusCode, extractErrorMessage(body, httpStatusCode))}
+		return graphQLWriteCopy{outcome: GraphQLWriteRejected, verdict: statusTableVerdict(httpStatusCode, extractErrorMessage(body, httpStatusCode))}
 	}
 	if !isResponse || len(reply.errors) == 0 {
 		// Nothing a node sends when it refused the transaction: a gateway's page, a bare status, or
 		// a write field that is null or has no effects without saying why (effects: null, MAG-4518).
 		switch {
 		case !is2xx:
-			return graphQLWriteCopy{outcome: GraphQLWriteMayHaveRun, verdict: statusTableVerdict(body, httpStatusCode, extractErrorMessage(body, httpStatusCode))}
+			return graphQLWriteCopy{outcome: GraphQLWriteMayHaveRun, verdict: statusTableVerdict(httpStatusCode, extractErrorMessage(body, httpStatusCode))}
 		case !isResponse:
-			return graphQLWriteCopy{outcome: GraphQLWriteMayHaveRun, verdict: suiFault(graphQLNotAResponsePrefix+extractErrorMessage(body, httpStatusCode), http.StatusBadGateway)}
+			return graphQLWriteCopy{outcome: GraphQLWriteMayHaveRun, verdict: statusTableVerdict(http.StatusBadGateway, graphQLNotAResponseMessage(body, httpStatusCode))}
 		}
 		return graphQLWriteCopy{outcome: GraphQLWriteMayHaveRun, verdict: unknownVerdict("executeTransaction answered with no effects")}
 	}
@@ -307,7 +303,7 @@ func suiWriteError(replyError graphQLReplyError) (GraphQLWriteOutcome, graphQLVe
 		return GraphQLWriteMayHaveRun, suiCaller(message) // W11
 	case suiCodeResourceExhausted:
 		if !replyError.hasPath { // W12: the vendor's quota, as a 429
-			return GraphQLWriteRejected, suiThrottled(message)
+			return GraphQLWriteRejected, graphQLThrottled(message)
 		}
 		return GraphQLWriteMayHaveRun, suiCaller(message) // W11
 	case suiCodeInternalServerError:
@@ -316,9 +312,9 @@ func suiWriteError(replyError graphQLReplyError) (GraphQLWriteOutcome, graphQLVe
 			// The client's doing, not this provider's.
 			return GraphQLWriteMayHaveRun, suiCaller(message)
 		}
-		return GraphQLWriteMayHaveRun, suiFault(message, http.StatusInternalServerError) // W11
+		return GraphQLWriteMayHaveRun, statusTableVerdict(http.StatusInternalServerError, message) // W11
 	case suiCodeRequestTimeout:
-		return GraphQLWriteMayHaveRun, suiFault(message, http.StatusGatewayTimeout) // W11
+		return GraphQLWriteMayHaveRun, statusTableVerdict(http.StatusGatewayTimeout, message) // W11
 	case "":
 		if strings.HasPrefix(message, suiWriteBytesParseFailure) || suiRequestCannotRun(message) { // W7
 			return GraphQLWriteRejected, suiCaller(message)
@@ -338,52 +334,35 @@ func suiWriteError(replyError graphQLReplyError) (GraphQLWriteOutcome, graphQLVe
 //
 // A path alone proves nothing: Sui's query-limit refusals carry the path of the query they measured,
 // not of a field that ran (extensions/query_limits), and come with data null.
-func suiWriteRan(request *GraphQLMessage, body []byte, replyErrors []graphQLReplyError) bool {
-	var writeKeys []string
-	for _, rootField := range request.RootFields {
-		if rootField.Name == suiExecuteTransactionField {
-			writeKeys = append(writeKeys, rootField.ResponseKey)
-		}
-	}
-	if len(writeKeys) == 0 {
-		return false
-	}
+func suiWriteRan(field *graphQLMutationField, body []byte, replyErrors []graphQLReplyError) bool {
 	var answer struct {
 		Data map[string]json.RawMessage `json:"data"`
 	}
 	if err := json.Unmarshal(body, &answer); err != nil {
 		return false
 	}
-	for _, key := range writeKeys {
-		resolved, effectsShown := suiExecutionResult(answer.Data[key])
-		if !resolved {
+	var result map[string]json.RawMessage
+	if err := json.Unmarshal(answer.Data[field.ResponseKey], &result); err != nil || result == nil {
+		return false
+	}
+	for _, replyError := range replyErrors {
+		if replyError.pathHead == field.ResponseKey && replyError.pathLength > 1 {
+			return true // W2
+		}
+	}
+	// A resolved field is sufficient when effects was omitted. When selected, any projection of
+	// effects that returned an object proves execution. A null or missing projection does not.
+	selectedEffects := false
+	for key, name := range field.children {
+		if name != "effects" {
 			continue
 		}
-		if effectsShown {
+		selectedEffects = true
+		if graphQLDataIsObject(result[key]) {
 			return true // W1
 		}
-		for _, replyError := range replyErrors {
-			if replyError.pathHead == key && replyError.pathLength > 1 {
-				return true // W2
-			}
-		}
 	}
-	return false
-}
-
-// suiExecutionResult reads one write field's value: resolved when it is an object, and effectsShown
-// when its effects member is an object or was not selected.
-func suiExecutionResult(raw json.RawMessage) (resolved, effectsShown bool) {
-	if !graphQLDataIsObject(raw) {
-		return false, false
-	}
-	var result struct {
-		Effects json.RawMessage `json:"effects"`
-	}
-	if err := json.Unmarshal(raw, &result); err != nil {
-		return false, false
-	}
-	return true, result.Effects == nil || graphQLDataIsObject(result.Effects)
+	return !selectedEffects
 }
 
 // hasAnyPrefix reports whether text starts with any of prefixes.

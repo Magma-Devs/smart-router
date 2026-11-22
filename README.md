@@ -12,7 +12,7 @@
 # Smart Router
 
 [![Build and Test](https://github.com/Magma-Devs/smart-router/actions/workflows/smartrouter.yml/badge.svg?branch=main)](https://github.com/Magma-Devs/smart-router/actions/workflows/smartrouter.yml)
-[![Release](https://img.shields.io/badge/release-v1.5.10-brightgreen)](https://github.com/Magma-Devs/smart-router/releases/latest)
+[![Release](https://img.shields.io/badge/release-v1.6.8-brightgreen)](https://github.com/Magma-Devs/smart-router/releases/latest)
 [![Go](https://img.shields.io/badge/go-1.26%2B-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![License](https://img.shields.io/badge/license-source--available-orange.svg)](LICENSE.md)
 
@@ -445,7 +445,7 @@ When started with `--debug-address <addr>` (and `devMode.enabled=true`), the rou
 
 The reset tests rely on is **`POST /debug/reset-all`**, which drains the router's internal state stores (optimizer scores, Ristretto, seen-block caches, session-manager state) and — so a single call returns the router to a serving state after an all-providers-down stress burst — also **re-enables endpoint health and cold-rebuilds pairing**.
 
-Why that matters: an endpoint that hits `MaxConsecutiveConnectionAttempts` consecutive connection failures is disabled (`Endpoint.Enabled=false`), and the only paths back are a successful relay or the ~15-minute epoch tick. After a stress test drives every provider down, those endpoints stay disabled and contaminate later tests until a pod restart. `reset-all` now re-enables them (mirroring the reset onto the Prometheus health gauge) and re-admits demoted providers via a cold `rebuildPairingFromConfig` (no re-probing). Every existing `reset-all` caller inherits this — no test migration.
+Why that matters: an endpoint that hits `MaxConsecutiveConnectionAttempts` consecutive connection failures is disabled (`Endpoint.Enabled=false`), and the only paths back are a successful relay or the ~15-minute epoch tick. After a stress test drives every provider down, those endpoints stay disabled and contaminate later tests until a pod restart. `reset-all` now re-enables them and re-admits demoted providers via a cold `rebuildPairingFromConfig` (no re-probing). Every existing `reset-all` caller inherits this — no test migration.
 
 For tests that only need the endpoint-health reset, **`POST /debug/reset-endpoint-health`** does exactly that and nothing else; its name mirrors `Endpoint.ResetHealth()` in the source. Response (any method other than `POST` returns 405):
 
@@ -454,6 +454,8 @@ For tests that only need the endpoint-health reset, **`POST /debug/reset-endpoin
 ```
 
 `/debug/reset-pairing` and `/debug/reset-scores` remain available for targeted cleanup.
+
+For tests that only need a clean response cache, **`POST /debug/reset-cache`** runs `reset-all`'s cache flush and nothing else. It answers `{"reset": true, "cleared": ["cache-be"]}` after a flush, `"cleared": []` when there was nothing it could flush (no cache backend, a disconnected `--cache-be` pod, or a pod without the flush call), and 500 when the flush fails. What a flush empties, shared-state entries included, is in [docs/RESP-CACHE.md](docs/RESP-CACHE.md#flush-semantics).
 
 **`GET /debug/verification`** shows, per chain and configured provider, what it is failing (`scope`, `service`, `check`, `severity`, and `since`, the start `smartrouter_provider_verification_failed` publishes), whether it is in the pairing, and when each check it is failing is next retried (`retries`, one entry per check, earliest due first: `check`, `addon`, `extension`, or `wholePass` for a provider whose pass gave no verdicts to read, with `attempts`, `pendingSince` and `nextRetryAt`; a url that could not be dialed, or that a pass did not ask because it is held off after a rate limit, has the entry `check: connect`, and its retry dials that url alone), with the retry delays in force (MAG-3950). A test can shorten those with `--verification-retry-delay` and `--verification-retry-max-delay` instead of waiting 30s to 15m between retries.
 

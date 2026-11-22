@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -40,14 +41,16 @@ type SmartRouterMetricsManager struct {
 	endpointInFlight            *prometheus.GaugeVec     // rpc_endpoint_requests_in_flight
 
 	// Endpoint-scoped metrics (labels: spec, apiInterface, endpoint_id)
-	endpointOverallHealth          *prometheus.GaugeVec   // rpc_endpoint_overall_health
 	endpointOverallHealthBreakdown *prometheus.GaugeVec   // rpc_endpoint_overall_health_breakdown {spec, apiInterface}
 	endpointSelectionScore         *prometheus.GaugeVec   // rpc_endpoint_selection_score {spec, apiInterface, endpoint_id, score_type}
 	optimizerSelectionScore        *prometheus.GaugeVec   // rpc_optimizer_selection_score {spec, endpoint_id, score_type}
 	endpointLatestBlock            *prometheus.GaugeVec   // rpc_endpoint_latest_block
 	endpointURLLatestBlock         *prometheus.GaugeVec   // rpc_endpoint_url_latest_block
 	endpointURLAnsweredUntil       *prometheus.GaugeVec   // rpc_endpoint_url_answered_until_seconds
+	endpointURLBlockTracking       *prometheus.GaugeVec   // rpc_endpoint_url_block_tracking
 	endpointURLRelaysServiced      *prometheus.CounterVec // rpc_endpoint_url_relays_serviced_total
+	endpointURLOutOfRotation       *prometheus.GaugeVec   // rpc_endpoint_url_out_of_rotation
+	endpointURLOutOfRotationExits  *prometheus.CounterVec // rpc_endpoint_url_out_of_rotation_exits_total
 	endpointFetchLatestFails       *prometheus.CounterVec // rpc_endpoint_fetch_latest_fails
 	endpointFetchBlockFails        *prometheus.CounterVec // rpc_endpoint_fetch_block_fails
 	endpointFetchLatestSuccess     *prometheus.CounterVec // rpc_endpoint_fetch_latest_success
@@ -84,9 +87,11 @@ type SmartRouterMetricsManager struct {
 	crossValidationMismatchTotalMetric              *prometheus.CounterVec // smartrouter_cross_validation_mismatch_total {spec, apiInterface, method, group, finality} — bounded alerting surface
 	crossValidationFailuresTotalMetric              *prometheus.CounterVec // smartrouter_cross_validation_failures_total {spec, apiInterface, method, reason} — bounded by the CrossValidationReason* enum
 	crossValidationStragglerTotalMetric             *prometheus.CounterVec // smartrouter_cross_validation_straggler_total {spec, apiInterface, method, outcome} — bounded by the CrossValidationStragglerOutcome* enum
+	crossValidationRecordDroppedTotalMetric         *prometheus.CounterVec // smartrouter_cross_validation_record_dropped_total {spec, apiInterface} — the async compliance-record write queue was full; the same gap is independently visible as a hole in the record Seq sequence itself (MAG-2787)
 
 	// Incident group metrics
 	incidentNodeErrorsTotalMetric     *prometheus.CounterVec   // smartrouter_node_errors_total         {spec, apiInterface, provider_address, method}
+	incidentNodeResultsTotalMetric    *prometheus.CounterVec   // smartrouter_node_results_total        {spec, apiInterface, provider_address, method}
 	incidentProtocolErrorsTotalMetric *prometheus.CounterVec   // smartrouter_protocol_errors_total     {spec, apiInterface, provider_address, method}
 	incidentRetriesTotalMetric        *prometheus.CounterVec   // smartrouter_retries_total             {spec, apiInterface, method}
 	incidentRetriesSuccessMetric      *prometheus.CounterVec   // smartrouter_retries_success_total     {spec, apiInterface, method}
@@ -178,6 +183,10 @@ type SmartRouterMetricsManager struct {
 	// ALL provider names sharing the URL — otherwise only the last-registered provider gets
 	// the metric label, leaving its peers stuck at the zero value on dashboards.
 	urlToProviderNames map[string][]string
+	// urlsOutOfRotation is the rpc_endpoint_url_out_of_rotation series published on the last
+	// probe cycle, per "spec|apiInterface", keyed by the joined label values. The next cycle
+	// deletes the ones that no longer hold. Guarded by lock.
+	urlsOutOfRotation map[string]map[string][]string
 	// urlInternalPaths maps a registered url to the spec path it serves ("/v2", or "" for the
 	// root), for the internal_path label of the per-url series. Guarded by lock.
 	urlInternalPaths map[string]string
@@ -240,7 +249,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 
 	m.endpointTotalRelaysServiced = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "rpc_endpoint_total_relays_serviced",
-		Help: "Total relays successfully serviced by this RPC endpoint, by function.",
+		Help: "Total relays this RPC endpoint answered, by function, an answer carrying a node error included: smartrouter_node_results_total counts the reads it answered with a result.",
 	}, endpointFunctionLabels))
 
 	m.endpointTotalErrored = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -257,11 +266,6 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		Name: "rpc_endpoint_requests_in_flight",
 		Help: "Current number of in-flight relays for this RPC endpoint, by function.",
 	}, endpointFunctionLabels))
-
-	m.endpointOverallHealth = registerOrReuse(prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "rpc_endpoint_overall_health",
-		Help: "Health status of this RPC endpoint (1=healthy, 0=unhealthy).",
-	}, endpointLabels))
 
 	m.endpointOverallHealthBreakdown = registerOrReuse(prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "rpc_endpoint_overall_health_breakdown",
@@ -295,10 +299,29 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		Name: "rpc_endpoint_url_answered_until_seconds",
 		Help: "Unix time until which a node url counts as answering: its last answer, a poll or a relay, plus max(2m, 6 x the interval its tracker polls at). A url past it has stopped answering: it is down, not stuck.",
 	}, urlLabels))
+	m.endpointURLBlockTracking = registerOrReuse(prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "rpc_endpoint_url_block_tracking",
+		Help: "Whether the router tracks the head of a node url: 1 = tracked, 0 = not tracked by design (the url serves only add-on collections and none of them declares a way to read the head). A url at 0 has no block polls, so its health is known only from the relays it serves.",
+	}, urlLabels))
 	m.endpointURLRelaysServiced = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "rpc_endpoint_url_relays_serviced_total",
-		Help: "Relays one node url of a provider served successfully.",
+		Help: "Relays one node url of a provider answered, an answer carrying a node error included.",
 	}, urlLabels))
+
+	// Why a url is out of rotation (MAG-5244). The provider block reason is always
+	// all-endpoints-disabled, which says every url is out and nothing about why; the cause is
+	// on the url.
+	urlReasonLabels := append(slices.Clone(urlLabels), "reason")
+	m.endpointURLOutOfRotation = registerOrReuse(prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "rpc_endpoint_url_out_of_rotation",
+		Help: "1 while one node url of a provider is out of rotation, labelled with why: unreachable (requests got no answer), node-error (the node answered with its own failure), head-stalled (it answers, but its block stopped moving while another url moved on), unspecified (should not appear). A url out for two reasons has two series. The series exists only while the url is out. Written once per probe cycle. url and internal_path as rpc_endpoint_url_latest_block.",
+	}, urlReasonLabels))
+	// Not rpc_endpoint_url_out_of_rotation_total: OpenMetrics names a counter's family without
+	// _total, which would declare the gauge's name a second time and make the page invalid.
+	m.endpointURLOutOfRotationExits = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "rpc_endpoint_url_out_of_rotation_exits_total",
+		Help: "Times one node url of a provider went from in rotation to out, under the reason that took it out (one of rpc_endpoint_url_out_of_rotation's). Gaining a second reason while out adds nothing. Counts a hold shorter than a scrape too, which the gauge cannot show. Starts at 0 for unreachable, node-error and head-stalled.",
+	}, urlReasonLabels))
 
 	m.endpointFetchLatestFails = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "rpc_endpoint_fetch_latest_fails",
@@ -372,7 +395,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 
 	m.routerTotalRelaysServiced = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_total_relays_serviced",
-		Help: "Total relays successfully serviced by the smart router, by function.",
+		Help: "Total relays the smart router's endpoints answered, by function, an answer carrying a node error included.",
 	}, routerFunctionLabels))
 
 	m.routerTotalErrored = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -497,6 +520,15 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		Name: "smartrouter_cross_validation_straggler_total",
 		Help: "Cross-validation straggler resolutions (responses that arrived after the quorum early-exit reply), by outcome (agreed, disagreed, node-error, protocol-error, not-received). Bounded — the outcome set is a closed enum.",
 	}, []string{"spec", "apiInterface", "method", "outcome"}))
+	// The structured compliance record (MAG-2787) is written off an async, bounded queue so a slow or
+	// unavailable log pipeline can never fail a relay. A full queue drops the record rather than
+	// blocking; this counter makes that drop visible without needing to notice a gap in the record's
+	// own Seq sequence. Deliberately unlabeled by method: it is a fact about the write pipeline's
+	// capacity, not about any one request.
+	m.crossValidationRecordDroppedTotalMetric = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "smartrouter_cross_validation_record_dropped_total",
+		Help: "Structured cross-validation compliance records (MAG-2787) dropped because the async write queue was full. Any non-zero value means the Seq sequence in the log stream has a gap.",
+	}, []string{"spec", "apiInterface"}))
 
 	// =========================================================================
 	// Incident group metrics
@@ -507,6 +539,10 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	m.incidentNodeErrorsTotalMetric = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_node_errors_total",
 		Help: "Total node errors received from RPC endpoints by the smart router.",
+	}, incidentProviderLabels))
+	m.incidentNodeResultsTotalMetric = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "smartrouter_node_results_total",
+		Help: "Client reads an RPC endpoint answered with a result rather than a node error. Not counted: a stateful request (a write, broadcast to every provider), the router's own health check, and an attempt that got no answer.",
 	}, incidentProviderLabels))
 	m.incidentProtocolErrorsTotalMetric = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_protocol_errors_total",
@@ -858,14 +894,6 @@ func (m *SmartRouterMetricsManager) incForEveryProvider(vec *prometheus.CounterV
 // Endpoint-scoped metric setters
 // =============================================================================
 
-// SetEndpointOverallHealth sets the health status for an RPC endpoint
-func (m *SmartRouterMetricsManager) SetEndpointOverallHealth(spec, apiInterface, endpointID string, healthy bool) {
-	if m == nil {
-		return
-	}
-	setGauge(m.endpointOverallHealth, boolGauge(healthy), spec, apiInterface, endpointID)
-}
-
 // SetEndpointOverallHealthBreakdown sets the aggregate health for a spec/apiInterface across endpoints
 func (m *SmartRouterMetricsManager) SetEndpointOverallHealthBreakdown(spec, apiInterface string, healthy bool) {
 	if m == nil {
@@ -952,6 +980,26 @@ func (m *SmartRouterMetricsManager) SetProviderURLLatestBlock(spec, apiInterface
 	m.setURLLatestBlockLocked(spec, apiInterface, providerName, endpointURL, block, answeredUntil)
 }
 
+// SetEndpointURLBlockTracking records on rpc_endpoint_url_block_tracking whether a url's head is
+// tracked, for every provider configured with the url. A reader of the per-url series cannot
+// otherwise tell a url that has no head by design (MAG-5349) from one whose polls went missing:
+// both show no block and no poll outcome. Only a registered url gets a series, as for the other
+// per-url series; ForgetEndpointURLLatestBlock deletes it with them.
+func (m *SmartRouterMetricsManager) SetEndpointURLBlockTracking(spec, apiInterface, endpointURL string, tracked bool) {
+	if m == nil || m.endpointURLBlockTracking == nil {
+		return
+	}
+	value := 0.0
+	if tracked {
+		value = 1
+	}
+	m.lock.RLock()
+	defer m.lock.RUnlock()
+	for _, providerName := range m.urlToProviderNames[endpointURL] {
+		m.endpointURLBlockTracking.WithLabelValues(m.urlSeriesLabelValuesLocked(spec, apiInterface, providerName, endpointURL)...).Set(value)
+	}
+}
+
 // answeredUntilFrom is the answered-until time of an answer at now.
 func answeredUntilFrom(now time.Time, answerTimeout time.Duration) time.Time {
 	if answerTimeout <= 0 {
@@ -970,7 +1018,7 @@ func (m *SmartRouterMetricsManager) setURLLatestBlockLocked(spec, apiInterface, 
 	}
 }
 
-// AddEndpointURLRelayServiced counts a relay one url of a provider served successfully, so a page
+// AddEndpointURLRelayServiced counts a relay one url of a provider answered (a node error included), so a page
 // about that url can ask whether customers' requests reach it, not just its provider.
 func (m *SmartRouterMetricsManager) AddEndpointURLRelayServiced(spec, apiInterface, providerName, endpointURL string) {
 	if m == nil || m.endpointURLRelaysServiced == nil {
@@ -982,6 +1030,74 @@ func (m *SmartRouterMetricsManager) AddEndpointURLRelayServiced(spec, apiInterfa
 		return
 	}
 	m.endpointURLRelaysServiced.WithLabelValues(m.urlSeriesLabelValuesLocked(spec, apiInterface, providerName, endpointURL)...).Inc()
+}
+
+// URLOutOfRotation is what one node url of a provider reports to PublishURLsOutOfRotation for one
+// probe cycle: the reasons it is out of rotation for right now, and how many times it went from in
+// rotation to out since the cycle before, under the reason that took it out.
+type URLOutOfRotation struct {
+	Provider string
+	URL      string
+	Reasons  []string
+	WentOut  map[string]uint64
+}
+
+// PublishURLsOutOfRotation publishes, for one chain and interface, why each node url is out of
+// rotation (MAG-5244). urls is every url the caller looked at this cycle, in or out. For each one
+// it sets rpc_endpoint_url_out_of_rotation to 1 under every reason that holds, and adds the new
+// times it left rotation to rpc_endpoint_url_out_of_rotation_exits_total. The url's counter series
+// for each of exitReasons is created at 0 first, so its first exit is an increase Prometheus sees:
+// a series born at 1 reads its first sample as its start, and increase() and rate() miss that exit.
+// Then it deletes every gauge
+// series it published for this chain and interface on an earlier cycle that no longer holds: a
+// url that came back, and also a url that is no longer listed at all (its provider left the
+// pairing), which would otherwise stay at 1 for ever.
+//
+// Only series that cleared are deleted, never all of them first, so a scrape between two cycles
+// never reads a gap for a url that is still out. The counter is never deleted here; it goes with
+// the url's other series in ForgetEndpointURLLatestBlock.
+//
+// Only a registered url gets a series, as for the other per-url metrics.
+func (m *SmartRouterMetricsManager) PublishURLsOutOfRotation(spec, apiInterface string, urls []URLOutOfRotation, exitReasons []string) {
+	if m == nil || m.endpointURLOutOfRotation == nil {
+		return
+	}
+	m.lock.Lock()
+	defer m.lock.Unlock()
+	scope := spec + "|" + apiInterface
+	// Keyed by the joined label values. The separator cannot appear in a label value here: a
+	// provider name, a hex fingerprint, a spec path and a reason constant.
+	now := make(map[string][]string)
+	for _, u := range urls {
+		if _, registered := m.urlToProviderNames[u.URL]; !registered {
+			continue
+		}
+		base := m.urlSeriesLabelValuesLocked(spec, apiInterface, u.Provider, u.URL)
+		for _, reason := range u.Reasons {
+			values := append(slices.Clone(base), reason)
+			m.endpointURLOutOfRotation.WithLabelValues(values...).Set(1)
+			now[strings.Join(values, "\x00")] = values
+		}
+		if m.endpointURLOutOfRotationExits != nil {
+			for _, reason := range exitReasons {
+				m.endpointURLOutOfRotationExits.WithLabelValues(append(slices.Clone(base), reason)...)
+			}
+			for reason, n := range u.WentOut {
+				if n > 0 {
+					m.endpointURLOutOfRotationExits.WithLabelValues(append(slices.Clone(base), reason)...).Add(float64(n))
+				}
+			}
+		}
+	}
+	for key, values := range m.urlsOutOfRotation[scope] {
+		if _, still := now[key]; !still {
+			m.endpointURLOutOfRotation.DeleteLabelValues(values...)
+		}
+	}
+	if m.urlsOutOfRotation == nil {
+		m.urlsOutOfRotation = make(map[string]map[string][]string)
+	}
+	m.urlsOutOfRotation[scope] = now
 }
 
 // ForgetEndpointURLLatestBlock deletes a url's per-url series for every provider configured with
@@ -1001,6 +1117,19 @@ func (m *SmartRouterMetricsManager) ForgetEndpointURLLatestBlock(spec, apiInterf
 		}
 		if m.endpointURLRelaysServiced != nil {
 			m.endpointURLRelaysServiced.DeleteLabelValues(values...)
+		}
+		if m.endpointURLBlockTracking != nil {
+			m.endpointURLBlockTracking.DeleteLabelValues(values...)
+		}
+		// The out-of-rotation series carry one more label, the reason, so they are matched by
+		// the url's own labels. The gauge is also cleared by the next PublishURLsOutOfRotation;
+		// the counter only here.
+		byURL := prometheus.Labels{"spec": values[0], "apiInterface": values[1], "endpoint_id": values[2], "url": values[3], "internal_path": values[4]}
+		if m.endpointURLOutOfRotation != nil {
+			m.endpointURLOutOfRotation.DeletePartialMatch(byURL)
+		}
+		if m.endpointURLOutOfRotationExits != nil {
+			m.endpointURLOutOfRotationExits.DeletePartialMatch(byURL)
 		}
 	}
 }
@@ -1182,11 +1311,6 @@ func (m *SmartRouterMetricsManager) RegisterEndpoint(spec, apiInterface, endpoin
 		m.urlFingerprints[endpointID] = URLFingerprint(endpointID)
 	}
 	m.lock.Unlock()
-
-	// Initialize health to healthy so always-healthy endpoints appear in Prometheus from startup.
-	// The relay code only calls SetEndpointOverallHealth on state transitions (unhealthy→healthy),
-	// so without this initialization, endpoints that never fail would have no health metric at all.
-	m.SetEndpointOverallHealth(spec, apiInterface, providerName, true)
 }
 
 // resolveProviderNames returns every provider name configured for a given endpoint URL.
@@ -1474,6 +1598,16 @@ func (m *SmartRouterMetricsManager) SetRelayNodeErrorMetric(chainId string, apiI
 	incCounter(m.incidentNodeErrorsTotalMetric, chainId, apiInterface, providerAddress, m.normalizeMethodLabel(chainId, method))
 }
 
+// SetRelayNodeResultMetric counts one client read an endpoint answered with a result, on
+// smartrouter_node_results_total. The relay processor decides what counts (handleResponse); this
+// only increments.
+func (m *SmartRouterMetricsManager) SetRelayNodeResultMetric(chainId string, apiInterface string, providerAddress string, method string) {
+	if m == nil {
+		return
+	}
+	incCounter(m.incidentNodeResultsTotalMetric, chainId, apiInterface, providerAddress, m.normalizeMethodLabel(chainId, method))
+}
+
 func (m *SmartRouterMetricsManager) RecordCacheResult(chainId, apiInterface, method, cacheTier, outcome string, latencyMs float64) {
 	if m == nil {
 		return
@@ -1607,6 +1741,16 @@ func (m *SmartRouterMetricsManager) SetCrossValidationStragglerMetric(chainId, a
 		return
 	}
 	incCounter(m.crossValidationStragglerTotalMetric, chainId, apiInterface, m.normalizeMethodLabel(chainId, method), outcome)
+}
+
+// SetCrossValidationRecordDroppedMetric records one structured compliance record (MAG-2787) lost
+// because the async write queue was full at emission time. Unlabeled by method/outcome: a drop is a
+// write-pipeline capacity fact, and the record's own Seq sequence already carries which request it was.
+func (m *SmartRouterMetricsManager) SetCrossValidationRecordDroppedMetric(chainId, apiInterface string) {
+	if m == nil {
+		return
+	}
+	incCounter(m.crossValidationRecordDroppedTotalMetric, chainId, apiInterface)
 }
 
 func (m *SmartRouterMetricsManager) UpdateHealthCheckStatus(status bool) {

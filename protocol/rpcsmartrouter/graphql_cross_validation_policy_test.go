@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
+	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
@@ -64,11 +65,17 @@ func TestGraphQLMultiRootCrossValidationPolicy(t *testing.T) {
 		return sm
 	}
 
-	t.Run("a forbid on one root holds when the write is selected twice", func(t *testing.T) {
-		resolver := resolverWith(CrossValidationPolicyEntry{ChainID: chainID, ApiInterface: apiInterface, Method: "executeTransaction", CrossValidationPolicy: CrossValidationPolicy{ForbidCallerCV: true}})
-		pm := protocolMessage(`{"query":"mutation { a: executeTransaction(transactionDataBcs: \"x\", signatures: [\"y\"]) { digest } b: executeTransaction(transactionDataBcs: \"x\", signatures: [\"y\"]) { digest } }"}`, callerCVHeaders)
-		require.Equal(t, "executeTransaction&executeTransaction", pm.GetApi().GetName())
+	t.Run("a write selected twice is refused before a policy reads it, and a forbid holds on the write", func(t *testing.T) {
+		// A mutation runs one write per request (MAG-5120, check Q8): the write selected twice
+		// under two aliases is refused at parse, with not_sent, so it never reaches the state
+		// machine this case used to hold the forbid in.
+		_, perr := chainParser.ParseMsg("", []byte(`{"query":"mutation { a: executeTransaction(transactionDataBcs: \"x\", signatures: [\"y\"]) { digest } b: executeTransaction(transactionDataBcs: \"x\", signatures: [\"y\"]) { digest } }"}`), http.MethodPost, nil, extensionslib.ExtensionInfo{})
+		refusal := rpcInterfaceMessages.GraphQLRefusalFrom(perr)
+		require.NotNil(t, refusal, "refused as a write's shape: %v", perr)
+		require.Equal(t, rpcInterfaceMessages.GraphQLWriteOutcomeNotSent, refusal.WriteOutcome())
 
+		resolver := resolverWith(CrossValidationPolicyEntry{ChainID: chainID, ApiInterface: apiInterface, Method: "executeTransaction", CrossValidationPolicy: CrossValidationPolicy{ForbidCallerCV: true}})
+		pm := protocolMessage(`{"query":"mutation { executeTransaction(transactionDataBcs: \"x\", signatures: [\"y\"]) { digest } }"}`, callerCVHeaders)
 		sm := stateMachine(pm, resolver)
 		require.Equal(t, relaycore.Stateful, sm.GetSelection(), "caller headers must not fan a forbidden write out for cross-validation")
 		require.Nil(t, sm.GetCrossValidationParams())

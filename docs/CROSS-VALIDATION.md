@@ -70,6 +70,12 @@ whatever the caller sends.
       agreement-threshold: { floor: 2, cap: 3 }  # caller may raise 2 -> 3, and no further
 ```
 
+Under `enabled: true`, a knob written without a floor is floored at its default: 3 for
+`max-participants`, 2 for `agreement-threshold`, 1 for `min-groups` (MAG-2784). So
+`enabled: true` alone still lets a caller ask for more, never for less: a caller sending
+`agreement-threshold: 1` gets 2. A floor written in the policy replaces the default, whether it
+is lower or higher, and a cap below the default still wins.
+
 So the shorthand "a caller may make cross-validation stricter, never weaker" holds only **up
 to the configured cap**. The cap is the one *configured* mechanism by which the router validates
 less strictly than a caller asked, and it is an explicit operator decision — an operator who
@@ -84,6 +90,37 @@ self-consistent shape is honored — including the degenerate `max-participants:
 single response because the requested quorum of one was met. Nothing is compared in that
 case; `…-all-providers` and `…-agreeing-providers` each list the one provider queried, so a
 client that needs real corroboration should read those lists rather than `status` alone.
+
+### max-participants: every configured upstream
+
+`max-participants` also accepts two string values instead of a number (MAG-2783):
+
+```yaml
+      max-participants: primary   # every non-backup upstream for this chain and interface
+      max-participants: all       # every upstream, backup tier included
+```
+
+Both resolve to a floor, exactly like the numeric shorthand (`max-participants: 2` means
+`{floor: 2}`) — a caller may still ask for *more* via the header, though there is nothing
+left to give once every configured upstream is already in the fan-out. `primary` counts the
+same `direct-rpc` providers the group-diversity fan-out already draws on; `all` adds
+`backup-direct-rpc` on top.
+
+**A backup that `all` folds in is a group in the quorum.** When the quorum counts groups for
+`min-groups`, a backup's answer counts under its own `group-label`, or under the implicit
+`"default"` group when it has none: the same rule as for a primary. So with primaries in groups
+`a` and `b` and an unlabeled backup, one primary of group `a` agreeing with the backup meets
+`min-groups: 2`. Give each backup the `group-label` of its vendor, or it can stand in for a group
+it does not belong to. The request-time `insufficient-groups` check and the selection still count
+the primaries' groups alone, so a backup never makes a request pass that check.
+
+Resolution happens once the router knows the endpoint's real provider counts (after dialing,
+before serving), so the two strings behave exactly like the equivalent number from then on —
+the same `insufficient-capacity` / `insufficient-groups` guards apply, and a request can still
+be refused if a primary is down and nothing backfilled the shortfall. For `all`, the
+`insufficient-capacity` guard counts the backups that can serve the request (not blocked, and
+serving its addon and extensions) beside the primaries; for `primary` and a number it counts the
+primaries alone.
 
 ## Worked examples
 
@@ -140,6 +177,11 @@ read-only per-request record of the dissent it observed (which provider, which g
 recording path) for test suites that cannot scrape the metrics port — see
 [Reading recorded dissent](../protocol/rpcsmartrouter/README.md#reading-recorded-dissent).
 
+Separately, and **not** debug-gated, every cross-validated request — agreement or dissent, success or
+failure — emits one structured compliance log record (digests and metadata only, never a body), always
+on regardless of `--log-level` — see
+[Compliance record](../protocol/rpcsmartrouter/README.md#compliance-record-always-on-not-debug-gated).
+
 ## Caveats
 
 - **Writes.** Cross-validation does not apply to a method in the stateful category, by either
@@ -182,9 +224,25 @@ recording path) for test suites that cannot scrape the metrics port — see
   groups leaves it 200 while requests for *that* method are refused with `insufficient-capacity`.
   That is deliberate: gating a whole chain and interface on one method's quorum is the over-coupling
   MAG-3746 was. Alert on the cross-validation failure series for policy capacity, not on readiness.
+- **A cross-validated request goes only to providers the router trusts to hold its answer.**
+  - **Never a blocked provider (MAG-2785).** When selection runs out of providers, an ordinary
+    request ends the failover cascade on the blocked list. A cross-validated one stops before it
+    and fails `insufficient-capacity`: a blocked provider's answer would count as a vote.
+  - **Never a provider known to be below the block it names (MAG-2786).** A node asked for a
+    block it does not have answers as if the block did not exist (`{"result": null}` on EVM, with
+    no error). So two lagging providers used to agree on "not found" and outvote the one that held
+    the block. A request for an explicit height now goes only to providers whose last known block,
+    or one of whose urls' own poll, reaches it. A provider whose block is unknown stays eligible.
+    `latest` and the other tags are not held to a height, and historical reads still use
+    providers behind the tip.
+  - **A block no provider has reached yet fails `insufficient-capacity`**, until one does. A
+    client following the head under cross-validation gets that failure, not a validated `null`,
+    for the next block.
 - **Cost & latency.** N relays per request. Scope policies to the methods that warrant it.
 - **A group smaller than the agreement threshold is an availability risk.** Cross-validation
-  does not retry, hedge or use backups. With `min-groups: 2` and a group of one provider,
+  does not retry or hedge, and a backup joins a request only when it is selected (see
+  `max-participants: all` above): none stands in for a provider that goes quiet. With
+  `min-groups: 2` and a group of one provider,
   that provider going quiet can leave the quorum only group diversity short. When the
   attempt window expires with the agreement count met, and only providers from groups
   smaller than the threshold could still complete a quorum, the request fails
@@ -464,9 +522,10 @@ The split in the reason enum is the client's decision procedure. A **quorum-time
 (`no-agreement`, `insufficient-responses`, `diversity-unmet`, `group-quorum-unmet`) means
 responses came back and did not agree — a retry against a different set may help. A
 **request-time structural** reason (`insufficient-capacity`, `insufficient-groups`) means the
-candidate set could not even be assembled, so retrying this router will not help and the client
-should fall back. The structural case carries no provider lists precisely because no provider
-was queried; `failure-reason` is the whole signal.
+candidate set could not even be assembled, so the client should fall back. Retrying this router
+helps only once the set can be assembled: a blocked provider is re-admitted, or a provider reaches
+the block the request names (see [Caveats](#caveats)). The structural case carries no provider
+lists precisely because no provider was queried; `failure-reason` is the whole signal.
 
 The same split is on the metrics side, so alerts can distinguish them without parsing logs:
 

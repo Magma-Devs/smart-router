@@ -2169,12 +2169,13 @@ func (g *GRPCDirectRPCConnection) handleGRPCError(ctx context.Context, err error
 
 	// The router's own deadline passed: a timeout, as on every HTTP transport, and the
 	// endpoint is still blamed for it. It is not the node's answer, so no response. A node
-	// that sends DEADLINE_EXCEEDED itself, while the router's deadline is still open, did
-	// answer, and stays a node error below.
+	// that sends DEADLINE_EXCEEDED or CANCELED itself, while the router's deadline is still
+	// open, did answer, and stays a node error below.
 	//
 	// The deadline is read from the clock as well as from ctx.Err(): the node's server
-	// enforces the router's deadline too, and reports it back as a status of its own. See
-	// routerDeadlineEchoed.
+	// enforces the router's deadline too, and reports it back as a status of its own — either
+	// DEADLINE_EXCEEDED or, when the node's own handler notices the deadline and aborts the
+	// call by hand, CANCELED. See routerDeadlineEchoed.
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) || routerDeadlineEchoed(ctx, err, time.Now()) {
 		return nil, fmt.Errorf("gRPC relay timed out: %w: %w", context.DeadlineExceeded, err)
 	}
@@ -2242,28 +2243,38 @@ func NewGRPCStatusError(code uint32, message string, cause error, md map[string]
 }
 
 // routerDeadlineEchoed reports whether a status from the node is the router's own deadline coming
-// back: a DEADLINE_EXCEEDED read once the clock has passed the deadline of the call's context.
+// back: a DEADLINE_EXCEEDED or CANCELED read once the clock has passed the deadline of the call's
+// context.
 //
-// gRPC sends the router's deadline to the node in the grpc-timeout header, and the node's server
-// ends the call at that deadline with a DEADLINE_EXCEEDED status of its own (grpc-go words it
-// "context deadline exceeded"; the provider simulator's Python server, "Deadline Exceeded"). So a
-// call that runs out the router's deadline is ended from two sides at the same instant, by the
-// router's own timer and by the node's status for the same deadline, and grpc-go hands back
-// whichever arrives first. A deadline context reports no error until the runtime has run its
-// timer, so a status that arrived in that gap met a live context and was taken for the node's
-// answer, through the node-error arm of handleGRPCError: nothing counts a node error against the
-// endpoint, and the status went to the caller as the node's reply (MAG-4925). Under a burst a few
-// attempts in a hundred took the gap, and a provider that never answered was left on, short of
-// the disable threshold.
+// gRPC sends the router's deadline to the node in the grpc-timeout header. A server whose own
+// library enforces that deadline ends the call with a DEADLINE_EXCEEDED status of its own (grpc-go
+// words it "context deadline exceeded"; the provider simulator's Python server, "Deadline
+// Exceeded"). A handler that instead gives up on the call by hand can just as well answer
+// CANCELED. The provider simulator's `hang` fault mode does: it does not read the deadline, but
+// holds the call for a fixed 30 s, the router's default attempt deadline, then aborts it CANCELED
+// ("hang timeout"). It starts that clock only when the call arrives, so its CANCELED lands at or
+// just after the router's deadline, in the same gap. That is why the first fix here
+// (DEADLINE_EXCEEDED only) kept failing verify-bug-fix after it merged (MAG-4925). Either way the
+// call is ended from two sides at the same instant, by the router's own timer and by the node's
+// status, and grpc-go hands back whichever arrives first. A deadline context reports no error
+// until the runtime has run its timer, so a status that arrived in that gap met a live context and was taken for the node's answer, through the node-error arm of
+// handleGRPCError: nothing counts a node error against the endpoint, and the status went to the
+// caller as the node's reply. Under a burst a few attempts in a hundred took the gap, and a
+// provider that never answered was left on, short of the disable threshold.
 //
-// The clock settles it. The node's deadline is never earlier than the router's: grpc-go rounds the
-// remaining time up when it writes the header, and the node starts its clock only when the header
-// arrives. So a DEADLINE_EXCEEDED read at or after the router's deadline is that deadline, echoed;
-// one read before it is the node's own (a query that timed out inside the node) and stays a node
-// error (TestSendGRPCRelay_NodeSentDeadlineIsANodeError). No other status is reinterpreted: a node
-// that answered anything else at that instant did answer, as on every HTTP transport.
+// The clock settles it, for either code. The node's deadline is never earlier than the router's:
+// grpc-go rounds the remaining time up when it writes the header, and the node starts its clock
+// only when the header arrives. So a DEADLINE_EXCEEDED or CANCELED read at or after the router's
+// deadline is that deadline, echoed; one read before it is the node's own (a query that timed out
+// or was cancelled inside the node) and stays a node error
+// (TestHandleGRPCError_NodeOwnDeadlineBeforeTheRoutersStaysANodeError,
+// TestHandleGRPCError_NodeOwnCanceledBeforeTheRoutersStaysANodeError). No other status is
+// reinterpreted: a node that answered anything else at that instant did answer, as on every HTTP
+// transport.
 func routerDeadlineEchoed(ctx context.Context, err error, now time.Time) bool {
-	if status.Code(err) != codes.DeadlineExceeded {
+	switch status.Code(err) {
+	case codes.DeadlineExceeded, codes.Canceled:
+	default:
 		return false
 	}
 	deadline, ok := ctx.Deadline()

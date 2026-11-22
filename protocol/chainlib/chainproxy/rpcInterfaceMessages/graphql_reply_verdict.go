@@ -2,6 +2,7 @@ package rpcInterfaceMessages
 
 import (
 	"bytes"
+	"errors"
 	"net/http"
 
 	"github.com/goccy/go-json"
@@ -11,21 +12,26 @@ import (
 
 // A GraphQL server answers most errors inside an HTTP 200, so the router reads the body to decide
 // what a reply means (MAG-5121). Each error in the reply gets one of the verdict kinds below; the
-// reply's verdict is the strongest of them, and it reaches the error registry as the HTTP status
-// that registry row stands for (graphQLVerdict.status).
+// reply's verdict is the strongest of them. A read's verdict names its registry entry itself
+// (graphQLVerdict.classified): GraphQL is read by the rows in this file only, never by the shared
+// REST rows, whose status and body-text rows mean other things on other interfaces.
 //
 // The kinds, and what the router does with each:
 //
 //	answer      served; no node-error header
-//	caller      the caller's mistake: served as is, not retried, the endpoint not blamed (400)
-//	elsewhere   another provider may serve it: retried, not blamed, not paused (501)
+//	caller      the caller's mistake: served as is, not retried, the endpoint not blamed
+//	            (USER_INVALID_REQUEST)
+//	elsewhere   another provider may serve it: retried, not blamed, not paused
+//	            (NODE_UNIMPLEMENTED, NODE_ACCESS_DENIED, NODE_UNRECOGNIZED_ERROR)
 //	unknown     cannot tell: treated exactly like elsewhere. When unsure, retry without blame
-//	throttled   our quota at a vendor: retried, the provider paused, not blamed (429)
-//	fault       the provider failed: retried and blamed (500, 502, 503, 504)
+//	            (NODE_UNRECOGNIZED_ERROR)
+//	throttled   our quota at a vendor: retried, the provider paused, not blamed (NODE_RATE_LIMITED)
+//	fault       the provider failed: retried and blamed (NODE_INTERNAL_ERROR, NODE_BAD_GATEWAY,
+//	            NODE_SERVICE_UNAVAILABLE, NODE_GATEWAY_TIMEOUT, NODE_SERVER_ERROR, NODE_URL_REFUSED)
 //
-// unknown and elsewhere share a status on purpose. The registry's own fallback for an
-// unrecognised error is retryable but still counts against the endpoint's availability, and an
-// error the router cannot read is not evidence that the endpoint is broken.
+// The registry's own fallback for an unrecognised error (UNKNOWN_ERROR) is retryable but still
+// counts against the endpoint's availability, and an error the router cannot read is not evidence
+// that the endpoint is broken: hence NODE_UNRECOGNIZED_ERROR.
 type graphQLVerdictKind int
 
 const (
@@ -37,12 +43,14 @@ const (
 	graphQLVerdictThrottled
 )
 
-// graphQLVerdict is one error's reading: its kind, the status the registry classifies it under,
-// and the message the log line and the registry's message rows read.
+// graphQLVerdict is one error's reading: its kind, the status it stands for (the log line's code,
+// and on a write the status the shared registry rows classify it under), the message the log line
+// reads, and on a read the registry entry it is filed under.
 type graphQLVerdict struct {
-	kind    graphQLVerdictKind
-	status  int
-	message string
+	kind       graphQLVerdictKind
+	status     int
+	message    string
+	classified *common.RouterError
 }
 
 // stronger reports whether v decides the reply over other. Any kind that retries beats the
@@ -53,29 +61,36 @@ func (v graphQLVerdict) stronger(other graphQLVerdict) bool {
 	return v.kind > other.kind
 }
 
-// graphQLRetryElsewhereStatus is the status the registry files "another provider may serve it"
-// under: NODE_UNIMPLEMENTED, retryable and node-capability, so the endpoint is neither blamed nor
-// demoted.
+// graphQLRetryElsewhereStatus is the status that stands for "another provider may serve it" in the
+// log line: a 501, NODE_UNIMPLEMENTED's.
 const graphQLRetryElsewhereStatus = http.StatusNotImplemented
 
 // graphQLReadRows are the default rows for an error in a read's reply, keyed on extensions.code
 // (MAG-5121 default rows). A code missing from this table matches no row and reads as unknown.
 var graphQLReadRows = map[string]graphQLVerdict{
-	"GRAPHQL_VALIDATION_FAILED": {kind: graphQLVerdictCaller, status: http.StatusBadRequest},
-	"BAD_USER_INPUT":            {kind: graphQLVerdictCaller, status: http.StatusBadRequest},
+	"GRAPHQL_VALIDATION_FAILED": graphQLCallerRow,
+	"BAD_USER_INPUT":            graphQLCallerRow,
 	// The node's parser is stricter than the router's (it stops at 64 levels of nesting where the
 	// router allows 256, and refuses syntax the router accepts), so every provider says the same.
-	"GRAPHQL_PARSE_FAILED":  {kind: graphQLVerdictCaller, status: http.StatusBadRequest},
-	"INTERNAL_SERVER_ERROR": {kind: graphQLVerdictFault, status: http.StatusInternalServerError},
-	"UNAVAILABLE":           {kind: graphQLVerdictFault, status: http.StatusServiceUnavailable},
-	"REQUEST_TIMEOUT":       {kind: graphQLVerdictFault, status: http.StatusGatewayTimeout},
-	"DEADLINE_EXCEEDED":     {kind: graphQLVerdictFault, status: http.StatusGatewayTimeout},
-	"FEATURE_UNAVAILABLE":   {kind: graphQLVerdictElsewhere, status: graphQLRetryElsewhereStatus},
+	"GRAPHQL_PARSE_FAILED":  graphQLCallerRow,
+	"INTERNAL_SERVER_ERROR": {kind: graphQLVerdictFault, status: http.StatusInternalServerError, classified: common.RouterErrorNodeInternalError},
+	"UNAVAILABLE":           {kind: graphQLVerdictFault, status: http.StatusServiceUnavailable, classified: common.RouterErrorNodeServiceUnavailable},
+	"REQUEST_TIMEOUT":       {kind: graphQLVerdictFault, status: http.StatusGatewayTimeout, classified: common.RouterErrorNodeGatewayTimeout},
+	"DEADLINE_EXCEEDED":     {kind: graphQLVerdictFault, status: http.StatusGatewayTimeout, classified: common.RouterErrorNodeGatewayTimeout},
+	"FEATURE_UNAVAILABLE":   {kind: graphQLVerdictElsewhere, status: graphQLRetryElsewhereStatus, classified: common.RouterErrorNodeUnimplemented},
+}
+
+// graphQLCallerRow is the caller's own mistake.
+var graphQLCallerRow = graphQLVerdict{kind: graphQLVerdictCaller, status: http.StatusBadRequest, classified: common.RouterErrorUserInvalidRequest}
+
+// graphQLThrottled is a vendor quota on our traffic: the provider is paused, as on an HTTP 429.
+func graphQLThrottled(message string) graphQLVerdict {
+	return graphQLVerdict{kind: graphQLVerdictThrottled, status: http.StatusTooManyRequests, message: message, classified: common.RouterErrorNodeRateLimited}
 }
 
 // graphQLReplyError is one entry of a reply's errors list, read leniently: a reply is never made
 // unreadable by the shape of one entry. code is the text of extensions.code, or "" when the code is
-// missing, not text (a number counts as no code, MAG-4428) or extensions is not an object.
+// missing, not text (a number counts as no code, MAG-5121 test 13) or extensions is not an object.
 type graphQLReplyError struct {
 	message string
 	code    string
@@ -89,33 +104,57 @@ type graphQLReplyError struct {
 	chain []string
 }
 
-// graphQLReply is a decoded GraphQL-over-HTTP response body. data is kept raw so a null data is
-// told apart from an object.
+// graphQLReply is a decoded GraphQL-over-HTTP response body. Only the shape of data is kept: a
+// read's data can be megabytes, and the verdict needs to know only whether it is an object.
 type graphQLReply struct {
-	data   json.RawMessage
-	errors []graphQLReplyError
+	dataIsObject bool
+	errors       []graphQLReplyError
 }
 
 // readGraphQLReply decodes a body and reports whether it is a GraphQL response at all: a non-empty
 // errors list, or data that is an object. JSON of another shape (a top-level null, a string, errors
 // that is not a list) is not one.
+//
+// A read's data can be megabytes and the verdict needs only to know whether it is an object, so
+// data is first decoded into a pointer to an empty struct: the decoder walks the object without
+// keeping any of it, where a json.RawMessage (or any value handed to an UnmarshalJSON method) is a
+// copy of the whole value. A data member of another shape (a string, a list, a number) does not
+// fit that pointer, and the reply is read again keeping data raw, the only case that pays the copy.
+// Only a value of the wrong type calls for that second reading: a body that is not JSON (a cut
+// reply, a page) fails it at the same byte, after walking the whole body once more.
 func readGraphQLReply(body []byte) (reply graphQLReply, isResponse bool) {
 	var envelope struct {
+		Data   *struct{}         `json:"data"`
+		Errors []json.RawMessage `json:"errors"`
+	}
+	err := json.Unmarshal(body, &envelope)
+	if err == nil {
+		return newGraphQLReply(envelope.Data != nil, envelope.Errors)
+	}
+	var wrongType *json.UnmarshalTypeError
+	if !errors.As(err, &wrongType) {
+		return graphQLReply{}, false
+	}
+	var raw struct {
 		Data   json.RawMessage   `json:"data"`
 		Errors []json.RawMessage `json:"errors"`
 	}
-	if err := json.Unmarshal(body, &envelope); err != nil {
+	if err = json.Unmarshal(body, &raw); err != nil {
 		return graphQLReply{}, false
 	}
-	reply.data = envelope.Data
-	for _, raw := range envelope.Errors {
-		reply.errors = append(reply.errors, readGraphQLReplyError(raw))
-	}
-	return reply, len(reply.errors) > 0 || graphQLDataIsObject(reply.data)
+	return newGraphQLReply(graphQLDataIsObject(raw.Data), raw.Errors)
 }
 
-// readGraphQLReplyError reads one errors entry. An entry that is not an object keeps its raw text
-// as the message, with no code and no path.
+func newGraphQLReply(dataIsObject bool, rawErrors []json.RawMessage) (reply graphQLReply, isResponse bool) {
+	reply.dataIsObject = dataIsObject
+	for _, raw := range rawErrors {
+		reply.errors = append(reply.errors, readGraphQLReplyError(raw))
+	}
+	return reply, len(reply.errors) > 0 || reply.dataIsObject
+}
+
+// readGraphQLReplyError reads one errors entry. An entry that is not an object keeps its text (a
+// JSON string's text, any other value's raw JSON) as the message, with no code and no path.
 func readGraphQLReplyError(raw json.RawMessage) graphQLReplyError {
 	var entry struct {
 		Message    json.RawMessage `json:"message"`
@@ -123,7 +162,7 @@ func readGraphQLReplyError(raw json.RawMessage) graphQLReplyError {
 		Extensions json.RawMessage `json:"extensions"`
 	}
 	if err := json.Unmarshal(raw, &entry); err != nil {
-		return graphQLReplyError{message: string(raw)}
+		return graphQLReplyError{message: jsonTextOrRaw(raw)}
 	}
 	read := graphQLReplyError{message: jsonTextOrRaw(entry.Message)}
 	read.pathHead, read.pathLength = readGraphQLPath(entry.Path)
@@ -177,7 +216,7 @@ func readGraphQLPath(raw json.RawMessage) (head string, length int) {
 
 // graphQLDataIsObject reports whether a response's raw data member holds an object. An absent
 // member and a JSON null both decode to something that is not one.
-func graphQLDataIsObject(data json.RawMessage) bool {
+func graphQLDataIsObject(data []byte) bool {
 	trimmed := bytes.TrimLeft(data, " \t\r\n")
 	return len(trimmed) > 0 && trimmed[0] == '{'
 }
@@ -192,7 +231,7 @@ func readErrorVerdict(replyError graphQLReplyError) (verdict graphQLVerdict, mat
 		}
 		// A vendor quota on our traffic, as on an HTTP 429: the provider is paused. A safeguard:
 		// not seen yet at Sui or at any vendor.
-		return graphQLVerdict{kind: graphQLVerdictThrottled, status: http.StatusTooManyRequests, message: replyError.message}, true
+		return graphQLThrottled(replyError.message), true
 	}
 	row, matched := graphQLReadRows[replyError.code]
 	if !matched {
@@ -202,71 +241,75 @@ func readErrorVerdict(replyError graphQLReplyError) (verdict graphQLVerdict, mat
 	return row, true
 }
 
-// graphQLQuotaTexts are the wordings that make an error no row matches a vendor quota on our
-// traffic: the provider is paused, as on an HTTP 429 (MAG-5121, Change 12). Each is long enough
-// to say only that. "rate limit" alone is not one ("Rate limit settings could not be loaded"),
-// nor is "too many" ("too many keys supplied" is the caller's) or "quota" (a field name, and a
-// monthly quota does not clear in a pause). Lower case: matched without regard to letter case.
-var graphQLQuotaTexts = []string{"too many requests", "rate limit exceeded"}
-
-// graphQLQuotaTextScanLimit bounds how much of one error message is searched for a quota text,
-// so a node that sends a huge message costs a fixed amount to read. Every wording seen sits at
-// the start of a short message.
-const graphQLQuotaTextScanLimit = 512
-
-// isGraphQLQuotaText reports whether a message carries one of graphQLQuotaTexts within its first
-// graphQLQuotaTextScanLimit bytes. It compares without regard to ASCII letter case and allocates
-// nothing.
-func isGraphQLQuotaText(message string) bool {
-	if len(message) > graphQLQuotaTextScanLimit {
-		message = message[:graphQLQuotaTextScanLimit]
-	}
-	for _, text := range graphQLQuotaTexts {
-		if containsFoldASCII(message, text) {
-			return true
-		}
-	}
-	return false
-}
-
-// containsFoldASCII reports whether s contains lowerNeedle, an all-lower-case ASCII string,
-// ignoring ASCII letter case in s.
-func containsFoldASCII(s, lowerNeedle string) bool {
-	for start := 0; start+len(lowerNeedle) <= len(s); start++ {
-		matched := true
-		for i := 0; i < len(lowerNeedle); i++ {
-			c := s[start+i]
-			if 'A' <= c && c <= 'Z' {
-				c += 'a' - 'A'
-			}
-			if c != lowerNeedle[i] {
-				matched = false
-				break
-			}
-		}
-		if matched {
-			return true
-		}
-	}
-	return false
-}
-
 // unknownVerdict is what an error no row matches means inside a 2xx: the router cannot tell, so
 // it retries without blame.
 func unknownVerdict(message string) graphQLVerdict {
-	return graphQLVerdict{kind: graphQLVerdictUnknown, status: graphQLRetryElsewhereStatus, message: message}
+	return graphQLVerdict{kind: graphQLVerdictUnknown, status: graphQLRetryElsewhereStatus, message: message, classified: common.RouterErrorNodeUnrecognizedError}
 }
 
-// statusTableVerdict is the verdict of a reply's own status outside 2xx, the status table: the
-// reply's status as the registry files it, with the gateway-refusal exception
-// (graphQLGatewayRefusalStatus). Its kind is read back from the registry so the strength
-// comparison agrees with what the registry will do.
-func statusTableVerdict(body []byte, httpStatusCode int, message string) graphQLVerdict {
-	status := graphQLGatewayRefusalStatus(body, httpStatusCode)
-	return graphQLVerdict{kind: graphQLKindOfStatus(status), status: status, message: message}
+// statusTableVerdict is a read's verdict on a status outside 2xx, the GraphQL status table
+// (MAG-5121). The status alone decides; nothing in the body is read here.
+//
+//	429                  throttled
+//	401, 402, 403        elsewhere: this provider refuses us (our key, our plan, a rule)
+//	404, 405, 1xx, 3xx   fault: GraphQL has one url, so a missing route or a redirect says the
+//	                     url is wrong, and every request to it will fail the same way
+//	408                  fault
+//	any other 4xx        elsewhere: a refusal the router cannot read (400, 409, 410, 413, 415,
+//	                     422, ...), so it asks another provider without blame
+//	501                  elsewhere
+//	any other 5xx        fault
+func statusTableVerdict(httpStatusCode int, message string) graphQLVerdict {
+	verdict := graphQLVerdict{status: httpStatusCode, message: message}
+	switch {
+	case httpStatusCode == http.StatusTooManyRequests:
+		return graphQLThrottled(message)
+	case httpStatusCode == http.StatusUnauthorized, httpStatusCode == http.StatusPaymentRequired, httpStatusCode == http.StatusForbidden:
+		verdict.kind, verdict.classified = graphQLVerdictElsewhere, common.RouterErrorNodeAccessDenied
+	case httpStatusCode == http.StatusNotFound, httpStatusCode == http.StatusMethodNotAllowed, httpStatusCode < 400:
+		verdict.kind, verdict.classified = graphQLVerdictFault, common.RouterErrorNodeURLRefused
+	case httpStatusCode == http.StatusRequestTimeout:
+		verdict.kind, verdict.classified = graphQLVerdictFault, common.RouterErrorNodeServiceUnavailable
+	case httpStatusCode < 500:
+		verdict.kind, verdict.classified = graphQLVerdictElsewhere, common.RouterErrorNodeUnrecognizedError
+	case httpStatusCode == http.StatusNotImplemented:
+		verdict.kind, verdict.classified = graphQLVerdictElsewhere, common.RouterErrorNodeUnimplemented
+	case httpStatusCode == http.StatusInternalServerError:
+		verdict.kind, verdict.classified = graphQLVerdictFault, common.RouterErrorNodeInternalError
+	case httpStatusCode == http.StatusBadGateway:
+		verdict.kind, verdict.classified = graphQLVerdictFault, common.RouterErrorNodeBadGateway
+	case httpStatusCode == http.StatusServiceUnavailable:
+		verdict.kind, verdict.classified = graphQLVerdictFault, common.RouterErrorNodeServiceUnavailable
+	case httpStatusCode == http.StatusGatewayTimeout:
+		verdict.kind, verdict.classified = graphQLVerdictFault, common.RouterErrorNodeGatewayTimeout
+	default:
+		verdict.kind, verdict.classified = graphQLVerdictFault, common.RouterErrorNodeServerError
+	}
+	return verdict
 }
 
-// graphQLKindOfStatus reads the verdict kind the registry's REST rows give a bare status.
+// graphQLClassifiedOfKind is the registry entry of a read verdict that names none: the entry its
+// kind stands for. It goes by the kind, not the status: a caller's verdict stands for a 400, which
+// the status table files as "elsewhere".
+func graphQLClassifiedOfKind(kind graphQLVerdictKind, status int) *common.RouterError {
+	switch kind {
+	case graphQLVerdictCaller:
+		return graphQLCallerRow.classified
+	case graphQLVerdictThrottled:
+		return common.RouterErrorNodeRateLimited
+	case graphQLVerdictFault:
+		if status >= 500 {
+			return statusTableVerdict(status, "").classified
+		}
+		return common.RouterErrorNodeBadGateway
+	default: // elsewhere, unknown
+		return common.RouterErrorNodeUnrecognizedError
+	}
+}
+
+// graphQLKindOfStatus reads the verdict kind the registry's REST rows give a bare status. Only a
+// write's error status uses it: writes still stand on the shared rows (MAG-5122), reads on
+// statusTableVerdict.
 func graphQLKindOfStatus(status int) graphQLVerdictKind {
 	classified := common.ClassifyError(nil, common.ChainFamilyUnknown, common.TransportREST, status, "")
 	switch {
@@ -290,10 +333,8 @@ func graphQLKindOfStatus(status int) graphQLVerdictKind {
 //	P3  HTTP 401, 402, 403: the provider refuses us, whatever the body says.
 //	P4  a 2xx that is not a GraphQL response: a provider fault (a gateway answering in the
 //	    node's place).
-//	P5  an errors list, under any status: each error through the chain's rows (the request's
-//	    chain list, MAG-4909), then the default rows. An error no row matches
-//	    is throttled when its message is a quota text (graphQLQuotaTexts) under a 2xx or a
-//	    4xx; otherwise unknown under a 2xx, and the status table under any other status.
+//	P5  an errors list, under any status: each error through the rows. An error no row matches
+//	    is unknown under a 2xx, and the status table under any other status.
 //	P6  a 2xx with data and no errors: the answer.
 //	P7  any other status with no GraphQL body: the status table.
 //
@@ -313,7 +354,7 @@ func readVerdict(body []byte, httpStatusCode int, request *GraphQLMessage) (verd
 	if !is2xx {
 		switch httpStatusCode {
 		case http.StatusTooManyRequests, http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden:
-			return statusTableVerdict(body, httpStatusCode, extractErrorMessage(body, httpStatusCode)), true
+			return statusTableVerdict(httpStatusCode, extractErrorMessage(body, httpStatusCode)), true
 		}
 	}
 
@@ -321,19 +362,20 @@ func readVerdict(body []byte, httpStatusCode int, request *GraphQLMessage) (verd
 	if !isResponse {
 		if is2xx {
 			return graphQLVerdict{
-				kind:    graphQLVerdictFault,
-				status:  http.StatusBadGateway,
-				message: graphQLNotAResponsePrefix + extractErrorMessage(body, httpStatusCode),
+				kind:       graphQLVerdictFault,
+				status:     http.StatusBadGateway,
+				message:    graphQLNotAResponseMessage(body, httpStatusCode),
+				classified: common.RouterErrorNodeBadGateway,
 			}, true
 		}
-		return statusTableVerdict(body, httpStatusCode, extractErrorMessage(body, httpStatusCode)), true
+		return statusTableVerdict(httpStatusCode, extractErrorMessage(body, httpStatusCode)), true
 	}
 	if len(reply.errors) == 0 {
 		if is2xx {
 			return graphQLVerdict{kind: graphQLVerdictAnswer, status: httpStatusCode}, false
 		}
 		// data and no errors under an error status: the status decides.
-		return statusTableVerdict(body, httpStatusCode, extractErrorMessage(body, httpStatusCode)), true
+		return statusTableVerdict(httpStatusCode, extractErrorMessage(body, httpStatusCode)), true
 	}
 
 	for index, replyError := range reply.errors {
@@ -342,15 +384,10 @@ func readVerdict(body []byte, httpStatusCode int, request *GraphQLMessage) (verd
 			errorVerdict, matched = readErrorVerdict(replyError)
 		}
 		if !matched {
-			switch {
-			case httpStatusCode < 500 && isGraphQLQuotaText(replyError.message):
-				// A vendor quota in words, under a 2xx or a 4xx. A 5xx stays the status's: a
-				// failing server, whatever its text says.
-				errorVerdict = graphQLVerdict{kind: graphQLVerdictThrottled, status: http.StatusTooManyRequests, message: replyError.message}
-			case is2xx:
+			if is2xx {
 				errorVerdict = unknownVerdict(replyError.message)
-			default:
-				errorVerdict = statusTableVerdict(body, httpStatusCode, replyError.message)
+			} else {
+				errorVerdict = statusTableVerdict(httpStatusCode, replyError.message)
 			}
 		}
 		if index == 0 || errorVerdict.stronger(verdict) {

@@ -2,9 +2,7 @@ package rpcInterfaceMessages
 
 import (
 	"bytes"
-	"cmp"
 	"errors"
-	"fmt"
 	"net/http"
 	"strings"
 
@@ -13,6 +11,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
+	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/parser"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 )
@@ -118,6 +117,59 @@ func graphQLTopLevelKeys(data []byte) (keys []string, isObject bool) {
 	return keys, true
 }
 
+// graphQLRequestMemberKinds is what each member the router reads must hold, in the words a refusal
+// uses.
+var graphQLRequestMemberKinds = map[string]string{
+	"query":         "a string",
+	"operationName": "a string",
+	"variables":     "an object",
+}
+
+// decodeGraphQLRequestEnvelope decodes the members the router reads, and refuses a body that is not
+// one JSON object or whose members have the wrong type (MAG-4351).
+//
+// The refusal says what is wrong from the decoder's typed fields, never from its error text: that
+// text names the router's Go types ("Go struct field graphQLRequestEnvelope.variables"), and a
+// refusal is sent to the client unmasked.
+func decodeGraphQLRequestEnvelope(data []byte) (graphQLRequestEnvelope, error) {
+	envelope := graphQLRequestEnvelope{}
+	err := json.Unmarshal(data, &envelope)
+	var syntaxErr *json.SyntaxError
+	var typeErr *json.UnmarshalTypeError
+	switch {
+	case err == nil:
+		// `null` decodes into the empty envelope without an error, and is no more a request than a
+		// string or a number is.
+		if trimmed := bytes.TrimLeft(data, " \t\r\n"); len(trimmed) == 0 || trimmed[0] != '{' {
+			return envelope, RefuseGraphQLRequest("graphql request body is not a JSON object")
+		}
+		return envelope, nil
+	case errors.As(err, &syntaxErr):
+		if len(bytes.TrimSpace(data)) == 0 {
+			return envelope, RefuseGraphQLRequest("graphql request body is empty")
+		}
+		return envelope, RefuseGraphQLRequest("graphql request body is not JSON")
+	case errors.As(err, &typeErr) && typeErr.Field == "":
+		// The body itself has the wrong type. An array is a batch, which GraphQL over HTTP does not
+		// define and Sui answers with its own refusal (UnsupportedBatch).
+		if typeErr.Value == "array" {
+			return envelope, RefuseGraphQLRequest("graphql request body is a JSON array: batched requests are not served, send each request on its own")
+		}
+		return envelope, RefuseGraphQLRequest("graphql request body is not a JSON object")
+	case errors.As(err, &typeErr):
+		// Field is the path of the value the decoder could not take: "variables", or
+		// "variables.n" for a value inside it.
+		member, _, inside := strings.Cut(typeErr.Field, ".")
+		kind, known := graphQLRequestMemberKinds[member]
+		if inside || !known {
+			return envelope, RefuseGraphQLRequest("graphql request member %q holds a value the router cannot read", member)
+		}
+		return envelope, RefuseGraphQLRequest("graphql request member %q must be %s", member, kind)
+	default:
+		return envelope, RefuseGraphQLRequest("graphql request body cannot be read")
+	}
+}
+
 // GraphQLRootField is one root selection of a GraphQL operation.
 type GraphQLRootField struct {
 	// Name is the schema field name, never the alias. Identity must not be aliasable: a caller
@@ -145,6 +197,9 @@ type GraphQLMessage struct {
 	// RootFields are the operation's root selections, in document order.
 	RootFields []GraphQLRootField
 	chainproxy.BaseMessage
+	// mutationField describes the executable mutation field. RootFields also retains skipped
+	// selections for routing when every root is skipped.
+	mutationField *graphQLMutationField
 	// chainRows is the list of the chain the request is sent to (SetChainFamily), nil for a chain
 	// that has none.
 	chainRows *graphQLChainRows
@@ -162,16 +217,19 @@ func ParseGraphQLMsg(data []byte) (*GraphQLMessage, error) {
 	if err := checkGraphQLRequestKeys(data); err != nil {
 		return nil, err
 	}
-	envelope := graphQLRequestEnvelope{}
-	if err := json.Unmarshal(data, &envelope); err != nil {
-		return nil, fmt.Errorf("failed unmarshalling graphql request body: %w", err)
+	// From here on every failure is a refusal the router answers itself, with nothing sent to a
+	// provider: a request it cannot read is refused, not forwarded (MAG-4351, decided 2026-11-09).
+	envelope, err := decodeGraphQLRequestEnvelope(data)
+	if err != nil {
+		return nil, err
 	}
+	envelope.Variables = exactGraphQLVariables(data, envelope.Variables)
 	if strings.TrimSpace(envelope.Query) == "" {
-		return nil, errors.New("graphql request carries no query")
+		return nil, RefuseGraphQLRequest("graphql request carries no query")
 	}
 
-	// parseGraphQLQuery names its own failures: a parse error carries the "failed parsing" prefix,
-	// and the depth limit is a router refusal that must not (MAG-4577).
+	// parseGraphQLQuery names its own failures: a parse error is GRAPHQL_PARSE_FAILED with the
+	// "failed parsing" prefix, and the depth limit is a router limit that carries neither (MAG-4577).
 	doc, err := parseGraphQLQuery(envelope.Query)
 	if err != nil {
 		return nil, err
@@ -189,14 +247,25 @@ func ParseGraphQLMsg(data []byte) (*GraphQLMessage, error) {
 	}
 	// GraphQL-over-HTTP POST cannot carry a subscription, and Sui's Subscription root shares field
 	// names with Query (checkpoints, transactions, events). Accepted, a subscription would resolve to
-	// the read of the same name and be cached and cross-validated as that read.
+	// the read of the same name and be cached and cross-validated as that read. It is refused and
+	// reaches no provider (MAG-4351, MAG-4577): no customer needs one today, and serving one would be
+	// a feature of its own, with a connection that stays open.
 	if operation.Operation == ast.Subscription {
-		return nil, errors.New("graphql subscriptions are not served over HTTP POST")
+		return nil, RefuseGraphQLRequest("graphql subscriptions are not served over HTTP POST")
 	}
 
-	rootFields, err := graphQLRootFields(doc, operation, envelope.Variables)
+	var mutationField *graphQLMutationField
+	if operation.Operation == ast.Mutation {
+		mutationField = &graphQLMutationField{}
+	}
+	rootFields, err := graphQLRootFields(doc, operation, envelope.Variables, mutationField)
 	if err != nil {
 		return nil, err
+	}
+	if operation.Operation == ast.Mutation {
+		if err := refuseMultiRootMutation(rootFields); err != nil {
+			return nil, err
+		}
 	}
 
 	return &GraphQLMessage{
@@ -206,6 +275,7 @@ func ParseGraphQLMsg(data []byte) (*GraphQLMessage, error) {
 		Variables:     envelope.Variables,
 		Operation:     operation.Operation,
 		RootFields:    rootFields,
+		mutationField: mutationField,
 	}, nil
 }
 
@@ -226,21 +296,47 @@ func refuseMixedMutationDocument(doc *ast.QueryDocument) error {
 		}
 	}
 	if hasMutation && hasOther {
-		return RefuseGraphQLRequest("graphql document holds a mutation beside another operation; send the mutation in a request of its own")
+		return refuseGraphQLWriteShape("graphql document holds a mutation beside another operation; send the mutation in a request of its own")
 	}
 	return nil
 }
+
+// refuseMultiRootMutation refuses a mutation that selects more than one root field once its
+// fragments are expanded, __typename not counted (MAG-5120, check Q8).
+//
+// The write path answers one write per request: one copy per provider, never re-sent, one verdict
+// (MAG-5122). A second root field would ride on the first one's copies and verdict: a second write
+// whose own outcome the caller is never told, or a read run once per primary and answered with the
+// write's reply. Until this refusal the router sent such a mutation to every primary as it was. A
+// client that means two writes sends them as two requests; __typename is the one root field a
+// mutation may carry beside its write, because it runs nothing.
+func refuseMultiRootMutation(rootFields []GraphQLRootField) error {
+	selected := 0
+	for _, rootField := range rootFields {
+		if rootField.Name != graphQLTypenameField {
+			selected++
+		}
+	}
+	if selected > 1 {
+		return refuseGraphQLWriteShape("graphql mutation selects %d root fields; send each write in a request of its own", selected)
+	}
+	return nil
+}
+
+// graphQLTypenameField is the meta field every GraphQL type answers with its own name. It runs
+// nothing on the node.
+const graphQLTypenameField = "__typename"
 
 // selectGraphQLOperation picks the operation the request executes. A named request names it; an
 // anonymous one is only valid when the document holds exactly one operation, which is the
 // GraphQL spec's own rule and not a simplification.
 func selectGraphQLOperation(doc *ast.QueryDocument, operationName string) (*ast.OperationDefinition, error) {
 	if len(doc.Operations) == 0 {
-		return nil, errors.New("graphql document defines no operation")
+		return nil, RefuseGraphQLRequest("graphql document defines no operation")
 	}
 	if operationName == "" {
 		if len(doc.Operations) > 1 {
-			return nil, errors.New("graphql document defines multiple operations and the request names none")
+			return nil, RefuseGraphQLRequest("graphql document defines multiple operations and the request names none")
 		}
 		return doc.Operations[0], nil
 	}
@@ -249,14 +345,30 @@ func selectGraphQLOperation(doc *ast.QueryDocument, operationName string) (*ast.
 			return operation, nil
 		}
 	}
-	return nil, fmt.Errorf("graphql document defines no operation named %q", operationName)
+	return nil, RefuseGraphQLRequest("graphql document defines no operation named %q", operationName)
 }
 
-// graphQLRootFields flattens the operation's root selection set into the fields it actually
-// selects, expanding fragment spreads and inline fragments so a query that hides its root field
-// behind a fragment still resolves to that field's api.
-func graphQLRootFields(doc *ast.QueryDocument, operation *ast.OperationDefinition, variables map[string]interface{}) ([]GraphQLRootField, error) {
+// graphQLRootFields flattens the operation's root selection set into the fields the node runs,
+// read the way the node reads it (MAG-5120): fragment spreads and inline fragments are expanded, so
+// a query that hides its root field behind a fragment still resolves to that field's api; a
+// selection that @skip or @include leaves out is left out; a field repeated under one response
+// key is one field, because the node runs it once; and a variable the request leaves out takes the
+// default the operation declares for it. These names drive routing, compute units, the cache and
+// the metrics, so each one must be a field the node actually runs.
+//
+// Every field selection still counts toward MaxGraphQLRootFields, left out or repeated, and every
+// fragment is still walked and checked, because the limit and the fragment checks bound and read
+// the document as written (MAG-4360, MAG-4351), not what runs.
+func graphQLRootFields(doc *ast.QueryDocument, operation *ast.OperationDefinition, variables map[string]interface{}, mutationField *graphQLMutationField) ([]GraphQLRootField, error) {
+	variables = graphQLVariablesWithDefaults(operation, variables)
 	rootFields := []GraphQLRootField{}
+	// leftOut holds the root fields @skip / @include leave out, only to name an operation whose
+	// every root field is left out (see below).
+	leftOut := []GraphQLRootField{}
+	// responseKeys are the response keys already named: the alias, or the field name without one.
+	responseKeys := map[string]struct{}{}
+	leftOutKeys := map[string]struct{}{}
+	selections := 0
 	// Guards a fragment cycle. gqlparser accepts a document whose fragments reference each other
 	// (cycle detection is a validation rule, which needs a schema), so an unguarded walk here
 	// would not return.
@@ -267,39 +379,50 @@ func graphQLRootFields(doc *ast.QueryDocument, operation *ast.OperationDefinitio
 	// would refuse it.
 	expanding := map[string]struct{}{}
 	fragments := graphQLFragmentsByName(doc.Fragments)
+	visitedChildFragments := make(map[string]bool)
 
 	// nesting counts the fragments being expanded around selectionSet. It and the root field
-	// count bound how much of the document the walk visits (MAG-4360).
-	var walk func(selectionSet ast.SelectionSet, nesting int) error
-	walk = func(selectionSet ast.SelectionSet, nesting int) error {
+	// count bound how much of the document the walk visits (MAG-4360). skipped is true inside a
+	// fragment that @skip or @include leaves out.
+	var walk func(selectionSet ast.SelectionSet, nesting int, skipped bool) error
+	walk = func(selectionSet ast.SelectionSet, nesting int, skipped bool) error {
 		if nesting > MaxGraphQLFragmentNesting {
 			return RefuseGraphQLRequest("graphql fragments nest more than %d deep", MaxGraphQLFragmentNesting)
 		}
 		for _, selection := range selectionSet {
 			switch typed := selection.(type) {
 			case *ast.Field:
-				if len(rootFields) == MaxGraphQLRootFields {
+				if selections == MaxGraphQLRootFields {
 					return RefuseGraphQLRequest("graphql operation selects more than %d root fields", MaxGraphQLRootFields)
 				}
-				rootFields = append(rootFields, GraphQLRootField{
+				selections++
+				rootField := GraphQLRootField{
 					Name:        typed.Name,
-					ResponseKey: cmp.Or(typed.Alias, typed.Name),
+					ResponseKey: graphQLResponseKey(typed),
 					Args:        graphQLArguments(typed.Arguments, variables),
-				})
+				}
+				if skipped || graphQLSelectionIsLeftOut(typed.Directives, variables) {
+					leftOut = appendGraphQLRootField(leftOut, leftOutKeys, rootField.ResponseKey, rootField)
+					continue
+				}
+				rootFields = appendGraphQLRootField(rootFields, responseKeys, rootField.ResponseKey, rootField)
+				if mutationField != nil && typed.Name != graphQLTypenameField {
+					mutationField.collect(rootField, typed.SelectionSet, fragments, variables, visitedChildFragments)
+				}
 			case *ast.InlineFragment:
-				if err := walk(typed.SelectionSet, nesting+1); err != nil {
+				if err := walk(typed.SelectionSet, nesting+1, skipped || graphQLSelectionIsLeftOut(typed.Directives, variables)); err != nil {
 					return err
 				}
 			case *ast.FragmentSpread:
 				if _, cyclic := expanding[typed.Name]; cyclic {
-					return fmt.Errorf("graphql fragment %q is cyclic", typed.Name)
+					return RefuseGraphQLRequest("graphql fragment %q is cyclic", typed.Name)
 				}
 				fragment := fragments[typed.Name]
 				if fragment == nil {
-					return fmt.Errorf("graphql query spreads undefined fragment %q", typed.Name)
+					return RefuseGraphQLRequest("graphql query spreads undefined fragment %q", typed.Name)
 				}
 				expanding[typed.Name] = struct{}{}
-				err := walk(fragment.SelectionSet, nesting+1)
+				err := walk(fragment.SelectionSet, nesting+1, skipped || graphQLSelectionIsLeftOut(typed.Directives, variables))
 				delete(expanding, typed.Name)
 				if err != nil {
 					return err
@@ -309,13 +432,118 @@ func graphQLRootFields(doc *ast.QueryDocument, operation *ast.OperationDefinitio
 		return nil
 	}
 
-	if err := walk(operation.SelectionSet, 0); err != nil {
+	if err := walk(operation.SelectionSet, 0, false); err != nil {
 		return nil, err
 	}
 	if len(rootFields) == 0 {
-		return nil, errors.New("graphql operation selects no root field")
+		// Every root field is left out: the node runs nothing and answers {"data":{}}. With no
+		// field left the router would have nothing to route the request by, so it is named by the
+		// fields it selects, as before MAG-5120. Only this degenerate request keeps that naming.
+		rootFields = leftOut
+	}
+	if len(rootFields) == 0 {
+		return nil, RefuseGraphQLRequest("graphql operation selects no root field")
 	}
 	return rootFields, nil
+}
+
+// appendGraphQLRootField appends rootField unless a field under the same response key is already
+// named: the node merges the two into one field and runs it once, so `{ epoch { epochId } epoch {
+// startTimestamp } }` is one epoch read, charged once (MAG-5120). Two aliases are two response
+// keys, and two runs.
+func appendGraphQLRootField(rootFields []GraphQLRootField, responseKeys map[string]struct{}, responseKey string, rootField GraphQLRootField) []GraphQLRootField {
+	if _, repeated := responseKeys[responseKey]; repeated {
+		return rootFields
+	}
+	responseKeys[responseKey] = struct{}{}
+	return append(rootFields, rootField)
+}
+
+// graphQLResponseKey is the key a field's answer comes back under: its alias, or its name when it
+// has none.
+func graphQLResponseKey(field *ast.Field) string {
+	if field.Alias != "" {
+		return field.Alias
+	}
+	return field.Name
+}
+
+// graphQLSelectionIsLeftOut reports whether @skip or @include leaves a selection out, as the node
+// reads them: @skip(if: true) leaves it out whatever @include says, and @include(if: false) leaves
+// it out (MAG-5120). A condition the router cannot read as a boolean, such as a variable the
+// request does not send, leaves the selection in: the node refuses such a document, and counting
+// the field keeps the router from charging less than the request asked for.
+func graphQLSelectionIsLeftOut(directives ast.DirectiveList, variables map[string]interface{}) bool {
+	if condition, known := graphQLDirectiveCondition(directives.ForName("skip"), variables); known && condition {
+		return true
+	}
+	if condition, known := graphQLDirectiveCondition(directives.ForName("include"), variables); known && !condition {
+		return true
+	}
+	return false
+}
+
+// graphQLDirectiveCondition reads the `if` argument of @skip or @include, resolving a variable.
+// known is false when there is no such directive or its condition is not a boolean.
+func graphQLDirectiveCondition(directive *ast.Directive, variables map[string]interface{}) (condition, known bool) {
+	if directive == nil {
+		return false, false
+	}
+	argument := directive.Arguments.ForName("if")
+	if argument == nil {
+		return false, false
+	}
+	condition, known = graphQLValue(argument.Value, variables).(bool)
+	return condition, known
+}
+
+// graphQLVariablesWithDefaults returns the request's variables with every variable the operation
+// declares a default for, and the request leaves out, set to that default (MAG-5120). The node
+// applies the default before it reads an argument, so `query P($n: UInt53 = 5) {
+// checkpoint(sequenceNumber: $n) { digest } }` sent with no variables reads checkpoint 5, not the
+// latest one. A variable the request sends, null included, keeps the value it is sent with.
+func graphQLVariablesWithDefaults(operation *ast.OperationDefinition, variables map[string]interface{}) map[string]interface{} {
+	var resolved map[string]interface{}
+	for _, definition := range operation.VariableDefinitions {
+		if definition.DefaultValue == nil {
+			continue
+		}
+		if _, sent := variables[definition.Variable]; sent {
+			continue
+		}
+		if resolved == nil {
+			resolved = make(map[string]interface{}, len(variables)+1)
+			for name, value := range variables {
+				resolved[name] = value
+			}
+		}
+		// A default is a constant: it cannot refer to another variable.
+		resolved[definition.Variable] = graphQLValue(definition.DefaultValue, nil)
+	}
+	if resolved == nil {
+		return variables
+	}
+	return resolved
+}
+
+// exactGraphQLVariables re-reads the request's variables with every number kept as its exact text
+// (json.Number), as a literal argument already is (graphQLValue). Decoded as a float64, a
+// checkpoint above 2^53 rounds to a neighbour, and the router would pin, route and cache the
+// request under a checkpoint the node does not read (MAG-5120). The body has already been decoded
+// once, so a second decode cannot fail; if it somehow does, the first decode's variables are kept.
+func exactGraphQLVariables(data []byte, decoded map[string]interface{}) map[string]interface{} {
+	if decoded == nil {
+		return nil
+	}
+	var exact struct {
+		Variables map[string]interface{} `json:"variables"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	if err := decoder.Decode(&exact); err != nil || exact.Variables == nil {
+		return decoded
+	}
+	return exact.Variables
 }
 
 // graphQLArguments converts an argument list to plain Go values, resolving variable references
@@ -399,10 +627,8 @@ func (gm *GraphQLMessage) GetRawRequestHash() ([]byte, error) {
 // CheckResponseError classifies a GraphQL reply: hasError is false only for an answer.
 //
 // GraphQL answers most errors inside an HTTP 200, so the status alone cannot say what a reply
-// means. A read is classified by readVerdict (MAG-5121), with the chain's rows first (MAG-4909). A
-// write on a chain with write rows is classified by them: only an accepted copy is an answer
-// (MAG-4909, MAG-5122). Any other write keeps writeVerdict. ClassificationStatus gives the same
-// verdict as the status the error registry files it under.
+// means. Reads and writes with chain-specific rows supply their own classification. Other writes
+// use the default write verdict and the shared registry.
 func (gm *GraphQLMessage) CheckResponseError(data []byte, httpStatusCode int) (hasError bool, errorMessage string) {
 	verdict, isError := gm.verdict(data, httpStatusCode)
 	if !isError {
@@ -411,9 +637,8 @@ func (gm *GraphQLMessage) CheckResponseError(data []byte, httpStatusCode int) (h
 	return true, verdict.message
 }
 
-// ClassificationStatus returns the HTTP status the error registry should classify a GraphQL
-// node error under: the status the reply's verdict stands for (see graphQLVerdictKind). For an
-// answer it is the reply's own status.
+// ClassificationStatus returns the status recorded for the verdict. A write that uses the shared
+// registry is classified under this status. An answer retains the upstream status.
 func (gm *GraphQLMessage) ClassificationStatus(data []byte, httpStatusCode int) int {
 	verdict, isError := gm.verdict(data, httpStatusCode)
 	if !isError {
@@ -422,18 +647,49 @@ func (gm *GraphQLMessage) ClassificationStatus(data []byte, httpStatusCode int) 
 	return verdict.status
 }
 
+// OwnClassification returns the registry entry selected by GraphQL's read or chain write rows.
+// It returns nil for an answer or when the shared registry classifies a write.
+func (gm *GraphQLMessage) OwnClassification(data []byte, httpStatusCode int) *common.RouterError {
+	verdict, isError := gm.verdict(data, httpStatusCode)
+	if !isError {
+		return nil
+	}
+	return verdict.classified
+}
+
+// ReplyVerdict is CheckResponseError, ClassificationStatus and OwnClassification from one reading
+// of the reply, for a caller that needs them all: each of them decodes the whole body.
+func (gm *GraphQLMessage) ReplyVerdict(data []byte, httpStatusCode int) (hasError bool, errorMessage string, classificationStatus int, classified *common.RouterError) {
+	verdict, isError := gm.verdict(data, httpStatusCode)
+	if !isError {
+		return false, "", httpStatusCode, nil
+	}
+	return true, verdict.message, verdict.status, verdict.classified
+}
+
 func (gm *GraphQLMessage) verdict(data []byte, httpStatusCode int) (graphQLVerdict, bool) {
 	if gm.hasChainWriteRows() {
-		copyReading := gm.chainRows.writeCopy(gm, data, httpStatusCode)
+		copyReading := gm.chainRows.writeCopy(gm.mutationField, data, httpStatusCode)
 		if copyReading.outcome == GraphQLWriteAccepted {
 			return graphQLVerdict{kind: graphQLVerdictAnswer, status: httpStatusCode}, false
+		}
+		if copyReading.outcome == GraphQLWriteMayHaveRun && httpStatusCode >= 500 {
+			// An ambiguous 5xx can come from a gateway after delivery. Keep the existing
+			// transport handling for that status. Only a definitive Sui verdict overrides it.
+			copyReading.verdict.classified = nil
 		}
 		return copyReading.verdict, true
 	}
 	if gm.IsMutation() {
 		return writeVerdict(data, httpStatusCode)
 	}
-	return readVerdict(data, httpStatusCode, gm)
+	verdict, isError := readVerdict(data, httpStatusCode, gm)
+	if isError && verdict.classified == nil {
+		// A read's error is never filed by the shared rows: a row that names no registry entry
+		// (a chain's row added without one) is filed by its kind instead (MAG-5121).
+		verdict.classified = graphQLClassifiedOfKind(verdict.kind, verdict.status)
+	}
+	return verdict, isError
 }
 
 // writeVerdict is a mutation's verdict, unchanged by MAG-5121 except that every reply is now
@@ -450,27 +706,45 @@ func (gm *GraphQLMessage) verdict(data []byte, httpStatusCode int) (graphQLVerdi
 //     the caller's (a 400: not retried, not scored).
 func writeVerdict(data []byte, httpStatusCode int) (graphQLVerdict, bool) {
 	if httpStatusCode != 0 && (httpStatusCode < 200 || httpStatusCode >= 300) {
-		return graphQLVerdict{status: graphQLGatewayRefusalStatus(data, httpStatusCode), message: extractErrorMessage(data, httpStatusCode)}, true
+		status := graphQLGatewayRefusalStatus(data, httpStatusCode)
+		return graphQLVerdict{kind: graphQLKindOfStatus(status), status: status, message: extractErrorMessage(data, httpStatusCode)}, true
 	}
 	reply, isResponse := readGraphQLReply(data)
 	if !isResponse {
-		return graphQLVerdict{status: http.StatusBadGateway, message: graphQLNotAResponsePrefix + extractErrorMessage(data, httpStatusCode)}, true
+		return graphQLVerdict{kind: graphQLVerdictFault, status: http.StatusBadGateway, message: graphQLNotAResponseMessage(data, httpStatusCode)}, true
 	}
 	if len(reply.errors) == 0 {
-		return graphQLVerdict{status: httpStatusCode}, false
+		return graphQLVerdict{kind: graphQLVerdictAnswer, status: httpStatusCode}, false
 	}
 	for _, replyError := range reply.errors {
 		if status, isNodeFault := graphQLWriteNodeErrorCodes[replyError.code]; isNodeFault {
-			return graphQLVerdict{status: status, message: replyError.message}, true
+			kind := graphQLVerdictFault
+			if status == http.StatusTooManyRequests {
+				kind = graphQLVerdictThrottled
+			}
+			return graphQLVerdict{kind: kind, status: status, message: replyError.message}, true
 		}
 	}
-	return graphQLVerdict{status: http.StatusBadRequest, message: reply.errors[0].message}, true
+	return graphQLVerdict{kind: graphQLVerdictCaller, status: http.StatusBadRequest, message: reply.errors[0].message}, true
 }
 
-// graphQLNotAResponsePrefix opens the error message of a 2xx body that is not a GraphQL response,
-// so the log line says why a 200 counted as a node error. The body's own message follows it, and
-// the registry's message rows still read that.
-const graphQLNotAResponsePrefix = "reply is not a GraphQL response (no data object, no errors): "
+// graphQLNotAResponsePrefix and graphQLNotJSONPrefix open the error message of a 2xx body that is
+// not a GraphQL response, so the log line says why a 200 counted as a node error: JSON with neither
+// a data object nor errors, or a body that is not JSON at all (an HTML or text page). The body's
+// own message follows, and the registry's message rows still read that.
+const (
+	graphQLNotAResponsePrefix = "reply is not a GraphQL response (no data object, no errors): "
+	graphQLNotJSONPrefix      = "reply is not a GraphQL response (not JSON): "
+)
+
+// graphQLNotAResponseMessage is the error message of a 2xx body that is not a GraphQL response.
+func graphQLNotAResponseMessage(body []byte, httpStatusCode int) string {
+	prefix := graphQLNotAResponsePrefix
+	if !json.Valid(body) {
+		prefix = graphQLNotJSONPrefix
+	}
+	return prefix + extractErrorMessage(body, httpStatusCode)
+}
 
 // GetParams returns the arguments of the operation's single root field, so block_parsing can
 // resolve a pinned checkpoint out of the request body. A multi-root operation has no single
@@ -502,11 +776,27 @@ type graphQLRootFieldInput struct {
 	rootField GraphQLRootField
 }
 
+// GetParams returns the root field's arguments as block_parsing reads them, with every text value
+// left out: a block is pinned only by a number, the way the node reads it (MAG-5120). Sui types a
+// checkpoint as UInt53 and refuses "100" or "0x10" for it, so the router reads such a request as
+// unpinned, and it falls to the api's default (latest) instead of a block the node never reads.
+//
+// Every GraphQL api that reads a block reads it from an argument the chain types as a number, and
+// none reads a hash from the arguments (lava-specs sui.json: checkpoint's sequenceNumber, and
+// atCheckpoint on address, object and package). A chain whose block arguments are text would need
+// its own flag. This view is block_parsing's alone; the root field keeps every argument.
 func (in graphQLRootFieldInput) GetParams() interface{} {
 	if len(in.rootField.Args) == 0 {
 		return nil
 	}
-	return in.rootField.Args
+	numbers := make(map[string]interface{}, len(in.rootField.Args))
+	for name, value := range in.rootField.Args {
+		if _, text := value.(string); text {
+			continue
+		}
+		numbers[name] = value
+	}
+	return numbers
 }
 
 func (in graphQLRootFieldInput) GetResult() json.RawMessage { return nil }

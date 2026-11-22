@@ -82,6 +82,14 @@ type connPool[C pooledConn] struct {
 	lastReconnectErr error
 	onReconnect      func() // called after a successful reconnect (to restore subscriptions)
 	onClose          func() // called once, as Close begins
+	// departed reports whether the endpoint has left both of its manager's tiers. Nil means
+	// it never does. See maybeScaleDown.
+	departed func() bool
+	// slotsHeld counts the slots taken and not yet released, on every connection the pool
+	// handed one out on. Unlike totalSlots it includes a connection the pool has since
+	// dropped as dead, whose subscription is restoring and still holds its slot there.
+	// Taken under lock; released without it.
+	slotsHeld atomic.Int32
 
 	minConnections int
 	maxConnections int
@@ -147,6 +155,7 @@ func (p *connPool[C]) take(ctx context.Context, reserve bool) (C, error) {
 	conn, err := p.pickConnectionLocked(ctx)
 	if err == nil && reserve {
 		conn.addSlots(1)
+		p.slotsHeld.Add(1)
 	}
 	p.lock.Unlock()
 
@@ -259,26 +268,43 @@ func (p *connPool[C]) release(conn C) {
 	}
 
 	conn.addSlots(-1)
+	p.slotsHeld.Add(-1)
 
 	// Consider scaling down if we have excess connections with no slots
 	p.maybeScaleDown()
 }
 
-// maybeScaleDown removes empty connections if we have more than minConnections
+// maybeScaleDown removes empty connections if we have more than minConnections.
+//
+// Once the endpoint has departed and its last subscription has left, the floor is no
+// connection at all. Its manager places no new subscription there, so minConnections only kept
+// sockets open to an upstream the router no longer serves, for the life of the process
+// (MAG-4924). While any subscription holds a slot, the floor stays: a restore that dropped its
+// dead connection has re-dialed one it has not taken a slot on yet, and the WebSocket waiters
+// on that reconnect judge it by whether the pool still holds a healthy connection. A
+// subscription that lands here afterwards dials one again, as one would after boot.
 func (p *connPool[C]) maybeScaleDown() {
+	departed := p.departed != nil && p.departed()
+
 	p.lock.Lock()
 	defer p.lock.Unlock()
 
-	if len(p.connections) <= p.minConnections {
+	// Read under the lock, which every take holds while it counts its slot.
+	floor := p.minConnections
+	if departed && p.slotsHeld.Load() <= 0 {
+		floor = 0
+	}
+
+	if len(p.connections) <= floor {
 		return
 	}
 
-	// Find connections with no slots (excluding the first minConnections)
+	// Find connections with no slots (excluding the first floor connections)
 	var toRemove []C
 	kept := make([]C, 0, len(p.connections))
 
 	for i, conn := range p.connections {
-		if i < p.minConnections {
+		if i < floor {
 			// Keep minimum connections
 			kept = append(kept, conn)
 		} else if conn.slots() == 0 && !conn.IsHealthy() {
@@ -286,7 +312,7 @@ func (p *connPool[C]) maybeScaleDown() {
 			toRemove = append(toRemove, conn)
 		} else if conn.slots() == 0 {
 			// Mark for potential removal (only if we have excess)
-			if len(kept)+len(p.connections)-i-1 >= p.minConnections {
+			if len(kept)+len(p.connections)-i-1 >= floor {
 				toRemove = append(toRemove, conn)
 			} else {
 				kept = append(kept, conn)

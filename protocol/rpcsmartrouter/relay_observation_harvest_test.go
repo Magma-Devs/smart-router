@@ -703,6 +703,11 @@ func newRealChainParserForHarvest(t testing.TB, specIndex string) chainlib.Chain
 	t.Helper()
 	spec, err := specutils.GetSpecFromLocalDirs([]string{"../../specs/"}, specIndex)
 	require.NoError(t, err)
+	// As the router does when it loads the catalog: SOLANAT takes the Solana family from its
+	// import of SOLANA, which decides how its tips are read.
+	catalog, err := specutils.GetAllSpecsFromLocalDir("../../specs/")
+	require.NoError(t, err)
+	common.RegisterChainFamilies(catalog)
 	cp, err := chainlib.NewChainParser("jsonrpc")
 	require.NoError(t, err)
 	cp.SetSpec(spec)
