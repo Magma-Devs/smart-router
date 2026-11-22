@@ -4663,12 +4663,17 @@ func (csm *ConsumerSessionManager) stickyClaimTTL() time.Duration {
 // then selection still offers it, and a claim on it held the session to a dead node on every
 // replica until the claim expired, two epochs later (MAG-5078). With no candidate left this returns
 // PairingListEmptyError, and the request is served unclaimed, as during an outage of every primary.
+//
+// A session for an add-on or extension is served only by the urls that carry it (relayURLs), so a
+// primary whose plain url is up but whose urls for that scope are all out is no candidate either.
 func (csm *ConsumerSessionManager) stickyCandidate(ctx context.Context, cuNeededForSession uint64, requestedBlock int64, addon string, extensions []string, internalPath *string, stateful uint32) (string, error) {
 	csm.lock.RLock()
 	defer csm.lock.RUnlock()
+	scoped := addon != "" || len(extensions) > 0
 	outOfRotation := map[string]struct{}{}
 	for _, address := range csm.getValidAddresses(addon, extensions, ctx) {
-		if provider := csm.pairing[address]; provider == nil || !provider.inRotation() {
+		provider := csm.pairing[address]
+		if provider == nil || !provider.inRotation() || (scoped && len(provider.relayURLs(addon, extensions, internalPath)) == 0) {
 			outOfRotation[address] = struct{}{}
 		}
 	}
