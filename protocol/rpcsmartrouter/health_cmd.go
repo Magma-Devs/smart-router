@@ -281,6 +281,10 @@ func collectHealthProviders(args []string, includeBackup bool, inlineAuth common
 	if err := routersession.ValidateUniqueProviderNames(lists...); err != nil {
 		utils.FormatWarning("the router will REFUSE TO START on this config — probing it anyway", err)
 	}
+	// So does a gRPC grpc-config boot refuses (MAG-5134): reported the same way, and probed.
+	if err := routersession.ValidateGRPCConfigs(lists...); err != nil {
+		utils.FormatWarning("the router will REFUSE TO START on this config — probing it anyway", err)
+	}
 
 	var providers []healthProvider
 	for _, static := range lists {
