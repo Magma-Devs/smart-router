@@ -1,4 +1,4 @@
-# Per-chain error classification in lava-specs (MAG-4910, revision 10)
+# Per-chain error classification in lava-specs (MAG-4910, revision 11)
 
 Implementation spec. Approval, by Nimrod or Tom: the **contract**, which freezes `schema_version` 1
 so MAG-4898 can start on it: the `errors` section, rows, shapes, classes and reasons, write verdicts
@@ -658,16 +658,18 @@ router boots on the bundled specs for everything; a file that fails beside good 
 chain on its bundled spec. Error policies are the bundled ones in every case (§5.4).
 
 - At boot the router validates every bundled policy (§4) against the interfaces the chain serves,
-  one atomic choice per chain before serving. A chain whose policy fails, that has no bundled rows,
-  or that serves an interface its bundled spec doesn't declare gets the router's own rules there
-  (§3.2 steps 1, 3, 4.1, 4.3, 5 and 6), logged as reduced coverage; its dependants with it,
-  unrelated chains untouched. Release CI runs the same validation, so this is a guard, not a path.
+  one atomic choice per chain before serving. A chain whose policy fails, or that serves an
+  interface its bundled spec doesn't declare, gets the router's own rules there (§3.2 steps 1, 3,
+  4.1, 4.3, 5 and 6), logged as reduced coverage; its dependants with it, unrelated chains
+  untouched. A chain with no rows, its own or inherited, is not reduced coverage: it runs on the
+  router's own rules with no gauge and no alert (CANTO in Step 1, and every chain outside the six
+  families). Release CI runs the same validation, so this is a guard, not a path.
   The §5.2 signatures and the XRPL reader are router code and apply in every state, whole-source
   failure included; a write copy left without its chain's rows is judged by the day-one rules
   (§5.2), the safe direction.
 - Log chain + cause; count `smartrouter_spec_errors_section_dropped_total{chain_id, reason}`,
-  reason ∈ {`schema_unknown`, `rule_violation`, `dependency_invalid`, `bundled_no_rows`,
-  `interface_not_bundled`, `source_file_failed`}; whole-source failures count
+  reason ∈ {`schema_unknown`, `rule_violation`, `dependency_invalid`, `interface_not_bundled`,
+  `source_file_failed`}; whole-source failures count
   `smartrouter_spec_source_fallback_total{reason}`, reason ∈ {`host_unreachable`, `ref_not_found`,
   `not_archive`, `no_spec_parsed`}.
 - Gauges: `smartrouter_spec_policy_fallback{spec, apiInterface, reason}` = 1 while a chain runs on
@@ -704,7 +706,8 @@ keep the connection rules.
 - No `--use-static-spec` → bundled specs (today the router refuses to start,
   `CreateSmartRouterEndpoint`). `--use-static-spec` still takes any URL or folder, unpinned: its api
   definitions load as today under the write-method lock (§5.3), and its `errors` sections are
-  ignored (§5.4).
+  ignored (§5.4). So a spec PR's rows are tested against a router whose `specs/` holds the PR's
+  commit (`make specs` from it), never through `--use-static-spec`.
 - At boot the router logs the spec source it loaded (bundled, a URL or a folder) and the commit it
   resolved to, and exports `smartrouter_spec_source_info{kind, source, commit}` = 1. The commit is
   the bundled `SPEC_COMMIT`, the commit a repository archive names, or `unknown` (a folder without
@@ -799,8 +802,9 @@ coverage at the family stage as well as the final verdict, per interface.
 | tables deleted (next release) | prefix, spec rows and router-owned XRP rows (§3.2 step 4), transport | same |
 
 `all` decides which rows classify; it is not `write_rows`, which alone switches on write verdicts
-read from a body (§2.1). Record the bundled commit, window start/end and observed coverage per
-chain, interface and scope (denominators: `smartrouter_requests_read_total` and
+read from a body (§2.1). Before `reads`: the docs (§10) are out, and MAG-2673's prerequisite for
+rows on live traffic is settled (§10). Record the bundled commit, window start/end and observed
+coverage per chain, interface and scope (denominators: `smartrouter_requests_read_total` and
 `smartrouter_requests_write_total`, summed by `spec` and `apiInterface`); a new bundle or a
 mismatch restarts the window; exercise unused rows with fixtures. Rollback before deletion =
 previous setting; after deletion = previous router release. The family tables and the 41 code
@@ -827,9 +831,11 @@ MAG-5258's new success rate.
 - Stateful check (§4.5) as a `spec_guards.yml` job.
 - Write-safety job: validator write rules + diff of effective policies for every affected chain and
   descendant (row and shape contents by `id`, order separately; a replacement in its parent row's
-  place isn't a reorder). A change to any row's `write` or a
-  chain's `write_rows` needs product's approval (Q229); a change to a row or shape on a stateful api
-  needs the write-safety owners' review; both are required checks (labels are informational). A new
+  place isn't a reorder). A change to any row's `write` or a chain's `write_rows` needs product's
+  approval (Q229); a change to a row or shape on a stateful api needs the write-safety owners'
+  review, a parent row's matcher included when it changes which replies a descendant's stateful api
+  treats as refused with the descendant's `write` untouched; both are required checks (labels are
+  informational). A new
   `CODEOWNERS` file names the owners teams (spec owners, write-safety owners, product, R&D); since
   it can't target a JSON section, the required checks compute what changed and demand the right
   approval on the current head.
@@ -851,7 +857,9 @@ there lands; until then they assert main's order with spec rows in place of the 
   release in service from `min_router` up; a dropped section fails unless declared.
 - Families, until the switch deletes the family tables: per chain and interface, the spec rows a
   chain gets equal the family rows main gives it (`rootChainFamilies`, `resolveChainFamily`), apart
-  from Appendix B's listed differences; a new difference fails until it is declared.
+  from Appendix B's listed differences; a new difference fails until it is declared. The side by
+  side compares the family stage, not only the final verdict: a family row missing from the spec
+  counts as `code_only` even when the transport rows give the same final verdict.
 - Replay: the 102 fixtures in `protocol/common/testdata/error_fixtures.json` plus
   `TestRESTStatusRows`, `TestRESTStatusRowsDoNotReachOtherTransports`,
   `TestRESTMessageRowsBeatTheStatusRow`, `TestGRPCRateLimitTexts_TheCodeRowsAboveStillDecide`,
@@ -868,7 +876,9 @@ there lands; until then they assert main's order with spec rows in place of the 
   never `C6`); Part III T13, T16, T18, T19, T20 and UNAVAILABLE carrying a gateway 403 (`C6`); Part
   IV T24; Part V T2, T7, T8, T11, T13, T20. The five fixtures whose status exists only as text
   (`rest_404_not_found`, `rest_429_rate_limit`, `rest_503_unavailable`, `evm_http_429`,
-  `evm_http_503`) keep running through `ClassifyError`.
+  `evm_http_503`) keep running through `ClassifyError`. Two fixtures pin the answer definition: a
+  GraphQL reply with a `data` object and `errors: []` is an answer, while `{"data": null}` without
+  errors and `errors: []` without data are `C5`.
 - Order (§3.2): 429 with a JSON-RPC `-32603` body → `C4`; REST 401, 402, 403 with family text and
   gRPC PERMISSION_DENIED, UNAUTHENTICATED → `C6`; a gateway 402 or 429 inside a gRPC status → `C6`
   or `C4` (D12); a well-formed JSON-RPC error under HTTP 500 → the row its code matches, not the
@@ -883,7 +893,9 @@ there lands; until then they assert main's order with spec rows in place of the 
   `{status: "PERMISSION_DENIED", contains}`, `{status: "RESOURCE_EXHAUSTED", contains}` on a row
   that isn't `C2` `over_limit` or `C4`, `{contains: "route not found"}` on `rest` before MAG-5253.
   Relay-policy: a stateful write whose every answer is the min-fee rejection stops after fan-out and
-  holds nothing off.
+  holds nothing off; a stateful write whose every copy matches a spec `C4` row is not sent again,
+  because the row acts on reads only until MAG-5232 lands (invariant 1), and after MAG-5232 no
+  write is sent again at all.
 - Attack row as a loaded spec row: `{code: -32000}` → `CHAIN_TX_REJECTED` vs EVM "already known":
   no verdict change.
 - Retry by class (§3.3), end to end through `relayInnerDirect` with spec-loaded rows: a caller's
@@ -923,8 +935,10 @@ there lands; until then they assert main's order with spec rows in place of the 
 - Shapes: per shape, a reply it reads and one it leaves alone, on each method it names; a REST body
   outside every shape is bare; an error a shape finds in a success never ends a write's fan-out as
   its success; a missing, null or wrong-type `when`, `code` or `space` pointer leaves the shape
-  unapplied and the next one reads the reply; a chain with `"inherit": false` still reads its
-  parents' shapes (CANTO: a broadcast with `tx_response.code` ≠ 0 inside a 200 is a node error).
+  unapplied and the next one reads the reply, while a shape whose `code` resolves and whose
+  `message` pointer doesn't applies with the interface's standard text; a chain with
+  `"inherit": false` still reads its parents' shapes (CANTO: a broadcast with `tx_response.code` ≠ 0
+  inside a 200 is a node error).
 - GraphQL aliases: an aliased root field (`tx: transaction(…)` answering null) matches the
   not-found row, the same field asked twice under two aliases is read twice, and an error's aliased
   path matches a row's `path`.
@@ -971,7 +985,14 @@ there lands; until then they assert main's order with spec rows in place of the 
   Tendermint `broadcast_tx_sync`, Aptos `POST /transactions/batch`, gRPC `BroadcastTx` included),
   batches, cache bypass, `deterministic: true` on a declared write.
 - Every fallback case asserts the gauges (1 for the affected chain/interface/reason, 0 elsewhere,
-  0 after reload with a valid policy, read from the collector).
+  0 after reload with a valid policy, read from the collector). Healthy states set none: a bundled
+  boot with no `--use-static-spec`, and a chain whose policy is empty on purpose (`"inherit": false`
+  and no rows) show both fallback gauges at 0 and fire no alert, while a rejected bundled policy (a
+  test build injects it) fires `sr-spec-policy-fallback` and a failed external source fires
+  `sr-spec-source-fallback`.
+- `write_rows` acts only at `all`, only for the chain that declares it (a child doesn't inherit it),
+  and `smartrouter_spec_write_rows` reads 1 for that chain and interface and 0 elsewhere; before
+  it, the same chain's success row changes no copy's verdict.
 - Alert rules proven in smart-router-infrastructure by extending the promtool replay in
   `tests/grafana-alert-rules/test_silent_when_idle.py` (render per-tenant rules with `expand_tenant`
   from `scripts/grafana-alert-rules.py`; gauge 1 past `for` fires, back to 0 resolves). For
@@ -986,9 +1007,9 @@ there lands; until then they assert main's order with spec rows in place of the 
 One canary router per cluster, one full day of production traffic (minimum; the 7/30-day windows of
 §7 still apply). Compare `smartrouter_errors_total` by `error_name`, `chain_id` and `apiInterface`
 (`InitErrorMetrics`, `protocol/metrics/error_metrics.go`); dropped-section and source-fallback
-counters at zero, the lock gauge at zero, both fallback gauges 0, and the source gauge naming the
-release's bundled commit. On-prem gets the tested pair only. Failed canary → previous router
-release; the next release bundles a fixed commit.
+counters at zero, the lock gauge at zero, both fallback gauges 0 (a chain with no rows sets none),
+and the source gauge naming the release's bundled commit. On-prem gets the tested pair only. Failed
+canary → previous router release; the next release bundles a fixed commit.
 
 ## 9. Observability
 
@@ -1034,6 +1055,7 @@ description names the rule (`stateful`).
 | Source evidence and production examples for migrated rows; the R&D owners team for verdict, class, reason and shape review | Step 1 |
 | Signing, so a policy can act from any source (§5.4): a later ticket | rows must reach routers faster than releases |
 | Infra ticket for the Helm default (§6): the chart-bump cadence, and the serving-probe catalog built at the bundled commit | Step 0's bundled specs reach the fleet |
+| MAG-2673 (lava-specs versioning) makes tags, a change log and a pinned version a prerequisite for rows acting on live traffic; this spec meets the need with the bundled commit, the release pair and `smartrouter_spec_source_info` (§6), and leaves tags out. Nimrod confirms or keeps tags as the prerequisite | Step 2 `reads` |
 | `source="client"` in infra's `docs/SLA-QUERIES.md` and `scripts/investigate.py` and in the dashboard's error pivots (§7 Step 0): a ticket in each repo | Step 0's `source` label ships |
 | Signature, duplicate and shape candidates per interface (§5.2, §2.4): MAG-4898's evidence for each | each ships |
 | create-spec agent keeps unknown keys in update modes by construction; new-chain mode needs a template (MAG-4898 part 3); add a test in `scripts/test_*.sh` | Step 3 |
