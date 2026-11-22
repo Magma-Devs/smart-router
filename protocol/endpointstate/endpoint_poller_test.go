@@ -89,6 +89,11 @@ func TestEndpointPoller_CustomMessage_POSTDelegatesToConnection(t *testing.T) {
 func TestEndpointMonitor_ForcesBlocksToSave1ForSolana(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	// SOLANAT and KOII take the Solana family from their imports when the router loads the catalog.
+	common.RegisterChainFamilies(map[string]spectypes.Spec{
+		"SOLANAT": {Index: "SOLANAT", Imports: []string{"SOLANA"}},
+		"KOII":    {Index: "KOII", Imports: []string{"SOLANA"}},
+	})
 
 	for _, tc := range []struct {
 		chainID  string

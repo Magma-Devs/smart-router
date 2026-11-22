@@ -25,6 +25,12 @@ var ( // Consumer Side Errors
 	// call for different reactions.
 	SelectedProviderUnavailableError   = errors.New("Header-selected provider is not a valid provider for this request")
 	SelectedProviderAlreadyFailedError = errors.New("Header-selected provider has already failed for this request")
+	// SelectedProviderNotConfiguredError marks the one SelectedProviderUnavailableError that is the
+	// caller's mistake: the lava-select-provider name is none of the router's providers at all,
+	// primary or backup, in any letter case (MAG-3800). GetSessions returns it wrapped together with
+	// SelectedProviderUnavailableError, so everything that stops on a pinned refusal still does. Its
+	// text is the whole sentence the listeners give the caller.
+	SelectedProviderNotConfiguredError = errors.New("Selected provider is not configured")
 )
 
 // SessionOutOfSyncGRPCCode is the gRPC status code used when wrapping SessionOutOfSyncError

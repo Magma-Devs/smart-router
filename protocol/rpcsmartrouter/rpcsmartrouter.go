@@ -420,6 +420,9 @@ func (rpsr *RPCSmartRouter) Start(ctx context.Context, options *rpcSmartRouterSt
 		// /debug/cross-validation-events can serve it (MAG-2772). Until this call the recorder is a
 		// nil check on the relay path, so a production router stores nothing.
 		enableCrossValidationEventRing(crossValidationEventRingCapacity)
+		// And the answers each request received, in the order they reached it, for
+		// /debug/relay-answers (MAG-4358).
+		relaycore.EnableRelayAnswerRecording(relaycore.RelayAnswerRingCapacity, relayAnswerMethod)
 		var currentOffsetNano atomic.Int64
 		debugMux := buildDebugMux(debugMuxDeps{
 			optimizers: optimizers,
@@ -686,14 +689,19 @@ func reregisterChainTrackerRowsLocked(router *RPCSmartRouter) (ensured, created 
 				continue
 			}
 			ensured++
-			if _, err := server.endpointChainTrackerManager.GetOrCreateTracker(ep.ProviderAddress, ep.Endpoint, ep.DirectConnection); err != nil {
+			tracker, err := server.endpointChainTrackerManager.GetOrCreateTracker(ep.ProviderAddress, ep.Endpoint, ep.DirectConnection)
+			if err != nil {
 				utils.FormatWarning("reset-chaintracker-rows: failed to re-register endpoint", err,
 					utils.LogAttr("endpoint", ep.Endpoint.NetworkAddress),
 					utils.LogAttr("chainKey", chainKey),
 				)
 				continue
 			}
-			if !existing[ep.Endpoint.NetworkAddress] {
+			// The url's series were deleted with its row; the tracking flag is written here, as
+			// on the other two paths that bring a url back (MAG-5349).
+			server.publishBlockTracking(ep.Endpoint.NetworkAddress)
+			// A url held as not tracked by design has no row to create: it is not counted.
+			if tracker != nil && !existing[ep.Endpoint.NetworkAddress] {
 				created++
 				existing[ep.Endpoint.NetworkAddress] = true
 			}
@@ -831,24 +839,23 @@ func resetAllChainStates(deps debugMuxDeps) int {
 	})
 }
 
-// resetEndpointHealthAndGauge re-enables every endpoint across all session managers
+// resetEndpointHealth re-enables every endpoint across all session managers
 // (ConsumerSessionManager.ResetEndpointHealth — clears ConnectionRefusals, sets
-// Enabled=true) and mirrors the reset onto the per-endpoint Prometheus health gauge for
-// every provider (primary + backup), matching what the epoch tick does in updateEpoch.
-// Returns the number of endpoints actually re-enabled.
+// Enabled=true), matching what the epoch tick does in updateEpoch. Returns the number of
+// endpoints actually re-enabled.
 //
 // Endpoints disabled after MaxConsecutiveConnectionAttempts consecutive failures (e.g. an
 // all-providers-down stress burst) otherwise stay disabled until the next epoch tick, the
 // only other ResetHealth caller — contaminating later tests. Shared by /debug/reset-all
 // and /debug/reset-endpoint-health.
-func resetEndpointHealthAndGauge(deps debugMuxDeps) (total int) {
+func resetEndpointHealth(deps debugMuxDeps) (total int) {
 	withRouterLocked(deps, func(router *RPCSmartRouter) {
-		total = resetEndpointHealthAndGaugeLocked(router)
+		total = resetEndpointHealthLocked(router)
 	})
 	return total
 }
 
-func resetEndpointHealthAndGaugeLocked(router *RPCSmartRouter) int {
+func resetEndpointHealthLocked(router *RPCSmartRouter) int {
 	total := 0
 	for chainKey, csm := range router.sessionManagers {
 		if csm == nil {
@@ -868,26 +875,6 @@ func resetEndpointHealthAndGaugeLocked(router *RPCSmartRouter) int {
 			server.headStall.reset()
 			if server.endpointChainTrackerManager != nil {
 				server.endpointChainTrackerManager.ResetStallCounters()
-			}
-		}
-
-		// Mirror the struct reset onto the Prometheus health gauge so operators see
-		// providers recover immediately rather than at the next epoch tick — without it
-		// the gauge stays stuck at 0 until a successful relay, one a rarely-used backup
-		// may never receive.
-		server := router.rpcServers[chainKey]
-		if server == nil || server.smartRouterEndpointMetrics == nil || server.listenEndpoint == nil {
-			continue
-		}
-		for _, sessions := range []map[uint64]*routersession.ConsumerSessionsWithProvider{
-			router.providerSessions[chainKey],
-			router.backupProviderSessions[chainKey],
-		} {
-			for _, cswp := range sessions {
-				if cswp != nil {
-					server.smartRouterEndpointMetrics.SetEndpointOverallHealth(
-						server.listenEndpoint.ChainID, server.listenEndpoint.ApiInterface, cswp.PublicAddress, true)
-				}
 			}
 		}
 	}
@@ -1429,7 +1416,7 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		if deps.router != nil {
 			deps.router.rebuildPairingFromConfig()
 		}
-		resetEndpointHealthAndGauge(deps)
+		resetEndpointHealth(deps)
 
 		// Capability advertisement — hardcoded for in-process stores, plus a
 		// conditional "cache-be" key when the external pod was actually
@@ -1623,6 +1610,7 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 				url := ep.Endpoint.NetworkAddress
 				health := ep.Endpoint.HealthSnapshot()
 				obs := observations[url] // zero value when no observation recorded yet
+				trackerState, _, _ := server.endpointChainTrackerManager.GetTrackerState(url)
 				rows = append(rows, map[string]any{
 					"ChainID":        server.listenEndpoint.ChainID,
 					"ApiInterface":   server.listenEndpoint.ApiInterface,
@@ -1643,19 +1631,26 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 					// MAG-3986: Enabled is the event slot only. Usable is what selection
 					// sees — Enabled AND no state reason. StateReasons lists head-stalled
 					// with when it was added and the block it was stuck on; SameBlockCycles
-					// is the evidence that adds it, and a HighestBlockSeen above the stuck
-					// block removes it.
+					// and HighestBlockSince (how long the highest block has stood still,
+					// MAG-5243) are the evidence that adds it, and a HighestBlockSeen above
+					// the stuck block removes it.
 					"Usable":            health.Usable,
 					"StateReasons":      debugStateReasons(health.StateReasons),
 					"SameBlockCycles":   obs.SameBlockCycles,
 					"LastAnsweredBlock": obs.LastAnsweredBlock,
 					"HighestBlockSeen":  obs.HighestBlockSeen,
+					"HighestBlockSince": debugTimeRFC3339(obs.HighestBlockSince),
 					"Provider":          ep.ProviderAddress,
 					"Backup":            ep.Backup,
 					// PollIntervalMs is the live dedicated-poll cadence: base when healthy,
 					// exponentialBackoff-stretched when the endpoint has been failing. This is the
 					// observable /debug/reset-probe-backoff returns to base (MAG-2395).
 					"PollIntervalMs": backoffByURL[url].Milliseconds(),
+					// TrackerState is the lifecycle state of the url's tracker. "not_tracked_by_design"
+					// is a url with no tracker on purpose (MAG-5349): it serves only add-on collections
+					// and none declares a way to read the head, so the poll fields above stay empty
+					// for good and say nothing about its health.
+					"TrackerState": string(trackerState),
 					// HashPolling says whether this chain's tracker does block-hash work
 					// (fork detection) and, when it does not, WHY — "off-operator-choice"
 					// (--enable-fork-detection not set) vs "off-spec-no-block-by-num" (the
@@ -1812,6 +1807,42 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		}
 		writeDebugRows(w, rows)
 	})
+
+	// GET /debug/relay-answers?request_id=<Lava-Guid> — the answers one request's attempts handed
+	// back, in the order they reached the router (MAG-4358, relaycore/relay_answers.go). One row per
+	// answer, oldest first: which provider, the status it answered with, and the router's verdict
+	// (success / node-error / protocol-error), or "unread" for an answer that arrived after the
+	// router stopped reading for its reply, such as a write's other deliveries. ElapsedMs is the time
+	// from the start of the request's relay processing to the answer. Seq is the order key, as on
+	// /debug/cross-validation-events, so the rows are not sorted. Optional limit keeps the most
+	// recent N rows. 503 when the recorder is not installed, so "nothing was recorded" never reads
+	// as "nothing answered"; X-Relay-Answers-Dropped reports the answers the bounded ring evicted.
+	mux.HandleFunc("/debug/relay-answers", debugMethod(http.MethodGet, func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		limit, _ := strconv.Atoi(q.Get("limit"))
+		answers, dropped, enabled := relaycore.ReadRelayAnswers(q.Get("request_id"), limit)
+		if !enabled {
+			http.Error(w, "relay answer recording is not enabled on this router", http.StatusServiceUnavailable)
+			return
+		}
+		rows := make([]map[string]any, 0, len(answers))
+		for _, answer := range answers {
+			rows = append(rows, map[string]any{
+				"Seq":             answer.Seq,
+				"ArrivedAt":       debugTimeRFC3339(answer.ArrivedAt),
+				"ElapsedMs":       answer.Elapsed.Milliseconds(),
+				"ChainID":         answer.ChainID,
+				"ApiInterface":    answer.ApiInterface,
+				"RequestID":       answer.RequestID,
+				"Method":          answer.Method,
+				"ProviderAddress": answer.ProviderAddress,
+				"StatusCode":      answer.StatusCode,
+				"Outcome":         answer.Outcome,
+			})
+		}
+		w.Header().Set("X-Relay-Answers-Dropped", strconv.FormatUint(dropped, 10))
+		encodeDebugJSON(w, rows, "failed encoding relay answers response")
+	}))
 
 	// GET /debug/probe-loop — per-chain proactive-prober cycle telemetry (MAG-2202 endpoint 4). Flat
 	// array of self-describing records (ChainID + ApiInterface): the configured --probe-loop-interval
@@ -2158,10 +2189,10 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 
 	// POST /debug/reset-endpoint-health — focused companion to /debug/reset-all (MAG-2186):
 	// re-enable every provider endpoint disabled by MaxConsecutiveConnectionAttempts
-	// (Endpoint.Enabled=false) and mirror the reset onto the Prometheus health gauge,
-	// nothing else. The name mirrors Endpoint.ResetHealth() in the source for discoverability.
+	// (Endpoint.Enabled=false), nothing else. The name mirrors Endpoint.ResetHealth() in the
+	// source for discoverability.
 	mux.HandleFunc("/debug/reset-endpoint-health", debugMethod(http.MethodPost, func(w http.ResponseWriter, r *http.Request) {
-		reenabled := resetEndpointHealthAndGauge(deps)
+		reenabled := resetEndpointHealth(deps)
 		writeDebugJSONf(w, `{"reset":true,"endpoints_reenabled":%d}`, reenabled)
 	}))
 
@@ -2766,6 +2797,17 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	// Create active subscription provider storage for each unique chain
 	activeSubscriptionProvidersStorage := routersession.NewActiveSubscriptionProvidersStorage()
 	sessionManager := routersession.NewConsumerSessionManager(rpcEndpoint, optimizer, smartRouterMetricsManager, smartRouterIdentifier, activeSubscriptionProvidersStorage)
+	// Every name in the router's config, verified or not, on any chain or interface, so a
+	// lava-select-provider name that a provider out of rotation carries is not answered as not
+	// configured (MAG-3800). The session manager's own lists hold the verified providers only. A
+	// provider configured only for another chain or interface has no URL for this route, which is
+	// the provider-unavailable reply, not the caller's mistake: only a name the router does not
+	// have at all is (Part I R-Q).
+	configuredNames := make([]string, 0, len(options.staticProvidersList)+len(options.backupProvidersList))
+	for _, provider := range slices.Concat(options.staticProvidersList, options.backupProvidersList) {
+		configuredNames = append(configuredNames, provider.Name)
+	}
+	sessionManager.SetConfiguredProviderNames(configuredNames)
 	// Cross-pod sticky sessions. Gated on --shared-state, the same operator signal the chain-tip
 	// and tracker-gate sharing use: "this chain runs on several replicas behind one cache". A
 	// single-replica router needs no registry, and its absence leaves stickiness pod-local.
@@ -3922,7 +3964,7 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 	cmdRPCSmartRouter.Flags().String(common.GitLabTokenFlag, "", "GitLab personal access token for accessing private repositories (supports gitlab.com and self-hosted instances)")
 	cmdRPCSmartRouter.Flags().Duration(common.EpochDurationFlag, 0, "duration of each epoch for time-based epoch system (e.g., 30m, 1h). Epochs always run: unset or 0 uses the standalone default of 15m, and a negative value is refused at startup")
 	cmdRPCSmartRouter.Flags().Duration(common.ShutdownGracePeriodFlag, common.DefaultShutdownGracePeriod, "graceful shutdown deadline for in-flight requests and WebSocket clients")
-	cmdRPCSmartRouter.Flags().IntVar(&relaycore.RelayRetryLimit, common.SetRelayRetryLimitFlag, 2, "max total relay retry attempts across all error types (node and protocol errors combined; 0 disables retries)")
+	cmdRPCSmartRouter.Flags().IntVar(&relaycore.RelayRetryLimit, common.SetRelayRetryLimitFlag, relaycore.DefaultRelayRetryLimit, "max total relay retry attempts across all error types (node and protocol errors combined; 0 disables retries)")
 	cmdRPCSmartRouter.Flags().Bool(common.StatefulToBackupFlag, false, "also broadcast stateful relays (transaction submission) to the backup tier. OFF by default: a stateful relay reaches every provider it selects, so this sends EVERY stateful request to the backup — including the ones the primaries serve fine — and a fast backup can answer the caller first. Turn it on to maximise the chance a transaction lands, accepting the backup spend")
 	cmdRPCSmartRouter.Flags().Duration(common.ReadYourWritesWindowFlag, common.DefaultReadYourWritesWindow, "how long an eth_sendRawTransaction's sender and hash stay pinned to the upstream that accepted it: the sender's pending-nonce reads and lookups of the hash go there, so a wallet reads back its own write instead of an upstream the write has not reached yet. Pod-local, and a preference — an upstream that cannot take the read gives way to ordinary selection. 0 turns it off")
 	if err := viper.BindPFlag(common.StatefulToBackupFlag, cmdRPCSmartRouter.Flags().Lookup(common.StatefulToBackupFlag)); err != nil {
@@ -4013,29 +4055,6 @@ func (rpsr *RPCSmartRouter) updateEpoch(ctx context.Context, epoch uint64) {
 			utils.LogAttr("time", time.Now().Format("15:04:05 MST")),
 		)
 
-		// Resolve the per-chain metrics manager once so endpoint health resets below
-		// can also reset the corresponding Prometheus gauge. Without this, #2256's
-		// endpoint.ResetHealth() fixes the in-memory struct but the
-		// rpc_endpoint_overall_health gauge stays stuck at 0 (unhealthy) forever,
-		// since the only path back to 1 is a successful relay that calls
-		// SetEndpointOverallHealth(..., true) — which a backup may never receive.
-		var epochMetrics *metrics.SmartRouterMetricsManager
-		var epochChainID, epochApiInterface string
-		// listenEndpoint is a *routersession.RPCEndpoint — always guard its deref.
-		// Skipping metric reset for a server with a nil listenEndpoint is preferable
-		// to a nil-deref panic that would kill the whole epoch transition and leave
-		// every endpoint.ResetHealth() undone.
-		if server, exists := rpsr.rpcServers[chainKey]; exists && server != nil && server.listenEndpoint != nil {
-			epochMetrics = server.smartRouterEndpointMetrics
-			epochChainID = server.listenEndpoint.ChainID
-			epochApiInterface = server.listenEndpoint.ApiInterface
-		}
-		var epochGauge func(provider string)
-		if epochMetrics != nil {
-			epochGauge = func(provider string) {
-				epochMetrics.SetEndpointOverallHealth(epochChainID, epochApiInterface, provider, true)
-			}
-		}
 		// Lock for the read → create-fresh → write-back section.
 		// This prevents races with the retry loop, which merges
 		// recovered providers into rpsr.providerSessions under the same lock.
@@ -4047,8 +4066,8 @@ func (rpsr *RPCSmartRouter) updateEpoch(ctx context.Context, epoch uint64) {
 		// Create FRESH ConsumerSessionsWithProvider objects to avoid session accumulation
 		// This is critical: reusing the same objects causes sessions to accumulate in the Sessions map
 		// until hitting the 1000-session limit, causing "No pairings available" errors
-		freshProviderSessions := freshenTier(oldProviderSessions, epoch, epochGauge, "Created fresh provider session for epoch", chainKeyLog)
-		freshBackupSessions := freshenTier(oldBackupSessions, epoch, epochGauge, "Created fresh backup provider session for epoch", chainKeyLog)
+		freshProviderSessions := freshenTier(oldProviderSessions, epoch, "Created fresh provider session for epoch", chainKeyLog)
+		freshBackupSessions := freshenTier(oldBackupSessions, epoch, "Created fresh backup provider session for epoch", chainKeyLog)
 
 		// Re-verify configured providers and reconcile against the fresh maps:
 		// drop entries whose provider failed validation (demote), and append
@@ -4174,24 +4193,18 @@ func withoutFailed(providers []*routersession.RPCStaticProviderEndpoint, failed 
 //
 // The reset is what gives a disabled endpoint a fresh start each epoch: an endpoint
 // disabled by ConnectionRefusals can never receive the successful relay that would
-// otherwise trigger ResetHealth, and backups rarely receive one at all. resetGauge
-// (nil when the chain has no metrics manager) mirrors the reset onto the
-// rpc_endpoint_overall_health gauge, which would otherwise stay stuck at 0 (#2256).
+// otherwise trigger ResetHealth, and backups rarely receive one at all (#2256).
 // The cross-validation group label, and the internal paths the provider lost at
 // admission (MAG-4214), must survive the refresh.
 func freshenTier(
 	old map[uint64]*routersession.ConsumerSessionsWithProvider,
 	epoch uint64,
-	resetGauge func(provider string),
 	debugMessage, chainKey string,
 ) map[uint64]*routersession.ConsumerSessionsWithProvider {
 	fresh := make(map[uint64]*routersession.ConsumerSessionsWithProvider)
 	for idx, oldSession := range old {
 		for _, endpoint := range oldSession.Endpoints {
 			endpoint.ResetHealth()
-		}
-		if resetGauge != nil {
-			resetGauge(oldSession.PublicAddress)
 		}
 		freshSession := routersession.NewConsumerSessionWithProvider(
 			oldSession.PublicAddress,

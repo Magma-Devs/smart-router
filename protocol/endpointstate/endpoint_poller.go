@@ -117,11 +117,16 @@ func (ecf *EndpointPoller) hydrateGrpcChainMessage(chainMessage chainlib.ChainMe
 // being the same one every time — an alternating tip source reads as a flapping
 // node.
 func (ecf *EndpointPoller) collectionAddons() []string {
-	if ecf.endpoint == nil || len(ecf.endpoint.Addons) == 0 {
+	return sortedAddons(ecf.endpoint)
+}
+
+// sortedAddons is an endpoint's declared add-ons in a stable order (see collectionAddons).
+func sortedAddons(endpoint *routersession.Endpoint) []string {
+	if endpoint == nil || len(endpoint.Addons) == 0 {
 		return nil
 	}
-	addons := make([]string, 0, len(ecf.endpoint.Addons))
-	for addon := range ecf.endpoint.Addons {
+	addons := make([]string, 0, len(endpoint.Addons))
+	for addon := range endpoint.Addons {
 		addons = append(addons, addon)
 	}
 	sort.Strings(addons)

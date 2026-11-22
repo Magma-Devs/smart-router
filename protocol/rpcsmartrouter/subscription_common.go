@@ -279,11 +279,11 @@ func (se *subscriptionEndpoints) endpointsSnapshot() endpointsSnapshot {
 // is handed straight to the client, and a non-empty primary tier suppresses the
 // primary→backup cascade entirely.
 //
-// Existing upstream pools are deliberately left alone. A pool keyed by a URL that just
-// left the tier still serves its live subscriptions until they close; tearing it down
-// here would kill working subscriptions on a provider that merely failed spec
-// re-verification. Nothing reaps such a pool afterwards: once its last subscription
-// leaves, its scale-down stops at the pool's minimum and that many connections stay open.
+// Existing upstream pools are not torn down here. A pool keyed by a URL that just left
+// the tiers still serves its live subscriptions until they close; tearing it down here
+// would kill working subscriptions on a provider that merely failed spec re-verification.
+// The pool reads the URL as departed (departs), and once its last subscription leaves it
+// closes every connection it holds.
 func (se *subscriptionEndpoints) setEndpoints(primary, backup []*common.NodeUrl) (changed bool) {
 	byURL := indexEndpoints(primary, backup)
 
@@ -299,6 +299,28 @@ func (se *subscriptionEndpoints) setEndpoints(primary, backup []*common.NodeUrl)
 	se.backup = backup
 	se.endpointsByURL = byURL
 	return true
+}
+
+// departs returns the departed check for the pool of url: whether url is in neither tier
+// now. It reads the tiers at each call, so a URL that comes back is served again.
+func (se *subscriptionEndpoints) departs(url string) func() bool {
+	return func() bool {
+		_, serving := se.endpointsSnapshot().byURL[url]
+		return !serving
+	}
+}
+
+// scaleDownDepartedPools lets the pool of each URL that left both tiers close its idle
+// connections. Without it, a pool idle when its URL left would wait for a release that
+// never comes. The scale-downs run in the background: the caller holds the router's
+// lock, and a pool holds its own lock across a dial. Caller holds its manager's lock.
+func scaleDownDepartedPools[P interface{ maybeScaleDown() }](se *subscriptionEndpoints, pools map[string]P) {
+	byURL := se.endpointsSnapshot().byURL
+	for url, pool := range pools {
+		if _, serving := byURL[url]; !serving {
+			go pool.maybeScaleDown()
+		}
+	}
 }
 
 // sameEndpointURLs reports whether two tiers hold the same URLs in the same order.

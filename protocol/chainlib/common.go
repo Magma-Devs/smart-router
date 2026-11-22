@@ -225,36 +225,25 @@ func drainHTTPThenWS(ctx context.Context, gate *serveGate, wg *sync.WaitGroup, n
 	return httpErr
 }
 
-// utxoFamilyChainIDs is the set of chain ids whose reply bodies need the JSON-RPC 1.0
-// fixup below. Membership is not a judgement call: it is exactly "the chain's spec
-// transitively imports BTC", which is what makes the node a Bitcoin Core derivative
-// speaking JSON-RPC 1.0. Resolved against the lava-specs catalog (255 specs), 14 enabled
-// specs reach BTC through their imports chain, and all 14 are listed here.
+// isUTXOFamily reports whether chainID's reply bodies need the JSON-RPC 1.0 fixup below.
+// Membership is not a judgement call: it is exactly "the chain's spec is BTC or imports it",
+// which is what makes the node a Bitcoin Core derivative speaking JSON-RPC 1.0, and it is what
+// puts a chain in the Bitcoin family: the router gives a spec its family from its imports when it
+// loads the catalog (common.RegisterChainFamilies). A new BTC-derived spec takes this path with no
+// list to update.
 //
-// MAG-3077: six of them — BTCT4, BTCS, DASH, DASHT, ZCASH, ZCASHT — were missing, so
-// those chains took the non-UTXO path and returned bodies with "jsonrpc":"2.0" injected
-// and a null "error" stripped. That is precisely the mangling checkUTXOResponseAndFixReply
-// exists to undo, and it breaks Bitcoin-derived clients that read resp["error"]
-// unconditionally.
+// A hand-kept list did not: MAG-3077 found BTCT4, BTCS, DASH, DASHT, ZCASH and ZCASHT missing, and
+// PEP, PEPT, QTUM and QTUMT were missing again (MAG-5246). Those chains took the non-UTXO path and
+// returned bodies with "jsonrpc":"2.0" injected and a null "error" stripped. That is precisely the
+// mangling checkUTXOResponseAndFixReply exists to undo, and it breaks Bitcoin-derived clients that
+// read resp["error"] unconditionally.
 //
-// MONERO/MONEROT are deliberately absent and are not an oversight: monero.json declares no
-// imports and monerod speaks JSON-RPC 2.0, so it needs no 1.0 fixup. Lookup is
-// case-sensitive because spec indexes are upper-case by construction.
-//
-// A new BTC-derived spec must be added here. TestIsUTXOFamily pins the membership so that
-// stays a deliberate edit rather than silent drift.
-var utxoFamilyChainIDs = map[string]struct{}{
-	"BTC": {}, "BTCT": {}, "BTCT4": {}, "BTCS": {}, // btc.json
-	"LTC": {}, "LTCT": {}, // litecoin.json -> BTC
-	"DOGE": {}, "DOGET": {}, // doge.json     -> BTC
-	"BCH": {}, "BCHT": {}, // bch.json      -> BTC
-	"DASH": {}, "DASHT": {}, // dash.json     -> BTC
-	"ZCASH": {}, "ZCASHT": {}, // zcash.json    -> BTC
-}
-
+// MONERO/MONEROT are deliberately not Bitcoin: monero.json declares no imports and monerod speaks
+// JSON-RPC 2.0, so it needs no 1.0 fixup. Lookup is case-sensitive because spec indexes are
+// upper-case by construction.
 func isUTXOFamily(chainID string) bool {
-	_, ok := utxoFamilyChainIDs[chainID]
-	return ok
+	family, ok := common.GetChainFamily(chainID)
+	return ok && family == common.ChainFamilyBitcoin
 }
 
 // checkUTXOResponseAndFixReply returns the reply body for UTXO-family chains after
@@ -926,9 +915,11 @@ func (apil *chainListenerBase) GetListeningAddress() string {
 // websocket upgrade. Only those listeners may hand an upgrade on the health path
 // past the health handler; see the health route below for why the distinction has
 // to be explicit rather than inferred.
-// routesDelete is true for a listener whose own routes answer a DELETE: GraphQL refuses it with 405
-// and Allow: POST like every method it does not serve (MAG-4524). The other listeners still get the
-// shared 204 below, before any route runs, until their own refusal is built (MAG-5061 item 7).
+// routesDelete is true for a listener that answers a DELETE itself, so the shared 204 below must not
+// (MAG-4524): GraphQL refuses it with 405 and Allow: POST like every method it does not serve,
+// JSON-RPC the same way it refuses a GET without an upgrade (405, Allow: POST), and Tendermint RPC
+// through fiber, as it refuses a PUT. REST still gets the shared 204, before any route runs, until
+// its own refusal is built (405 with the path's verbs in Allow and REQUEST_REFUSED, MAG-5255).
 func createAndSetupBaseAppListener(cmdFlags common.ConsumerCmdFlags, healthCheckPath string, healthReporter HealthReporter, servesWebSocketUpgrades, routesDelete bool) *fiber.App {
 	app := fiber.New(fiber.Config{
 		JSONEncoder: json.Marshal,
