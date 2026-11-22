@@ -1887,7 +1887,7 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 		stickiness = ""
 	}
 
-	// The caller's own lava-select-provider name, before a sticky claim below can fill
+	// The caller's own router-select-provider name, before a sticky claim below can fill
 	// selectedProvider. Only that name can be the caller's mistake: a refusal of it that names no
 	// provider of this router at all is marked SelectedProviderNotConfiguredError, which the
 	// listeners answer as a refused request (MAG-3800). A blocked provider, one that lacks the
@@ -2341,7 +2341,7 @@ func (csm *ConsumerSessionManager) SetConfiguredProviderNames(names []string) {
 	csm.configuredProviderNames = append([]string{}, names...)
 }
 
-// selectedProviderConfigured reports whether name, a lava-select-provider value, names a provider
+// selectedProviderConfigured reports whether name, a router-select-provider value, names a provider
 // this router is configured with: a primary or a backup, in rotation or not, in any letter case, the
 // way resolveSelectedProviderAddress matches it. With no configured list recorded, every name
 // counts as configured: an unknown answer must not tell a caller their provider does not exist in

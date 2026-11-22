@@ -1808,7 +1808,7 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		writeDebugRows(w, rows)
 	})
 
-	// GET /debug/relay-answers?request_id=<Lava-Guid> — the answers one request's attempts handed
+	// GET /debug/relay-answers?request_id=<Router-Guid> — the answers one request's attempts handed
 	// back, in the order they reached the router (MAG-4358, relaycore/relay_answers.go). One row per
 	// answer, oldest first: which provider, the status it answered with, and the router's verdict
 	// (success / node-error / protocol-error), or "unread" for an answer that arrived after the
@@ -2798,7 +2798,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	activeSubscriptionProvidersStorage := routersession.NewActiveSubscriptionProvidersStorage()
 	sessionManager := routersession.NewConsumerSessionManager(rpcEndpoint, optimizer, smartRouterMetricsManager, smartRouterIdentifier, activeSubscriptionProvidersStorage)
 	// Every name in the router's config, verified or not, on any chain or interface, so a
-	// lava-select-provider name that a provider out of rotation carries is not answered as not
+	// router-select-provider name that a provider out of rotation carries is not answered as not
 	// configured (MAG-3800). The session manager's own lists hold the verified providers only. A
 	// provider configured only for another chain or interface has no URL for this route, which is
 	// the provider-unavailable reply, not the caller's mistake: only a name the router does not

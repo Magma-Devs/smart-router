@@ -477,9 +477,9 @@ would label every request on the connection rather than the one the caller tagge
 
 ### The answers one request received (`/debug/relay-answers`)
 
-In debug mode (`--debug-address`), `GET /debug/relay-answers?request_id=<Lava-Guid>` lists the
+In debug mode (`--debug-address`), `GET /debug/relay-answers?request_id=<Router-Guid>` lists the
 answers one request's attempts handed back, in the order they reached the router (MAG-4358). The
-id is the `Lava-Guid` header of the reply, not the caller's `X-Request-Id`. A write goes to every
+id is the `Router-Guid` header of the reply, not the caller's `X-Request-Id`. A write goes to every
 primary at once, and what its caller gets depends on that order: a refusal that arrives first is
 held while the router waits for an acceptance. This route shows the order without a log line or the
 metrics port. It is read-only, and reading it does not change any reply.

@@ -414,7 +414,7 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 				// and never err's text, which lists the router's provider names. A plain error, as
 				// below, reaches the client as Unknown (MAG-3800).
 				apil.logger.LogRequestAndResponse("grpc in/out", true, method, relayBodyForLog(string(reqBody), cmdFlags.DebugRelays), "", message, msgSeed, time.Since(startTime), err)
-				// The request id goes in lava-guid, as on a served call and on the HTTP refusal,
+				// The request id goes in router-guid, as on a served call and on the HTTP refusal,
 				// since the sentence alone no longer carries it.
 				replyMetadata := convertRelayMetaDataToMDMetaData(relayReply.GetMetadata())
 				replyMetadata.Set(common.GUID_HEADER_NAME, msgSeed)

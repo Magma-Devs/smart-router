@@ -1931,7 +1931,7 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 			return timedOut, err
 		}
 
-		// A GraphQL write pinned to a lava-select-provider name the router does not have is refused
+		// A GraphQL write pinned to a router-select-provider name the router does not have is refused
 		// before any provider is asked, so its reply says the write was never sent, as the
 		// listener's other refusals of a GraphQL write do (MAG-3800; Part I R-Q, Part II Q8). The
 		// listener writes the refusal and passes this reply's headers on; only this function knows
