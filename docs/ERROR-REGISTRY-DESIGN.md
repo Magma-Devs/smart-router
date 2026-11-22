@@ -105,10 +105,10 @@ Uses a **tiered classification system** (see Section 3 for details):
 | 3004 | `CHAIN_GAS_TOO_LOW` | Intrinsic gas too low | No | EVM |
 | 3005 | `CHAIN_GAS_LIMIT_EXCEEDED` | Exceeds block gas limit | No | EVM |
 | 3006 | `CHAIN_TX_UNDERPRICED` | Transaction gas price too low | No | EVM |
-| 3007 | `CHAIN_TX_ALREADY_KNOWN` | Transaction already in mempool | No | EVM, Starknet, XRP |
+| 3007 | `CHAIN_TX_ALREADY_KNOWN` | Transaction already in mempool | No | EVM, Starknet, XRP, Cosmos |
 | 3008 | `CHAIN_TX_REPLACEMENT_UNDERPRICED` | Replacement tx gas too low | No | EVM |
 | 3009 | `CHAIN_MEMPOOL_FULL` | Mempool/tx pool is full | No | EVM, Cosmos |
-| 3010 | `CHAIN_TX_TOO_LARGE` | Transaction exceeds size limit | No | EVM, Solana |
+| 3010 | `CHAIN_TX_TOO_LARGE` | Transaction exceeds size limit | No | EVM, Solana, Cosmos |
 | 3011 | `CHAIN_MAX_FEE_BELOW_BASE` | Max fee per gas below base fee | No | EVM (EIP-1559) |
 | 3012 | `CHAIN_INVALID_SEQUENCE` | Invalid sequence (Cosmos nonce equivalent) | No | Cosmos |
 | 3013 | `CHAIN_INSUFFICIENT_FEE` | Insufficient fee | No | Cosmos |
@@ -644,7 +644,7 @@ _Blocked on protocol upgrade: sdkerrors carry ABCI codes used in the gRPC wire f
 | **TON** | Partial — TVM exit codes + custom HTTP | Yes (3 codes) | Lite-server timeout retryable, message expired retryable |
 | **Aptos** | Partial — custom REST error format | No (generic codes sufficient) | Error format differs but semantics map to generic codes |
 | **Stellar** | Yes — typed error URIs + result_codes | No (generic codes sufficient) | REST-based, HTTP codes sufficient for retry decisions |
-| **Cosmos SDK** | Standard — tx_response.code | No (generic codes sufficient) | Standard patterns, well-covered by generic tier |
+| **Cosmos SDK** | Standard — tx_response.code | No (generic codes sufficient) | Standard patterns, well-covered by generic tier. A REST broadcast refusal is classified by its code (§10) |
 
 ## 9. REST replies: any status outside 2xx is a node error
 
@@ -780,3 +780,36 @@ reading was the wrong one.
   node's reply (MAG-4060).
 - Cross-validation counts only successes toward a quorum, so on a REST interface under a CV
   policy identical not-found answers no longer form one. No tenant runs CV on REST today.
+
+## 10. A Cosmos REST broadcast refused inside a 200 (MAG-5451)
+
+`POST /cosmos/tx/v1beta1/txs` answers a refused transaction with HTTP 200 and `tx_response.code` ≠ 0.
+`CheckResponseError` already called that an error, so a sibling's acceptance won the fan-out, but
+the sender kept a 2xx out of `IsNodeError`. So when every node refused, the reply carried no
+`lava-identified-node-error`; each refusal reset the refuser's failure count as if it had served;
+and the verdict came from `raw_log` alone, which is empty on some refusals, so the metric fell back
+to the whole body, where the tx hash's digits matched the HTTP status rows.
+
+Now the sender flags a refusal on the broadcast path (`RestMessage.RefusesTransaction`) as the
+node's error. A GET of an already-broadcast transaction answers the same shape and is not read here
+(MAG-5326). The message the registry classifies is `cosmos tx refused: code <code>, codespace
+<codespace>: <log>`; its rows are Tier-1 on REST and also open the CosmosSDK Tier-2 list, so the
+code decides before a log's words, and they end in a catch-all, so a refusal is never
+`UNKNOWN_ERROR`, which is retried and scored.
+
+| Refusal | Code | At fault |
+| --- | --- | --- |
+| `sdk` 32 | `CHAIN_INVALID_SEQUENCE` | no |
+| `sdk` 19 | `CHAIN_TX_ALREADY_KNOWN` | no |
+| `sdk` 13 | `CHAIN_INSUFFICIENT_FEE` | no |
+| `sdk` 5 | `CHAIN_INSUFFICIENT_FUNDS` | no |
+| `sdk` 4 | `CHAIN_INVALID_SIGNATURE` | no |
+| `sdk` 9 | `CHAIN_ACCOUNT_NOT_FOUND` | no |
+| `sdk` 11 | `CHAIN_OUT_OF_GAS` | no |
+| `sdk` 20 | `CHAIN_MEMPOOL_FULL` | no |
+| `sdk` 21 | `CHAIN_TX_TOO_LARGE` | no |
+| any other code or codespace | `CHAIN_TX_REJECTED` | no |
+
+A refusal about the transaction is the same from every node: it neither resets the endpoint's
+failure count nor adds to it. MAG-5323 applies the same rule to Tendermint RPC, Cosmos gRPC and
+Tron.

@@ -875,12 +875,16 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 	// own it, and the flag stays false so the availability gate reads the carve-out), and a 2xx
 	// carrying an application error in its body (a Cosmos tx_response.code) is a
 	// request/application error, not a node error at the transport level.
+	//
+	// A 2xx that is the node refusing the broadcast transaction the request sent (Cosmos's
+	// tx_response.code, MAG-5451) is a node error, as on JSON-RPC and gRPC: the reply says the
+	// node answered with an error, and it is no proof the endpoint is healthy.
 	var isNodeError bool
 	switch {
 	case response.StatusCode == 429:
 		isNodeError = false
 	case response.StatusCode == 0 || (response.StatusCode >= 200 && response.StatusCode < 300):
-		isNodeError = false
+		isNodeError = hasError && restMessage.RefusesTransaction(response.Body)
 	default:
 		isNodeError = hasError
 	}

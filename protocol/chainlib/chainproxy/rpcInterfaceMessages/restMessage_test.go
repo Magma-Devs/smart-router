@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/magma-Devs/smart-router/protocol/common"
 )
 
 func TestRestMessage(t *testing.T) {
@@ -303,7 +305,11 @@ func TestCheckResponseError_CosmosTransaction_VariousErrorCodes(t *testing.T) {
 
 			require.Equal(t, tc.expectError, hasError, "Error detection mismatch for %s", tc.name)
 			if tc.expectError {
-				require.Equal(t, tc.rawLog, errorMessage, "Error message should match raw_log for %s", tc.name)
+				// The message carries the code (and codespace, when the node sent one) ahead of
+				// the log, not the bare raw_log: MAG-5451 needs them for the registry's rows, and
+				// an empty raw_log must not fall back to classifying the whole response body.
+				require.Equal(t, common.CosmosTxRefusalMessage("", uint32(tc.code), tc.rawLog), errorMessage,
+					"Error message should be the code-prefixed refusal message for %s", tc.name)
 			}
 		})
 	}
@@ -823,4 +829,43 @@ func TestServerErrorIsNodeReply(t *testing.T) {
 			require.Equal(t, tc.want, ServerErrorIsNodeReply(tc.status, []byte(tc.body)))
 		})
 	}
+}
+
+// TestRestMessage_RefusesTransaction pins MAG-5451's gate: only a refusal on the broadcast path is
+// the node refusing the transaction. A GET of an already-broadcast transaction answers the same
+// tx_response shape, and stays out (MAG-5326).
+func TestRestMessage_RefusesTransaction(t *testing.T) {
+	refused := `{"tx_response":{"height":"0","txhash":"5C504ED4","codespace":"sdk","code":19,"raw_log":""}}`
+	accepted := `{"tx_response":{"height":"0","txhash":"5C504ED4","codespace":"","code":0,"raw_log":"[]"}}`
+
+	cases := []struct {
+		name     string
+		specPath string
+		path     string
+		body     string
+		want     bool
+	}{
+		{"broadcast refused", "/cosmos/tx/v1beta1/txs", "/cosmos/tx/v1beta1/txs", refused, true},
+		{"broadcast accepted", "/cosmos/tx/v1beta1/txs", "/cosmos/tx/v1beta1/txs", accepted, false},
+		{"broadcast refused, no spec path, query on the url", "", "/cosmos/tx/v1beta1/txs?x=1", refused, true},
+		{"GET of a failed transaction (MAG-5326)", "/cosmos/tx/v1beta1/txs/{hash}", "/cosmos/tx/v1beta1/txs/5C504ED4", refused, false},
+		{"broadcast path, not a tx_response", "/cosmos/tx/v1beta1/txs", "/cosmos/tx/v1beta1/txs", `{"message":"ok"}`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			msg := RestMessage{SpecPath: tc.specPath, Path: tc.path}
+			require.Equal(t, tc.want, msg.RefusesTransaction([]byte(tc.body)))
+		})
+	}
+}
+
+// TestCheckResponseError_CosmosRefusal_EmptyLogKeepsCode is the hash case from MAG-5451: an empty
+// raw_log used to give an empty message, so the metric fell back to the whole body, where the tx
+// hash's digits matched the HTTP status rows. The message now always carries the code.
+func TestCheckResponseError_CosmosRefusal_EmptyLogKeepsCode(t *testing.T) {
+	body := `{"tx_response":{"height":"0","txhash":"5C504ED4AA429502","codespace":"sdk","code":19,"raw_log":""}}`
+	hasError, message := RestMessage{}.CheckResponseError([]byte(body), 200)
+	require.True(t, hasError)
+	require.Equal(t, "cosmos tx refused: code 19, codespace sdk", message)
+	require.NotContains(t, message, "5C504ED4", "the tx hash must never reach the message the registry reads")
 }

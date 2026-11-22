@@ -6,6 +6,8 @@ import (
 	"io"
 	"net"
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -58,7 +60,9 @@ var chainErrorMappings = map[ChainFamily][]errorMapping{
 		{MessageContains("double spend"), RouterErrorChainDoubleSpend},
 		{MessageContains("txn-mempool-conflict"), RouterErrorChainDoubleSpend}, // Bitcoin Core specific
 	},
-	ChainFamilyCosmosSDK: {
+	// A refused broadcast's code decides first (cosmosTxRefusalRows): its log is free text, and
+	// the rows below would otherwise read it.
+	ChainFamilyCosmosSDK: slices.Concat(cosmosTxRefusalRows, []errorMapping{
 		// Cosmos SDK transaction errors. These must be Tier-2 (not Tier-1)
 		// because "insufficient fee" also collides with Starknet's dedicated
 		// CHAIN_STARKNET_INSUFFICIENT_FEE (code 53) which is handled in the
@@ -71,7 +75,7 @@ var chainErrorMappings = map[ChainFamily][]errorMapping{
 		// Generic Tier-1 doesn't carry this matcher because EVM uses different
 		// phrasing and would false-match contract calls against unfunded addresses.
 		{MessageContains("account not found"), RouterErrorChainAccountNotFound},
-	},
+	}),
 	ChainFamilyStarknet: {
 		// Source: Starknet JSON-RPC spec error codes
 		{CodeEquals(1), RouterErrorChainStarknetFailedToReceiveTx},
@@ -185,6 +189,68 @@ func IsXRPLRejection(engineResult string) bool {
 // codes, with or without the direct-RPC sender's "HTTP <status>: " prefix.
 func xrplMessageStartsWith(alternatives ...string) ErrorMatcher {
 	return MessageRegex(`^(?:HTTP \d+: )?(?:` + strings.Join(alternatives, "|") + `)\b`)
+}
+
+// ---------------------------------------------------------------------------
+// A node's refusal of a broadcast transaction, inside an ordinary reply (MAG-5451)
+// ---------------------------------------------------------------------------
+//
+// Cosmos REST's POST /cosmos/tx/v1beta1/txs answers a refused transaction with HTTP 200 and says
+// so in tx_response.code. Read as a success, a refusal ended a stateful broadcast whenever it
+// arrived first, and it does arrive first when a node that already has the transaction (by
+// gossip, or from an earlier send) answers before the node that takes it. As a node error, the
+// broadcast waits for its siblings, and when every node refuses, the first refusal still reaches
+// the client unchanged — the same rule MAG-5323 established for Tendermint RPC, Cosmos gRPC and
+// Tron. rpcInterfaceMessages flags the reply and writes a message that starts with what the node
+// said, through CosmosTxRefusalMessage, and the rows below classify that message.
+//
+// Tier-1 on TransportREST, not Tier-2 only: a request's chain family is not always resolved by
+// the time a REST reply is classified. Anchored on a prefix no node writes, the rows match
+// nothing else, so they are also safe to run first in ChainFamilyCosmosSDK's Tier-2 list, ahead
+// of the rows that read a log's words.
+
+// cosmosTxRefusalPrefix starts every message CosmosTxRefusalMessage writes.
+const cosmosTxRefusalPrefix = "cosmos tx refused: code "
+
+// CosmosTxRefusalMessage is the message a Cosmos node's refusal of a broadcast transaction is
+// classified by: its ABCI code, its codespace, and its log.
+//
+//	cosmos tx refused: code 32, codespace sdk: account sequence mismatch, expected 7, got 6: incorrect account sequence
+func CosmosTxRefusalMessage(codespace string, code uint32, log string) string {
+	message := cosmosTxRefusalPrefix + strconv.FormatUint(uint64(code), 10)
+	if codespace != "" {
+		message += ", codespace " + codespace
+	}
+	if log != "" {
+		message += ": " + log
+	}
+	return message
+}
+
+// sdkTxRefused matches CosmosTxRefusalMessage's message for one code of the Cosmos SDK's own
+// codespace, sdk, with or without the direct-RPC sender's "HTTP <status>: " prefix.
+func sdkTxRefused(code uint32) ErrorMatcher {
+	return MessageRegex(`^(?:HTTP \d+: )?` + regexp.QuoteMeta(cosmosTxRefusalPrefix+strconv.FormatUint(uint64(code), 10)+", codespace sdk") + `(?::|$)`)
+}
+
+// cosmosTxRefusalRows classify a refused Cosmos transaction by its code (cosmos-sdk
+// types/errors/errors.go). A broadcast's code is CheckTx's, so it comes from the ante handler, or
+// from the SDK's conversion of a CometBFT error. Each is a fact about the transaction or the
+// chain, the same from every node, so every row is a non-retryable chain error that keeps the
+// availability gate off the node. The mempool is the one node-local state here; the registry
+// already answers "mempool is full" with CHAIN_MEMPOOL_FULL, not at fault.
+var cosmosTxRefusalRows = []errorMapping{
+	{sdkTxRefused(32), RouterErrorChainInvalidSequence},  // ErrWrongSequence: account sequence mismatch
+	{sdkTxRefused(19), RouterErrorChainTxAlreadyKnown},   // ErrTxInMempoolCache: tx already in mempool
+	{sdkTxRefused(13), RouterErrorChainInsufficientFee},  // ErrInsufficientFee
+	{sdkTxRefused(5), RouterErrorChainInsufficientFunds}, // ErrInsufficientFunds
+	{sdkTxRefused(4), RouterErrorChainInvalidSignature},  // ErrUnauthorized: signature verification failed
+	{sdkTxRefused(9), RouterErrorChainAccountNotFound},   // ErrUnknownAddress: the signer's account does not exist
+	{sdkTxRefused(11), RouterErrorChainOutOfGas},         // ErrOutOfGas, in the ante handler
+	{sdkTxRefused(20), RouterErrorChainMempoolFull},      // ErrMempoolIsFull
+	{sdkTxRefused(21), RouterErrorChainTxTooLarge},       // ErrTxTooLarge
+	// Any other code, of any codespace: a module's own refusal, a timeout height, a bad memo.
+	{MessageRegex(`^(?:HTTP \d+: )?` + regexp.QuoteMeta(cosmosTxRefusalPrefix) + `\d`), RouterErrorChainTxRejected},
 }
 
 // ---------------------------------------------------------------------------
@@ -621,6 +687,10 @@ func httpStatusMessageMappings() []errorMapping {
 // any reader can observe the map, so the runtime invariant ("read-only after
 // package init") holds. Do not add mutations outside this function.
 func init() {
+	// A refused Cosmos broadcast opens the REST table: its message starts with a prefix no node
+	// writes, so it shadows no row below, and first, no row below reads the node's free text.
+	genericErrorMappings[TransportREST] = slices.Concat(cosmosTxRefusalRows, genericErrorMappings[TransportREST])
+
 	// Append shared HTTP status message matchers to JSON-RPC transport
 	genericErrorMappings[TransportJsonRPC] = append(genericErrorMappings[TransportJsonRPC], httpStatusMessageMappings()...)
 
