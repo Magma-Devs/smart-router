@@ -41,7 +41,6 @@ type SmartRouterMetricsManager struct {
 	endpointInFlight            *prometheus.GaugeVec     // rpc_endpoint_requests_in_flight
 
 	// Endpoint-scoped metrics (labels: spec, apiInterface, endpoint_id)
-	endpointOverallHealth          *prometheus.GaugeVec   // rpc_endpoint_overall_health
 	endpointOverallHealthBreakdown *prometheus.GaugeVec   // rpc_endpoint_overall_health_breakdown {spec, apiInterface}
 	endpointSelectionScore         *prometheus.GaugeVec   // rpc_endpoint_selection_score {spec, apiInterface, endpoint_id, score_type}
 	optimizerSelectionScore        *prometheus.GaugeVec   // rpc_optimizer_selection_score {spec, endpoint_id, score_type}
@@ -267,11 +266,6 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		Name: "rpc_endpoint_requests_in_flight",
 		Help: "Current number of in-flight relays for this RPC endpoint, by function.",
 	}, endpointFunctionLabels))
-
-	m.endpointOverallHealth = registerOrReuse(prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "rpc_endpoint_overall_health",
-		Help: "Health status of this RPC endpoint (1=healthy, 0=unhealthy).",
-	}, endpointLabels))
 
 	m.endpointOverallHealthBreakdown = registerOrReuse(prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "rpc_endpoint_overall_health_breakdown",
@@ -900,14 +894,6 @@ func (m *SmartRouterMetricsManager) incForEveryProvider(vec *prometheus.CounterV
 // Endpoint-scoped metric setters
 // =============================================================================
 
-// SetEndpointOverallHealth sets the health status for an RPC endpoint
-func (m *SmartRouterMetricsManager) SetEndpointOverallHealth(spec, apiInterface, endpointID string, healthy bool) {
-	if m == nil {
-		return
-	}
-	setGauge(m.endpointOverallHealth, boolGauge(healthy), spec, apiInterface, endpointID)
-}
-
 // SetEndpointOverallHealthBreakdown sets the aggregate health for a spec/apiInterface across endpoints
 func (m *SmartRouterMetricsManager) SetEndpointOverallHealthBreakdown(spec, apiInterface string, healthy bool) {
 	if m == nil {
@@ -1325,11 +1311,6 @@ func (m *SmartRouterMetricsManager) RegisterEndpoint(spec, apiInterface, endpoin
 		m.urlFingerprints[endpointID] = URLFingerprint(endpointID)
 	}
 	m.lock.Unlock()
-
-	// Initialize health to healthy so always-healthy endpoints appear in Prometheus from startup.
-	// The relay code only calls SetEndpointOverallHealth on state transitions (unhealthy→healthy),
-	// so without this initialization, endpoints that never fail would have no health metric at all.
-	m.SetEndpointOverallHealth(spec, apiInterface, providerName, true)
 }
 
 // resolveProviderNames returns every provider name configured for a given endpoint URL.
