@@ -875,12 +875,17 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 	// own it, and the flag stays false so the availability gate reads the carve-out), and a 2xx
 	// carrying an application error in its body (a Cosmos tx_response.code) is a
 	// request/application error, not a node error at the transport level.
+	//
+	// A 2xx that is java-tron's servlet-error shape (restMessage.IsTronServletError, MAG-5449) is
+	// a node error at the transport level too: unlike the Cosmos carve-out, it is never the chain's
+	// answer about anything, on a read or a write, so the broadcast waits for a sibling and the
+	// reply never reaches the cache (tryCacheWriteResolved's node-error gate).
 	var isNodeError bool
 	switch {
 	case response.StatusCode == 429:
 		isNodeError = false
 	case response.StatusCode == 0 || (response.StatusCode >= 200 && response.StatusCode < 300):
-		isNodeError = false
+		isNodeError = hasError && restMessage.IsTronServletError(response.Body)
 	default:
 		isNodeError = hasError
 	}

@@ -1430,3 +1430,35 @@ func TestXRPLRowsWinOverARealHTTPStatus(t *testing.T) {
 		require.Equal(t, tc.want.Name, ClassifyError(nil, ChainFamilyXRP, TransportJsonRPC, tc.status, msg).Name, msg)
 	}
 }
+
+// --- Tron rows (ChainFamilyTron in error_classifier.go) ---
+
+// TestTronServletErrorRows pins MAG-5449: the rate limiter's own exception is capacity, held off
+// but not scored; every other servlet-error message is UNKNOWN_ERROR — unclassified, but never a
+// success now that checkTronServletError marks it a node error.
+func TestTronServletErrorRows(t *testing.T) {
+	rateLimited := ClassifyError(nil, ChainFamilyTron, TransportREST, 200,
+		"class java.lang.IllegalAccessException : lack of computing resources")
+	require.Equal(t, RouterErrorNodeRateLimited.Name, rateLimited.Name)
+
+	retry := ClassifyNodeErrorForRetry(ChainFamilyTron, TransportREST, 200,
+		"class java.lang.IllegalAccessException : lack of computing resources")
+	require.True(t, retry.IsRateLimited, "held off, not scored")
+
+	for _, msg := range []string{
+		"class java.lang.NullPointerException : null",
+		"class com.google.protobuf.InvalidProtocolBufferException : detail",
+		"... This block does not exist",
+	} {
+		require.Equal(t, RouterErrorUnknown.Name, ClassifyError(nil, ChainFamilyTron, TransportREST, 200, msg).Name, msg)
+	}
+}
+
+// The Tron row is Tier-2: another family's node error that happens to contain the same words is
+// not classified by it.
+func TestTronRowsAreTronOnly(t *testing.T) {
+	for _, family := range []ChainFamily{ChainFamilyEVM, ChainFamilyCosmosSDK, ChainFamilyUnknown} {
+		require.NotEqual(t, RouterErrorNodeRateLimited.Name,
+			ClassifyError(nil, family, TransportREST, 200, "lack of computing resources").Name, family.String())
+	}
+}

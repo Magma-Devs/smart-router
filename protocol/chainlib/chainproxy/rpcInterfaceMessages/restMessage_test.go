@@ -799,6 +799,111 @@ func TestCheckResponseError_AnyNonSuccessIsANodeError(t *testing.T) {
 	}
 }
 
+// TestCheckResponseError_TronServletError pins MAG-5449: java-tron answers an exception its
+// servlet could not process with a 2xx and a JSON object whose single member is "Error" — the
+// rate limiter's own IllegalAccessException included. That is a node error on reads and writes
+// alike, never the chain's answer.
+func TestCheckResponseError_TronServletError(t *testing.T) {
+	testCases := []struct {
+		name          string
+		response      string
+		httpStatus    int
+		expectedError bool
+		errorMessage  string
+	}{
+		{
+			name:          "rate limiter's own exception",
+			response:      `{"Error":"class java.lang.IllegalAccessException : lack of computing resources"}`,
+			httpStatus:    200,
+			expectedError: true,
+			errorMessage:  "class java.lang.IllegalAccessException : lack of computing resources",
+		},
+		{
+			name:          "a node-local exception on a broadcast",
+			response:      `{"Error":"class java.lang.NullPointerException : null"}`,
+			httpStatus:    200,
+			expectedError: true,
+			errorMessage:  "class java.lang.NullPointerException : null",
+		},
+		{
+			name:          "getblockbalance on a node without balance history",
+			response:      `{"Error":"... This block does not exist"}`,
+			httpStatus:    200,
+			expectedError: true,
+			errorMessage:  "... This block does not exist",
+		},
+		{
+			name:          "Error beside another member is left alone",
+			response:      `{"Error":"x","code":1}`,
+			httpStatus:    200,
+			expectedError: false,
+		},
+		{
+			name:          "lowercase error is not java-tron's shape",
+			response:      `{"error":"x"}`,
+			httpStatus:    200,
+			expectedError: false,
+		},
+		{
+			name:          "a non-string Error member does not match",
+			response:      `{"Error":404}`,
+			httpStatus:    200,
+			expectedError: false,
+		},
+		{
+			name:          "an ordinary Tron reply with a count",
+			response:      `{"count":0}`,
+			httpStatus:    200,
+			expectedError: false,
+		},
+		{
+			name:          "empty object",
+			response:      `{}`,
+			httpStatus:    200,
+			expectedError: false,
+		},
+		{
+			name:          "the shape still applies beside a non-2xx status",
+			response:      `{"Error":"class java.lang.IllegalAccessException : lack of computing resources"}`,
+			httpStatus:    503,
+			expectedError: true,
+			errorMessage:  `{"Error":"class java.lang.IllegalAccessException : lack of computing resources"}`,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			restMsg := RestMessage{}
+			hasError, errorMessage := restMsg.CheckResponseError([]byte(tc.response), tc.httpStatus)
+			require.Equal(t, tc.expectedError, hasError)
+			if tc.errorMessage != "" {
+				require.Equal(t, tc.errorMessage, errorMessage)
+			}
+		})
+	}
+}
+
+// TestRestMessage_IsTronServletError pins the sender's narrower question: which 2xx replies are
+// java-tron's servlet-error shape, as opposed to any other reply CheckResponseError flags on a 2xx
+// (a Cosmos tx_response error keeps its old place at the sender — not this).
+func TestRestMessage_IsTronServletError(t *testing.T) {
+	testCases := []struct {
+		name     string
+		response string
+		want     bool
+	}{
+		{"tron servlet error", `{"Error":"class java.lang.IllegalAccessException : lack of computing resources"}`, true},
+		{"cosmos tx error is not this shape", `{"tx_response":{"code":32,"raw_log":"account sequence mismatch"}}`, false},
+		{"Error beside another member is not this shape", `{"Error":"x","code":1}`, false},
+		{"an ordinary success", `{"balances":[]}`, false},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, RestMessage{}.IsTronServletError([]byte(tc.response)))
+		})
+	}
+}
+
 // TestServerErrorIsNodeReply pins which REST 5xx replies keep their body for the client.
 func TestServerErrorIsNodeReply(t *testing.T) {
 	cases := []struct {

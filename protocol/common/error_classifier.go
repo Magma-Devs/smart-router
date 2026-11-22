@@ -98,6 +98,14 @@ var chainErrorMappings = map[ChainFamily][]errorMapping{
 		{MessageContains("INVALID_SHARD_ID"), RouterErrorChainNEARInvalidShardID},
 		{MessageContains("NOT_SYNCED_YET"), RouterErrorChainNEARNotSyncedYet},
 	},
+	// Source: java-tron services/http/Util.java and RateLimiterServlet (MAG-5449). A servlet
+	// exception is a 2xx {"Error": "<class> : <message>"}; checkTronServletError flags it, and
+	// this row names the one message that is capacity, not a fault: RateLimiterServlet's own
+	// IllegalAccessException. Every other message falls through to UNKNOWN_ERROR, which stays
+	// never-success now that checkTronServletError marks it a node error — not a silent "no verdict".
+	ChainFamilyTron: {
+		{MessageContains("lack of computing resources"), RouterErrorNodeRateLimited},
+	},
 	// Source: rippled (src/libxrpl/protocol/ErrorCodes.cpp, transaction results in TER.cpp).
 	// rippled reports a failed call inside an ordinary HTTP 200 result, as an API error in
 	// result.error beside "status":"error", on every method; a submit also says what happened to

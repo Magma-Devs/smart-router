@@ -48,7 +48,8 @@ func (rm *RestMessage) GetRawRequestHash() ([]byte, error) {
 // it adds on JSON-RPC: a write broadcast keeps waiting for a sibling's success instead of taking
 // the first refusal as the result, and the error registry classifies the reply — its REST rows
 // decide whether a read is retried elsewhere and whether the endpoint is scored. A 2xx is a
-// success unless its body carries a Cosmos transaction error.
+// success unless its body carries a Cosmos transaction error, or the single-member shape
+// java-tron's servlets answer every exception with (checkTronServletError, MAG-5449).
 //
 // A status of 0 is "not set" — a cache entry written before statuses were stored, a test
 // fixture, gRPC's codes.OK on the shared RelayResult — and reads as a success, the way the
@@ -58,9 +59,44 @@ func (jm RestMessage) CheckResponseError(data []byte, httpStatusCode int) (hasEr
 		if cosmosTxErr, errMsg := checkCosmosTxError(data); cosmosTxErr {
 			return cosmosTxErr, errMsg
 		}
+		if tronErr, errMsg := checkTronServletError(data); tronErr {
+			return tronErr, errMsg
+		}
 		return false, ""
 	}
 	return true, extractErrorMessage(data, httpStatusCode)
+}
+
+// checkTronServletError detects java-tron's answer to a request its servlet could not process: a
+// 2xx whose body is a JSON object with the single string member "Error" (MAG-5449). 121 of
+// java-tron's 131 HTTP servlets write it this way (services/http/Util.java processError), on
+// anything from a malformed request to the rate limiter's own IllegalAccessException — never a
+// status other than 200. A body with "Error" beside other members, or any other shape, is left to
+// the caller: among java-tron's own replies, /wallet/broadcasttransaction's result:false (no
+// "Error" member) is the broadcast-refusal shape, not this one.
+func checkTronServletError(data []byte) (bool, string) {
+	var members map[string]json.RawMessage
+	if err := json.Unmarshal(data, &members); err != nil || len(members) != 1 {
+		return false, ""
+	}
+	raw, ok := members["Error"]
+	if !ok {
+		return false, ""
+	}
+	var message string
+	if err := json.Unmarshal(raw, &message); err != nil {
+		return false, ""
+	}
+	return true, message
+}
+
+// IsTronServletError reports whether a 2xx reply is checkTronServletError's shape. The sender
+// marks such a reply a node error at the transport level, as it does any reply outside 2xx; a
+// Cosmos tx_response error on a 2xx keeps its old place, a node error to the relay processor and
+// the registry only (MAG-5449).
+func (jm RestMessage) IsTronServletError(data []byte) bool {
+	is, _ := checkTronServletError(data)
+	return is
 }
 
 // ServerErrorIsNodeReply reports whether a REST 5xx is the node's own answer rather than a failure
