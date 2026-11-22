@@ -140,6 +140,13 @@ func TestRelayInnerDirect_AttemptEndedAtTheRoutersDeadlineStillCounts(t *testing
 	})
 }
 
+// burstCallerTimeout is the grpc-timeout of each caller in the burst below. It is far shorter than
+// slowGRPCNodeAnswer, so every call ends at its caller's deadline, and long enough for the calls to
+// reach a provider first under the race detector: the router looks the method up by reflection
+// before it dispatches, and the test nodes refuse reflection, so every call pays that round trip.
+// At 50 ms, under -race, fewer than half of the 30 calls reached a provider in about 1 run in 20.
+const burstCallerTimeout = 250 * time.Millisecond
+
 // End to end through the router's gRPC listener: callers that set a grpc-timeout shorter than the
 // providers take. Every call ends at its caller's deadline, and every provider stays on.
 func TestGRPCListener_CallsEndingAtTheCallersDeadlineLeaveEveryProviderOn(t *testing.T) {
@@ -160,7 +167,7 @@ func TestGRPCListener_CallsEndingAtTheCallersDeadlineLeaveEveryProviderOn(t *tes
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			callCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+			callCtx, cancel := context.WithTimeout(context.Background(), burstCallerTimeout)
 			defer cancel()
 			err := client.Invoke(callCtx, "/"+relayEndGRPCMethod, wrapperspb.Int64(5), &wrapperspb.Int64Value{})
 			codesSeen[i] = status.Code(err)
@@ -226,7 +233,7 @@ func startGRPCRouterOverSlowNodes(t *testing.T, nodeAddrs []string) (*grpc.Clien
 		connection, err := routersession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = connection.Close() })
-		// Connected up front, as endpoint setup leaves it, so a caller's 50 ms is spent waiting on
+		// Connected up front, as endpoint setup leaves it, so a caller's deadline is spent waiting on
 		// the node rather than on the first dial.
 		prewarmer, ok := connection.(routersession.DirectRPCPrewarmer)
 		require.True(t, ok)
