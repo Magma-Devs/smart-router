@@ -1,10 +1,10 @@
-# Per-chain error classification in lava-specs (MAG-4910, revision 11)
+# Per-chain error classification in lava-specs (MAG-4910, revision 12)
 
 Implementation spec. Approval, by Nimrod or Tom: the **contract**, which freezes `schema_version` 1
 so MAG-4898 can start on it: the `errors` section, rows, shapes, classes and reasons, write verdicts
-and inheritance (§2) and the validator's rules (§4); and Must-haves 2 to 4 as the router epic plans
-them (§5 to §9, in §7's order), the epic opened on approval. Product (Omer) approves each row's
-write verdict (Q229). Blocks MAG-4898.
+and inheritance (§2) and the validator's rules (§4); and Must-haves 2 to 4 as the router epic
+MAG-5592 plans them (§5 to §9, in §7's order). Product (Omer) approves each row's write verdict
+(Q229). Blocks MAG-4898.
 
 Baseline: smart-router `b1712ee8`, lava-specs `4bbb5e9c`, smart-router-helm-chart `0a6f8134`,
 smart-router-infrastructure `7db44170`; code is cited by file and symbol. Rulebook: Part I v1.0 as
@@ -636,8 +636,8 @@ text, with the two exceptions step 2 and step 3 name.
   would prove product approved each write verdict in any source a router loads; bundling proves it
   through the release pair, and every tenant runs the bundled specs by default (§6).
 - Signing (a manifest per chain, a canonical hash, trust roots, a signing service, key custody,
-  rotation, revocation, candidate and general trust contexts, a promotion job) is a later ticket,
-  opened if rows must reach routers faster than releases (§10).
+  rotation, revocation, candidate and general trust contexts, a promotion job) is a later ticket
+  (MAG-5612), opened if rows must reach routers faster than releases (§10).
 
 ### 5.5 Router-owned XRP rows
 
@@ -716,8 +716,8 @@ keep the connection rules.
   with `url` the bare lava-specs URL, which loads its default branch) defaults to `false`, so
   routers start on their bundled specs. A tenant that wants a source sets
   `miscellaneous.staticSpecs` in its values. No tenant in smart-router-infrastructure sets it, so
-  the chart bump moves every tenant at once. The fleet rollout is an infra ticket (§10): the
-  chart-bump cadence, and the hub's serving-probe catalog (`blackbox/modules.yaml`, which
+  the chart bump moves every tenant at once. The fleet rollout is MAG-5601's infra step (§10):
+  the chart-bump cadence, and the hub's serving-probe catalog (`blackbox/modules.yaml`, which
   `blackbox-catalog.yaml` rebuilds at lava-specs' tip) built at the bundled commit instead.
 
 ## 7. Rollout
@@ -737,7 +737,7 @@ keep the connection rules.
    subscriptions land in the SLA's error number.
 3. Bundled specs and fallback: `compatibility.json`, `SPEC_COMMIT`, `make specs`,
    folder-matches-commit check, bundled specs in the image, source fallback, the loaded-source log
-   and gauge (§6, §5.6); the Helm default, with its infra rollout ticket (§6).
+   and gauge (§6, §5.6); the Helm default and its fleet rollout (§6; MAG-5601).
 4. The validator: `cmd/specvalidate`, the schema, `spec_guards.yml` jobs, owner-review and evidence
    checks (§4, §8.1); the router-owned set exported with each verdict's class and reason, and the
    class checks (§4.1).
@@ -1053,10 +1053,10 @@ description names the rule (`stateful`).
 | Initial write-method table | Step 0 write guards ship |
 | Docs: verdict names can come from a chain's spec, with no number (`ERROR-REGISTRY-DESIGN.md`, public docs, and `docs/RELAY-END-EVENT.md`'s `error_code` field say "error registry name") | Step 2 |
 | Source evidence and production examples for migrated rows; the R&D owners team for verdict, class, reason and shape review | Step 1 |
-| Signing, so a policy can act from any source (§5.4): a later ticket | rows must reach routers faster than releases |
-| Infra ticket for the Helm default (§6): the chart-bump cadence, and the serving-probe catalog built at the bundled commit | Step 0's bundled specs reach the fleet |
+| Signing, so a policy can act from any source (§5.4): MAG-5612, a later ticket | rows must reach routers faster than releases |
+| The Helm default's fleet rollout (§6), MAG-5601's chart and infra steps: the chart-bump cadence, and the serving-probe catalog built at the bundled commit | Step 0's bundled specs reach the fleet |
 | MAG-2673 (lava-specs versioning) makes tags, a change log and a pinned version a prerequisite for rows acting on live traffic; this spec meets the need with the bundled commit, the release pair and `smartrouter_spec_source_info` (§6), and leaves tags out. Nimrod confirms or keeps tags as the prerequisite | Step 2 `reads` |
-| `source="client"` in infra's `docs/SLA-QUERIES.md` and `scripts/investigate.py` and in the dashboard's error pivots (§7 Step 0): a ticket in each repo | Step 0's `source` label ships |
+| `source="client"` in infra's `docs/SLA-QUERIES.md` and `scripts/investigate.py` and in the dashboard's error pivots (§7 Step 0): MAG-5598's infra and dashboard steps, before its router step | Step 0's `source` label ships |
 | Signature, duplicate and shape candidates per interface (§5.2, §2.4): MAG-4898's evidence for each | each ships |
 | create-spec agent keeps unknown keys in update modes by construction; new-chain mode needs a template (MAG-4898 part 3); add a test in `scripts/test_*.sh` | Step 3 |
 | Effort: ticket said 6–8 engineer-weeks; revision 2 split ≈9; bundled-only (§5.4) drops the approval pipeline; the prefix, chain-defined verdicts, shapes, answer rows and write verdicts, and interface parity (record, per-interface fixtures) add to it | R&D sizes the epic |
