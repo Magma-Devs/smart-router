@@ -254,6 +254,70 @@ func TestGrpcParseMsg_DecodesTheBodyWhenTheDescriptorIsHeld(t *testing.T) {
 	})
 }
 
+// upgradingRemote is a reflection snapshot remote whose upstream changes build: its lookups and
+// what it holds both answer from the build served now.
+type upgradingRemote struct {
+	serving atomic.Pointer[protoregistry.Files]
+}
+
+func (r *upgradingRemote) HeldDescriptorByName(name protoreflect.FullName) (protoreflect.Descriptor, error) {
+	return r.serving.Load().FindDescriptorByName(name)
+}
+
+func (r *upgradingRemote) ProtoFileByPath(path string) (*descriptorpb.FileDescriptorProto, error) {
+	fd, err := r.serving.Load().FindFileByPath(path)
+	if err != nil {
+		return nil, err
+	}
+	return protodesc.ToFileDescriptorProto(fd), nil
+}
+
+func (r *upgradingRemote) ProtoFileContainingSymbol(name protoreflect.FullName) (*descriptorpb.FileDescriptorProto, error) {
+	d, err := r.serving.Load().FindDescriptorByName(name)
+	if err != nil {
+		return nil, err
+	}
+	return protodesc.ToFileDescriptorProto(d.ParentFile()), nil
+}
+
+func (r *upgradingRemote) Close() error { return nil }
+
+// buildOfQueryGet is one build of a file serving chainlib_test.build.Query/Get, whose request's
+// field 2 has the type field2 declares.
+func buildOfQueryGet(t *testing.T, field2 string) *protoregistry.Files {
+	t.Helper()
+	fdp := &descriptorpb.FileDescriptorProto{}
+	require.NoError(t, prototext.Unmarshal([]byte(`
+name: "chainlib_test/build.proto" package: "chainlib_test.build" syntax: "proto3"
+message_type { name: "Inner" field { name: "a" number: 1 label: LABEL_OPTIONAL type: TYPE_INT64 } }
+message_type { name: "Request" field { name: "id" number: 1 label: LABEL_OPTIONAL type: TYPE_UINT64 } field { name: "f" number: 2 label: LABEL_OPTIONAL `+field2+` } }
+message_type { name: "Reply" }
+service { name: "Query" method { name: "Get" input_type: ".chainlib_test.build.Request" output_type: ".chainlib_test.build.Reply" } }
+`), fdp))
+	fd, err := protodesc.NewFile(fdp, protoregistry.GlobalFiles)
+	require.NoError(t, err)
+	files := new(protoregistry.Files)
+	require.NoError(t, files.RegisterFile(fd))
+	return files
+}
+
+// Block parsing resolves a method once, and the registry keeps that build for the process's
+// life. After the upstream changes build, the check reads a request with the build it serves now.
+func TestCheckGrpcRequestMessage_ReadsWithTheBuildTheUpstreamServesNow(t *testing.T) {
+	remote := &upgradingRemote{}
+	remote.serving.Store(buildOfQueryGet(t, `type: TYPE_MESSAGE type_name: ".chainlib_test.build.Inner"`))
+	registry := dyncodec.NewRegistry(remote)
+	_, err := registry.FindDescriptorByName("chainlib_test.build.Query.Get")
+	require.NoError(t, err)
+	oldRequest := wire(nil).varint(1, 7).bytes(2, wire(nil).varint(1, 9))
+	newRequest := wire(nil).varint(1, 7).bytes(2, []byte("hello, world"))
+	require.NoError(t, checkGrpcRequestMessage(registry, "chainlib_test.build.Query/Get", oldRequest))
+	require.ErrorIs(t, checkGrpcRequestMessage(registry, "chainlib_test.build.Query/Get", newRequest), GrpcRequestNotProtobufError, "field 2 is a message in this build")
+
+	remote.serving.Store(buildOfQueryGet(t, `type: TYPE_STRING`))
+	require.NoError(t, checkGrpcRequestMessage(registry, "chainlib_test.build.Query/Get", newRequest), "field 2 is a string in the build served now")
+}
+
 // The refusal sentence is fixed: the decoder's own words stay in the router's log.
 func TestGrpcRequestNotProtobufError_KeepsTheCauseForTheLog(t *testing.T) {
 	err := checkGrpcRequestMessage(nil, reflectionMethod, []byte{0x0a, 0x05, 0x61})

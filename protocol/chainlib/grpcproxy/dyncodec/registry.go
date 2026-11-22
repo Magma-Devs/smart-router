@@ -137,23 +137,27 @@ func (r *Registry) FindDescriptorByName(name protoreflect.FullName) (protoreflec
 		})
 }
 
-// HeldDescriptorByName returns name's descriptor when the registry already holds it, or its
-// remote does without asking an upstream. It never waits on a lookup, so it suits a check that
-// runs on every request; ok is false when neither holds the name.
+// HeldDescriptorByName returns name's descriptor when the registry's remote holds it without
+// asking an upstream, or else when the registry itself does. It never waits on a lookup, so it
+// suits a check that runs on every request; ok is false when neither holds the name.
+//
+// The remote comes first: its snapshot is the build its upstream serves now, while a file the
+// registry resolved once is kept for the process's life, so after the upstream changes build it
+// would describe a request the upstream no longer reads that way.
 func (r *Registry) HeldDescriptorByName(name protoreflect.FullName) (protoreflect.Descriptor, bool) {
 	if r == nil {
 		return nil, false
+	}
+	if held, ok := r.remote.(heldDescriptorSource); ok {
+		if d, err := held.HeldDescriptorByName(name); err == nil {
+			return d, true
+		}
 	}
 	r.mu.RLock()
 	d, err := r.prefFiles.FindDescriptorByName(name)
 	r.mu.RUnlock()
 	if err == nil {
 		return d, true
-	}
-	if held, ok := r.remote.(heldDescriptorSource); ok {
-		if d, err := held.HeldDescriptorByName(name); err == nil {
-			return d, true
-		}
 	}
 	return nil, false
 }
