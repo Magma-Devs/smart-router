@@ -119,17 +119,18 @@ func TestGraphQLCrossValidationBuckets(t *testing.T) {
 			wantAgreed: pruned,
 		},
 		{
-			// Current behavior, not a goal. Sui files "outside consistent range" under BAD_USER_INPUT,
-			// so the router reads it as the caller's answer: it votes, and two of them are the agreed
-			// reply. Retention is per operator (about an hour for balances), so an honest provider that
-			// still holds the data is outvoted by two that no longer do. MAG-2863 keeps retention-window
-			// handling as an open slice, and this row changes with it.
-			name:       "an error that is the caller's votes like any answer (current behavior, not a goal)",
-			request:    balanceRead,
-			replies:    []string{outOfRange, outOfRange},
-			threshold:  2,
-			wantVotes:  []int{2},
-			wantAgreed: outOfRange,
+			// Current behavior, not a goal. The caller's error is a node error (MAG-5121), so it does
+			// not vote, and when every provider answers it, cross-validation fails for too few
+			// answers: the client gets the router's failure, as for a REST 400, not the providers'
+			// reply. Sui files "outside consistent range" under BAD_USER_INPUT; its chain row
+			// (MAG-4909 R5) makes it a retry on another provider when chain rows land.
+			name:           "the caller's error does not vote (current behavior, not a goal)",
+			request:        balanceRead,
+			replies:        []string{outOfRange, outOfRange},
+			threshold:      2,
+			wantVotes:      []int{},
+			wantNodeErrors: 2,
+			wantReason:     common.CrossValidationReasonInsufficientResponses,
 		},
 		{
 			// A server-fault code inside the 200 is the node's error.
