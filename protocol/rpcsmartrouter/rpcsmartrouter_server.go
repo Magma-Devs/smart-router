@@ -5298,6 +5298,15 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 	if finalized && protocolMessage.HasBlocklessElement() {
 		finalized = false
 	}
+	// The block being far enough behind the tip says nothing about what this node answered
+	// with: a node behind the network answers a numbered read with its own copy of that block,
+	// which can still change, and says so in the reply (MAG-5339). Where the chain's spec names
+	// that field, a reply that says "not final" takes the chain's short lifetime, like a block
+	// too close to the tip. The reply itself is untouched; see replyAllowsFinal.
+	if finalized {
+		path, finalValue := rpcss.chainParser.FinalityField()
+		finalized = replyAllowsFinal(relayResult.Reply.Data, path, finalValue)
+	}
 
 	// Convert LATEST_BLOCK to the concrete block the cache key carries. This MUST be the
 	// block the lookup in sendRelayToEndpoint computes for the same request, which is why

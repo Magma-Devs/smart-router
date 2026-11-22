@@ -759,6 +759,19 @@ func (bcp *BaseChainParser) ReplyHeaderDirectives() []*spectypes.Header {
 	return bcp.replyHeaders
 }
 
+// FinalityField returns the spec's finality field declaration (spectypes.Spec.FinalityField):
+// the reply field by which a node says whether its answer is final and the value that means
+// final, or two empty strings when the chain's spec names none. One implementation for every
+// API interface, since the declaration is the chain's and not an interface's.
+func (bcp *BaseChainParser) FinalityField() (path, finalValue string) {
+	if bcp == nil {
+		return "", ""
+	}
+	bcp.rwLock.RLock()
+	defer bcp.rwLock.RUnlock()
+	return bcp.spec.FinalityField()
+}
+
 // addServerApi stores apiContainer under key. An enabled api always replaces a disabled one
 // and a disabled one never replaces an enabled one, so a method that one collection disables
 // and another serves stays served whatever order the collections load in. Between two
