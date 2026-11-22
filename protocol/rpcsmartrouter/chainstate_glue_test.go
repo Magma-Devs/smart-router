@@ -802,3 +802,29 @@ func TestChainBlockRegression_CountedAndGaugeFollows(t *testing.T) {
 	require.Equal(t, staleBefore+1, readBlockRegressions(t, chainstate.RegressionReasonStaleTip))
 	require.Equal(t, float64(19_999_990), readRouterLatestBlockGauge(t))
 }
+
+// MAG-5450: a load balancer's bad backend answers first, so its absurd block is the tip before anything
+// can check it. The good backend's head, far below, takes the tip once it moves forward; the move is
+// counted under unconfirmed_start and the gauge follows it down. Built through newChainState, so
+// dropping the regression hook from production wiring fails this test.
+func TestOnEndpointAnswer_ColdStartLieCountedAndGaugeFollows(t *testing.T) {
+	mm := metrics.NewSmartRouterMetricsManager(metrics.SmartRouterMetricsManagerOptions{})
+	rpcss := &RPCSmartRouterServer{
+		smartRouterEndpointMetrics: mm,
+		listenEndpoint:             &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+	}
+	rpcss.chainState = rpcss.newChainState(12 * time.Second)
+	before := readBlockRegressions(t, chainstate.RegressionReasonUnconfirmedStart)
+
+	const absurd, head = int64(1) << 50, int64(20_000_000)
+	rpcss.onTipObservation("https://lb", absurd, false) // the bad backend answers first
+	rpcss.onEndpointAnswer("https://lb", head)          // the good one: far below, not moving yet
+	require.Equal(t, before, readBlockRegressions(t, chainstate.RegressionReasonUnconfirmedStart))
+
+	rpcss.onEndpointAnswer("https://lb", head+1) // its head moved forward
+	tip, fresh := rpcss.chainState.GetLatestBlock()
+	require.True(t, fresh)
+	require.Equal(t, head+1, tip)
+	require.Equal(t, before+1, readBlockRegressions(t, chainstate.RegressionReasonUnconfirmedStart))
+	require.Equal(t, float64(head+1), readRouterLatestBlockGauge(t), "the gauge follows the tip down")
+}

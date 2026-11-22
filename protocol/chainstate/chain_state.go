@@ -132,7 +132,7 @@ type Config struct {
 	OnRegression func(from, to int64, reason string)
 }
 
-// Regression reasons passed to Config.OnRegression: the only two ways the tip moves down.
+// Regression reasons passed to Config.OnRegression: the only three ways the tip moves down.
 const (
 	// RegressionReasonConsensus — Recompute snapped the tip down to the majority baseline
 	// because it led it by more than OutlierThreshold: a poisoned tip, or a chain revert the
@@ -141,6 +141,11 @@ const (
 	// RegressionReasonStaleTip — nothing re-confirmed the tip for a TTL, and a fresh lower
 	// observation was re-adopted: every endpoint now reports below what this chain last saw.
 	RegressionReasonStaleTip = "stale_tip"
+	// RegressionReasonUnconfirmedStart — the tip was taken with no guard to check it against (the
+	// first observation, or one over a stale tip) and had not advanced since, and a url answered far
+	// below it with a head that moved forward: a load balancer's bad backend answered first
+	// (MAG-5450).
+	RegressionReasonUnconfirmedStart = "unconfirmed_start"
 )
 
 // outlierThresholdForBlockTime derives the anti-lie / realignment threshold (in blocks) from a
@@ -234,6 +239,16 @@ type ChainState struct {
 	// deletes the url's entry and Recompute drops an entry with no answer for a StalenessWindow, so
 	// the map holds only urls that answered above the guard lately, however many urls come and go.
 	jumpRuns map[string]jumpRun
+	// provisional is true while the tip is a block SetLatestBlock took with no guard to check it
+	// against — the first observation, or one over a stale tip with no baseline — and the tip has not
+	// advanced since (MAG-5450). A load balancer's bad backend may have given it, and its repeats would
+	// keep it fresh for ever while the url's tip store drops the good backend's lower answers. While it
+	// holds, NoteAnswer replaces the tip with a url's head far below it once that head moves forward
+	// (fallRuns). Any guarded advance, and every tip Recompute sets, clears it.
+	provisional bool
+	// fallRuns holds, per url, the run of answers that url has given more than OutlierThreshold below
+	// a provisional tip, fed by NoteAnswer (MAG-5450). Empty whenever the tip is not provisional.
+	fallRuns map[string]fallRun
 	// initialized is a STICKY flag: true once any positive observation has ever been accepted.
 	// SetLatestBlock reads it to know whether a REFERENCE exists to guard the next observation
 	// against — the very first observation has none, which is why no anti-lie check can fire on it.
@@ -261,6 +276,13 @@ type jumpRun struct {
 	answers int       // answers in the run
 	firstAt time.Time // when the run's first answer came
 	lastAt  time.Time // when its latest answer came
+}
+
+// fallRun is one url's run of answers far below a provisional tip (see ChainState.fallRuns).
+// lastAt is on the real base clock, like every stored ChainState timestamp.
+type fallRun struct {
+	firstBlock int64     // the run's first answer, which a later answer must move past
+	lastAt     time.Time // when its latest answer came
 }
 
 // New builds a ChainState with the production clock. Zero-valued Config fields fall back to
@@ -325,9 +347,9 @@ func (cs *ChainState) SetDebugClockOffset(d time.Duration) {
 // This is the operator big-hammer for a poisoned tip. The tip self-heals on its own — Recompute
 // snaps an out-of-band tip down and stale-tip re-adoption pulls a frozen one down within one TTL —
 // but a WITHIN-BAND lie (a reporter walking the tip up in sub-OutlierThreshold steps, kept fresh by
-// its own traffic) has no automatic downward path, and neither does a genuine cold-start lie before
-// any peer forms a baseline. Reset is the only way to drop such a value immediately rather than
-// waiting for the liar to stop and a TTL to expire. Debug-only: reached from /debug/reset-all and
+// its own traffic) has no automatic downward path, and neither does a cold-start lie that no url
+// answers below (MAG-5450) before any peer forms a baseline. Reset is the only way to drop such a
+// value immediately rather than waiting for the liar to stop and a TTL to expire. Debug-only: reached from /debug/reset-all and
 // /debug/reset-scores, never from a relay path.
 //
 // Know one consequence before pulling it: clearing the tip also blanks GetLatestBlockAllowStale, so
@@ -342,6 +364,8 @@ func (cs *ChainState) Reset() {
 	cs.latestSince = time.Time{}
 	cs.rejectedSince = time.Time{}
 	cs.jumpRuns = nil
+	cs.provisional = false
+	cs.fallRuns = nil
 	cs.initialized = false
 	cs.baseline = 0
 	cs.hasBaseline = false
@@ -375,13 +399,18 @@ func (cs *ChainState) Reset() {
 //     answering above the guard (MAG-4964, MAG-5080); with two or more voters the head waits for a
 //     majority, or for the tip to go a TTL unconfirmed.
 //
-// Caveat: the guard cannot fire on the VERY FIRST observation (no reference exists yet), so a
-// cold-start lie is accepted here. It is bounded, not permanent: the stale-tip re-adoption above
-// drops it within one TTL, and on a pod that forms a baseline Recompute snaps it back sooner. That
-// self-heal is now the WHOLE bound, and it suffices — no consumer keeps a separate monotonic-max
-// copy of this value any more. The rpcsmartrouter bootstrap atomic, which was the one such copy and
-// turned a cold-start lie into a process-lifetime one, is retired (T3); every reader goes through
-// this tip. Do not reintroduce a ratcheting mirror of it without its own downward path.
+// Caveat: the guard cannot fire on the VERY FIRST observation (no reference exists yet), nor on one
+// over a stale tip with no baseline, so a lie there is accepted, and the tip is provisional
+// (MAG-5450). The stale-tip re-adoption above drops it within one TTL only if nothing confirms it,
+// and a load balancer's bad backend keeps confirming its own block while the url's tip store drops
+// the good backend's lower answers. So while the tip is provisional, NoteAnswer makes a url's head
+// more than OutlierThreshold below it the tip once that head moves forward — about one block time
+// after the good backend first answers — and on a pod that forms a baseline Recompute snaps the lie
+// back. What remains: a lie that advances like a chain, or one no url answers below, holds until the
+// tip goes a TTL unconfirmed or an operator resets it. No consumer keeps a separate monotonic-max
+// copy of this value: the rpcsmartrouter bootstrap atomic, which turned a cold-start lie into a
+// process-lifetime one, is retired (T3), and every reader goes through this tip. Do not reintroduce
+// a ratcheting mirror of it without its own downward path.
 //
 // Returns the resulting tip, the time it was last confirmed, and whether this call moved the tip
 // UP. advanced is not an accept/reject signal: equal-block confirmations, downward re-adoptions,
@@ -426,6 +455,7 @@ func (cs *ChainState) setLatestBlockLocked(block int64, nowReal time.Time) (late
 			cs.latestBlock = block
 			cs.lastObservedAt = nowReal
 			cs.latestSince = nowReal // the tip block CHANGED — re-establish its age
+			cs.setProvisionalLocked(false)
 			return cs.latestBlock, cs.lastObservedAt, false, regressedFrom
 		}
 		if block == cs.latestBlock {
@@ -446,11 +476,22 @@ func (cs *ChainState) setLatestBlockLocked(block int64, nowReal time.Time) (late
 		}
 		return cs.latestBlock, cs.lastObservedAt, false, 0
 	}
+	// With no baseline and no fresh tip (the first observation, or one over a stale tip) nothing
+	// checked this block, so it is provisional until the tip advances under a guard (MAG-5450).
+	cs.setProvisionalLocked(!cs.hasBaseline && !(cs.initialized && tipFresh))
 	cs.latestBlock = block
 	cs.lastObservedAt = nowReal
 	cs.latestSince = nowReal // advance (or first observation) — the tip block CHANGED
 	cs.initialized = true
 	return cs.latestBlock, cs.lastObservedAt, true, 0
+}
+
+// setProvisionalLocked records whether the tip that is being set is provisional (see
+// ChainState.provisional). Every caller is changing the tip, so the fall runs, counted against the
+// tip being replaced, are dropped either way. The caller holds cs.mu.
+func (cs *ChainState) setProvisionalLocked(provisional bool) {
+	cs.provisional = provisional
+	cs.fallRuns = nil
 }
 
 // NoteAnswer takes one block a url answered this router with first-hand: a poll it answered, or a
@@ -463,13 +504,23 @@ func (cs *ChainState) setLatestBlockLocked(block int64, nowReal time.Time) (late
 //     never reach SetLatestBlock. Without this the tip goes stale, the fresh-tip guard switches off,
 //     and the next absurd answer becomes the tip directly;
 //   - it keeps the url's run of answers above the guard (jumpRuns), which Recompute's sole-voter
-//     pull-up requires. An answer above the guard extends the run; any other answer ends it.
+//     pull-up requires. An answer above the guard extends the run; any other answer ends it;
+//   - while the tip is provisional (MAG-5450), it keeps the url's run of answers more than
+//     OutlierThreshold below the tip (fallRuns), and makes the url's head the tip once it has moved
+//     forward (noteFallLocked). That is the good backend answering, when the bad one answered first.
 //
 // Returns whether the tip moved up.
 func (cs *ChainState) NoteAnswer(url string, block int64) (advanced bool) {
 	if block <= 0 {
 		return false
 	}
+	// Same ordering as SetLatestBlock: registered before the unlock defer, so the hook runs after it.
+	var regressedFrom, regressedTo int64
+	defer func() {
+		if regressedFrom > 0 {
+			cs.reportRegression(regressedFrom, regressedTo, RegressionReasonUnconfirmedStart)
+		}
+	}()
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
 	if !cs.initialized {
@@ -492,11 +543,49 @@ func (cs *ChainState) NoteAnswer(url string, block int64) (advanced bool) {
 	}
 	delete(cs.jumpRuns, url)
 	if block < cs.latestBlock {
+		if cs.provisional && block < cs.latestBlock-cs.cfg.OutlierThreshold {
+			if replaced := cs.noteFallLocked(url, block, nowReal); replaced > 0 {
+				regressedFrom, regressedTo = replaced, block
+			}
+		}
 		return false
 	}
 	// block is in [tip, tip+OutlierThreshold], so this never moves the tip down: no regression to report.
 	_, _, advanced, _ = cs.setLatestBlockLocked(block, nowReal)
 	return advanced
+}
+
+// noteFallLocked takes one of url's answers more than OutlierThreshold below a provisional tip
+// (MAG-5450). It keeps url's run of such answers and, once an answer is above the run's first, makes
+// that answer the tip and returns the tip it replaced; otherwise it returns 0.
+//
+// Moving forward is what tells the good backend from a stuck one: a chain's head advances, and
+// neither a stuck backend nor the absurd block the tip came from does. Without that a backend stuck
+// far behind would take the tip from an honest first answer. A run with no answer for a
+// StalenessWindow has ended, as the url's vote has aged out, and an answer more than OutlierThreshold
+// past the run's first starts it over: the guard's own premise is that the chain cannot move that far
+// between two looks, and a node catching up from far behind does. A lower answer keeps the run alive
+// but never moves its first. The caller holds cs.mu.
+func (cs *ChainState) noteFallLocked(url string, block int64, nowReal time.Time) (replaced int64) {
+	run, ok := cs.fallRuns[url]
+	if !ok || nowReal.Add(cs.warpOffsetDuration()).Sub(run.lastAt) > cs.cfg.StalenessWindow ||
+		block > run.firstBlock+cs.cfg.OutlierThreshold {
+		run = fallRun{firstBlock: block}
+	}
+	run.lastAt = nowReal
+	if block > run.firstBlock {
+		replaced = cs.latestBlock
+		cs.latestBlock = block
+		cs.lastObservedAt = nowReal
+		cs.latestSince = nowReal
+		cs.setProvisionalLocked(false)
+		return replaced
+	}
+	if cs.fallRuns == nil {
+		cs.fallRuns = make(map[string]fallRun)
+	}
+	cs.fallRuns[url] = run
+	return 0
 }
 
 // GetLatestBlock returns THE tip — the one answer to "what block is the chain at" — and whether
@@ -690,6 +779,11 @@ func (cs *ChainState) Recompute(snapshots []BlockObservation) {
 			delete(cs.jumpRuns, url)
 		}
 	}
+	for url, run := range cs.fallRuns {
+		if evalNow.Sub(run.lastAt) > cs.cfg.StalenessWindow {
+			delete(cs.fallRuns, url)
+		}
+	}
 	prevBaseline := cs.baseline
 	prevHasBaseline := cs.hasBaseline
 	cs.hasBaseline = ok
@@ -719,6 +813,7 @@ func (cs *ChainState) Recompute(snapshots []BlockObservation) {
 			cs.lastObservedAt = nowReal
 			cs.latestSince = nowReal
 			cs.initialized = true
+			cs.setProvisionalLocked(false)
 		case cs.latestBlock < baseline:
 			// Pull UP: the majority is ahead of the tip. Without this the tip could sit below
 			// consensus indefinitely — every consumer now reads the tip (D1/D4), so a trailing
@@ -732,6 +827,7 @@ func (cs *ChainState) Recompute(snapshots []BlockObservation) {
 			// "latestBlock > 0 ⟹ initialized", so SetLatestBlock's guards and the cold-start
 			// fallbacks cannot mistake a consensus-seeded tip for "never observed anything".
 			cs.initialized = true
+			cs.setProvisionalLocked(false)
 		}
 	} else if since := cs.rejectedSinceLocked(evalNow); !since.IsZero() && sole.ObservedAt.After(since) && sole.Block > cs.latestBlock &&
 		cs.jumpHeldLocked(sole.URL, evalNow) {
@@ -758,6 +854,7 @@ func (cs *ChainState) Recompute(snapshots []BlockObservation) {
 		cs.lastObservedAt = nowReal
 		cs.latestSince = nowReal
 		cs.initialized = true
+		cs.setProvisionalLocked(false)
 	}
 }
 
