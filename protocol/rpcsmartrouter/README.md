@@ -475,6 +475,14 @@ read, so messages sent over a WebSocket carry no caller ids today. Reading the u
 would not be the same fix: one socket multiplexes many subscriptions and requests, so those ids
 would label every request on the connection rather than the one the caller tagged.
 
+An HTTP request or a gRPC call needs no caller id to be found again: the router names it by its
+GUID, in the reply's `Lava-Guid` header, or in the error id of an error reply without one. In debug
+mode, `/debug/relay-end?guid=<GUID>` returns that request's `relay_end` event as one JSON object
+([docs/RELAY-END-EVENT.md](../../docs/RELAY-END-EVENT.md#reading-one-requests-event)). The
+exceptions are a WebSocket message answered successfully and a gRPC stream opened successfully: their
+replies carry no GUID, so their events, though kept, are found only through `/debug/logs`. Their
+error replies do carry it, as `Error_GUID` or in the gRPC status text.
+
 ### The answers one request received (`/debug/relay-answers`)
 
 In debug mode (`--debug-address`), `GET /debug/relay-answers?request_id=<Router-Guid>` lists the

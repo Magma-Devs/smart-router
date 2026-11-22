@@ -933,8 +933,14 @@ func createAndSetupBaseAppListener(cmdFlags common.ConsumerCmdFlags, healthCheck
 	app.Use(favicon.New())
 	applyResponseCompression(app, cmdFlags.ResponseCompression)
 	app.Use(func(c *fiber.Ctx) error {
-		// we set up wild card by default.
-		c.Set("Access-Control-Allow-Origin", cmdFlags.OriginFlag)
+		// "*" by default; a --cors-origin list answers with the caller's own origin when listed.
+		origin, send, vary := common.CORSAllowOrigin(cmdFlags.OriginFlag, c.Get(fiber.HeaderOrigin))
+		if send {
+			c.Set("Access-Control-Allow-Origin", origin)
+		}
+		if vary {
+			c.Vary(fiber.HeaderOrigin)
+		}
 		// Expose selected response headers to browser JS. Access-Control-Expose-
 		// Headers must be present on the ACTUAL response (not just the preflight)
 		// for fetch() to read a non-simple header like Router-Provider-Address.

@@ -52,6 +52,14 @@ func bootArchiveBackupEndpoint(t *testing.T, primaryURL, backupURL string, backu
 // backups, behind cache when it is not nil, and returns the server once it listens.
 func bootETH1Endpoint(t *testing.T, primaries, backups []*routersession.RPCStaticProviderEndpoint, cache performance.CacheBackend) *RPCSmartRouterServer {
 	t.Helper()
+	return bootEndpoint(t, "ETH1", "jsonrpc", "../../specs/ethereum.json", primaries, backups, cache)
+}
+
+// bootEndpoint runs the real CreateSmartRouterEndpoint for chainID on apiInterface, its spec read
+// from specPath, with primaries and backups, behind cache when it is not nil, and returns the
+// server once it listens.
+func bootEndpoint(t *testing.T, chainID, apiInterface, specPath string, primaries, backups []*routersession.RPCStaticProviderEndpoint, cache performance.CacheBackend) *RPCSmartRouterServer {
+	t.Helper()
 	if !rand.Initialized() {
 		rand.InitRandomSeed()
 	}
@@ -64,7 +72,7 @@ func bootETH1Endpoint(t *testing.T, primaries, backups []*routersession.RPCStati
 	t.Cleanup(cancel)
 	rpsr := createTestRPCSmartRouter()
 	rpsr.reverifyInputs = make(map[string]*chainReverifyInputs)
-	endpoint := &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc", NetworkAddress: "127.0.0.1:0"}
+	endpoint := &routersession.RPCEndpoint{ChainID: chainID, ApiInterface: apiInterface, NetworkAddress: "127.0.0.1:0"}
 	metricsManager := metrics.NewSmartRouterMetricsManager(metrics.SmartRouterMetricsManagerOptions{})
 	logs, err := metrics.NewRPCConsumerLogs(metricsManager, nil, nil)
 	require.NoError(t, err)
@@ -72,14 +80,14 @@ func bootETH1Endpoint(t *testing.T, primaries, backups []*routersession.RPCStati
 		rpcEndpoints:        []*routersession.RPCEndpoint{endpoint},
 		cache:               cache,
 		strategy:            provideroptimizer.StrategyBalanced,
-		cmdFlags:            common.ConsumerCmdFlags{StaticSpecPaths: []string{"../../specs/ethereum.json"}},
+		cmdFlags:            common.ConsumerCmdFlags{StaticSpecPaths: []string{specPath}},
 		staticProvidersList: primaries,
 		backupProvidersList: backups,
 	}
 	err = rpsr.CreateSmartRouterEndpoint(ctx, endpoint, make(chan error, 1), &common.SafeSyncMap[string, *provideroptimizer.ProviderOptimizer]{},
-		map[string]*sync.Mutex{"ETH1": {}}, options, "test-router", logs, nil, metricsManager, nil)
+		map[string]*sync.Mutex{chainID: {}}, options, "test-router", logs, nil, metricsManager, nil)
 	require.NoError(t, err)
-	server := rpsr.rpcServers[(&routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"}).Key()]
+	server := rpsr.rpcServers[(&routersession.RPCEndpoint{ChainID: chainID, ApiInterface: apiInterface}).Key()]
 	require.NotNil(t, server)
 	require.Eventually(t, func() bool { return server.GetListeningAddress() != "" }, 5*time.Second, 10*time.Millisecond)
 	return server

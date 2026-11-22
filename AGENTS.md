@@ -217,8 +217,8 @@ explicitly asks for them.
   secrets.
 - The router listens over HTTP locally. Put TLS, client authentication, and rate
   limiting in a reverse proxy for non-local deployments.
-- Do not expose the local dashboard with default `admin` / `password`
-  credentials.
+- Do not expose the local dashboard: it has no sign-in unless you enable its
+  auth (`AUTH_MODE=enabled`, see that repo's README).
 
 ## Agent behavior rules
 
