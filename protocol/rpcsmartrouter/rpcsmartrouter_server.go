@@ -3395,6 +3395,17 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 						utils.LogAttr("GUID", goroutineCtx),
 					)
 				}
+			} else if errors.Is(err, routersession.ErrNoMethodDefinition) {
+				// The router held no definition of the gRPC method to convert the JSON request
+				// with, so nothing was sent and the endpoint's availability was never tested
+				// (MAG-5134). The failure arm below would score it 0 and count a consecutive
+				// error against an endpoint that was never asked. Released like a session that
+				// was selected and not used.
+				if errSession := rpcss.sessionManager.OnSessionDiscarded(singleConsumerSession, err); errSession != nil {
+					utils.FormatWarning("OnSessionDiscarded failed for direct RPC", errSession,
+						utils.LogAttr("GUID", goroutineCtx),
+					)
+				}
 			} else if err == nil && !localRelayResult.IsRateLimited && lostBroadcast(localRelayResult.IsNodeError) {
 				// A rejection after another upstream accepted the write is about the transaction,
 				// not this upstream (lostBroadcastRejection): no score either way, as when a loser
