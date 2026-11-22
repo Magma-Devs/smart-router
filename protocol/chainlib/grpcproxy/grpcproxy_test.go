@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/grpcproxy/testproto"
@@ -120,4 +121,38 @@ func TestGRPCProxy_TrailersReachTheClientAsTrailers(t *testing.T) {
 // reflection source, so the binary has no caller for it.
 func newGRPCProxy(cb ProxyCallBack, healthCheckPath string, cmdFlags common.ConsumerCmdFlags, healthReporter HealthReporter) (*grpc.Server, *http.Server, error) {
 	return NewGRPCProxyWithReflection(cb, healthCheckPath, cmdFlags, healthReporter, nil, nil)
+}
+
+// TestGRPCProxy_CORSOriginList pins the --cors-origin contract on the gRPC-web listener, the same
+// one the HTTP listener follows: a listed origin is echoed with Vary: Origin, an unlisted one gets
+// no Access-Control-Allow-Origin, and "*" stays a literal "*".
+func TestGRPCProxy_CORSOriginList(t *testing.T) {
+	cases := []struct {
+		name       string
+		configured string
+		origin     string
+		wantAllow  string
+		wantVary   bool
+	}{
+		{"list echoes a listed origin", "https://a.example,https://b.example", "https://b.example", "https://b.example", true},
+		{"list refuses an unlisted origin", "https://a.example,https://b.example", "https://evil.example", "", true},
+		{"wildcard stays literal", "*", "https://evil.example", "*", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, httpServer, err := newGRPCProxy(func(ctx context.Context, method string, reqBody []byte) ([]byte, metadata.MD, metadata.MD, error) {
+				return nil, nil, nil, nil
+			}, "", common.ConsumerCmdFlags{HeadersFlag: "*", OriginFlag: tc.configured, MethodsFlag: "GET,POST,OPTIONS", CDNCacheDuration: "86400"}, nil)
+			require.NoError(t, err)
+
+			req := httptest.NewRequest(http.MethodOptions, "/", nil)
+			req.Header.Set("Origin", tc.origin)
+			rec := httptest.NewRecorder()
+			httpServer.Handler.ServeHTTP(rec, req)
+
+			require.Equal(t, http.StatusNoContent, rec.Code)
+			require.Equal(t, tc.wantAllow, rec.Header().Get("Access-Control-Allow-Origin"))
+			require.Equal(t, tc.wantVary, rec.Header().Get("Vary") == "Origin", "Vary = %q", rec.Header().Get("Vary"))
+		})
+	}
 }

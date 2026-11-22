@@ -70,10 +70,10 @@ the router (an HTTP 405, for one); the router's own health and probe relays.
 | `reply_bytes` | number | when `has_reply` is `true`, except on a subscription request | The length in bytes of the upstream's or the cache's reply, the body the router returns to its listener for the client. `0` for an empty reply. Absent when the client got an error (`write_unknown` included), and on a subscription request, whose answer the subscription manager writes. |
 | `requested_block` | number | when the request names a block | The block number the request names, as the spec's block parsing reads it at parse time: `100` for `eth_getBlockByNumber("0x64")`, `0` for the genesis block. For a range, its later end (`toBlock`). Absent when the request names a tag (`latest`, `earliest`, `pending`, `safe`, `finalized`) or a range that ends at one, when its api names no block, and for a request that did not parse. |
 | `seen_block` | number | when the router knew a fresh chain tip | The chain tip the router knew when it parsed the request, from its own chain state (`RelayPrivateData.SeenBlock`): the height the router resolves the request's `latest` against and reads its cache with. Not a value the client sends. Absent when the router had no fresh tip, and for a request that did not parse. |
-| `tx_hash` | string | on a transaction submit whose reply names the transaction, and on every `eth_sendRawTransaction` whose request carries a signed transaction | The transaction's id on its chain, written as the chain writes it: `0x` and 64 lowercase hex digits on EVM chains, base58 on Solana and Sui, 64 hex digits in the node's case on Cosmos. Read from the reply the client got. For `eth_sendRawTransaction` it is computed from the signed transaction in the request when the reply returns none, so a refused write, a `write_unknown` or a `no_answer` still names a hash to look up. Not read on a batch, or from a reply over 64 KiB. Where each chain's comes from: [Transaction fields by chain](#transaction-fields-by-chain). |
+| `tx_hash` | string | on a transaction submit whose reply names the transaction, and on every `eth_sendRawTransaction` whose request carries a signed transaction | The transaction's id on its chain, written as the chain writes it: `0x` and 64 lowercase hex digits on EVM chains, base58 on Solana and Sui, 64 hex digits in the node's case on Cosmos, 64 lowercase hex digits on Concordium. Read from the reply the client got. For `eth_sendRawTransaction` it is computed from the signed transaction in the request when the reply returns none, so a refused write, a `write_unknown` or a `no_answer` still names a hash to look up. Not read on a batch, or from a reply over 64 KiB. Where each chain's comes from: [Transaction fields by chain](#transaction-fields-by-chain). |
 | `tx_status` | string | when the submit's reply reports the transaction's execution | `success` or `failure`: the chain's execution result, as the send reply reports it, and only that. Sui's submits report it; EVM, Solana and Cosmos submits answer before the transaction executes, so their events never carry it (a Cosmos node's acceptance is `tx_code`). An event without `tx_status` says nothing about whether the transaction executed. |
 | `tx_error` | string | when `tx_status` is `failure` and the reply names the error | The chain's execution error, redacted and capped like `error`. |
-| `tx_code` | number | on a write over `tendermintrpc` or `rest` whose reply names a transaction code | A Cosmos node answers a refused transaction with a normal reply, so `outcome` stays `ok`; this is the code inside it: `0` when the node took the transaction, the refusal's code otherwise. Read from `result.code` (`broadcast_tx_sync`, `broadcast_tx_async`), `result.check_tx` then `result.tx_result` or `result.deliver_tx` (`broadcast_tx_commit`), or `tx_response.code` (`POST /cosmos/tx/v1beta1/txs`); the first non-zero code wins. `broadcast_tx_async` answers before checking, so its `0` means only that the node received the transaction. Not read over `grpc`, whose reply is protobuf. |
+| `tx_code` | number | on a write over `tendermintrpc`, `rest` or `grpc` whose reply names a transaction code | A Cosmos node answers a refused transaction with a normal reply, so `outcome` stays `ok`; this is the code inside it: `0` when the node took the transaction, the refusal's code otherwise. Read from `result.code` (`broadcast_tx_sync`, `broadcast_tx_async`), `result.check_tx` then `result.tx_result` or `result.deliver_tx` (`broadcast_tx_commit`), or `tx_response.code` (`POST /cosmos/tx/v1beta1/txs`, and `cosmos.tx.v1beta1.Service/BroadcastTx` over `grpc`, whose reply leaves a `0` off the wire); the first non-zero code wins. `broadcast_tx_async` answers before checking, so its `0` means only that the node received the transaction. The same holds for a `POST /cosmos/tx/v1beta1/txs` or a `BroadcastTx` when the request's `mode` is `BROADCAST_MODE_ASYNC`. |
 | `tx_codespace` | string | with `tx_code`, when the reply names one | The module the code belongs to, such as `sdk`: a code means something only within its codespace. |
 | `tx_log` | string | when `tx_code` is not `0` | The node's reason for the refusal, redacted and capped like `error`. |
 | `skipped` | array | when the consistency check passed an upstream over | One entry each time the consistency check passed an upstream over before sending because it was too far behind the chain tip: `upstream`, `lag` (blocks behind the tip), `threshold` (the lag allowed) and `batch` (the batch it was passed over in). A skipped upstream got no request then; it is in `attempts` only if it was sent later, as a stale fallback. |
@@ -103,14 +103,18 @@ wrong length, a digest that is not base58) is not written.
 | Solana | `jsonrpc` | `sendTransaction` | The reply's `result`, the transaction's signature (64 bytes in base58). Stellar's `sendTransaction`, which answers with an object, is not read. | Not read: the send reply does not report execution. |
 | Sui | `jsonrpc` | `sui_executeTransactionBlock` | `result.digest`. | `result.effects.status.status` (`success`, `failure`) and `result.effects.status.error`, present when the request asked for `showEffects`. |
 | Sui | `graphql` | `executeTransaction`, as the operation's only root field | `effects.transaction.digest`, else `effects.digest` (the same digest), in `data`'s one entry: the root field's name, or the client's alias for it. | `effects.status` (`SUCCESS` is `success`, `FAILURE` is `failure`) and `effects.executionError.message`. Only what the mutation selected is in the reply, and what it did not select is not written. |
-| Sui | `grpc` | `sui.rpc.v2.TransactionExecutionService/ExecuteTransaction` | Not read: the reply is protobuf. | Not read. |
+| Sui | `grpc` | `sui.rpc.v2.TransactionExecutionService/ExecuteTransaction` | Not read yet: it ships with Sui's write rows (MAG-5186). | Not read. |
 | Cosmos SDK | `tendermintrpc` | `broadcast_tx_sync`, `broadcast_tx_async`, `broadcast_tx_commit` | `result.hash`. | Not read; `tx_code` says whether the node took the transaction. |
 | Cosmos SDK | `rest` | `cosmos/tx/v1beta1/txs` (`POST`) | `tx_response.txhash`. | Not read; see `tx_code`. |
-| Cosmos SDK | `grpc` | `cosmos.tx.v1beta1.Service/BroadcastTx` | Not read: the reply is protobuf. | Not read. |
+| Cosmos SDK | `grpc` | `cosmos.tx.v1beta1.Service/BroadcastTx` | `tx_response.txhash`. | Not read; see `tx_code`. |
+| Concordium | `grpc` | `concordium.v2.Queries/SendBlockItem` | The reply's `TransactionHash` value, 32 bytes. | Not read: the send reply does not report execution. |
 | Any other chain or method | | | Not read. | Not read. |
 
-On Cosmos the fields are read, as `tx_code` is, only on a write the spec marks stateful: a `GET` of
-`cosmos/tx/v1beta1/txs` is the transaction query by events, a read under the same path.
+Over `tendermintrpc` and `rest` the Cosmos fields are read, as `tx_code` is, only on a write the spec
+marks stateful: a `GET` of `cosmos/tx/v1beta1/txs` is the transaction query by events, a read under
+the same path. A `grpc` reply is the node's protobuf message, read by the field numbers of the
+chain's own proto files, so it is read without a descriptor, from a provider whose reflection service
+does not answer too.
 
 ## outcome
 
@@ -137,7 +141,8 @@ errors, successes, not by time.
 | `outcome` | string | See below. |
 | `error_code` | string | The error registry name of the attempt's error, the value the narrative lines call `error_name`; `UNKNOWN_ERROR` when it was not classified. `""` for `ok` and for an attempt with no result. |
 | `message` | string | The attempt's error: the node's message for a node error, the transport error otherwise. Redacted and capped. `""` for `ok` and for an attempt with no result. |
-| `node_code` | number | The code of the node's JSON-RPC error reply (`error.code`), the code the error registry classified the attempt by: `-32000`, `3`. Present when the attempt's reply is a JSON-RPC error with a non-zero code: over `jsonrpc` and `tendermintrpc`, and a node's refusal of a subscription request. Absent otherwise: a REST, GraphQL or gRPC node error, a transport failure, an attempt with no result. |
+| `node_code` | number | The code of the node's JSON-RPC error reply (`error.code`), the code the error registry classified the attempt by: `-32000`, `3`. Present when the attempt's reply is a JSON-RPC error with a non-zero code: over `jsonrpc` and `tendermintrpc`, and a node's refusal of a subscription request. Absent otherwise: a REST, GraphQL or gRPC node error (a gRPC node's status is `grpc_status`), a transport failure, an attempt with no result. |
+| `grpc_status` | number | The status of a node error over `grpc`, `1` to `16`: `3` for `INVALID_ARGUMENT`, `8` for `RESOURCE_EXHAUSTED`. The node's text is in `message`, inside the router's JSON for the error, `{"error_message":"<the node's text>","error_code":<the status>}`. A status the router's gRPC client makes itself is recorded the same way, with the client's text as `error_message`: `8` with "received message larger than max" when the node's reply is over the receive limit. Absent otherwise. |
 | `retryable` | boolean | The router's verdict on the attempt's error, the registry's `Retryable` flag that the narrative lines print as `retryable`: `true` when another upstream may succeed where this one failed. Present when `error_code` is set. |
 | `batch` | number | The batch the attempt went out in, counted from 0. A write's broadcast sends every upstream in one batch; each retry or hedge is the next batch, so a relay with more than one batch was retried. A batch that was taken and then not sent, such as one the consistency check emptied, leaves its number unused. Absent on an attempt that was not sent: a cache hit. |
 | `sent_ms` | number | Milliseconds from the relay's start, the origin of the event's `latency_ms`, to when the attempt was taken for sending. The attempt ended at `sent_ms` plus its `latency_ms`. Absent on an attempt that was not sent. |
@@ -201,6 +206,30 @@ any relay, and its fields from what the subscription manager did:
 The upstream is named by provider, as on every relay; the manager picks it by node URL, which may
 carry a credential. The messages a subscription pushes afterwards, and a subscription restored after
 its upstream connection drops, write no event.
+
+## Reading one request's event
+
+In debug mode (`--debug-address`), `GET /debug/relay-end?guid=<GUID>` returns the event of one
+request, so a test asserts on the router's record of the request it sent instead of searching the
+log (MAG-4899). `guid` is the event's `GUID`: the reply's `Lava-Guid` header, or the error id of an
+error reply without one. A WebSocket message answered successfully and a gRPC stream opened
+successfully reply with no GUID, so their events are kept but can be found only through
+`/debug/logs`; their error replies carry it, as `Error_GUID` or in the gRPC status text.
+
+| Status | When |
+| --- | --- |
+| `200` | The event, as one JSON object: the object its log line carries, the same fields, with `time` set when it was kept. `X-Relay-End-Records` says how many events were written with that GUID: `1` for every relay, a retried one included. Above `1` the router broke the one-event-per-relay rule, and the body is the last of them. |
+| `400` | No `guid`. |
+| `404` | A GUID the router does not hold: never written, or dropped as older than the rest. |
+| `405` | Any method but `GET`. |
+| `503` | The router keeps no events. `--debug-address` installs the store with the route, so a router never answers this; it is not a `404` so that "not kept" cannot read as "never written". |
+
+The router keeps the events of its newest GUIDs and drops the oldest GUID first. It holds at most
+16 MiB of event text: an event's size follows its attempts, from about 400 bytes for a read one
+provider answered to over a kilobyte for a relay that failed over, so that is about 40 000 of the
+smallest events and fewer of larger ones. It never holds more than 50 000, as many as the
+`/debug/logs` buffer holds lines. An event is kept as it is written, so a request's event is
+kept before its HTTP or gRPC reply leaves the router. An event without a GUID is not kept.
 
 ## Collector
 

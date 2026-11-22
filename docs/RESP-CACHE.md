@@ -609,11 +609,11 @@ ports are held by anything else.
 
 | Lane | Covers |
 | --- | --- |
-| `scripts/pre_setups/init_smartrouter_eth_redis_demo.sh` | Redis + router; drop-in caching, and degraded mode when the backend is paused |
-| `scripts/pre_setups/init_smartrouter_eth_redis_sentinel.sh` | Primary + replica + 3 sentinels, both credential planes. `--failover` kills the primary and follows the promotion, `--recover` rejoins it, `--status` reports the topology |
-| `scripts/pre_setups/init_smartrouter_eth_redis_multiregion.sh` | Two regions and two routers; `--demo` shows a region-local read served from a replica while writes go to the primary region |
-| `scripts/pre_setups/init_smartrouter_eth_lavap_cache.sh` | No RESP infrastructure — router + cache sidecar only |
-| `scripts/pre_setups/init_smartrouter_eth_resp_cache.sh` | Single-node lane against the checked-in example config (`RUN_DEMO=1` for an end-to-end check) |
+| `scripts/pre_setups/cache/init_smartrouter_eth_redis_demo.sh` | Redis + router; drop-in caching, and degraded mode when the backend is paused |
+| `scripts/pre_setups/cache/init_smartrouter_eth_redis_sentinel.sh` | Primary + replica + 3 sentinels, both credential planes. `--failover` kills the primary and follows the promotion, `--recover` rejoins it, `--status` reports the topology |
+| `scripts/pre_setups/cache/init_smartrouter_eth_redis_multiregion.sh` | Two regions and two routers; `--demo` shows a region-local read served from a replica while writes go to the primary region |
+| `scripts/pre_setups/cache/init_smartrouter_eth_lavap_cache.sh` | No RESP infrastructure — router + cache sidecar only |
+| `scripts/pre_setups/cache/init_smartrouter_eth_resp_cache.sh` | Single-node lane against the checked-in example config (`RUN_DEMO=1` for an end-to-end check) |
 
 Test lanes — the docker-gated ones fail hard if docker is unreachable rather than skipping, so
 a documented command never prints PASS for a lane that verified nothing:
@@ -650,7 +650,7 @@ the standalone one first.
 ### Setup
 
 ```bash
-scripts/pre_setups/init_smartrouter_eth_redis_demo.sh
+scripts/pre_setups/cache/init_smartrouter_eth_redis_demo.sh
 ```
 
 | | Where | Role |
@@ -782,7 +782,7 @@ lane has to be re-run.
 ### 3. Sentinel failover
 
 ```bash
-scripts/pre_setups/init_smartrouter_eth_redis_sentinel.sh
+scripts/pre_setups/cache/init_smartrouter_eth_redis_sentinel.sh
 ```
 
 A primary, a replica and three sentinels, with the data plane and the sentinel control plane
@@ -802,12 +802,12 @@ Sending these commands to `:3360` reaches the standalone router, which answers h
 naming its own single Redis.
 
 ```bash
-scripts/pre_setups/init_smartrouter_eth_redis_sentinel.sh --status
+scripts/pre_setups/cache/init_smartrouter_eth_redis_sentinel.sh --status
 # sentinel reports master: <lan-ip>:63811
 #   sr-demo-primary    master
 #   sr-demo-replica    slave
 
-scripts/pre_setups/init_smartrouter_eth_redis_sentinel.sh --failover
+scripts/pre_setups/cache/init_smartrouter_eth_redis_sentinel.sh --failover
 ```
 
 ```
@@ -841,7 +841,7 @@ this applies.
 ### 4. Multi-region read/write split
 
 ```bash
-scripts/pre_setups/init_smartrouter_eth_redis_multiregion.sh
+scripts/pre_setups/cache/init_smartrouter_eth_redis_multiregion.sh
 ```
 
 | | | |
@@ -860,7 +860,7 @@ resp-cache:
 ```
 
 ```bash
-scripts/pre_setups/init_smartrouter_eth_redis_multiregion.sh --demo
+scripts/pre_setups/cache/init_smartrouter_eth_redis_multiregion.sh --demo
 ```
 
 ```
@@ -889,8 +889,8 @@ than a replica role, so this lane uses `standalone` — the shape the feature is
 ### 5. No RESP infrastructure
 
 ```bash
-scripts/pre_setups/init_smartrouter_eth_redis_demo.sh --stop
-scripts/pre_setups/init_smartrouter_eth_lavap_cache.sh
+scripts/pre_setups/cache/init_smartrouter_eth_redis_demo.sh --stop
+scripts/pre_setups/cache/init_smartrouter_eth_lavap_cache.sh
 ```
 
 Router plus cache sidecar, no Redis and no `resp-cache:` block — today's deployment shape:
@@ -920,7 +920,7 @@ feature in a disabled state — it is on exactly the path it ran before.
 The cache lives outside the router, so restarting the router does not cost the cached data.
 
 ```bash
-scripts/pre_setups/init_smartrouter_eth_redis_demo.sh --persistence
+scripts/pre_setups/cache/init_smartrouter_eth_redis_demo.sh --persistence
 ```
 
 ```
@@ -950,7 +950,7 @@ infrastructure choice and outside what the router controls.
 Two routers, one backend: what one caches, the other serves.
 
 ```bash
-scripts/pre_setups/init_smartrouter_eth_redis_demo.sh --shared-state
+scripts/pre_setups/cache/init_smartrouter_eth_redis_demo.sh --shared-state
 ```
 
 ```

@@ -267,7 +267,13 @@ func (dgm *DirectGRPCSubscriptionManager) SetEndpointNames(names map[string]stri
 // SetEndpoints replaces both tiers with the currently-serving gRPC endpoints and reports
 // whether anything changed. See subscriptionEndpoints.setEndpoints.
 func (dgm *DirectGRPCSubscriptionManager) SetEndpoints(grpcEndpoints, grpcBackupEndpoints []*common.NodeUrl) (changed bool) {
-	return dgm.setEndpoints(grpcEndpoints, grpcBackupEndpoints)
+	if !dgm.setEndpoints(grpcEndpoints, grpcBackupEndpoints) {
+		return false
+	}
+	dgm.lock.RLock()
+	scaleDownDepartedPools(&dgm.subscriptionEndpoints, dgm.upstreamPools)
+	dgm.lock.RUnlock()
+	return true
 }
 
 // Start initializes the manager and starts background tasks
@@ -1382,6 +1388,7 @@ func (dgm *DirectGRPCSubscriptionManager) getOrCreatePool(endpoint *common.NodeU
 		endpointURL := endpoint.Url
 		pool.descriptors.resolver.SetLookupObserver(func(err error) { observe(endpointURL, err) })
 	}
+	pool.departed = dgm.departs(endpoint.Url)
 	dgm.upstreamPools[endpoint.Url] = pool
 
 	return pool, nil

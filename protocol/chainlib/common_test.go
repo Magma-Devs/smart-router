@@ -547,37 +547,64 @@ func TestGetServiceApis(t *testing.T) {
 	require.Equal(t, 3, enabled)
 }
 
-// utxoFamilyChainIDsForTest lists every chain id isUTXOFamily accepts. Derived from the
-// production set rather than restated, so the null-body regression below cannot silently
-// stop covering a chain that gets added later. TestIsUTXOFamily pins what that set is
-// allowed to contain.
-var utxoFamilyChainIDsForTest = func() []string {
-	ids := make([]string, 0, len(utxoFamilyChainIDs))
-	for id := range utxoFamilyChainIDs {
-		ids = append(ids, id)
+// utxoTestSpecs is the BTC-derived part of the lava-specs catalog (main 4bbb5e9), each spec with
+// what it imports, beside specs that must not take the UTXO path. The UTXO tests register it the way
+// the router registers the catalog it loads, so they need no lava-specs checkout;
+// TestEveryLavaSpecHasAChainFamily (protocol/common) holds the real catalog to the same rule.
+var utxoTestSpecs = func() map[string]spectypes.Spec {
+	imports := map[string][]string{
+		"BTC": nil, "BTCT": {"BTC"}, "BTCT4": {"BTC"}, "BTCS": {"BTC"}, // btc.json
+		"LTC": {"BTC"}, "LTCT": {"LTC"}, // litecoin.json
+		"DOGE": {"BTC"}, "DOGET": {"DOGE"}, // doge.json
+		"PEP": {"DOGE"}, "PEPT": {"PEP"}, // pep.json, BTC through DOGE
+		"BCH": {"BTC"}, "BCHT": {"BCH"}, // bch.json
+		"DASH": {"BTC"}, "DASHT": {"DASH"}, // dash.json
+		"QTUM": {"BTC"}, "QTUMT": {"QTUM"}, // qtum.json
+		"ZCASH": {"BTC"}, "ZCASHT": {"ZCASH"}, // zcash.json
+		"MONERO": nil, "MONEROT": {"MONERO"}, // monero.json
+		"ETH1": nil, "SOLANA": nil,
+	}
+	specs := make(map[string]spectypes.Spec, len(imports))
+	for index, parents := range imports {
+		specs[index] = spectypes.Spec{Index: index, Imports: parents}
+	}
+	return specs
+}()
+
+// utxoFamilyChainIDsForTest lists every chain id of utxoTestSpecs that isUTXOFamily accepts, once
+// the specs are registered. Derived rather than restated, so the null-body regression below cannot
+// silently stop covering a BTC-derived chain added to the catalog. TestIsUTXOFamily pins what the
+// set is allowed to contain.
+func utxoFamilyChainIDsForTest() []string {
+	common.RegisterChainFamilies(utxoTestSpecs)
+	var ids []string
+	for id := range utxoTestSpecs {
+		if isUTXOFamily(id) {
+			ids = append(ids, id)
+		}
 	}
 	sort.Strings(ids)
 	return ids
-}()
+}
 
 func TestIsUTXOFamily(t *testing.T) {
-	// Membership is exactly "the chain's spec transitively imports BTC", which is what makes
-	// the node a Bitcoin Core derivative speaking JSON-RPC 1.0. Resolved against the
-	// lava-specs catalog (255 specs): these 14 enabled specs reach BTC via imports, and
-	// nothing else does (MAG-3077).
+	// Membership is exactly "the chain's spec is BTC or imports it", which is what makes the
+	// node a Bitcoin Core derivative speaking JSON-RPC 1.0. In the lava-specs catalog these 18
+	// specs reach BTC through their imports, and nothing else does. A hand-kept list missed six
+	// of them (MAG-3077), then PEP, PEPT, QTUM and QTUMT (MAG-5246); the set now comes from the
+	// imports.
 	btcDerived := []string{
 		"BTC", "BTCT", "BTCT4", "BTCS", // btc.json
 		"LTC", "LTCT", // litecoin.json -> BTC
 		"DOGE", "DOGET", // doge.json     -> BTC
+		"PEP", "PEPT", // pep.json      -> DOGE -> BTC
 		"BCH", "BCHT", // bch.json      -> BTC
 		"DASH", "DASHT", // dash.json     -> BTC
+		"QTUM", "QTUMT", // qtum.json     -> BTC
 		"ZCASH", "ZCASHT", // zcash.json    -> BTC
 	}
-	for _, chainID := range btcDerived {
-		require.True(t, isUTXOFamily(chainID),
-			"%s derives from the BTC spec and needs the JSON-RPC 1.0 fixup", chainID)
-	}
-	require.Len(t, utxoFamilyChainIDs, len(btcDerived),
+	sort.Strings(btcDerived)
+	require.Equal(t, btcDerived, utxoFamilyChainIDsForTest(),
 		"the UTXO set must hold exactly the BTC-derived chains — adding one that is not, or "+
 			"dropping one that is, changes response formatting on a live chain")
 
@@ -596,6 +623,9 @@ func TestIsUTXOFamily(t *testing.T) {
 }
 
 func TestCheckUTXOResponseAndFixReply(t *testing.T) {
+	// DOGE is Bitcoin through its import of BTC, which the router learns when it loads the catalog.
+	utxoChainIDs := utxoFamilyChainIDsForTest()
+
 	t.Run("single_response_preserves_error_null", func(t *testing.T) {
 		// BTC-family nodes return "error":null; the relay pipeline uses omitempty which strips it
 		input := `{"jsonrpc":"2.0","id":"1","result":"abc","error":null}`
@@ -664,7 +694,7 @@ func TestCheckUTXOResponseAndFixReply(t *testing.T) {
 	// pre-existing case in this suite used null only as a *field* value ("error":null),
 	// which is why none of them caught it.
 	t.Run("whole_body_null_is_returned_unchanged", func(t *testing.T) {
-		for _, chainID := range utxoFamilyChainIDsForTest {
+		for _, chainID := range utxoChainIDs {
 			t.Run(chainID, func(t *testing.T) {
 				require.NotPanics(t, func() {
 					result := checkUTXOResponseAndFixReply(chainID, []byte("null"))
@@ -1571,6 +1601,49 @@ func BenchmarkMatchSpecApiByName(b *testing.B) {
 			for i := 0; i < b.N; i++ {
 				matchSpecApiByName(benchCase.path, "GET", serverApis)
 			}
+		})
+	}
+}
+
+// TestCreateAndSetupBaseAppListener_CORSOriginList pins the --cors-origin contract on the HTTP
+// listener: a list answers with the caller's own origin when it is listed and with no
+// Access-Control-Allow-Origin when it is not, always with Vary: Origin; "*" stays a literal "*".
+// Before, the whole list was sent as one header value, which every browser refuses.
+func TestCreateAndSetupBaseAppListener_CORSOriginList(t *testing.T) {
+	cases := []struct {
+		name       string
+		configured string
+		method     string
+		origin     string
+		wantAllow  string // "" means the header is absent
+		wantVary   bool
+	}{
+		{"list echoes a listed origin", "https://a.example,https://b.example", fiber.MethodGet, "https://b.example", "https://b.example", true},
+		{"list answers a listed preflight", "https://a.example,https://b.example", fiber.MethodOptions, "https://a.example", "https://a.example", true},
+		{"list refuses an unlisted origin", "https://a.example,https://b.example", fiber.MethodGet, "https://evil.example", "", true},
+		{"wildcard stays literal", "*", fiber.MethodGet, "https://evil.example", "*", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cmdFlags := common.ConsumerCmdFlags{
+				HeadersFlag:      "*",
+				CredentialsFlag:  "true",
+				OriginFlag:       tc.configured,
+				MethodsFlag:      "GET,POST,OPTIONS",
+				CDNCacheDuration: "86400",
+			}
+			app := createAndSetupBaseAppListener(cmdFlags, "/health", alwaysHealthyReporter{}, false, false)
+			app.Get("/", func(c *fiber.Ctx) error { return c.SendString("ok") })
+
+			req := httptest.NewRequest(tc.method, "/", nil)
+			req.Header.Set(fiber.HeaderOrigin, tc.origin)
+			resp, err := app.Test(req)
+			require.NoError(t, err)
+			defer resp.Body.Close()
+
+			require.Equal(t, tc.wantAllow, resp.Header.Get(fiber.HeaderAccessControlAllowOrigin))
+			require.Equal(t, tc.wantVary, strings.Contains(resp.Header.Get(fiber.HeaderVary), fiber.HeaderOrigin),
+				"Vary = %q", resp.Header.Get(fiber.HeaderVary))
 		})
 	}
 }

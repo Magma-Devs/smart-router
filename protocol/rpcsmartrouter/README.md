@@ -243,11 +243,11 @@ mean responses came back but didn't agree — a retry against a different set *m
 - `diversity-unmet` — a quorum agreed but did not span `min-groups` groups.
 - `group-quorum-unmet` — (per-group mode) too few groups reached their own internal quorum, or the per-group winners disagreed.
 
-**Request-time (structural)** reasons mean the candidate set could not even be assembled — a
-retry against the same router will *not* help (the fleet structurally lacks the
-providers/groups), so the client should fall back:
+**Request-time (structural)** reasons mean the candidate set could not even be assembled, so the
+client should fall back. A retry against the same router helps only once the set can be assembled:
+a blocked provider is re-admitted, or a provider reaches the block the request names:
 
-- `insufficient-capacity` — too few candidate providers/sessions for `max-participants` or the threshold.
+- `insufficient-capacity` — too few candidate providers/sessions for `max-participants` or the threshold. A blocked provider is never a candidate, and for a request that names a block height, neither is a provider known to be below that block (MAG-2785, MAG-2786).
 - `insufficient-groups` — too few candidate groups (or, for per-group, too few groups with enough providers) for `min-groups`.
 
 ### Outlier behavior
@@ -372,6 +372,7 @@ The record carries digests and metadata only, **never** a request or response bo
 | `seq` | process-wide monotonic counter, assigned before the record is queued for writing — a gap in the sequence as seen in the log stream is how a dropped record becomes visible, rather than silent. A request whose stragglers were still in flight is written when they resolve, up to the straggler deadline after its reply, so records are not in `seq` order: a missing `seq` is a drop only once that deadline has passed. It starts again at 1 when the process restarts |
 | `requestId` | the same value returned in the `Lava-Guid` response header |
 | `tenant` | the caller's customer-id/dapp-id header as sent: up to 128 bytes of valid UTF-8, else `other`; `DefaultDappID` when absent. Unlike the `customer` Prometheus label it is not capped in count, so keep it in the line body and never promote it to a Loki label |
+| `method` | the spec's api name, written as `relay_end` writes it: a REST path without its leading slash (`cosmos/bank/v1beta1/balances/{address}`), because the fleet's log collector rewrites a value that starts with `/` as `/REDACTED`. An unlisted api named by URL is the caller's own path, so it is withheld as `Default-REDACTED` |
 | `agreementThreshold`, `maxParticipants`, `minGroups` | the policy **as resolved for this request**, not whatever the config says when the record is later read |
 | `status`, `failureReason` | `success` or `failed`; the closed failure-reason enum on failure |
 | `servedDigest` | which answer was served — empty on failure, where there was no winner |
@@ -473,6 +474,42 @@ notifications the stream delivers afterwards. A WebSocket connection's upgrade r
 read, so messages sent over a WebSocket carry no caller ids today. Reading the upgrade's ids
 would not be the same fix: one socket multiplexes many subscriptions and requests, so those ids
 would label every request on the connection rather than the one the caller tagged.
+
+An HTTP request or a gRPC call needs no caller id to be found again: the router names it by its
+GUID, in the reply's `Lava-Guid` header, or in the error id of an error reply without one. In debug
+mode, `/debug/relay-end?guid=<GUID>` returns that request's `relay_end` event as one JSON object
+([docs/RELAY-END-EVENT.md](../../docs/RELAY-END-EVENT.md#reading-one-requests-event)). The
+exceptions are a WebSocket message answered successfully and a gRPC stream opened successfully: their
+replies carry no GUID, so their events, though kept, are found only through `/debug/logs`. Their
+error replies do carry it, as `Error_GUID` or in the gRPC status text.
+
+### The answers one request received (`/debug/relay-answers`)
+
+In debug mode (`--debug-address`), `GET /debug/relay-answers?request_id=<Lava-Guid>` lists the
+answers one request's attempts handed back, in the order they reached the router (MAG-4358). The
+id is the `Lava-Guid` header of the reply, not the caller's `X-Request-Id`. A write goes to every
+primary at once, and what its caller gets depends on that order: a refusal that arrives first is
+held while the router waits for an acceptance. This route shows the order without a log line or the
+metrics port. It is read-only, and reading it does not change any reply.
+
+One row per answer, oldest first:
+
+| Field | Meaning |
+| --- | --- |
+| `Seq` | per-process order key, taken as the answer reached the request. The router reads a request's answers in this order; only two answers handed over in the same instant can swap |
+| `ArrivedAt`, `ElapsedMs` | when the answer arrived, to the second, and how long after the request's relay processing started, to the millisecond. Two answers of one request usually share an `ArrivedAt`: order them by `Seq`, and compare `ElapsedMs` for the time between them |
+| `ChainID`, `ApiInterface`, `RequestID` | the request |
+| `Method` | the request's api, named as `relay_end` names it: without its leading slash, capped at 256 characters, and `Default-REDACTED` for an unlisted api the request named by URL, whose name would be the caller's own path |
+| `ProviderAddress` | who answered |
+| `StatusCode` | the status the upstream answered with. A 5xx or 429 that failed the attempt keeps its status here. `0` means no status came back. On gRPC a call that succeeded reads `200`, and a node's error reads its gRPC status code, `1` to `16` |
+| `Outcome` | `success`, `node-error` or `protocol-error`: what the router made of the answer. `unread` means the answer arrived after the router had stopped reading for its reply: a write's other deliveries, or a cross-validation straggler (see `/debug/cross-validation-events` for those) |
+
+A cache hit, the router's own health check and a subscription record nothing: a subscription is
+served by the subscription managers, not the relay processor. Without `request_id` the route lists
+every request's answers. An optional `limit` keeps the most recent N rows. The route answers
+**503** when the recorder is not installed, so "nothing was recorded" never reads as "nothing
+answered". The ring holds the last 4096 answers, and the `X-Relay-Answers-Dropped` header counts
+the evicted ones.
 
 ### Usage telemetry (OTel)
 
