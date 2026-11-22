@@ -78,18 +78,18 @@ func TestSendRESTRelay_TronServletErrorIsANodeError(t *testing.T) {
 	}
 }
 
-// TestSendRESTRelay_CosmosTxErrorStaysOffAtTransport is a regression pin: the Cosmos tx_response
-// carve-out (a 2xx application error, not a node error at the transport level) must survive the
-// Tron-shape check being added beside it, since the two shapes never overlap but share one switch
-// case.
-func TestSendRESTRelay_CosmosTxErrorStaysOffAtTransport(t *testing.T) {
+// TestSendRESTRelay_NonTronApplicationErrorStaysOffAtTransport is a regression pin: the Tron gate
+// must not turn any other 2xx that CheckResponseError flags into a transport-level node error. A
+// GET of a transaction that ran and failed carries a non-zero tx_response.code; that is the answer
+// the caller asked for, not a refusal, whatever rule the broadcast path itself follows.
+func TestSendRESTRelay_NonTronApplicationErrorStaysOffAtTransport(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	body := `{"tx_response":{"code":32,"raw_log":"account sequence mismatch"}}`
-	sender, chainMessage := newTestRESTRelaySender(t, ctx, http.MethodPost, "/cosmos/tx/v1beta1/txs", body, http.StatusOK)
+	body := `{"tx":{},"tx_response":{"code":5,"raw_log":"insufficient funds","txhash":"ABC123"}}`
+	sender, chainMessage := newTestRESTRelaySender(t, ctx, http.MethodGet, "/cosmos/tx/v1beta1/txs/ABC123", body, http.StatusOK)
 
 	result, err := sender.sendRESTRelay(ctx, chainMessage, 5*time.Second)
 	require.NoError(t, err)
-	require.False(t, result.IsNodeError, "a Cosmos tx_response error stays an application error at the transport level")
+	require.False(t, result.IsNodeError, "only the Tron servlet-error shape is a node error at the transport level on a 2xx read")
 	require.Equal(t, http.StatusOK, result.StatusCode)
 }
