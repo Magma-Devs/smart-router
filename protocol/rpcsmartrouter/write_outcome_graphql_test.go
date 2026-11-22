@@ -154,8 +154,8 @@ func writeOutcomeHeader(t *testing.T, result *common.RelayResult) string {
 	return ""
 }
 
-// MAG-3800: a write pinned to a lava-select-provider name the router does not have is refused
-// before any provider is asked. On GraphQL its reply says Lava-Write-Outcome: not_sent, as the
+// MAG-3800: a write pinned to a router-select-provider name the router does not have is refused
+// before any provider is asked. On GraphQL its reply says Router-Write-Outcome: not_sent, as the
 // listener's other refusals of a GraphQL write do (Part I R-Q, Part II Q8). The other interfaces
 // carry no write outcome yet (MAG-5232), so they get no header.
 func TestGraphQLWrite_APinToANameTheRouterDoesNotHaveIsNotSent(t *testing.T) {

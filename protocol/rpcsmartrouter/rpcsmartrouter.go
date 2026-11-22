@@ -1589,9 +1589,9 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		writeDebugJSONf(w, `{"cleared":true}`)
 	}))
 
-	// GET /debug/relay-end?guid=<Lava-Guid> — the relay_end event of one request (MAG-4899), the object
+	// GET /debug/relay-end?guid=<Router-Guid> — the relay_end event of one request (MAG-4899), the object
 	// its log line carries (docs/RELAY-END-EVENT.md), so a test asserts on the router's record of the
-	// request it sent rather than searching the log. guid is the decimal Lava-Guid of the reply.
+	// request it sent rather than searching the log. guid is the decimal Router-Guid of the reply.
 	// X-Relay-End-Records says how many events were written with that GUID: 1 for every relay, a
 	// retried one included, so a higher count is the router breaking that contract, and the body is
 	// then the last of them. The store keeps the newest GUIDs, up to debugLogBufferCapacity of them and
@@ -1603,7 +1603,7 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 	mux.HandleFunc("/debug/relay-end", debugMethod(http.MethodGet, func(w http.ResponseWriter, r *http.Request) {
 		guid := r.URL.Query().Get("guid")
 		if guid == "" {
-			http.Error(w, "guid is required: the Lava-Guid of a reply", http.StatusBadRequest)
+			http.Error(w, "guid is required: the Router-Guid of a reply", http.StatusBadRequest)
 			return
 		}
 		line, writes, enabled := readRelayEnd(guid)

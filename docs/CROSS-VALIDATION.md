@@ -340,7 +340,7 @@ It ends with a self-check, so a broken stack is caught before you start:
 
 ```
 [Smoke] policy load -> fan-out -> quorum
-    router /router/health                    200
+    router /router/health                  200
     policies loaded                        policies=7
     distinct groups                        distinctGroups=3
     mandated cross-validation              success

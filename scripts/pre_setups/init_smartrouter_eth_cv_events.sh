@@ -173,7 +173,7 @@ cv_headers() {
 	curl -s -D - -o /dev/null -X POST "http://127.0.0.1:$ETH_PORT" \
 		-H 'Content-Type: application/json' \
 		-d "{\"jsonrpc\":\"2.0\",\"method\":\"$CV_METHOD\",\"params\":[\"$addr\",\"$CV_BLOCK\"],\"id\":$nonce}" \
-		| grep -iE '^smart-?router-' | sed 's/\r//' | sed 's/^/    /'
+		| grep -i '^router-' | sed 's/\r//' | sed 's/^/    /'
 }
 
 # -----------------------------------------------------------------------------
@@ -458,7 +458,7 @@ would skip the fan-out):
   curl -s -D - -o /dev/null -X POST http://127.0.0.1:$ETH_PORT \\
     -H 'Content-Type: application/json' \\
     -d '{"jsonrpc":"2.0","method":"$CV_METHOD","params":["0x000000000000000000000000000000000000beef","$CV_BLOCK"],"id":1}' \\
-    | grep -iE '^smart-?router-'
+    | grep -i '^router-'
 
 Make sim-3 dissent (reply-time row), or delay it past the quorum (straggler row):
   curl -s -X POST http://$SIM_CONTROL/scenario -H 'Content-Type: application/json' \\

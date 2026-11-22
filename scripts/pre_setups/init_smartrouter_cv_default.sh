@@ -291,7 +291,7 @@ Router is running — manual commands
 Plain relay — no cross-validation, no headers on the way back:
   curl -si -X POST http://127.0.0.1:${ROUTER_PORT} -H 'Content-Type: application/json' \\
     -d '{"jsonrpc":"2.0","method":"${METHOD}","params":["0x00000000000000000000000000000000000000ff","${BLOCK}"],"id":1}' \\
-    | grep -iE '^smart-?router-'
+    | grep -i '^router-'
 
 The same request, with the caller opting in as it always could:
   curl -si -X POST http://127.0.0.1:${ROUTER_PORT} -H 'Content-Type: application/json' \\

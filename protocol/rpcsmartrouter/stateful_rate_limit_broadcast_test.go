@@ -209,8 +209,8 @@ func sendWrite(t *testing.T, tc writeInterfaceCase, chainParser chainlib.ChainPa
 	return sendWriteWithDirectives(t, tc, chainParser, server, nil)
 }
 
-// sendWriteWithDirectives is sendWrite with the request's lava-* directive headers, such as a
-// lava-select-provider pin.
+// sendWriteWithDirectives is sendWrite with the request's router-* directive headers, such as a
+// router-select-provider pin.
 func sendWriteWithDirectives(t *testing.T, tc writeInterfaceCase, chainParser chainlib.ChainParser, server *RPCSmartRouterServer, directives map[string]string) (*common.RelayResult, error) {
 	t.Helper()
 	ctx := context.Background()

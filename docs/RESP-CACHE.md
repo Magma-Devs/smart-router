@@ -663,7 +663,7 @@ It ends with a self-check, so a broken stack is caught before you start:
 
 ```
 [Smoke] relay -> cache write -> cache hit
-  router /router/health            200
+  router /router/health          200
   relay eth_blockNumber          ok
   cache hits                     7
   resp_cache_connected           1

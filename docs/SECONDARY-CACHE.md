@@ -66,8 +66,8 @@ request ──► primary cache ──hit──► served ("Cached")
   live path run (`common.FilterUpstreamReplyMetadata`): the headers that
   describe how to decode the payload (`Content-Type`, `Content-Encoding`), the
   429 pair (`Retry-After`, `Date`), and the headers the chain spec declares in
-  the reply direction. A name the router mints itself (`smart-router-*`, `router-*`,
-  `Provider-Latest-Block`, `Router-Version`, `status-code`) never
+  the reply direction. A name the router mints itself (`router-*`,
+  `Provider-Latest-Block`, `status-code`) never
   survives, even when a spec directive names it. Everything else in it goes,
   including header names this router has never heard of — an allowlist rather
   than a denylist because upstream response headers are an open set that no

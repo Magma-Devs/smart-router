@@ -556,7 +556,7 @@ One-time in your shell (paste as-is), then use 'vk <COMMAND>':
    "Cached" and Router-Cache-Backend names the node that served it:
      curl -s -D - -o /dev/null -X POST http://127.0.0.1:${ROUTER_PORT} -H 'Content-Type: application/json' \\
        -d '{"jsonrpc":"2.0","method":"eth_getBlockByNumber","params":["0x112a880",false],"id":1}' \\
-       | grep -iE 'smart-router-(provider-address|cache-backend)'
+       | grep -iE 'router-(provider-address|cache-backend)'
      # expect:  Router-Provider-Address: Cached  +  Router-Cache-Backend: ${VALKEY_HOST}:${VALKEY_PORT}
      # (works even far from the backend — the lane raised the router's lookup
      #  budget with --cache-timeout ${CACHE_TIMEOUT}; the production default is 50ms)
