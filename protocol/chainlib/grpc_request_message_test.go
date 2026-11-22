@@ -629,6 +629,29 @@ func TestDecodeAsMessage_ReadsMapEntries(t *testing.T) {
 	require.Error(t, decodeAsMessage(md, wire(nil).bytes(1, wire(nil).bytes(1, []byte("k")).bytes(2, []byte{0x0a, 0x09}))))
 }
 
+// The read stops where protobuf's decoders stop: a body nested one level deeper than they read is
+// refused, as they refuse it, and one level less is read.
+func TestDecodeAsMessage_StopsAtTheDecodersNestingLimit(t *testing.T) {
+	md := everyKindRequest(t, "Inner")
+	nested := func(levels int) []byte {
+		var body []byte
+		for i := 0; i < levels; i++ {
+			body = protowire.AppendBytes(protowire.AppendTag(nil, 3, protowire.BytesType), body) // kids
+		}
+		return body
+	}
+	decode := func(body []byte) error {
+		return proto.UnmarshalOptions{AllowPartial: true, DiscardUnknown: true}.Unmarshal(body, dynamicpb.NewMessage(md))
+	}
+	limit := protowire.DefaultRecursionLimit
+	require.NoError(t, decodeAsMessage(md, nested(limit-1)))
+	require.ErrorIs(t, decodeAsMessage(md, nested(limit)), errRequestTooDeep)
+	for _, levels := range []int{limit - 1, limit, limit + 1} {
+		body := nested(levels)
+		require.Equal(t, decode(body) == nil, decodeAsMessage(md, body) == nil, "%d levels", levels)
+	}
+}
+
 // The read builds nothing, however many fields a body holds.
 func TestDecodeAsMessage_AllocatesNothing(t *testing.T) {
 	md := everyKindRequest(t, "Request")
