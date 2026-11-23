@@ -226,6 +226,17 @@ func (ecf *EndpointPoller) FetchLatestBlockNum(ctx context.Context) (blockNum in
 		)
 	}
 
+	// A reply the interface itself reads as an error is not a healthy poll, whatever head sits
+	// beside the error (GraphQL answers its errors inside a 200; MAG-5124).
+	if notAnAnswer := chainlib.NotAnAnswerReplyError(chainMessage, responseData, 0); notAnAnswer != nil {
+		return spectypes.NOT_APPLICABLE, utils.FormatDebugErr(tagName+" reply carries an error", notAnAnswer,
+			utils.LogAttr("chainID", ecf.chainID),
+			utils.LogAttr("endpoint", ecf.endpointURL),
+			utils.LogAttr("method", parsing.ApiName),
+			utils.LogAttr("response", parser.CapStringLen(string(responseData))),
+		)
+	}
+
 	parsedInput := parser.ParseBlockFromReply(parserInput, parsing.ResultParsing, parsing.Parsers)
 	blockNum = parsedInput.GetBlock()
 	if blockNum == spectypes.NOT_APPLICABLE {

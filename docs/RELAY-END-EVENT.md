@@ -63,7 +63,7 @@ the router (an HTTP 405, for one); the router's own health and probe relays.
 | `status` | number | always | The HTTP status on the router's result. When every attempt failed with a protocol error, it is the status the client gets: the upstream's own status when an upstream answered (a `429` included), `504` when no upstream answered in time (a connect timeout, the request's deadline, or a hung upstream that never answered), and `502` when every attempt failed in transport otherwise (MAG-4218, MAG-4481). `0` when the router returned no result or one without a status; the listener then answers with its own status. A router built with masked errors answers a no-answer failure with `500` while this field keeps `502` or `504`. A `write_unknown` is always `500`, the status the client gets. `0` for a subscription request. |
 | `has_reply` | boolean | always | `true` exactly when `outcome` is `ok` or `node_error`: the client got an upstream's or the cache's reply, or, to a subscription request, the router's own answer. `false` on a `no_answer` whose client was sent an upstream's error status and body as is (a `503`, a `429`): the relay failed, and `status` is that upstream's status (MAG-4481). |
 | `error_code` | string | always | The error registry name (`protocol/common/error_codes.go`) of why the relay did not end `ok`; see [error_code](#error_code). `""` on `ok`. |
-| `error` | string | always | `node_error`: the node's error message. `write_unknown`: the message the client gets ("transaction status unclear: …"). Any other failure: the error the relay ended with. `""` on `ok`. |
+| `error` | string | always | `node_error`: the node's error message. A transaction a node refused inside a normal reply is written as `cosmos tx refused: code <code>, codespace <codespace>: <log>` or `tron tx refused: <code>: <message>`. `write_unknown`: the message the client gets ("transaction status unclear: …"). Any other failure: the error the relay ended with. `""` on `ok`. |
 | `latency_ms` | number | always | Milliseconds from the router taking the request to the event. A request that parses is timed from `SendParsedRelay` (the parse is not counted); one that does not, from `SendRelay`; a WebSocket frame that does not parse, from its parse. |
 | `is_batch` | boolean | always | A JSON-RPC batch. A batch refused while it is parsed (too large, or not accepted by the chain) is `true` too. |
 | `request_bytes` | number | when the request has a body | The length in bytes of the request data the router relays: a JSON-RPC, Tendermint or GraphQL body (a batch's whole body), a REST request's body, a gRPC call's message. Absent for a request without one (a REST `GET`, a Tendermint URI request) and for a request that did not parse. |
@@ -73,7 +73,7 @@ the router (an HTTP 405, for one); the router's own health and probe relays.
 | `tx_hash` | string | on a transaction submit whose reply names the transaction, and on every `eth_sendRawTransaction` whose request carries a signed transaction | The transaction's id on its chain, written as the chain writes it: `0x` and 64 lowercase hex digits on EVM chains, base58 on Solana and Sui, 64 hex digits in the node's case on Cosmos, 64 lowercase hex digits on Concordium. Read from the reply the client got. For `eth_sendRawTransaction` it is computed from the signed transaction in the request when the reply returns none, so a refused write, a `write_unknown` or a `no_answer` still names a hash to look up. Not read on a batch, or from a reply over 64 KiB. Where each chain's comes from: [Transaction fields by chain](#transaction-fields-by-chain). |
 | `tx_status` | string | when the submit's reply reports the transaction's execution | `success` or `failure`: the chain's execution result, as the send reply reports it, and only that. Sui's submits report it; EVM, Solana and Cosmos submits answer before the transaction executes, so their events never carry it (a Cosmos node's acceptance is `tx_code`). An event without `tx_status` says nothing about whether the transaction executed. |
 | `tx_error` | string | when `tx_status` is `failure` and the reply names the error | The chain's execution error, redacted and capped like `error`. |
-| `tx_code` | number | on a write over `tendermintrpc`, `rest` or `grpc` whose reply names a transaction code | A Cosmos node answers a refused transaction with a normal reply, so `outcome` stays `ok`; this is the code inside it: `0` when the node took the transaction, the refusal's code otherwise. Read from `result.code` (`broadcast_tx_sync`, `broadcast_tx_async`), `result.check_tx` then `result.tx_result` or `result.deliver_tx` (`broadcast_tx_commit`), or `tx_response.code` (`POST /cosmos/tx/v1beta1/txs`, and `cosmos.tx.v1beta1.Service/BroadcastTx` over `grpc`, whose reply leaves a `0` off the wire); the first non-zero code wins. `broadcast_tx_async` answers before checking, so its `0` means only that the node received the transaction. The same holds for a `POST /cosmos/tx/v1beta1/txs` or a `BroadcastTx` when the request's `mode` is `BROADCAST_MODE_ASYNC`. |
+| `tx_code` | number | on a write over `tendermintrpc`, `rest` or `grpc` whose reply names a transaction code | A Cosmos node answers a refused transaction with a normal reply; this is the code inside it: `0` when the node took the transaction, the refusal's code otherwise. The refusal is a node error, so its attempt's `outcome` is `node_error`: on `broadcast_tx_sync`, on `broadcast_tx_commit` by its `check_tx`, and on `BroadcastTx` at height 0 since MAG-5323, where `error_code` names the code; on `POST /cosmos/tx/v1beta1/txs` as before. Read from `result.code` (`broadcast_tx_sync`, `broadcast_tx_async`), `result.check_tx` then `result.tx_result` or `result.deliver_tx` (`broadcast_tx_commit`), or `tx_response.code` (`POST /cosmos/tx/v1beta1/txs`, and `cosmos.tx.v1beta1.Service/BroadcastTx` over `grpc`, whose reply leaves a `0` off the wire); the first non-zero code wins. `broadcast_tx_async` answers before checking, so its `0` means only that the node received the transaction. The same holds for a `POST /cosmos/tx/v1beta1/txs` or a `BroadcastTx` when the request's `mode` is `BROADCAST_MODE_ASYNC`. |
 | `tx_codespace` | string | with `tx_code`, when the reply names one | The module the code belongs to, such as `sdk`: a code means something only within its codespace. |
 | `tx_log` | string | when `tx_code` is not `0` | The node's reason for the refusal, redacted and capped like `error`. |
 | `skipped` | array | when the consistency check passed an upstream over | One entry each time the consistency check passed an upstream over before sending because it was too far behind the chain tip: `upstream`, `lag` (blocks behind the tip), `threshold` (the lag allowed) and `batch` (the batch it was passed over in). A skipped upstream got no request then; it is in `attempts` only if it was sent later, as a stale fallback. |
@@ -206,6 +206,30 @@ any relay, and its fields from what the subscription manager did:
 The upstream is named by provider, as on every relay; the manager picks it by node URL, which may
 carry a credential. The messages a subscription pushes afterwards, and a subscription restored after
 its upstream connection drops, write no event.
+
+## Reading one request's event
+
+In debug mode (`--debug-address`), `GET /debug/relay-end?guid=<GUID>` returns the event of one
+request, so a test asserts on the router's record of the request it sent instead of searching the
+log (MAG-4899). `guid` is the event's `GUID`: the reply's `Router-Guid` header, or the error id of an
+error reply without one. A WebSocket message answered successfully and a gRPC stream opened
+successfully reply with no GUID, so their events are kept but can be found only through
+`/debug/logs`; their error replies carry it, as `Error_GUID` or in the gRPC status text.
+
+| Status | When |
+| --- | --- |
+| `200` | The event, as one JSON object: the object its log line carries, the same fields, with `time` set when it was kept. `X-Relay-End-Records` says how many events were written with that GUID: `1` for every relay, a retried one included. Above `1` the router broke the one-event-per-relay rule, and the body is the last of them. |
+| `400` | No `guid`. |
+| `404` | A GUID the router does not hold: never written, or dropped as older than the rest. |
+| `405` | Any method but `GET`. |
+| `503` | The router keeps no events. `--debug-address` installs the store with the route, so a router never answers this; it is not a `404` so that "not kept" cannot read as "never written". |
+
+The router keeps the events of its newest GUIDs and drops the oldest GUID first. It holds at most
+16 MiB of event text: an event's size follows its attempts, from about 400 bytes for a read one
+provider answered to over a kilobyte for a relay that failed over, so that is about 40 000 of the
+smallest events and fewer of larger ones. It never holds more than 50 000, as many as the
+`/debug/logs` buffer holds lines. An event is kept as it is written, so a request's event is
+kept before its HTTP or gRPC reply leaves the router. An event without a GUID is not kept.
 
 ## Collector
 

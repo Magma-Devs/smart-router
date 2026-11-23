@@ -263,6 +263,11 @@ func (apip *GrpcChainParser) ParseMsg(url string, data []byte, connectionType st
 		return nil, utils.FormatError("failed to getApiCollection gRPC", err)
 	}
 
+	// A request no node can decode is refused here, once, before any provider is picked.
+	if err := checkGrpcRequestMessage(apip.registry, url, data); err != nil {
+		return nil, err
+	}
+
 	// handle headers
 	metadata, overwriteReqBlock, _ := apip.HandleHeaders(metadata, apiCollection, spectypes.Header_pass_send)
 	if name, ok := unsendableGrpcHeader(metadata); ok {
@@ -384,6 +389,9 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 	sendRelayCallback := func(ctx context.Context, method string, reqBody []byte) ([]byte, metadata.MD, error) {
 		guid := utils.GenerateUniqueIdentifier()
 		ctx = utils.WithUniqueIdentifier(ctx, guid)
+		// The call's deadline here is the caller's own grpc-timeout. Recorded so an attempt that
+		// ends at it is not counted against the endpoint (common.IsClientCancellation).
+		ctx = common.WithCallerDeadline(ctx)
 		msgSeed := strconv.FormatUint(guid, 10)
 		metadataValues, _ := metadata.FromIncomingContext(ctx)
 		ctx = utils.ExtractWantedHeadersFromCachedMap(metadataValues, ctx)
@@ -414,16 +422,25 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 				// and never err's text, which lists the router's provider names. A plain error, as
 				// below, reaches the client as Unknown (MAG-3800).
 				apil.logger.LogRequestAndResponse("grpc in/out", true, method, relayBodyForLog(string(reqBody), cmdFlags.DebugRelays), "", message, msgSeed, time.Since(startTime), err)
-				// The request id goes in lava-guid, as on a served call and on the HTTP refusal,
+				// The request id goes in router-guid, as on a served call and on the HTTP refusal,
 				// since the sentence alone no longer carries it.
 				replyMetadata := convertRelayMetaDataToMDMetaData(relayReply.GetMetadata())
 				replyMetadata.Set(common.GUID_HEADER_NAME, msgSeed)
 				return nil, replyMetadata, status.Error(codes.InvalidArgument, message)
 			}
+			if noAnswer, ok := grpcNoAnswerStatus(relayResult); ok {
+				// No provider answered: the router's own status and sentence, never the transport
+				// error, which can hold the router's and a provider's addresses (MAG-5130). The
+				// request id goes in router-guid, as on the refusal above.
+				apil.logger.LogRequestAndResponse("grpc in/out", true, method, relayBodyForLog(string(reqBody), cmdFlags.DebugRelays), "", noAnswer.Message(), msgSeed, time.Since(startTime), err)
+				replyMetadata := convertRelayMetaDataToMDMetaData(relayReply.GetMetadata())
+				replyMetadata.Set(common.GUID_HEADER_NAME, msgSeed)
+				return nil, replyMetadata, noAnswer.Err()
+			}
 			errMasking := apil.logger.GetUniqueGuidResponseForError(err, msgSeed)
 			apil.logger.LogRequestAndResponse("grpc in/out", true, method, relayBodyForLog(string(reqBody), cmdFlags.DebugRelays), "", errMasking, msgSeed, time.Since(startTime), err)
 			// Even on error the relay result may carry response metadata — notably the
-			// lava-cross-validation-* failure headers synthesized on a quorum/structural failure. Surface it
+			// router-cross-validation-* failure headers synthesized on a quorum/structural failure. Surface it
 			// (the proxy attaches it as gRPC trailers on the error path) so gRPC clients get the same
 			// structured cross-validation signal as the HTTP interfaces. nil/empty when there is nothing to
 			// propagate, preserving prior behavior for ordinary errors.
@@ -496,7 +513,7 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 
 	fmt.Printf(`
  ┌───────────────────────────────────────────────────┐
- │               Lava's Grpc Server                  │
+ │               Router's Grpc Server                │
  │               %s│
  │               Version: %s│
  └───────────────────────────────────────────────────┘

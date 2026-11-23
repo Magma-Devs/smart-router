@@ -54,6 +54,18 @@ func withImmediateDemote(t *testing.T) {
 	t.Cleanup(func() { reverifyDemoteThreshold = restore })
 }
 
+// probeAndApplyReverification is one tier of an epoch pass as updateEpoch runs it: the
+// tier's configured providers probed, then the verdicts applied to fresh.
+func probeAndApplyReverification(
+	ctx context.Context,
+	inputs *chainReverifyInputs,
+	fresh map[uint64]*routersession.ConsumerSessionsWithProvider,
+	tier reverifyTier,
+	epoch uint64,
+) (map[uint64]*routersession.ConsumerSessionsWithProvider, []*routersession.ConsumerSessionsWithProvider, []string) {
+	return applyReverification(inputs, fresh, tier, epoch, probeReverification(ctx, inputs, inputs.configuredFor(tier), nil, nil))
+}
+
 func TestApplyReverification(t *testing.T) {
 	withImmediateDemote(t)
 	rpc := &routersession.RPCEndpoint{ChainID: "TEST", ApiInterface: "rest"}
@@ -158,7 +170,7 @@ func TestApplyReverification(t *testing.T) {
 				validateFn:                 validate,
 			}
 
-			got, demoted, _ := applyReverification(context.Background(), inputs, fresh, reverifyTierStatic, uint64(42))
+			got, demoted, _ := probeAndApplyReverification(context.Background(), inputs, fresh, reverifyTierStatic, uint64(42))
 			gotNames := collectNames(got)
 
 			require.Len(t, gotNames, len(tt.want), "result size, tc #%d", i)
@@ -221,7 +233,7 @@ func TestApplyReverification_BackupTierReadsBackupList(t *testing.T) {
 		validateFn:                 validate,
 	}
 
-	_, _, _ = applyReverification(context.Background(), inputs, map[uint64]*routersession.ConsumerSessionsWithProvider{}, reverifyTierBackup, 1)
+	_, _, _ = probeAndApplyReverification(context.Background(), inputs, map[uint64]*routersession.ConsumerSessionsWithProvider{}, reverifyTierBackup, 1)
 	require.Equal(t, []string{"B"}, calls, "backup tier must validate the backup list")
 }
 
@@ -312,7 +324,7 @@ func TestApplyReverification_DemoteHysteresis(t *testing.T) {
 		for i, n := range present {
 			fresh[uint64(i)] = makeSession(n)
 		}
-		got, demotedSessions, _ := applyReverification(context.Background(), inputs, fresh, reverifyTierStatic, epoch)
+		got, demotedSessions, _ := probeAndApplyReverification(context.Background(), inputs, fresh, reverifyTierStatic, epoch)
 		for _, s := range demotedSessions {
 			demoted = append(demoted, s.PublicAddress)
 		}
@@ -369,7 +381,7 @@ func TestApplyReverification_SuccessResetsDemoteStreak(t *testing.T) {
 
 	run := func(epoch uint64) map[string]struct{} {
 		fresh := map[uint64]*routersession.ConsumerSessionsWithProvider{0: makeSession("A")}
-		got, _, _ := applyReverification(context.Background(), inputs, fresh, reverifyTierStatic, epoch)
+		got, _, _ := probeAndApplyReverification(context.Background(), inputs, fresh, reverifyTierStatic, epoch)
 		return collectNames(got)
 	}
 
