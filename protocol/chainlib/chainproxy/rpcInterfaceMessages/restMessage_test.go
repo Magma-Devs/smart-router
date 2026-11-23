@@ -175,7 +175,7 @@ func TestRestMessageGetParamsReadsTheBody(t *testing.T) {
 
 // TestCheckResponseError_CosmosTransaction_Success tests successful Cosmos transaction (code=0)
 func TestCheckResponseError_CosmosTransaction_Success(t *testing.T) {
-	restMsg := RestMessage{}
+	restMsg := RestMessage{Broadcast: true}
 
 	// Cosmos SDK transaction success response (HTTP 200 + code=0)
 	successResponse := `{
@@ -204,7 +204,7 @@ func TestCheckResponseError_CosmosTransaction_Success(t *testing.T) {
 
 // TestCheckResponseError_CosmosTransaction_SequenceMismatch tests sequence mismatch error (code=32)
 func TestCheckResponseError_CosmosTransaction_SequenceMismatch(t *testing.T) {
-	restMsg := RestMessage{}
+	restMsg := RestMessage{Broadcast: true}
 
 	// Cosmos SDK transaction error (HTTP 200 + code=32)
 	errorResponse := `{
@@ -285,7 +285,7 @@ func TestCheckResponseError_CosmosTransaction_VariousErrorCodes(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			restMsg := RestMessage{}
+			restMsg := RestMessage{Broadcast: true}
 
 			response := fmt.Sprintf(`{
 				"tx_response": {
@@ -377,7 +377,7 @@ func TestCheckResponseError_HTTPStatusCodeVariations(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			restMsg := RestMessage{}
+			restMsg := RestMessage{Broadcast: true}
 
 			hasError, errorMessage := restMsg.CheckResponseError([]byte(tc.response), tc.httpStatus)
 
@@ -415,6 +415,23 @@ func TestCheckResponseError_NonTransactionCalls(t *testing.T) {
 				"tx_response": {
 					"code": 0,
 					"txhash": "ABC123"
+				}
+			}`,
+			httpStatus:    200,
+			expectedError: false,
+		},
+		{
+			// MAG-5326: a transaction that was included and failed. The non-zero code is the
+			// transaction's record, the same from every provider, not the node refusing the read.
+			name: "Query TX by Hash - included but failed (out of gas)",
+			response: `{
+				"tx": {},
+				"tx_response": {
+					"height": "17",
+					"txhash": "ABC123",
+					"codespace": "sdk",
+					"code": 11,
+					"raw_log": "out of gas in location: WriteFlat; gasWanted: 200000, gasUsed: 200524: out of gas"
 				}
 			}`,
 			httpStatus:    200,
@@ -528,7 +545,7 @@ func TestCheckResponseError_EdgeCases(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			restMsg := RestMessage{}
+			restMsg := RestMessage{Broadcast: true}
 
 			hasError, _ := restMsg.CheckResponseError([]byte(tc.response), tc.httpStatus)
 
@@ -633,7 +650,7 @@ func TestCheckResponseError_RealWorldScenarios(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			restMsg := RestMessage{}
+			restMsg := RestMessage{Broadcast: true}
 
 			hasError, errorMessage := restMsg.CheckResponseError([]byte(tc.response), tc.httpStatus)
 
@@ -745,9 +762,11 @@ func TestCheckResponseError_ServerErrors(t *testing.T) {
 }
 
 // TestCheckResponseError_AnyNonSuccessIsANodeError pins the rule: every status outside 2xx is a
-// node error whatever the body says, a 2xx is a success unless it carries a Cosmos transaction
-// error, and a status of 0 is "not set" and reads as a success. The bodies are what real nodes
-// and gateways answered with on 2026-09-27 (docs/ERROR-REGISTRY-DESIGN.md, "REST replies").
+// node error whatever the body says, a 2xx is a success unless it answers a broadcast with a Cosmos
+// transaction error, and a status of 0 is "not set" and reads as a success. The bodies are what
+// real nodes and gateways answered with on 2026-09-27 (docs/ERROR-REGISTRY-DESIGN.md, "REST
+// replies"). Every case is read as a broadcast's reply; only the Cosmos one depends on it, and
+// TestCheckResponseError_NonTransactionCalls has the same shape answering a read.
 func TestCheckResponseError_AnyNonSuccessIsANodeError(t *testing.T) {
 	testCases := []struct {
 		name          string
@@ -790,7 +809,7 @@ func TestCheckResponseError_AnyNonSuccessIsANodeError(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			hasError, errorMessage := RestMessage{}.CheckResponseError([]byte(tc.response), tc.httpStatus)
+			hasError, errorMessage := RestMessage{Broadcast: true}.CheckResponseError([]byte(tc.response), tc.httpStatus)
 			require.Equal(t, tc.expectedError, hasError)
 			if tc.msgContains != "" {
 				require.Contains(t, errorMessage, tc.msgContains)

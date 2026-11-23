@@ -103,6 +103,7 @@ func (apip *RestChainParser) ParseMsg(urlPath string, data []byte, connectionTyp
 	restMessage := rpcInterfaceMessages.RestMessage{
 		Msg:         data,
 		Path:        urlPath,
+		Broadcast:   api.Category.Stateful == common.CONSISTENCY_SELECT_ALL_PROVIDERS,
 		BaseMessage: chainproxy.BaseMessage{Headers: metadata, LatestBlockHeaderSetter: settingHeaderDirective},
 	}
 	// add spec path to rest message so we can extract the requested block.

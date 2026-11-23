@@ -29,6 +29,11 @@ type RestMessage struct {
 	Msg      []byte
 	Path     string
 	SpecPath string
+	// Broadcast is set when the request matched an api the spec marks stateful
+	// (CONSISTENCY_SELECT_ALL_PROVIDERS): a write, sent to every provider. Only its reply's
+	// tx_response.code is the node's verdict on the request. A read of a transaction that was
+	// included and failed carries the same non-zero code in its correct answer (MAG-5326).
+	Broadcast bool
 	chainproxy.BaseMessage
 }
 
@@ -48,15 +53,19 @@ func (rm *RestMessage) GetRawRequestHash() ([]byte, error) {
 // it adds on JSON-RPC: a write broadcast keeps waiting for a sibling's success instead of taking
 // the first refusal as the result, and the error registry classifies the reply — its REST rows
 // decide whether a read is retried elsewhere and whether the endpoint is scored. A 2xx is a
-// success unless its body carries a Cosmos transaction error.
+// success unless the request is a Broadcast and its body carries a Cosmos transaction error. On
+// any other request a tx_response is the answer: a GET of a transaction that ran out of gas is
+// that transaction's final record, and every provider answers it the same way.
 //
 // A status of 0 is "not set" — a cache entry written before statuses were stored, a test
 // fixture, gRPC's codes.OK on the shared RelayResult — and reads as a success, the way the
 // health gate reads it. A REST upstream always answers with a real status.
 func (jm RestMessage) CheckResponseError(data []byte, httpStatusCode int) (hasError bool, errorMessage string) {
 	if httpStatusCode == 0 || (httpStatusCode >= 200 && httpStatusCode < 300) {
-		if cosmosTxErr, errMsg := checkCosmosTxError(data); cosmosTxErr {
-			return cosmosTxErr, errMsg
+		if jm.Broadcast {
+			if cosmosTxErr, errMsg := checkCosmosTxError(data); cosmosTxErr {
+				return cosmosTxErr, errMsg
+			}
 		}
 		return false, ""
 	}
