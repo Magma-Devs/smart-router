@@ -3393,6 +3393,18 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 						utils.LogAttr("GUID", goroutineCtx),
 					)
 				}
+			} else if errors.Is(err, routersession.ErrNoMethodDescriptor) {
+				// The node's lookup gave no definition of the gRPC method to convert the JSON request
+				// with, so nothing was sent and the endpoint's availability was never tested
+				// (MAG-5675). The failure arm below would score it 0 and count a consecutive error
+				// against an endpoint that was never asked. Released like a session that was
+				// selected and not used. A cancelled relay keeps its own release: the error carries
+				// this only when the lookup ended with the relay's context still live.
+				if errSession := rpcss.sessionManager.OnSessionDiscarded(singleConsumerSession, err); errSession != nil {
+					utils.FormatWarning("OnSessionDiscarded failed for direct RPC", errSession,
+						utils.LogAttr("GUID", goroutineCtx),
+					)
+				}
 			} else if isClientCancel {
 				// Cancelled while it still had budget left, so availability was never tested —
 				// release without a QoS penalty (MAG-2648). OnSessionFailure here would feed the
