@@ -158,7 +158,7 @@ func (apil *chainListenerBase) relayHTTP(spec httpRelaySpec) fiber.Handler {
 
 // refusedRequestMessage reports whether err is a refusal of the request itself that every
 // interface answers as a client error, and the one sentence the caller is given for it: a
-// lava-select-provider name that none of the router's providers carries (MAG-3800), and on gRPC a
+// router-select-provider name that none of the router's providers carries (MAG-3800), and on gRPC a
 // binary request that is not a protobuf message (MAG-5421).
 func refusedRequestMessage(err error) (message string, ok bool) {
 	switch {

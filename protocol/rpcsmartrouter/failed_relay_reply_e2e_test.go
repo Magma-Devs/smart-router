@@ -406,8 +406,8 @@ func TestFailedRelayReply_BudgetExpiryKeepsTheRequestHeaders_MAG3980(t *testing.
 }
 
 // MAG-5076: a request the router ends before asking any provider, a pin on a provider it cannot use
-// or a router with no provider at all, still carries the request's headers: Lava-Guid, the guid the
-// body names, lava-user-request-type, and Lava-Relay-Timeout-Applied for the lava-relay-timeout
+// or a router with no provider at all, still carries the request's headers: Router-Guid, the guid the
+// body names, router-user-request-type, and Router-Relay-Timeout-Applied for the router-relay-timeout
 // every request here sends. It used to carry none, so the guid was only in the body. No attempt went
 // out, so it names no provider and no retry. The status and the body are unchanged.
 func TestFailedRelayReply_ARequestRefusedBeforeDispatchKeepsTheRequestHeaders_MAG5076(t *testing.T) {
@@ -438,9 +438,9 @@ func TestFailedRelayReply_ARequestRefusedBeforeDispatchKeepsTheRequestHeaders_MA
 				require.Equal(t, http.StatusInternalServerError, read.status, read.body)
 				require.Zero(t, arrivals.Load(), "setup: the request must end before any provider is asked")
 
-				require.NotEmpty(t, read.guid, "the reply carries no Lava-Guid")
+				require.NotEmpty(t, read.guid, "the reply carries no Router-Guid")
 				require.Contains(t, read.body, read.guid, "the header names the request the body names")
-				require.NotEmpty(t, read.header.Get(common.USER_REQUEST_TYPE), "the reply carries no lava-user-request-type")
+				require.NotEmpty(t, read.header.Get(common.USER_REQUEST_TYPE), "the reply carries no router-user-request-type")
 				require.Equal(t, failedReplyRelayTimeout.String(), read.header.Get(common.RELAY_TIMEOUT_APPLIED_HEADER_NAME))
 				require.Empty(t, read.header.Get(common.PROVIDER_ADDRESS_HEADER_NAME), "no provider was asked")
 				require.Empty(t, read.header.Get(common.RETRY_COUNT_HEADER_NAME), "no attempt went out")
@@ -452,7 +452,7 @@ func TestFailedRelayReply_ARequestRefusedBeforeDispatchKeepsTheRequestHeaders_MA
 // MAG-5076: a strict pin on an upstream too far behind the chain tip is turned away by the
 // consistency gate, after selection picked it and before anything is sent. The refusal carries the
 // request's headers as the other refusals do. A write had the upstream on record as a target, but
-// the upstream never received it, so lava-fast-tx-participants must not name it.
+// the upstream never received it, so router-fast-tx-participants must not name it.
 func TestFailedRelayReply_AStrictPinTheConsistencyGateTurnsAwayKeepsTheRequestHeaders_MAG5076(t *testing.T) {
 	if !rand.Initialized() {
 		rand.InitRandomSeed()
@@ -478,7 +478,7 @@ func TestFailedRelayReply_AStrictPinTheConsistencyGateTurnsAwayKeepsTheRequestHe
 			require.Contains(t, read.body, "too far behind the chain tip", "setup: the consistency gate must be what refused the pin")
 			require.Zero(t, arrivals.Load(), "setup: the pinned upstream must not be asked")
 
-			require.NotEmpty(t, read.guid, "the reply carries no Lava-Guid")
+			require.NotEmpty(t, read.guid, "the reply carries no Router-Guid")
 			require.Contains(t, read.body, read.guid)
 			require.Equal(t, tc.method, read.header.Get(common.USER_REQUEST_TYPE))
 			require.Empty(t, read.header.Values(common.PROVIDER_ADDRESS_HEADER_NAME), "no provider was asked")

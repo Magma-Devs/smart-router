@@ -26,7 +26,7 @@ import (
 // it does not serve: status Unknown, and the reason in the message.
 type methodRefusingBlockService struct{}
 
-const methodRefusedMessage = "Method /lavatest.v1.BlockService/GetLatestBlock is not allowed"
+const methodRefusedMessage = "Method /routertest.v1.BlockService/GetLatestBlock is not allowed"
 
 func (methodRefusingBlockService) GetLatestBlock(context.Context, *dynamicpb.Message) (*dynamicpb.Message, error) {
 	return nil, status.Error(codes.Unknown, methodRefusedMessage)
@@ -103,7 +103,7 @@ func TestGrpcVerificationReportsTheNodesRefusal(t *testing.T) {
 }
 
 func TestGrpcNodeErrorReply(t *testing.T) {
-	grpcMessage := &rpcInterfaceMessages.GrpcMessage{Path: "lavatest.v1.BlockService/GetLatestBlock"}
+	grpcMessage := &rpcInterfaceMessages.GrpcMessage{Path: "routertest.v1.BlockService/GetLatestBlock"}
 	nodeErrorBody, err := json.Marshal(GrpcNodeErrorResponse{ErrorCode: uint32(codes.Unknown), ErrorMessage: methodRefusedMessage})
 	require.NoError(t, err)
 

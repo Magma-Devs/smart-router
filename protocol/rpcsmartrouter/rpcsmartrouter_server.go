@@ -1933,19 +1933,19 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 
 		// A request that ended before any provider was asked: a pin on a provider the router cannot
 		// use, no provider to ask, a deadline before the first dispatch. The listener writes the
-		// router's error, and this reply carries the request's own headers on it, Lava-Guid and
-		// lava-user-request-type among them, as every other failed reply does (MAG-5076; Part I §1:
-		// Lava-Guid on every reply). Returning nil sent the error with none. No attempt went out, so
+		// router's error, and this reply carries the request's own headers on it, Router-Guid and
+		// router-user-request-type among them, as every other failed reply does (MAG-5076; Part I §1:
+		// Router-Guid on every reply). Returning nil sent the error with none. No attempt went out, so
 		// the reply names no provider and no retry. A cross-validated request is left out: the header
 		// builder would count a round that never ran.
 		if relayProcessor != nil && relayProcessor.GetSelection() != relaycore.CrossValidation && relayProcessor.GetUsedProviders().SessionsDispatched() == 0 {
 			// A write's targets are recorded when selection picks them. The consistency gate can then
 			// turn every one away, as it does a strict pin on a node too far behind the chain tip. No
-			// node received this write, so lava-fast-tx-participants must name none.
+			// node received this write, so router-fast-tx-participants must name none.
 			relayProcessor.SetStatefulRelayTargets(nil)
 			refused := &common.RelayResult{}
 			rpcss.appendHeadersToRelayResult(ctx, refused, relayProcessor.ProtocolErrors(), relayProcessor, protocolMessage, protocolMessage.GetApi().GetName(), analytics, false)
-			// A GraphQL write pinned to a lava-select-provider name the router does not have is
+			// A GraphQL write pinned to a router-select-provider name the router does not have is
 			// refused, so its reply says the write was never sent, as the listener's other refusals
 			// of a GraphQL write do (MAG-3800; Part I R-Q, Part II Q8). Only this function knows the
 			// request is a write.
@@ -7603,7 +7603,7 @@ func httpStatusRelayError(statusCode int, reply *pairingtypes.RelayReply) error 
 	return httpErr
 }
 
-// identifiedNodeError reports whether a reply carries lava-identified-node-error: the header says
+// identifiedNodeError reports whether a reply carries router-identified-node-error: the header says
 // the node answered with an error, so it is set only when the reply shows that. On JSON-RPC and
 // Tendermint RPC a node always answers in JSON-RPC, so a body that is not a JSON-RPC reply (a
 // gateway's 401, 403 or 404 page, an empty body) is not the node's answer: it is forwarded as is,
