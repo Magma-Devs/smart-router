@@ -143,7 +143,6 @@ func TestClassifyCacheLookupOutcome(t *testing.T) {
 
 func TestSmartRouterRecordCacheWriteSkipped_CountsByReason(t *testing.T) {
 	m := newTestMetricsManager(t)
-	m.cacheWriteSkippedTotalMetric = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_cache_write_skipped"}, []string{"spec", "apiInterface", "method", "reason"})
 
 	m.RecordCacheWriteSkipped("SOLANA", "jsonrpc", "getBlock", CacheWriteSkipReasonSize)
 	m.RecordCacheWriteSkipped("SOLANA", "jsonrpc", "getBlock", CacheWriteSkipReasonSize)
@@ -154,7 +153,6 @@ func TestSmartRouterRecordCacheWriteSkipped_CountsByReason(t *testing.T) {
 // A 1 MiB cap is a bucket boundary, so "entries at or under the cap" is one bucket.
 func TestSmartRouterRecordCacheEntryWritten_ObservesBodySize(t *testing.T) {
 	m := newTestMetricsManager(t)
-	m.cacheEntryBytesHistogram = prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "t_sr_cache_entry_bytes", Buckets: cacheEntryBytesBuckets}, []string{"spec", "apiInterface", "method"})
 
 	m.RecordCacheEntryWritten("SOLANA", "jsonrpc", "getBlock", 900)
 	m.RecordCacheEntryWritten("SOLANA", "jsonrpc", "getBlock", 1<<20)
