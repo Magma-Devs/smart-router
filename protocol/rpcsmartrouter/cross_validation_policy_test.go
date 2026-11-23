@@ -165,9 +165,16 @@ func TestCrossValidationPolicyResolver_Resolve(t *testing.T) {
 			wantParams:    common.CrossValidationParams{MaxParticipants: 3, AgreementThreshold: 3, MinGroups: 1},
 		},
 		{
-			// Regression (more severe): min-groups has NO caller header, yet pre-fix a caller sending
-			// max-participants:1 clamped MinGroups (2) down to 1 — disabling the operator's diversity mandate
-			// entirely. The effective max is now floored at the operator min-groups (2) so diversity survives.
+			// Regression (more severe): min-groups has NO caller header, yet pre-MAG-2333-fix a caller
+			// sending max-participants:1 clamped MinGroups (2) down to 1 — disabling the operator's
+			// diversity mandate entirely. max-participants carries no explicit floor of its own, so two
+			// mechanisms now independently protect it: the operatorMinGroups guard below (which used to
+			// be the only one, and is still exercised here as defense-in-depth) and MAG-2784's separate
+			// fix to resolveKnob, which floors an unfloored knob at its default — 3, already >= the
+			// min-groups floor of 2, so that guard happens to be non-binding in this exact case. The
+			// same default-floor fix also applies to agreement-threshold, which carries no floor of its
+			// own either: the caller's threshold:1 now floors at the DEFAULT (2) instead of passing
+			// through unclamped.
 			name:     "caller-shrunk max-participants cannot disable operator min-groups diversity (no max floor)",
 			method:   "eth_getBalance",
 			policy:   CrossValidationPolicy{Enabled: true, MinGroups: Bound{Floor: new(2)}},
@@ -175,7 +182,7 @@ func TestCrossValidationPolicyResolver_Resolve(t *testing.T) {
 			caller:        common.CrossValidationParams{MaxParticipants: 1, AgreementThreshold: 1},
 			callerPresent: true,
 			wantApplies:   true,
-			wantParams:    common.CrossValidationParams{MaxParticipants: 2, AgreementThreshold: 1, MinGroups: 2},
+			wantParams:    common.CrossValidationParams{MaxParticipants: 3, AgreementThreshold: 2, MinGroups: 2},
 		},
 	}
 

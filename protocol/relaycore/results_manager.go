@@ -5,6 +5,8 @@ import (
 	"strings"
 	"sync"
 
+	"google.golang.org/grpc/codes"
+
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	common "github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/parser"
@@ -25,7 +27,10 @@ func transportFromProtocolMessage(pm chainlib.ProtocolMessage) common.TransportT
 // (rpcInterfaceMessages.GraphQLMessage). It stands in for the reply's status the way the body's
 // error code does for JSON-RPC.
 type replyStatusClassifier interface {
-	ClassificationStatus(data []byte, httpStatusCode int) int
+	// ReplyVerdict reads the reply once: whether it is an error, its message, the status it stands
+	// for, and the registry entry the interface's own rows file it under, or nil when the shared
+	// rows decide (GraphQL: a write, MAG-5121). Each reading decodes the whole reply.
+	ReplyVerdict(data []byte, httpStatusCode int) (hasError bool, errorMessage string, classificationStatus int, classified *common.RouterError)
 }
 
 type ResultsManager interface {
@@ -180,6 +185,12 @@ func (rp *ResultsManagerInst) setValidResponse(response *RelayResponse, protocol
 				errorCode, jsonRPCErrorCode = code, code
 			}
 		}
+		// A gRPC node error's status code is the status the node sent (handleGRPCError). Outside
+		// 1..16 it is the router's own stand-in for a failure that carried no status.
+		grpcStatus := 0
+		if transport == common.TransportGRPC && errorCode >= int(codes.Canceled) && errorCode <= int(codes.Unauthenticated) {
+			grpcStatus = errorCode
+		}
 		// GraphQL answers its node faults inside a 200 as well, so the status says nothing there
 		// either. The message's own rule maps the error's code onto the status the registry's
 		// rows know (RESOURCE_EXHAUSTED a 429, INTERNAL_SERVER_ERROR a 500, a caller's error on a
@@ -187,8 +198,9 @@ func (rp *ResultsManagerInst) setValidResponse(response *RelayResponse, protocol
 		// decision (sendGraphQLRelay). Classified by the 200 instead, every GraphQL node fault was
 		// UNKNOWN_ERROR, logged at DEBUG and never blamed on the endpoint, while the same fault
 		// behind a 503 was an ERROR line with its own name (MAG-4375).
+		var ownClassification *common.RouterError
 		if statusClassifier, ok := protocolMessage.GetRPCMessage().(replyStatusClassifier); ok {
-			errorCode = statusClassifier.ClassificationStatus(response.RelayResult.Reply.Data, response.RelayResult.StatusCode)
+			_, _, errorCode, ownClassification = statusClassifier.ReplyVerdict(response.RelayResult.Reply.Data, response.RelayResult.StatusCode)
 		}
 		// Resolve chain family so Tier-2 chain-specific matchers win over
 		// Tier-1 generic ones. Without this, chain-native codes like Solana's
@@ -197,7 +209,10 @@ func (rp *ResultsManagerInst) setValidResponse(response *RelayResponse, protocol
 		// (zero CU, no retry) — a silent retry-starvation bug.
 		chainFamily := common.GetChainFamilyOrDefault(rp.chainID)
 		// err is the node's reply text, so the transport-only rows stay out of it (MAG-4242).
-		nodeClassified := common.ClassifyError(common.DetectConnectionErrorInReplyText(errorMessage), chainFamily, transport, errorCode, err.Error())
+		nodeClassified := ownClassification
+		if nodeClassified == nil {
+			nodeClassified = common.ClassifyError(common.DetectConnectionErrorInReplyText(errorMessage), chainFamily, transport, errorCode, err.Error())
+		}
 		// ERROR only when the endpoint is to blame. A not-found, a pruned height, a rejected
 		// transaction is the node answering the question it was asked, and on REST those are
 		// routine — see LogCodedNodeAnswer. The metric fires either way.
@@ -218,7 +233,7 @@ func (rp *ResultsManagerInst) setValidResponse(response *RelayResponse, protocol
 			utils.LogAttr("requestPayload", parser.CapStringLen(reqPayload)),
 			utils.LogAttr("requestHeaders", reqHeaders),
 		)
-		rp.nodeResponseErrors.AddError(RelayError{Err: err, ProviderInfo: response.RelayResult.ProviderInfo, Response: response, RouterError: nodeClassified, JSONRPCErrorCode: jsonRPCErrorCode})
+		rp.nodeResponseErrors.AddError(RelayError{Err: err, ProviderInfo: response.RelayResult.ProviderInfo, Response: response, RouterError: nodeClassified, JSONRPCErrorCode: jsonRPCErrorCode, GRPCStatus: grpcStatus})
 		return err
 	}
 	rp.successResults = append(rp.successResults, response.RelayResult)

@@ -14,22 +14,6 @@ import (
 // strings in its source (sui-indexer-alt-graphql, sui-rpc-api, sui-core's transaction driver, and
 // the async-graphql fork it runs on), checked at v1.71.1, v1.82.3 and main.
 
-// suiEffect is readEffect with the registry read for Sui, as the sender reads it.
-func suiEffect(t *testing.T, message *GraphQLMessage, body string, status int) graphQLEffect {
-	t.Helper()
-	hasError, errorMessage := message.CheckResponseError([]byte(body), status)
-	if !hasError {
-		return effectAnswer
-	}
-	classified := common.ClassifyError(nil, common.ChainFamilySui, common.TransportREST, message.ClassificationStatus([]byte(body), status), errorMessage)
-	return graphQLEffect{
-		nodeError: true,
-		retried:   classified.Retryable,
-		blamed:    classified.EndpointAtFault(),
-		paused:    classified.SubCategory.IsRateLimit(),
-	}
-}
-
 func parsedSuiRequest(t *testing.T, body string) *GraphQLMessage {
 	t.Helper()
 	message, err := ParseGraphQLMsg([]byte(body))
@@ -61,12 +45,17 @@ func TestSuiGraphQLReadRows(t *testing.T) {
 		{"R5 a checkpoint in the future (checkpoints/query.snap)", read, 200, `{"data":{"checkpoint":null},"errors":[{"message":"Checkpoint 4 in the future","path":["checkpoint"],"extensions":{"code":"BAD_USER_INPUT"}}]}`, effectElsewhere},
 		{"R5 outside the consistent range", read, 200, `{"data":null,"errors":[{"message":"Request is outside consistent range","path":["object"],"extensions":{"code":"BAD_USER_INPUT"}}]}`, effectElsewhere},
 		{"R5 a page larger than this provider's max", read, 200, `{"data":null,"errors":[{"message":"Page size of 100 exceeds max of 50 for connection","path":["checkpoints"],"extensions":{"code":"BAD_USER_INPUT"}}]}`, effectElsewhere},
+		// Omer's ruling (17 Nov, point 3): Checkpoint.query's internal error with no number is R5, not R19.
+		{"R5 a checkpoint in the future with no number, an internal error (checkpoint/mod.rs)", read, 200, `{"data":{"checkpoint":{"query":null}},"errors":[{"message":"Checkpoint in the future","path":["checkpoint","query"],"extensions":{"code":"INTERNAL_SERVER_ERROR"}}]}`, effectElsewhere},
 		// R6 over R7: the full node has not applied the client's last transaction.
 		{"R6 simulate names an object not applied yet (v1.82 and later)", simulate, 200, `{"data":null,"errors":[{"message":"Invalid argument: Error checking transaction input objects: Could not find the referenced object 0x5 at version None","path":["simulateTransaction"],"extensions":{"code":"BAD_USER_INPUT"}}]}`, effectElsewhere},
 		{"R6 simulate names an object not applied yet (v1.71, in the chain)", simulate, 200, `{"data":null,"errors":[{"message":"Failed to simulate transaction","path":["simulateTransaction"],"extensions":{"code":"INTERNAL_SERVER_ERROR","chain":["code: 'Internal error', message: \"Error checking transaction input objects: Could not find the referenced object 0x5 at version None\""]}}]}`, effectElsewhere},
+		// Omer's ruling (17 Nov, point 4): an input the full node cannot find is R6 on a simulate.
+		{"R6 simulate names an input the full node cannot find", simulate, 200, `{"data":null,"errors":[{"message":"Invalid argument: Object 0x5 not found","path":["simulateTransaction"],"extensions":{"code":"BAD_USER_INPUT"}}]}`, effectElsewhere},
+		{"R6 simulate names an input version the full node cannot find", simulate, 200, `{"data":null,"errors":[{"message":"Invalid argument: Object 0x5 with version 7 not found","path":["simulateTransaction"],"extensions":{"code":"BAD_USER_INPUT"}}]}`, effectElsewhere},
 		{"R6 only on simulateTransaction: the same text on a read is R7", read, 200, `{"data":null,"errors":[{"message":"Could not find the referenced object 0x5","path":["checkpoint"],"extensions":{"code":"BAD_USER_INPUT"}}]}`, effectCaller},
 		// R7: the caller's mistake.
-		{"R7 any other bad input", read, 200, `{"data":null,"errors":[{"message":"Invalid argument: Object 0x5 not found","path":["simulateTransaction"],"extensions":{"code":"BAD_USER_INPUT"}}]}`, effectCaller},
+		{"R7 an object not found on a request that selects no simulate", read, 200, `{"data":null,"errors":[{"message":"Invalid argument: Object 0x5 not found","path":["simulateTransaction"],"extensions":{"code":"BAD_USER_INPUT"}}]}`, effectCaller},
 		{"R7 a bad simulate is the caller's", simulate, 200, `{"data":null,"errors":[{"message":"Invalid argument: invalid transaction: missing gas payment","path":["simulateTransaction"],"extensions":{"code":"BAD_USER_INPUT"}}]}`, effectCaller},
 		// R8: this provider's operator limit (query_limits/error.rs).
 		{"R8 nesting", read, 200, `{"data":null,"errors":[{"message":"Query nesting is over 20","path":["checkpoint"],"extensions":{"code":"GRAPHQL_VALIDATION_FAILED"}}]}`, effectElsewhere},
@@ -110,6 +99,9 @@ func TestSuiGraphQLReadRows(t *testing.T) {
 		{"R18 a feature this provider has off", read, 200, `{"data":null,"errors":[{"message":"querying checkpoints not available","path":["checkpoint"],"extensions":{"code":"FEATURE_UNAVAILABLE"}}]}`, effectElsewhere},
 		// R19: the provider broke.
 		{"R19 an internal error", read, 200, `{"data":null,"errors":[{"message":"Failed to fetch checkpoint","path":["checkpoint"],"extensions":{"code":"INTERNAL_SERVER_ERROR","chain":["connection refused"]}}]}`, effectFault},
+		// A chain that is not a list is left out; the error keeps its code.
+		{"R19 with a chain written as text", read, 200, `{"data":null,"errors":[{"message":"Failed to fetch checkpoint","path":["checkpoint"],"extensions":{"code":"INTERNAL_SERVER_ERROR","chain":"connection refused"}}]}`, effectFault},
+		{"R19 with a chain written as an object", read, 200, `{"data":null,"errors":[{"message":"Failed to fetch checkpoint","path":["checkpoint"],"extensions":{"code":"INTERNAL_SERVER_ERROR","chain":{"cause":"connection refused"}}}]}`, effectFault},
 		// R20 (Omer, 8 Nov): the query timeout is the operator's setting.
 		{"R20 a query timeout", read, 200, `{"errors":[{"message":"Query timed out after 40.00s","extensions":{"code":"REQUEST_TIMEOUT"}}]}`, effectElsewhere},
 
@@ -123,7 +115,7 @@ func TestSuiGraphQLReadRows(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			require.Equal(t, tc.want, suiEffect(t, tc.request, tc.body, tc.status))
+			require.Equal(t, tc.want, readEffect(t, tc.request, tc.body, tc.status))
 		})
 	}
 }
@@ -131,7 +123,7 @@ func TestSuiGraphQLReadRows(t *testing.T) {
 // TestSuiGraphQLRowsOnlyOnSui: the same reply on a chain without a list keeps the default rows.
 func TestSuiGraphQLRowsOnlyOnSui(t *testing.T) {
 	timeout := `{"errors":[{"message":"Query timed out after 40.00s","extensions":{"code":"REQUEST_TIMEOUT"}}]}`
-	require.Equal(t, effectElsewhere, suiEffect(t, parsedSuiRequest(t, suiCheckpointRead), timeout, 200), "Sui's R20")
+	require.Equal(t, effectElsewhere, readEffect(t, parsedSuiRequest(t, suiCheckpointRead), timeout, 200), "Sui's R20")
 
 	other, err := ParseGraphQLMsg([]byte(suiCheckpointRead))
 	require.NoError(t, err)
@@ -147,6 +139,8 @@ func TestSuiGraphQLWriteRows(t *testing.T) {
 	write := parsedSuiRequest(t, suiExecuteWrite)
 	aliased := parsedSuiRequest(t, `{"query":"mutation { submitted: executeTransaction(transactionDataBcs: \"AA==\", signatures: [\"AA==\"]) { effects { status } } }"}`)
 	noEffects := parsedSuiRequest(t, `{"query":"mutation { executeTransaction(transactionDataBcs: \"AA==\", signatures: [\"AA==\"]) { __typename } }"}`)
+	merged := parsedSuiRequest(t, `{"query":"mutation($include: Boolean! = true) { tx: executeTransaction(transactionDataBcs: \"AA==\", signatures: []) { tag: __typename ...F @include(if: $include) } tx: executeTransaction(transactionDataBcs: \"AA==\", signatures: []) { other: effects { status } } } fragment F on ExecutionResult { ... on ExecutionResult { fx: effects { status } } }"}`)
+	skippedEffects := parsedSuiRequest(t, `{"query":"mutation($skip: Boolean! = true) { executeTransaction(transactionDataBcs: \"AA==\", signatures: []) { effects: __typename ...F @skip(if: $skip) } } fragment F on ExecutionResult { fx: effects { status } }"}`)
 
 	tests := []struct {
 		name    string
@@ -164,6 +158,12 @@ func TestSuiGraphQLWriteRows(t *testing.T) {
 		{"W1 inside a 429", write, 429, `{"data":{"executeTransaction":{"effects":{"status":"SUCCESS"}}}}`, GraphQLWriteAccepted, effectAnswer},
 		{"W1 inside a 500", write, 500, `{"data":{"executeTransaction":{"effects":{"status":"SUCCESS"}}}}`, GraphQLWriteAccepted, effectAnswer},
 		{"W1 the field resolved without effects selected", noEffects, 200, `{"data":{"executeTransaction":{"__typename":"ExecutionResult"}}}`, GraphQLWriteAccepted, effectAnswer},
+		{"W1 effects selected by a named fragment", merged, 200, `{"data":{"tx":{"tag":"ExecutionResult","fx":{"status":"SUCCESS"},"other":null}}}`, GraphQLWriteAccepted, effectAnswer},
+		{"W1 effects contributed by a repeated root", merged, 200, `{"data":{"tx":{"tag":"ExecutionResult","fx":null,"other":{"status":"SUCCESS"}}}}`, GraphQLWriteAccepted, effectAnswer},
+		{"W1 skipped effects and a typename alias", skippedEffects, 200, `{"data":{"executeTransaction":{"effects":"ExecutionResult"}}}`, GraphQLWriteAccepted, effectAnswer},
+		{"W11 neither projection has effects", merged, 200, `{"data":{"tx":{"tag":"ExecutionResult","fx":null,"other":null}}}`, GraphQLWriteMayHaveRun, effectElsewhere},
+		{"W11 a requested projection is missing", write, 200, `{"data":{"executeTransaction":{}}}`, GraphQLWriteMayHaveRun, effectElsewhere},
+		{"W2 an error below an aliased root", merged, 502, `{"data":{"tx":{"fx":null,"other":null}},"errors":[{"message":"failed to resolve effects","path":["tx","fx"]}]}`, GraphQLWriteAccepted, effectAnswer},
 		{"W2 an error below the field", write, 200, `{"data":{"executeTransaction":{"effects":null}},"errors":[{"message":"Failed to read effects","path":["executeTransaction","effects"],"extensions":{"code":"INTERNAL_SERVER_ERROR"}}]}`, GraphQLWriteAccepted, effectAnswer},
 		{"W2 only below the write field", write, 200, `{"data":{"executeTransaction":{"effects":null}},"errors":[{"message":"Failed to execute transaction","path":["other","effects"],"extensions":{"code":"INTERNAL_SERVER_ERROR"}}]}`, GraphQLWriteMayHaveRun, effectFault},
 		// A path alone is no run: Sui's query-limit refusals carry the query's path, with data null.
@@ -203,7 +203,7 @@ func TestSuiGraphQLWriteRows(t *testing.T) {
 			outcome, known := tc.request.WriteOutcome([]byte(tc.body), tc.status)
 			require.True(t, known)
 			require.Equal(t, tc.outcome, outcome)
-			require.Equal(t, tc.effect, suiEffect(t, tc.request, tc.body, tc.status))
+			require.Equal(t, tc.effect, readEffect(t, tc.request, tc.body, tc.status))
 		})
 	}
 }
@@ -241,7 +241,8 @@ func TestSuiTransactionDigest(t *testing.T) {
 		{"under an alias", `{"query":"mutation { s: executeTransaction(transactionDataBcs: \"` + suiSnapshotBcs + `\", signatures: []) { effects { status } } }"}`, suiSnapshotDigest},
 		{"bytes that are not Base64", `{"query":"mutation { executeTransaction(transactionDataBcs: \"not base64!\", signatures: []) { effects { status } } }"}`, ""},
 		{"no bytes", `{"query":"mutation Submit($tx: Base64!) { executeTransaction(transactionDataBcs: $tx, signatures: []) { effects { status } } }"}`, ""},
-		{"two writes name no single transaction", `{"query":"mutation { a: executeTransaction(transactionDataBcs: \"` + suiSnapshotBcs + `\", signatures: []) { effects { status } } b: executeTransaction(transactionDataBcs: \"` + suiSnapshotBcs + `\", signatures: []) { effects { status } } }"}`, ""},
+		{"a variable default", `{"query":"mutation Submit($tx: Base64! = \"` + suiSnapshotBcs + `\") { executeTransaction(transactionDataBcs: $tx, signatures: []) { effects { status } } }"}`, suiSnapshotDigest},
+		{"a skipped transaction has none", `{"query":"mutation { executeTransaction(transactionDataBcs: \"` + suiSnapshotBcs + `\", signatures: []) @skip(if: true) { effects { status } } }"}`, ""},
 		{"a read has none", `{"query":"{ checkpoint(sequenceNumber: 1) { digest } }"}`, ""},
 	}
 	for _, tc := range tests {

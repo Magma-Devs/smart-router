@@ -13,7 +13,7 @@ import (
 // attempt still silent when the budget expired are each a cancelled context. The client-cancellation
 // carve-out returns exempt before looking at anything else, which is right for a race loser
 // (MAG-2648) but also swallowed real hangs — so a single bad URL behind a provider with several was
-// never disabled, never probed for recovery, and never moved the health metric.
+// never disabled and never probed for recovery.
 //
 // The rule is one condition: the REQUEST ran out of budget while this endpoint was still silent.
 // This test pins that single condition, in both directions, at the decision function.

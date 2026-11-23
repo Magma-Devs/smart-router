@@ -21,17 +21,9 @@ const suiTransactionDigestPrefix = "TransactionData::"
 // data)), Sui's TransactionData::digest. It is "" when the request names no single
 // executeTransaction, or its transaction bytes are not a base64 text: a caller then gets the unknown
 // reply that says how to find the transaction without it.
-func suiTransactionDigest(request *GraphQLMessage) string {
-	var encoded string
-	found := 0
-	for _, rootField := range request.RootFields {
-		if rootField.Name != suiExecuteTransactionField {
-			continue
-		}
-		found++
-		encoded, _ = rootField.Args[suiTransactionDataBcsArgument].(string)
-	}
-	if found != 1 || encoded == "" {
+func suiTransactionDigest(field *graphQLMutationField) string {
+	encoded, _ := field.Args[suiTransactionDataBcsArgument].(string)
+	if encoded == "" {
 		return ""
 	}
 	transactionData, err := base64.StdEncoding.DecodeString(encoded)

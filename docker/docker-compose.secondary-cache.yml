@@ -16,8 +16,9 @@
 #
 # The router never writes this service — reads only. Locally both caches start
 # empty, so to see a secondary hit, seed this cache first (e.g. point a second
-# router's cache-be at it, as scripts/pre_setups/init_smartrouter_eth_secondary_cache.sh
-# does outside compose).
+# router's cache-be at it, as
+# scripts/pre_setups/cache/init_smartrouter_eth_secondary_cache.sh does outside
+# compose).
 #
 # Secondary cache prometheus metrics: http://localhost:5556/metrics
 

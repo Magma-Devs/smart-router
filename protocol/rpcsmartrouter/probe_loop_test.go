@@ -357,9 +357,7 @@ func TestProbeCycle_HeldOffEndpointIsNotScoredUnavailable(t *testing.T) {
 	run := func(t *testing.T, holdOff func(reg *holdoff.Registry), obsByURL map[string]endpointstate.EndpointObservation, endpoints ...*routersession.EndpointWithDirectConnection) []probeCall {
 		t.Helper()
 		reg := holdoff.NewRegistryWithClock(func() time.Time { return now })
-		restore := relayHoldoff
-		relayHoldoff = reg
-		t.Cleanup(func() { relayHoldoff = restore })
+		swapRelayHoldoff(t, reg)
 		holdOff(reg)
 		getObs := func(url string) (endpointstate.EndpointObservation, bool) {
 			obs, ok := obsByURL[url]

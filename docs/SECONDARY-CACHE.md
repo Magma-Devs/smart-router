@@ -306,7 +306,7 @@ address, which no client should be able to ask for.
 
 ### The two-zone walkthrough
 
-`scripts/pre_setups/init_smartrouter_eth_secondary_cache.sh` reproduces the
+`scripts/pre_setups/cache/init_smartrouter_eth_secondary_cache.sh` reproduces the
 zone-segregated topology on a single machine — two caches and two routers:
 
 ```
@@ -317,7 +317,7 @@ external zone:  router :3360  ──read/write──►  cache :20100
 
 ```bash
 export ETH_RPC_URL_1="https://<your-eth-endpoint>"
-RUN_DEMO=1 ./scripts/pre_setups/init_smartrouter_eth_secondary_cache.sh
+RUN_DEMO=1 ./scripts/pre_setups/cache/init_smartrouter_eth_secondary_cache.sh
 ```
 
 `RUN_DEMO=1` runs the flagship flow end to end and prints its pass criteria: one
@@ -390,7 +390,7 @@ by hand:
 ```bash
 cd "$(git rev-parse --show-toplevel)"
 export ETH_RPC_URL_1="https://<your-eth-endpoint>"
-./scripts/pre_setups/init_smartrouter_eth_secondary_cache.sh
+./scripts/pre_setups/cache/init_smartrouter_eth_secondary_cache.sh
 ```
 
 Then, **in every shell you use**, export the log directory the checks read. An
@@ -812,4 +812,4 @@ tests or supports either combination; the supported RESP pairing is
 | --- | --- |
 | Unit and integration tests | `protocol/rpcsmartrouter/secondary_cache_test.go`, `protocol/performance/secondary_config_test.go`, `protocol/performance/sanitize_test.go`, `types/relay/cache_test.go` |
 | Startup/config validation, end to end against the real binary | `tests/infrastructure/binary_startup/test_secondary_cache_config_validation.py` in `Magma-Devs/smart-router-automation` — fail-fast cases, advisory warnings, startup visibility, and flag-beats-YAML precedence |
-| Live two-zone flow | `scripts/pre_setups/init_smartrouter_eth_secondary_cache.sh` with `RUN_DEMO=1`; one hands-on demo per use case in [Manual demo walkthrough](#manual-demo-walkthrough) |
+| Live two-zone flow | `scripts/pre_setups/cache/init_smartrouter_eth_secondary_cache.sh` with `RUN_DEMO=1`; one hands-on demo per use case in [Manual demo walkthrough](#manual-demo-walkthrough) |

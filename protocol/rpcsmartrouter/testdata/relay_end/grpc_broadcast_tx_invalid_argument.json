@@ -1,0 +1,37 @@
+{
+  "GUID": "<minted by the listener>",
+  "api_interface": "grpc",
+  "attempts": [
+    {
+      "batch": 0,
+      "error_code": "USER_INVALID_PARAMS",
+      "grpc_status": 3,
+      "latency_ms": "<ms>",
+      "message": "{\"error_message\":\"signature verification failed; please verify account number (5), sequence (12) and chain-id (cosmoshub-4): unauthorized\",\"error_code\":3}",
+      "outcome": "node_error",
+      "retryable": false,
+      "returned_to_client": true,
+      "sent_ms": "<ms>",
+      "upstream": "grpc-node"
+    }
+  ],
+  "chain": "GRPCTEST",
+  "error": "{\"error_message\":\"signature verification failed; please verify account number (5), sequence (12) and chain-id (cosmoshub-4): unauthorized\",\"error_code\":3}",
+  "error_code": "USER_INVALID_PARAMS",
+  "event": "relay_end",
+  "has_reply": true,
+  "is_batch": false,
+  "latency_ms": "<ms>",
+  "level": "info",
+  "message": "relay_end",
+  "method": "cosmos.tx.v1beta1.Service/BroadcastTx",
+  "outcome": "node_error",
+  "reply_bytes": 154,
+  "request_bytes": 34,
+  "schema": 2,
+  "selection": "stateful",
+  "served_by": "grpc-node",
+  "stateful": true,
+  "status": 3,
+  "stop_reason": "Stateful"
+}

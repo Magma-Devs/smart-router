@@ -255,6 +255,8 @@ func (apip *JsonRPCChainParser) ParseMsg(url string, data []byte, connectionType
 			return nil, err
 		}
 	}
+	// The cache never writes the request as final when the fold left an element out (MAG-4650).
+	nodeMsg.blocklessElement = blockFold.skippedBlocklessElement()
 	apip.BaseChainParser.ExtensionParsing(apiCollection.CollectionData.AddOn, nodeMsg, extensionInfo)
 	return nodeMsg, nil
 }
@@ -343,7 +345,6 @@ func (apip *JsonRPCChainParser) ChainBlockStats() (allowedBlockLagForQosSync int
 type JsonRPCChainListener struct {
 	chainListenerBase
 	wsListenerBase
-	app *fiber.App // captured during Serve so Shutdown can drain HTTP
 }
 
 // NewJrpcChainListener creates a new instance of JsonRPCChainListener
@@ -373,8 +374,9 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 	// Setup HTTP Server
 	// true: this listener registers a GET catch-all that upgrades, so the health
 	// route may hand an upgrade on its own path past the health handler.
-	app := createAndSetupBaseAppListener(cmdFlags, apil.endpoint.HealthCheckPath, apil.healthReporter, true)
-	apil.app = app
+	// true: a DELETE goes on to this listener's own refusal below, instead of the shared 204
+	// that told the caller it was done (MAG-4524).
+	app := createAndSetupBaseAppListener(cmdFlags, apil.endpoint.HealthCheckPath, apil.healthReporter, true, true)
 
 	// ConnectionType POST: ParseMsg needs it to find the subscription method in the spec.
 	wsUpgradeMiddleware, websocketCallbackWithDappID := apil.websocketRoutes(ctx, app, &apil.chainListenerBase, cmdFlags, "jsonrpc", fiber.MethodPost)
@@ -444,6 +446,20 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 		}
 		return fiberCtx.Next()
 	}, wsUpgradeMiddleware, websocketCallbackWithDappID)
+	// A DELETE, a PUT and a PATCH are refused the way a GET without an upgrade is: 405 and
+	// Allow: POST, the only method this listener serves outside the upgrade, at any path (MAG-4524;
+	// rulebook Part IV, section 1). Left to fiber, a PUT and a PATCH got an Allow of every method
+	// with a route (GET, HEAD, POST), and a GET is served only as an upgrade. It is a Use handler,
+	// not routes for these methods: fiber builds a 405's Allow from the routes of the other methods,
+	// so such routes would show up in each other's Allow, and Use handlers are left out of it.
+	app.Use("/*", func(fiberCtx *fiber.Ctx) error {
+		switch fiberCtx.Method() {
+		case fiber.MethodDelete, fiber.MethodPut, fiber.MethodPatch:
+			fiberCtx.Set(fiber.HeaderAllow, fiber.MethodPost)
+			return fiber.ErrMethodNotAllowed
+		}
+		return fiberCtx.Next()
+	})
 
 	apil.listen(ctx, app)
 }
@@ -630,5 +646,5 @@ func (apil *JsonRPCChainListener) Shutdown(ctx context.Context) error {
 	if apil == nil {
 		return nil
 	}
-	return drainHTTPThenWS(ctx, apil.app, &apil.wsWG, "JSONRPC")
+	return drainHTTPThenWS(ctx, &apil.gate, &apil.wsWG, "JSONRPC")
 }

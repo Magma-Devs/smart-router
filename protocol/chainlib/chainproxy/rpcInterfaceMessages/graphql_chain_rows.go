@@ -14,12 +14,14 @@ type graphQLChainRows struct {
 	// readError reads one error of a read's reply. matched is false when no row of the chain
 	// matches; the default rows read it then.
 	readError func(request *GraphQLMessage, replyError graphQLReplyError) (verdict graphQLVerdict, matched bool)
+	// writeField is the mutation's schema name, independent of its response alias.
+	writeField string
 	// writeCopy reads one copy's reply to a write: its outcome, and the verdict the error registry
 	// files a copy that is not accepted under.
-	writeCopy func(request *GraphQLMessage, body []byte, httpStatusCode int) graphQLWriteCopy
+	writeCopy func(field *graphQLMutationField, body []byte, httpStatusCode int) graphQLWriteCopy
 	// transactionDigest is the digest of the transaction a write carries, or "" when the request
 	// does not let the chain's formula compute it.
-	transactionDigest func(request *GraphQLMessage) string
+	transactionDigest func(field *graphQLMutationField) string
 	// notFound reads a read's 2xx reply with no errors (MAG-5121 P6): its message and true when a
 	// chain not-found row matches it, an answer whose record this provider says it does not hold.
 	notFound func(request *GraphQLMessage, body []byte) (message string, notFound bool)
@@ -80,7 +82,7 @@ func (gm *GraphQLMessage) chainNotFound(body []byte) (graphQLVerdict, bool) {
 	if !notFound {
 		return graphQLVerdict{}, false
 	}
-	return graphQLVerdict{kind: graphQLVerdictNotFound, status: graphQLNotFoundStatus, message: message}, true
+	return graphQLVerdict{kind: graphQLVerdictNotFound, status: graphQLNotFoundStatus, message: message, classified: common.RouterErrorNodeDataNotHeld}, true
 }
 
 // ReplyIsNotFound reports whether a read's reply matched a chain not-found row (MAG-5121 P6): an
@@ -96,7 +98,7 @@ func (gm *GraphQLMessage) ReplyIsNotFound(data []byte, httpStatusCode int) bool 
 
 // hasChainWriteRows reports whether the request is a write on a chain whose list reads write copies.
 func (gm *GraphQLMessage) hasChainWriteRows() bool {
-	return gm.IsMutation() && gm.chainRows != nil && gm.chainRows.writeCopy != nil
+	return gm.mutationField != nil && gm.chainRows != nil && gm.chainRows.writeCopy != nil && gm.mutationField.Name == gm.chainRows.writeField
 }
 
 // WriteOutcome is one copy's outcome for a write on a chain whose list reads write copies (MAG-4909
@@ -106,14 +108,14 @@ func (gm *GraphQLMessage) WriteOutcome(data []byte, httpStatusCode int) (outcome
 	if !gm.hasChainWriteRows() {
 		return 0, false
 	}
-	return gm.chainRows.writeCopy(gm, data, httpStatusCode).outcome, true
+	return gm.chainRows.writeCopy(gm.mutationField, data, httpStatusCode).outcome, true
 }
 
 // TransactionDigest is the digest of the transaction the request writes, by its chain's formula, or
 // "" when the chain has none or the request does not let it be computed.
 func (gm *GraphQLMessage) TransactionDigest() string {
-	if !gm.IsMutation() || gm.chainRows == nil || gm.chainRows.transactionDigest == nil {
+	if !gm.hasChainWriteRows() || gm.chainRows.transactionDigest == nil {
 		return ""
 	}
-	return gm.chainRows.transactionDigest(gm)
+	return gm.chainRows.transactionDigest(gm.mutationField)
 }

@@ -41,6 +41,21 @@ func (m *MockChainParser) EXPECT() *MockChainParserMockRecorder {
 	return m.recorder
 }
 
+// FinalityField mocks base method.
+func (m *MockChainParser) FinalityField() (string, string) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "FinalityField")
+	ret0, _ := ret[0].(string)
+	ret1, _ := ret[1].(string)
+	return ret0, ret1
+}
+
+// FinalityField indicates an expected call of FinalityField.
+func (mr *MockChainParserMockRecorder) FinalityField() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "FinalityField", reflect.TypeOf((*MockChainParser)(nil).FinalityField))
+}
+
 // ChainBlockStats mocks base method.
 func (m *MockChainParser) ChainBlockStats() (int64, time.Duration, uint32, uint32) {
 	m.ctrl.T.Helper()
@@ -478,6 +493,20 @@ func (m *MockChainMessage) GetUsedDefaultValue() bool {
 func (mr *MockChainMessageMockRecorder) GetUsedDefaultValue() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetUsedDefaultValue", reflect.TypeOf((*MockChainMessage)(nil).GetUsedDefaultValue))
+}
+
+// HasBlocklessElement mocks base method.
+func (m *MockChainMessage) HasBlocklessElement() bool {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "HasBlocklessElement")
+	ret0, _ := ret[0].(bool)
+	return ret0
+}
+
+// HasBlocklessElement indicates an expected call of HasBlocklessElement.
+func (mr *MockChainMessageMockRecorder) HasBlocklessElement() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "HasBlocklessElement", reflect.TypeOf((*MockChainMessage)(nil).HasBlocklessElement))
 }
 
 // IsBatch mocks base method.

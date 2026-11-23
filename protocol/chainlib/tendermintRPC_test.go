@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gofiber/fiber/v2"
 	"github.com/gorilla/websocket"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
@@ -308,9 +307,7 @@ func TestTendermintURIRPC(t *testing.T) {
 }
 
 func TestTendermintRpcChainListener_Shutdown_DrainsWSWaitGroup(t *testing.T) {
-	listener := &TendermintRpcChainListener{
-		app: fiber.New(fiber.Config{DisableStartupMessage: true}),
-	}
+	listener := &TendermintRpcChainListener{}
 	listener.wsWG.Add(1)
 	go func() {
 		time.Sleep(100 * time.Millisecond)
@@ -326,9 +323,7 @@ func TestTendermintRpcChainListener_Shutdown_DrainsWSWaitGroup(t *testing.T) {
 }
 
 func TestTendermintRpcChainListener_Shutdown_RespectsContextDeadline(t *testing.T) {
-	listener := &TendermintRpcChainListener{
-		app: fiber.New(fiber.Config{DisableStartupMessage: true}),
-	}
+	listener := &TendermintRpcChainListener{}
 	listener.wsWG.Add(1)
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()

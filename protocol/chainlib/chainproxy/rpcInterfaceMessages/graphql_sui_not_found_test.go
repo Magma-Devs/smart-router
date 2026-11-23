@@ -48,11 +48,12 @@ func TestSuiTransactionNotFound(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			read := parsedSuiRequest(t, test.request)
 			require.Equal(t, test.wantNotFound, read.ReplyIsNotFound([]byte(test.body), test.status))
-			require.Equal(t, test.wantEffect, suiEffect(t, read, test.body, test.status))
+			require.Equal(t, test.wantEffect, readEffect(t, read, test.body, test.status))
 			if test.wantNotFound {
-				status := read.ClassificationStatus([]byte(test.body), test.status)
-				classified := common.ClassifyError(nil, common.ChainFamilySui, common.TransportREST, status, "")
-				require.True(t, classified.SubCategory.IsDataScope(), "filed as data this provider does not hold, got %s", classified.Name)
+				// The entry the relay applies (IsDataScope, so OnSessionDataNotHeld), not the shared
+				// rows' reading of the status: a read verdict naming none is filed by its kind.
+				classified := read.OwnClassification([]byte(test.body), test.status)
+				require.Equal(t, common.RouterErrorNodeDataNotHeld, classified, "filed as data this provider does not hold, got %v", classified)
 			}
 		})
 	}

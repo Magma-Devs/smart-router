@@ -16,6 +16,9 @@ type RelayProcessorMetricsMock struct{}
 func (romm *RelayProcessorMetricsMock) SetRelayNodeErrorMetric(providerAddress, chainId, apiInterface, method string) {
 }
 
+func (romm *RelayProcessorMetricsMock) SetRelayNodeResultMetric(chainId, apiInterface, providerAddress, method string) {
+}
+
 func (romm *RelayProcessorMetricsMock) RecordHedgeRelaySent(chainId string, apiInterface string, method string) {
 }
 

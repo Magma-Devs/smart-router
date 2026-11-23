@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
+	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 )
 
@@ -197,6 +198,13 @@ func TestFetchBlockHashWithSolanaRetry(t *testing.T) {
 }
 
 func TestIsSolanaFamily_DefaultCases(t *testing.T) {
+	// The forks and testnets take the Solana family from their imports when the router loads the
+	// catalog, as solana.json and koii.json declare them.
+	common.RegisterChainFamilies(map[string]spectypes.Spec{
+		"SOLANAT": {Index: "SOLANAT", Imports: []string{"SOLANA"}},
+		"KOII":    {Index: "KOII", Imports: []string{"SOLANA"}},
+		"KOIIT":   {Index: "KOIIT", Imports: []string{"KOII"}},
+	})
 	tests := []struct {
 		chainID  string
 		expected bool

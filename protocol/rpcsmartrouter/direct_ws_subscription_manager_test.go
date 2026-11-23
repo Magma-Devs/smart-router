@@ -462,6 +462,8 @@ func (m *mockWSProtocolMessage) GetUsedDefaultValue() bool                      
 func (m *mockWSProtocolMessage) GetParseDirective() *spectypes.ParseDirective        { return nil }
 func (m *mockWSProtocolMessage) IsBatch() bool                                       { return false }
 
+func (m *mockWSProtocolMessage) HasBlocklessElement() bool { return false }
+
 func (m *mockWSProtocolMessage) CheckResponseError(data []byte, httpStatusCode int) (bool, string) {
 	return false, ""
 }

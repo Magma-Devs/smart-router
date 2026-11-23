@@ -925,9 +925,9 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 // sendGraphQLRelay posts a GraphQL document to the endpoint's base URL.
 //
 // Every operation shares that one URL, so the body is the request: it is sent exactly as the
-// caller wrote it. Errors are classified on the REST transport, which GraphQL-over-HTTP shares
-// (see common.ApiInterfaceToTransport); what counts as a node error is decided by
-// GraphQLMessage.CheckResponseError, since GraphQL reports most failures inside a 200.
+// caller wrote it. What counts as a node error is decided by GraphQLMessage.CheckResponseError,
+// since GraphQL reports most failures inside a 200. A read's error is filed by GraphQL's own rows
+// (MAG-5121); a write's by the shared REST rows, until MAG-5122.
 func (d *DirectRPCRelaySender) sendGraphQLRelay(
 	ctx context.Context,
 	chainMessage chainlib.ChainMessage,
@@ -971,9 +971,15 @@ func (d *DirectRPCRelaySender) sendGraphQLRelay(
 		return nil, classifyAndWrap(err, d.chainFamily, common.TransportREST)
 	}
 
-	// Every GraphQL reply is a JSON document, errors included, so a 2xx body that does not
-	// parse is a truncated or corrupted reply: a transport failure, as on JSON-RPC.
-	if response.StatusCode >= 200 && response.StatusCode < 300 && len(response.Body) > 0 && !json.Valid(response.Body) {
+	// Every GraphQL reply is a JSON document, errors included. A 2xx body that starts like one
+	// and does not parse was cut on the way: a dropped connection, a transport failure, as on
+	// JSON-RPC. A body that does not start like JSON at all (an HTML or text page) is a whole
+	// reply from whatever answered: on a read it goes on as this provider's reply, which the
+	// verdict blames as a bad gateway and the client gets as is when no provider answers
+	// (MAG-5121). A write keeps the transport failure, which tells the broadcast that it may
+	// have run (MAG-5122).
+	if response.StatusCode >= 200 && response.StatusCode < 300 && len(response.Body) > 0 &&
+		(graphqlMessage.IsMutation() || looksLikeJSONOpening(response.Body)) && !json.Valid(response.Body) {
 		utils.FormatDebug("direct GraphQL response is not valid JSON",
 			utils.LogAttr("endpoint", d.endpointName),
 			utils.LogAttr("status_code", response.StatusCode),
@@ -985,7 +991,9 @@ func (d *DirectRPCRelaySender) sendGraphQLRelay(
 		)
 	}
 
-	hasError, errorMessage := chainMessage.CheckResponseError(response.Body, response.StatusCode)
+	// One reading of the body for both the verdict and the status the registry files it under: a
+	// read's reply can be megabytes. chainMessage.CheckResponseError is this same method.
+	hasError, errorMessage, classificationStatus, ownClassification := graphqlMessage.ReplyVerdict(response.Body, response.StatusCode)
 	if hasError && errorMessage != "" {
 		utils.FormatDebug("GraphQL response contains error",
 			utils.LogAttr("endpoint", d.endpointName),
@@ -1028,11 +1036,13 @@ func (d *DirectRPCRelaySender) sendGraphQLRelay(
 		// A Sui transaction looked up by its digest and answered null (MAG-5121 P6, R23).
 		IsNotFoundAnswer: hasError && graphqlMessage.ReplyIsNotFound(response.Body, response.StatusCode),
 	}
-	if hasError {
-		// A GraphQL node error usually arrives inside a 200, so the status alone would leave
-		// the registry with nothing to go on: the message stands in for it (RESOURCE_EXHAUSTED
-		// classifies as a 429, a caller's error on a mutation as a 400).
-		classificationStatus := graphqlMessage.ClassificationStatus(response.Body, response.StatusCode)
+	switch {
+	case ownClassification != nil:
+		// Preserve the body verdict from GraphQL's read or chain write rows even under a 5xx.
+		result.ApplyRouterErrorClassification(ownClassification)
+		result.IsOwnVerdict = true
+	case hasError:
+		// A write without chain rows uses the shared registry under its classification status.
 		result.ApplyNodeErrorClassification(d.chainFamily, common.TransportREST, classificationStatus, errorMessage)
 	}
 

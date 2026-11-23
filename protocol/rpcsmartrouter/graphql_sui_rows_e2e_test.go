@@ -7,9 +7,33 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	specutils "github.com/magma-Devs/smart-router/utils/keeper"
 	"github.com/magma-Devs/smart-router/utils/rand"
 )
+
+func TestSuiGraphQLRelay_InputCoercionServedByFirstProvider(t *testing.T) {
+	rand.InitRandomSeed()
+	logs, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
+	require.NoError(t, err)
+	specs, err := specutils.GetAllSpecsFromPath("../chainlib/testdata/sui.json")
+	require.NoError(t, err)
+	sui, err := specutils.ExpandSpecWithDependencies(specs, "SUI")
+	require.NoError(t, err)
+	parser, err := chainlib.NewGraphQLChainParser()
+	require.NoError(t, err)
+	parser.SetSpec(*sui)
+
+	const query = `{"query":"{ checkpoint(sequenceNumber: \"abc\") { digest } }"}`
+	const refusal = `{"data":null,"errors":[{"message":"Expected input type \"UInt53\", found \"abc\".","locations":[{"line":1,"column":30}],"path":["checkpoint"]}]}`
+	hits, server := newGatewayTestServer(t, parser, logs, refusalReply{http.StatusOK, refusal}, refusalReply{http.StatusOK, refusal})
+	result, err := sendGatewayTestRequest(t, context.Background(), parser, server, query)
+	require.NoError(t, err)
+	require.Equal(t, [2]int64{1, 0}, loadRefusalHits(hits))
+	require.Equal(t, refusal, string(result.Reply.Data))
+	require.True(t, result.IsNonRetryable)
+}
 
 // TestSuiGraphQLRelay_ReadRowsDecideThePeer (MAG-4909) sends Sui reads through SendParsedRelay to two
 // local upstreams, as TestGraphQLRelay_ReadVerdictsDecideThePeer does for the default rows. A Sui row

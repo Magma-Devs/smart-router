@@ -204,7 +204,6 @@ func (apip *RestChainParser) ChainBlockStats() (allowedBlockLagForQosSync int64,
 
 type RestChainListener struct {
 	chainListenerBase
-	app *fiber.App // captured during Serve so Shutdown can drain HTTP
 }
 
 // RestMethodCarriesBody reports whether the REST listener relays the request body for
@@ -262,8 +261,7 @@ func (apil *RestChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 	// false: rest serves no websockets and registers no GET route, so the next
 	// handler after the health route is the relay catch-all below. Handing an
 	// upgrade on here would turn a health probe into a chain request.
-	app := createAndSetupBaseAppListener(cmdFlags, apil.endpoint.HealthCheckPath, apil.healthReporter, false)
-	apil.app = app
+	app := createAndSetupBaseAppListener(cmdFlags, apil.endpoint.HealthCheckPath, apil.healthReporter, false, false)
 
 	chainID := apil.endpoint.ChainID
 	// A verb the spec does not declare is a 501, not a masked 500, on both handlers.
@@ -417,8 +415,8 @@ func (rcp *RestChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMe
 // Shutdown drains in-flight HTTP requests and closes the listener.
 // REST has no client-facing WebSockets, so no 1001 close frames are needed.
 func (apil *RestChainListener) Shutdown(ctx context.Context) error {
-	if apil == nil || apil.app == nil {
+	if apil == nil {
 		return nil
 	}
-	return apil.app.ShutdownWithContext(ctx)
+	return apil.gate.close(ctx)
 }
