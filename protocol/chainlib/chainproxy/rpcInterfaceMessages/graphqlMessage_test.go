@@ -223,26 +223,26 @@ func TestGraphQLMessageCheckResponseError(t *testing.T) {
 			expectedHasError: false,
 		},
 		{
-			name: "error with no extensions block is the caller's, not the node's",
-			// Measured on Sui mainnet from a wrong argument type, identically on two
-			// independent operators. The plan assumed extensions.code is always present; it is
-			// not, and defaulting the other way would demote the whole fleet on one malformed
-			// customer query.
+			name: "an error with no code is unknown: retried without blame (MAG-5121)",
+			// Measured on Sui mainnet from a wrong argument type. Most GraphQL servers send no
+			// code at all, and on them the same shape is also a provider's own failure, so the
+			// router cannot tell: it retries, and blames no one.
 			body:             `{"data":null,"errors":[{"message":"Expected input type \"UInt53\", found \"abc\".","locations":[{"line":1,"column":30}],"path":["checkpoint"]}]}`,
 			httpStatusCode:   200,
-			expectedHasError: false,
+			expectedHasError: true,
 		},
 		{
+			// A node error filed as the caller's: served as is, not retried, not cached (MAG-5121).
 			name:             "validation failure is the caller's",
 			body:             `{"data":null,"errors":[{"message":"Page size is too large: 1000 > 50","extensions":{"code":"GRAPHQL_VALIDATION_FAILED"}}]}`,
 			httpStatusCode:   200,
-			expectedHasError: false,
+			expectedHasError: true,
 		},
 		{
-			name:             "unrecognized code is the caller's",
+			name:             "an unrecognized code is unknown",
 			body:             `{"data":null,"errors":[{"message":"something new","extensions":{"code":"SOME_FUTURE_CODE"}}]}`,
 			httpStatusCode:   200,
-			expectedHasError: false,
+			expectedHasError: true,
 		},
 		{
 			name: "resource exhausted is the node's",
@@ -266,10 +266,10 @@ func TestGraphQLMessageCheckResponseError(t *testing.T) {
 			expectedHasError: true,
 		},
 		{
-			name:             "partial success passes through as a success",
+			name:             "a partial reply with the caller's error is the caller's",
 			body:             `{"data":{"chainIdentifier":"x"},"errors":[{"message":"partial","extensions":{"code":"GRAPHQL_VALIDATION_FAILED"}}]}`,
 			httpStatusCode:   200,
-			expectedHasError: false,
+			expectedHasError: true,
 		},
 		{
 			name:             "5xx is the node's",
@@ -379,11 +379,12 @@ func TestGraphQLMessageNonResponseIsNodeError(t *testing.T) {
 		})
 	}
 
-	// Errors without data stay under the existing rules: a code-less error on a read is the
-	// caller's, and on a write it is a node error the registry files as the caller's.
+	// Errors without data are a response: a code-less error on a read is unknown (retried without
+	// blame), and on a write it is a node error the registry files as the caller's.
 	codelessNoData := []byte(`{"errors":[{"message":"Invalid user signature"}]}`)
 	hasError, _ := query.CheckResponseError(codelessNoData, http.StatusOK)
-	require.False(t, hasError)
+	require.True(t, hasError)
+	require.Equal(t, http.StatusNotImplemented, query.ClassificationStatus(codelessNoData, http.StatusOK))
 	hasError, _ = mutation.CheckResponseError(codelessNoData, http.StatusOK)
 	require.True(t, hasError)
 	require.Equal(t, http.StatusBadRequest, mutation.ClassificationStatus(codelessNoData, http.StatusOK))
@@ -400,12 +401,12 @@ func TestGraphQLMessageMutationErrors(t *testing.T) {
 	internal := []byte(`{"data":null,"errors":[{"message":"boom","extensions":{"code":"INTERNAL_SERVER_ERROR"}}]}`)
 
 	// A rejected write must not end the broadcast as a success, so any error on a mutation is a
-	// node error. The same code-less error on a read stays the caller's answer (rule 3).
+	// node error. The same code-less error on a read is unknown: retried without blame.
 	hasError, message := mutation.CheckResponseError(codeless, 200)
 	require.True(t, hasError)
 	require.Equal(t, "Invalid user signature", message)
 	hasError, _ = query.CheckResponseError(codeless, 200)
-	require.False(t, hasError)
+	require.True(t, hasError)
 
 	// The registry gets a status that says what the error is: the caller's mutation error is a
 	// 400 (not retried, not scored), and each of Sui's node-fault codes maps to its HTTP analogue
@@ -414,14 +415,14 @@ func TestGraphQLMessageMutationErrors(t *testing.T) {
 	require.Equal(t, 429, mutation.ClassificationStatus(rateLimited, 200))
 	require.Equal(t, 429, query.ClassificationStatus(rateLimited, 200))
 	require.Equal(t, 500, mutation.ClassificationStatus(internal, 200))
-	require.Equal(t, 200, query.ClassificationStatus(codeless, 200))
+	require.Equal(t, 501, query.ClassificationStatus(codeless, 200))
 	require.Equal(t, 503, mutation.ClassificationStatus(codeless, 503), "a non-2xx status is its own answer")
 }
 
 // TestGraphQLMessageSuiNodeFaultCodes pins every code Sui's GraphQL server defines
-// (sui-indexer-alt-graphql, src/error.rs `mod code`). REQUEST_TIMEOUT arrives inside an ordinary
-// response; read as the caller's answer it ended the relay unretried and could be cached as a
-// pinned checkpoint's answer.
+// (sui-indexer-alt-graphql, src/error.rs `mod code`) against the default rows of a read
+// (MAG-5121). REQUEST_TIMEOUT arrives inside an ordinary response; read as the caller's answer it
+// ended the relay unretried and could be cached as a pinned checkpoint's answer.
 func TestGraphQLMessageSuiNodeFaultCodes(t *testing.T) {
 	query, err := ParseGraphQLMsg([]byte(`{"query":"{ checkpoint(sequenceNumber: 1) { digest } }"}`))
 	require.NoError(t, err)
@@ -431,13 +432,13 @@ func TestGraphQLMessageSuiNodeFaultCodes(t *testing.T) {
 		nodeError  bool
 		statusWant int
 	}{
-		{code: "BAD_USER_INPUT", nodeError: false, statusWant: 200},
-		{code: "GRAPHQL_PARSE_FAILED", nodeError: false, statusWant: 200},
-		{code: "GRAPHQL_VALIDATION_FAILED", nodeError: false, statusWant: 200},
+		{code: "BAD_USER_INPUT", nodeError: true, statusWant: 400},
+		{code: "GRAPHQL_PARSE_FAILED", nodeError: true, statusWant: 400},
+		{code: "GRAPHQL_VALIDATION_FAILED", nodeError: true, statusWant: 400},
 		{code: "RESOURCE_EXHAUSTED", nodeError: true, statusWant: 429},
 		{code: "INTERNAL_SERVER_ERROR", nodeError: true, statusWant: 500},
 		{code: "REQUEST_TIMEOUT", nodeError: true, statusWant: 504},
-		{code: "FEATURE_UNAVAILABLE", nodeError: true, statusWant: 403},
+		{code: "FEATURE_UNAVAILABLE", nodeError: true, statusWant: 501},
 	}
 	for _, test := range tests {
 		t.Run(test.code, func(t *testing.T) {
@@ -682,7 +683,7 @@ func TestParseGraphQLMsgADocumentHoldingAMutationIsAWrite(t *testing.T) {
 
 // MAG-5120, check Q8: a mutation that selects more than one root field once its fragments are
 // expanded, __typename not counted, is refused as a write's shape, with REQUEST_REFUSED and
-// Lava-Write-Outcome: not_sent.
+// Router-Write-Outcome: not_sent.
 func TestParseGraphQLMsgRefusesAMutationWithMoreThanOneRootField(t *testing.T) {
 	const write = `executeTransaction(transactionDataBcs: \"AA==\") { digest }`
 	for _, tc := range []struct {

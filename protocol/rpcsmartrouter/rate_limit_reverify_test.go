@@ -21,7 +21,7 @@ func runCycles(t *testing.T, inputs *chainReverifyInputs, active map[uint64]*rou
 		inputs.rateLimitHoldoff = holdoff.NewRegistry()
 	}
 	for i := 0; i < n; i++ {
-		active, _, _ = applyReverification(context.Background(), inputs, active, reverifyTierStatic, uint64(100+i))
+		active, _, _ = probeAndApplyReverification(context.Background(), inputs, active, reverifyTierStatic, uint64(100+i))
 	}
 	return collectNames(active)
 }

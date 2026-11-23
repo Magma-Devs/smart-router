@@ -26,7 +26,7 @@
   "method": "cosmos.tx.v1beta1.Service/BroadcastTx",
   "outcome": "node_error",
   "reply_bytes": 157,
-  "request_bytes": 25,
+  "request_bytes": 27,
   "schema": 2,
   "selection": "stateful",
   "served_by": "grpc-node",

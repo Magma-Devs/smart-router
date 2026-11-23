@@ -117,11 +117,16 @@ func (ecf *EndpointPoller) hydrateGrpcChainMessage(chainMessage chainlib.ChainMe
 // being the same one every time — an alternating tip source reads as a flapping
 // node.
 func (ecf *EndpointPoller) collectionAddons() []string {
-	if ecf.endpoint == nil || len(ecf.endpoint.Addons) == 0 {
+	return sortedAddons(ecf.endpoint)
+}
+
+// sortedAddons is an endpoint's declared add-ons in a stable order (see collectionAddons).
+func sortedAddons(endpoint *routersession.Endpoint) []string {
+	if endpoint == nil || len(endpoint.Addons) == 0 {
 		return nil
 	}
-	addons := make([]string, 0, len(ecf.endpoint.Addons))
-	for addon := range ecf.endpoint.Addons {
+	addons := make([]string, 0, len(endpoint.Addons))
+	for addon := range endpoint.Addons {
 		addons = append(addons, addon)
 	}
 	sort.Strings(addons)
@@ -218,6 +223,17 @@ func (ecf *EndpointPoller) FetchLatestBlockNum(ctx context.Context) (blockNum in
 			utils.LogAttr("chainID", ecf.chainID),
 			utils.LogAttr("endpoint", ecf.endpointURL),
 			utils.LogAttr("method", parsing.ApiName),
+		)
+	}
+
+	// A reply the interface itself reads as an error is not a healthy poll, whatever head sits
+	// beside the error (GraphQL answers its errors inside a 200; MAG-5124).
+	if notAnAnswer := chainlib.NotAnAnswerReplyError(chainMessage, responseData, 0); notAnAnswer != nil {
+		return spectypes.NOT_APPLICABLE, utils.FormatDebugErr(tagName+" reply carries an error", notAnAnswer,
+			utils.LogAttr("chainID", ecf.chainID),
+			utils.LogAttr("endpoint", ecf.endpointURL),
+			utils.LogAttr("method", parsing.ApiName),
+			utils.LogAttr("response", parser.CapStringLen(string(responseData))),
 		)
 	}
 

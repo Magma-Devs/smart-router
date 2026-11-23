@@ -652,16 +652,26 @@ func FormatTrace(description string, attributes ...Attribute) error {
 }
 
 // FormatLongString shortens a msg longer than maxCharacters bytes to its first two thirds and its
-// last third of maxCharacters, joined by "...truncated...". Each cut lands on a rune boundary, so a
-// valid UTF-8 msg stays valid UTF-8: a rune the cut would split is left out, and the kept parts may
-// be up to three bytes short of the budget. A maxCharacters of 0 keeps msg whole.
+// last third of maxCharacters, joined by "...truncated...", with CutMiddle's rune-boundary cuts. A
+// maxCharacters of 0 keeps msg whole.
 func FormatLongString(msg string, maxCharacters int) string {
 	if maxCharacters != 0 && len(msg) > maxCharacters {
 		postfixLen := maxCharacters / 3
-		prefixLen := maxCharacters - postfixLen
-		return msg[:runeStartAtOrBefore(msg, prefixLen)] + "...truncated..." + msg[runeStartAtOrAfter(msg, len(msg)-postfixLen):]
+		return CutMiddle(msg, maxCharacters-postfixLen, postfixLen, "...truncated...")
 	}
 	return msg
+}
+
+// CutMiddle returns msg's first head bytes and its last tail bytes joined by marker, for a log line.
+// Each cut lands on a rune boundary, so a valid UTF-8 msg stays valid UTF-8: a rune the cut would
+// split is left out, and each kept part may be up to three bytes short. A msg the cut would not
+// shorten (head+tail at least len(msg)), or a negative head or tail, comes back whole: the cut
+// would index past msg and panic in the middle of a log call.
+func CutMiddle(msg string, head, tail int, marker string) string {
+	if head < 0 || tail < 0 || head+tail >= len(msg) {
+		return msg
+	}
+	return msg[:runeStartAtOrBefore(msg, head)] + marker + msg[runeStartAtOrAfter(msg, len(msg)-tail):]
 }
 
 // runeStartAtOrBefore returns the last index at or before at where a rune of s starts, so s[:i]
