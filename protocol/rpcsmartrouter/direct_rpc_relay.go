@@ -577,7 +577,7 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 	// and caching. CometBFT serves both forms on the same port.
 	if tendermintMessage, ok := chainMessage.GetRPCMessage().(*rpcInterfaceMessages.TendermintrpcMessage); ok {
 		if uri, fromURI := tendermintMessage.URIRequest(); fromURI {
-			fullURL, err := tendermintURIRequestURL(nodeUrl.Url, uri)
+			fullURL, err := tendermintURIRequestURL(nodeUrl, uri)
 			if err != nil {
 				return nil, fmt.Errorf("failed to build Tendermint RPC URL: %w", err)
 			}
@@ -708,12 +708,14 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 // tendermintURIRequestURL is the URL a client's Tendermint GET goes to: the client's path under the
 // node url's own path, and the client's query after the node url's own query. A node url can name
 // its key in either, and the JSON-RPC POST goes to the node url as configured, so the GET keeps
-// both (MAG-5267). uri is the client's path and query without the leading "/" (URIRequest).
-func tendermintURIRequestURL(nodeURL, uri string) (string, error) {
+// both (MAG-5267). The node url's own parameters go as configured: a client pair whose name the
+// node url's query or its auth-query already sets is left out. uri is the client's path and query
+// without the leading "/" (URIRequest).
+func tendermintURIRequestURL(nodeURL *common.NodeUrl, uri string) (string, error) {
 	path, query, _ := strings.Cut(uri, "?")
 	// A leading "/" makes JoinURLPath append the path to the node url's own path. Without it the
 	// path is relative, and resolving it replaces the node url's last path segment and its query.
-	joined, err := common.JoinURLPath(nodeURL, "/"+path)
+	joined, err := common.JoinURLPath(nodeURL.Url, "/"+path)
 	if err != nil || query == "" {
 		return joined, err
 	}
@@ -721,12 +723,66 @@ func tendermintURIRequestURL(nodeURL, uri string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	query = withoutQueryNames(query, queryNames(joinedURL.RawQuery, nodeURL.AuthConfig.AuthQuery))
+	if query == "" {
+		return joined, nil
+	}
 	if joinedURL.RawQuery == "" {
 		joinedURL.RawQuery = query
 	} else {
 		joinedURL.RawQuery += "&" + query
 	}
 	return joinedURL.String(), nil
+}
+
+// queryNames lists the parameter names the raw queries set, as queryName reads them. A pair ends at
+// "&" or ";": some servers split on both.
+func queryNames(rawQueries ...string) map[string]bool {
+	names := map[string]bool{}
+	for _, rawQuery := range rawQueries {
+		for _, pair := range strings.FieldsFunc(rawQuery, func(r rune) bool { return r == '&' || r == ';' }) {
+			names[queryName(pair)] = true
+		}
+	}
+	return names
+}
+
+// queryName is a query pair's name, unescaped and lowercased, so a name a server reads the same way
+// compares equal however it is spelled.
+func queryName(pair string) string {
+	name, _, _ := strings.Cut(pair, "=")
+	if unescaped, err := url.QueryUnescape(name); err == nil {
+		name = unescaped
+	}
+	return strings.ToLower(name)
+}
+
+// withoutQueryNames is rawQuery without the pairs whose name is in names. The pairs it keeps, and
+// the separator before each, stay as they were.
+func withoutQueryNames(rawQuery string, names map[string]bool) string {
+	if len(names) == 0 {
+		return rawQuery
+	}
+	var kept strings.Builder
+	wrote := false
+	before := ""
+	for {
+		pair, after, rest, found := rawQuery, "", "", false
+		if i := strings.IndexAny(rawQuery, "&;"); i >= 0 {
+			pair, after, rest, found = rawQuery[:i], rawQuery[i:i+1], rawQuery[i+1:], true
+		}
+		if pair == "" || !names[queryName(pair)] {
+			if wrote {
+				kept.WriteString(before)
+			}
+			kept.WriteString(pair)
+			wrote = true
+		}
+		if !found {
+			return kept.String()
+		}
+		rawQuery, before = rest, after
+	}
 }
 
 // classifyJSONRPCNodeError stamps the registry's verdict on a JSON-RPC or Tendermint reply that
