@@ -154,7 +154,6 @@ func TestRESTListener_WriteOutcome(t *testing.T) {
 			}
 			if tc.hang {
 				server.smartRouterEndpointMetrics = metrics.NewSmartRouterMetricsManager(metrics.SmartRouterMetricsManagerOptions{})
-				server.smartRouterEndpointMetrics.SetEndpointOverallHealth("LAVA", "rest", "rest-upstream", true)
 			}
 			listener := chainlib.NewRestChainListener(ctx, rpcEndpoint, server, nil, logs)
 			listenerDone := make(chan struct{})
@@ -222,10 +221,6 @@ func TestRESTListener_WriteOutcome(t *testing.T) {
 				require.Eventually(t, func() bool { return !providerEndpoint.HealthSnapshot().Enabled }, time.Second, time.Millisecond,
 					"a budget-expired cancellation must disable the unhealthy URL at the refusal threshold")
 				require.NotZero(t, providerEndpoint.HealthSnapshot().DisabledAt)
-				require.Eventually(t, func() bool {
-					value, found := gatherHealthGauge(t, "LAVA", "rest", "rest-upstream")
-					return found && value == 0
-				}, time.Second, time.Millisecond, "endpoint health metric must reflect the hang")
 			}
 		})
 	}

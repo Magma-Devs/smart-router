@@ -12,6 +12,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	relaycoretest "github.com/magma-Devs/smart-router/protocol/relaycoretest"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
+	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 )
@@ -87,8 +88,12 @@ func TestSendParsedRelay_ExpiredBeforeWriteDispatch(t *testing.T) {
 
 	// Preserve that error through the client-facing path: no node could hold this write.
 	result, err := server.SendParsedRelay(ctx, nil, msg)
-	require.Nil(t, result)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
+	// The reply carries the request's headers and no verdict of its own (MAG-5076).
+	require.NotNil(t, result)
+	require.Zero(t, result.StatusCode)
+	require.Nil(t, result.ClientFacing)
+	require.Contains(t, result.GetReply().GetMetadata(), pairingtypes.Metadata{Name: common.USER_REQUEST_TYPE, Value: "eth_sendRawTransaction"})
 }
 
 func TestWriteOutcomeIsUnknown_Wrapper(t *testing.T) {

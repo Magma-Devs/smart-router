@@ -41,13 +41,13 @@ func newTestWSManager(primary, backup []*common.NodeUrl) *DirectWSSubscriptionMa
 func TestWSSetEndpoints_DarkBootRecoversWithoutRestart(t *testing.T) {
 	manager := newTestWSManager(nil, nil)
 
-	_, err := manager.selectEndpoint(context.Background(), "client-1", nil)
+	_, err := manager.selectEndpoint(context.Background(), "client-1")
 	require.Error(t, err, "dark boot: nothing to select")
 
 	recovered := []*common.NodeUrl{{Url: "wss://primary-1.example.com"}}
 	require.True(t, manager.SetEndpoints(recovered, nil))
 
-	ep, err := manager.selectEndpoint(context.Background(), "client-1", nil)
+	ep, err := manager.selectEndpoint(context.Background(), "client-1")
 	require.NoError(t, err, "recovered provider must be selectable — this is the whole fix")
 	require.Equal(t, "wss://primary-1.example.com", ep.Url)
 }
@@ -58,14 +58,14 @@ func TestWSSetEndpoints_RecoveredPrimaryTakesOverFromBackup(t *testing.T) {
 	backup := []*common.NodeUrl{{Url: "wss://backup-1.example.com"}}
 	manager := newTestWSManager(nil, backup)
 
-	ep, err := manager.selectEndpoint(context.Background(), "client-1", nil)
+	ep, err := manager.selectEndpoint(context.Background(), "client-1")
 	require.NoError(t, err)
 	require.Equal(t, "wss://backup-1.example.com", ep.Url, "empty primary tier is what fires the cascade")
 
 	primary := []*common.NodeUrl{{Url: "wss://primary-1.example.com"}}
 	require.True(t, manager.SetEndpoints(primary, backup))
 
-	ep, err = manager.selectEndpoint(context.Background(), "client-2", nil)
+	ep, err = manager.selectEndpoint(context.Background(), "client-2")
 	require.NoError(t, err)
 	require.Equal(t, "wss://primary-1.example.com", ep.Url, "primary tier is served first again")
 }
@@ -77,7 +77,7 @@ func TestWSSetEndpoints_DemotionEmptiesTier(t *testing.T) {
 	manager := newTestWSManager(primary, nil)
 
 	require.True(t, manager.SetEndpoints(nil, nil))
-	_, err := manager.selectEndpoint(context.Background(), "client-1", nil)
+	_, err := manager.selectEndpoint(context.Background(), "client-1")
 	require.Error(t, err)
 }
 
@@ -119,7 +119,7 @@ func TestWSSetEndpoints_RebuildsURLIndexForOptimizer(t *testing.T) {
 	fresh := []*common.NodeUrl{{Url: "wss://new-1.example.com"}, {Url: "wss://new-2.example.com"}}
 	require.True(t, manager.SetEndpoints(fresh, nil))
 
-	ep, err := manager.selectEndpoint(context.Background(), "client-1", nil)
+	ep, err := manager.selectEndpoint(context.Background(), "client-1")
 	require.NoError(t, err, "optimizer-selected URL must resolve against the rebuilt index")
 	require.Contains(t, []string{"wss://new-1.example.com", "wss://new-2.example.com"}, ep.Url)
 
@@ -130,12 +130,12 @@ func TestGRPCSetEndpoints_DarkBootRecoversWithoutRestart(t *testing.T) {
 	manager := NewDirectGRPCSubscriptionManager(
 		getTestMetricsManager(), "BSC", "grpc", nil, nil, nil, nil)
 
-	_, err := manager.selectEndpoint(context.Background(), "client-1", nil)
+	_, err := manager.selectEndpoint(context.Background(), "client-1")
 	require.Error(t, err)
 
 	require.True(t, manager.SetEndpoints([]*common.NodeUrl{{Url: "grpc-1.example.com:9090"}}, nil))
 
-	ep, err := manager.selectEndpoint(context.Background(), "client-1", nil)
+	ep, err := manager.selectEndpoint(context.Background(), "client-1")
 	require.NoError(t, err, "also unblocks gRPC reflection, which selects through the same cascade")
 	require.Equal(t, "grpc-1.example.com:9090", ep.Url)
 

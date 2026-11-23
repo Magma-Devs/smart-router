@@ -86,6 +86,21 @@ func (mr *MockChainParserMockRecorder) ExtensionsParser() *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ExtensionsParser", reflect.TypeOf((*MockChainParser)(nil).ExtensionsParser))
 }
 
+// FinalityField mocks base method.
+func (m *MockChainParser) FinalityField() (string, string) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "FinalityField")
+	ret0, _ := ret[0].(string)
+	ret1, _ := ret[1].(string)
+	return ret0, ret1
+}
+
+// FinalityField indicates an expected call of FinalityField.
+func (mr *MockChainParserMockRecorder) FinalityField() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "FinalityField", reflect.TypeOf((*MockChainParser)(nil).FinalityField))
+}
+
 // GetAllInternalPaths mocks base method.
 func (m *MockChainParser) GetAllInternalPaths() []string {
 	m.ctrl.T.Helper()

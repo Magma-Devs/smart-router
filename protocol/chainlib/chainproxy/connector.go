@@ -273,9 +273,11 @@ type GRPCConnectorInterface interface {
 
 // dialOptions is every dial this connector makes: the shared options for the endpoint
 // (common.NodeUrl.GRPCDialOptions) with the transport decided here, dialled blocking so a
-// caller waiting on a pool refill fails fast on an unreachable node.
+// caller waiting on a pool refill fails fast on an unreachable node. The status-frame handler
+// is what tells a node's status from one grpc-go wrote for a broken connection
+// (common.GRPCStatusFrame).
 func (connector *GRPCConnector) dialOptions(transport grpc.DialOption) []grpc.DialOption {
-	return connector.nodeUrl.GRPCDialOptions(transport, grpc.WithBlock())
+	return connector.nodeUrl.GRPCDialOptions(transport, grpc.WithBlock(), common.GRPCStatusFrameDialOption())
 }
 
 func (connector *GRPCConnector) setCredentials(credentials credentials.TransportCredentials) {

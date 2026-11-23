@@ -16,7 +16,7 @@ linters:
     - copyloopvar
     - dogsled
     # dupl was added by MAG-4280 after the 2026-10-13 duplicate-code review's mechanical batch; the
-    # copies it still reports are listed under exclusions below, each with the ticket that owns them.
+    # production copies it still reports are listed under exclusions below, each with why it stays.
     - dupl
     - forcetypeassert
     - gocritic
@@ -65,32 +65,26 @@ linters:
           - bodyclose
           - unparam
           - prealloc
-      # dupl baseline (MAG-4280). Each rule names the files of the clone pairs it excludes, so a copy
-      # of their code in any other file is still reported; a new copy inside a named file, or between
-      # the two files of one rule, is not. Test code is MAG-4281's; the generated-shape files are not
-      # hand-written.
+      # dupl gates production code only.
       - path: _test\.go
         linters:
           - dupl
-      - path: (types/relay/grpc_service|protocol/chainlib/chainlib_mock)\.go
+      # dupl baseline: the production copies dupl still reports. Generated files (chainlib_mock.go)
+      # need no rule: golangci-lint skips them.
+      #
+      # The gRPC service glue is hand-written in protoc-gen-go-grpc's shape: every handler is the same
+      # code over its own request type. The rule names the file and the line each copy starts on
+      # (source), so a copy that is not a handler is still reported; delete it when the handlers go.
+      - path: types/relay/grpc_service\.go
         linters:
           - dupl
-      # The JSON-RPC/Tendermint ParseMsg batch walkers are the last of MAG-4279's structural merges:
-      # they differ on the parse directive a one-element batch gets, which needs an owner decision.
-      - path: protocol/chainlib/(jsonRPC|tendermintRPC)\.go
-        linters:
-          - dupl
-        text: "(jsonRPC|tendermintRPC)\\.go"
-      # Twins whose differences are the point: latency vs sync normalisation (constants, log keys)
-      # and sticky vs fresh selection (log text).
-      - path: protocol/provideroptimizer/(upstream_selector|provider_optimizer)\.go
-        linters:
-          - dupl
-        text: "(upstream_selector|provider_optimizer)\\.go"
-      - path: protocol/routersession/consumer_session_manager\.go
-        linters:
-          - dupl
-        text: "consumer_session_manager\\.go"
+        source: '^func _\w+_Handler\('
+      # The JSON-RPC and Tendermint ParseMsg batch walks share an element's requested-block block and
+      # the batch's combined-api block. They stay two until the parse directive a one-element batch
+      # gets is decided, and each of the four blocks carries a //nolint:dupl on its first line rather
+      # than a rule here: a rule can only anchor on a line's text, and `if idx == 0 {` would hide a
+      # new pair across the two files that starts the same way. nolintlint (allow-unused: false)
+      # reports each directive once its copies go.
       - linters:
           - gocritic
         text: "singleCaseSwitch"

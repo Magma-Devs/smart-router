@@ -14,7 +14,7 @@ import (
 
 // noAnswerRelay is a relay that ends with no provider answer, the way the router's relay path ends
 // one: the status the router chose, the client-facing verdict with the transport cause, and the
-// reply headers the relay put on, its own Lava-Guid among them.
+// reply headers the relay put on, its own Router-Guid among them.
 func noAnswerRelay(status int, cf common.ClientFacingError) *recordingRelaySender {
 	return &recordingRelaySender{send: answeringWith(&common.RelayResult{
 		StatusCode:   status,
@@ -26,7 +26,7 @@ func noAnswerRelay(status int, cf common.ClientFacingError) *recordingRelaySende
 // TestGraphQLListener_NoProviderAnswerIsTheRoutersGraphQLError is MAG-5119's no-answer reply through
 // the listener (the GraphQL chapter's cases T9 and T10): a read no provider answered gets the status
 // the router chose, 502 when a provider refused the connection and 504 when every provider timed
-// out, and one GraphQL error with the code NO_PROVIDER_ANSWER, whose guid equals Lava-Guid, with no
+// out, and one GraphQL error with the code NO_PROVIDER_ANSWER, whose guid equals Router-Guid, with no
 // data key and no word of a provider's url, address or connection error.
 //
 // It used to be one JSON object with the key "error", and on a refused connection its text named
@@ -54,7 +54,7 @@ func TestGraphQLListener_NoProviderAnswerIsTheRoutersGraphQLError(t *testing.T) 
 			require.Equal(t, "application/json; charset=utf-8", reply.header.Get("Content-Type"))
 			entry := requireGraphQLErrorEntry(t, reply.body)
 			require.Equal(t, graphQLNoProviderAnswerCode, entry.Extensions["code"])
-			require.Equal(t, entry.Extensions["guid"], reply.header.Get(common.GUID_HEADER_NAME), "Lava-Guid equals extensions.guid")
+			require.Equal(t, entry.Extensions["guid"], reply.header.Get(common.GUID_HEADER_NAME), "Router-Guid equals extensions.guid")
 			var raw map[string]json.RawMessage
 			require.NoError(t, json.Unmarshal([]byte(reply.body), &raw))
 			for _, leak := range []string{"sui.node.example.com", "APIKEY123", "192.0.2.7", "connection refused", "dial tcp"} {

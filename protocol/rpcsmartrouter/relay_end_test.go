@@ -590,7 +590,8 @@ func TestRelayEnd_CosmosTxOutcome(t *testing.T) {
 }
 
 // A Cosmos node refuses a transaction with a normal reply that carries the refusal's code, which the
-// event reads, so a refused transaction is told from an accepted one.
+// event reads, so a refused transaction is told from an accepted one. The client still gets the
+// node's reply; the attempt is a node error (MAG-5323), named by the code.
 func TestRelayEnd_TendermintTxRefused(t *testing.T) {
 	rand.InitRandomSeed()
 	noop := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
@@ -607,7 +608,7 @@ func TestRelayEnd_TendermintTxRefused(t *testing.T) {
 	ctx, cancel := context.WithTimeout(utils.WithUniqueIdentifier(context.Background(), guid), relayEndShortWait)
 	defer cancel()
 	_, err = server.SendRelay(ctx, "", `{"jsonrpc":"2.0","method":"broadcast_tx_sync","params":{"tx":"CpIBCo8B"},"id":1}`, "", relayEndNoCustomerID, "", nil, nil)
-	require.NoError(t, err, "the client gets the node's normal reply")
+	require.NoError(t, err, "the client gets the node's reply")
 	requireRelayEndGolden(t, "tendermint_tx_refused", normalizeRelayEnd(t, onlyRelayEnd(t, read(), guid), false))
 }
 

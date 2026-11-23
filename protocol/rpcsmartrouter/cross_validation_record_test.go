@@ -545,7 +545,7 @@ func TestCrossValidationRecord_LineFollowsLogFormat(t *testing.T) {
 // TestCrossValidationRecord_FailFastBeforeDispatch sends a request the capacity guard refuses before
 // any provider is asked (max-participants 5 against three paired providers) through SendParsedRelay.
 // crossValidationFailFast counts it as a failed cross-validated request, but the path returns before
-// appendHeadersToRelayResult, so it produced no record, and its reply had no Lava-Guid to name one.
+// appendHeadersToRelayResult, so it produced no record, and its reply had no Router-Guid to name one.
 func TestCrossValidationRecord_FailFastBeforeDispatch(t *testing.T) {
 	rand.InitRandomSeed()
 	ctx := utils.WithUniqueIdentifier(context.Background(), 771200001)
@@ -588,5 +588,5 @@ func TestCrossValidationRecord_FailFastBeforeDispatch(t *testing.T) {
 	require.Empty(t, rec.Endpoints, "no provider was asked")
 	require.Equal(t, "", rec.ServedDigest)
 	require.Equal(t, "771200001", rec.RequestID)
-	require.Equal(t, rec.RequestID, pinOverrideReplyHeader(result, common.GUID_HEADER_NAME), "the reply names the record in Lava-Guid")
+	require.Equal(t, rec.RequestID, pinOverrideReplyHeader(result, common.GUID_HEADER_NAME), "the reply names the record in Router-Guid")
 }

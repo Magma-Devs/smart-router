@@ -54,7 +54,7 @@ func getRelayAnswers(t *testing.T, query string) *httptest.ResponseRecorder {
 }
 
 // sendWriteAs is sendWrite on a request whose guid is guid, the id the listener stamps on a
-// request and the reply carries as Lava-Guid.
+// request and the reply carries as Router-Guid.
 func sendWriteAs(t *testing.T, guid uint64, tc writeInterfaceCase, chainParser chainlib.ChainParser, server *RPCSmartRouterServer) (*common.RelayResult, error) {
 	t.Helper()
 	ctx := utils.WithUniqueIdentifier(context.Background(), guid)

@@ -95,6 +95,26 @@ func TestSnapshotRemote(t *testing.T) {
 		require.True(t, source.contextEnded, "the source must be asked with an ended context")
 	})
 
+	// A check runs on every request, so what it is told is held comes from the snapshot alone:
+	// a name the snapshot lacks is not looked up on the upstream, and the source is asked with
+	// an ended context, so nothing waits.
+	t.Run("a held descriptor is the snapshot's own and is never looked up", func(t *testing.T) {
+		snapshot := &currentGlobalSnapshot{current: true}
+		source := &recordingSource{snapshots: []grpcproxy.ReflectionSnapshot{snapshot}}
+		remote := NewSnapshotRemote(source)
+		want := (&apipb.Api{}).ProtoReflect().Descriptor()
+		d, err := remote.HeldDescriptorByName(want.FullName())
+		require.NoError(t, err)
+		require.Equal(t, want.FullName(), d.FullName())
+		_, err = remote.HeldDescriptorByName("does.not.Exist")
+		require.ErrorIs(t, err, protoregistry.NotFound)
+		require.Zero(t, snapshot.lookups, "no upstream lookup")
+		require.True(t, source.contextEnded, "the source must be asked with an ended context")
+
+		_, err = NewSnapshotRemote(&recordingSource{}).HeldDescriptorByName(want.FullName())
+		require.ErrorIs(t, err, context.Canceled, "with no snapshot taken yet, nothing is held")
+	})
+
 	t.Run("one resolution stays on a current snapshot", func(t *testing.T) {
 		source := &recordingSource{snapshots: []grpcproxy.ReflectionSnapshot{
 			&currentGlobalSnapshot{current: true}, &currentGlobalSnapshot{current: true},

@@ -76,6 +76,12 @@ func TestPositionalLabels_EveryWrappedMetric(t *testing.T) {
 		"url": URLFingerprint(nodeURL), "internal_path": path,
 	}
 
+	publishOut := func() {
+		m.PublishURLsOutOfRotation(positionalSpec, api, []URLOutOfRotation{{
+			Provider: provider, URL: nodeURL, Reasons: []string{"posReason"}, WentOut: map[string]uint64{"posReason": 1},
+		}}, nil)
+	}
+
 	for _, c := range []struct {
 		metric string
 		drive  func()
@@ -85,7 +91,6 @@ func TestPositionalLabels_EveryWrappedMetric(t *testing.T) {
 		{"rpc_endpoint_total_errored", func() { m.AddEndpointRelayErrored(positionalSpec, api, endpoint, function) }, byFunction},
 		{"rpc_endpoint_total_cancelled", func() { m.AddEndpointRelayCancelled(positionalSpec, api, endpoint, function) }, byFunction},
 		{"rpc_endpoint_requests_in_flight", func() { m.AddEndpointInFlightRequest(positionalSpec, api, endpoint, function) }, byFunction},
-		{"rpc_endpoint_overall_health", func() { m.SetEndpointOverallHealth(positionalSpec, api, endpoint, true) }, byEndpoint},
 		{"rpc_endpoint_latest_block", func() { m.SetEndpointLatestBlock(positionalSpec, api, endpoint, 7) }, byEndpoint},
 		{"rpc_endpoint_fetch_latest_fails", func() { m.AddEndpointFetchLatestFail(positionalSpec, api, endpoint) }, byEndpoint},
 		{"rpc_endpoint_fetch_block_fails", func() { m.AddEndpointFetchBlockFail(positionalSpec, api, endpoint) }, byEndpoint},
@@ -97,6 +102,9 @@ func TestPositionalLabels_EveryWrappedMetric(t *testing.T) {
 		{"rpc_endpoint_url_latest_block", func() { m.SetProviderURLLatestBlock(positionalSpec, api, provider, nodeURL, 9, time.Minute) }, byURL},
 		{"rpc_endpoint_url_answered_until_seconds", func() { m.SetProviderURLLatestBlock(positionalSpec, api, provider, nodeURL, 9, time.Minute) }, byURL},
 		{"rpc_endpoint_url_relays_serviced_total", func() { m.AddEndpointURLRelayServiced(positionalSpec, api, provider, nodeURL) }, byURL},
+		{"rpc_endpoint_url_block_tracking", func() { m.SetEndpointURLBlockTracking(positionalSpec, api, nodeURL, false) }, byURL},
+		{"rpc_endpoint_url_out_of_rotation", func() { publishOut() }, withLabel(byURL, "reason", "posReason")},
+		{"rpc_endpoint_url_out_of_rotation_exits_total", func() { publishOut() }, withLabel(byURL, "reason", "posReason")},
 	} {
 		t.Run(c.metric, func(t *testing.T) {
 			c.drive()
@@ -108,7 +116,10 @@ func TestPositionalLabels_EveryWrappedMetric(t *testing.T) {
 	// Forgetting a url deletes its per-url series by the same positional values, so it must
 	// remove exactly the series written above.
 	m.ForgetEndpointURLLatestBlock(positionalSpec, api, nodeURL)
-	for _, metric := range []string{"rpc_endpoint_url_latest_block", "rpc_endpoint_url_answered_until_seconds", "rpc_endpoint_url_relays_serviced_total"} {
+	for _, metric := range []string{"rpc_endpoint_url_latest_block", "rpc_endpoint_url_answered_until_seconds", "rpc_endpoint_url_relays_serviced_total", "rpc_endpoint_url_block_tracking"} {
 		require.NotContains(t, seriesLabels(t, metric), byURL, "%s outlived ForgetEndpointURLLatestBlock", metric)
+	}
+	for _, metric := range []string{"rpc_endpoint_url_out_of_rotation", "rpc_endpoint_url_out_of_rotation_exits_total"} {
+		require.NotContains(t, seriesLabels(t, metric), withLabel(byURL, "reason", "posReason"), "%s outlived ForgetEndpointURLLatestBlock", metric)
 	}
 }

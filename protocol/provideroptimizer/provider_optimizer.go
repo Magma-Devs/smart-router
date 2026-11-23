@@ -215,51 +215,42 @@ func (po *ProviderOptimizer) ConfigureUpstreamSelector(config UpstreamSelectorCo
 // getAdaptiveLatencyBounds returns the current P10 and P90 bounds for latency normalization
 // from the global T-Digest that aggregates data from all providers
 func (po *ProviderOptimizer) getAdaptiveLatencyBounds() (p10, p90 float64) {
-	if po == nil {
-		return score.AdaptiveP10MinBound, score.DefaultLatencyAdaptiveMaxMax
-	}
-
-	po.adaptiveLock.RLock()
-	defer po.adaptiveLock.RUnlock()
-
-	if po.globalLatencyCalculator == nil {
-		return score.AdaptiveP10MinBound, score.DefaultLatencyAdaptiveMaxMax
-	}
-
-	p10, p90 = po.globalLatencyCalculator.GetAdaptiveBounds()
-	if math.IsNaN(p10) || math.IsNaN(p90) || math.IsInf(p10, 0) || math.IsInf(p90, 0) || p10 <= 0 || p90 <= 0 || p90 <= p10 {
-		utils.FormatWarning("invalid adaptive latency bounds, using defaults",
-			nil,
-			utils.LogAttr("p10", p10),
-			utils.LogAttr("p90", p90),
-		)
-		return score.AdaptiveP10MinBound, score.DefaultLatencyAdaptiveMaxMax
-	}
-	return p10, p90
+	return po.adaptiveBounds("latency", func() *score.AdaptiveMaxCalculator { return po.globalLatencyCalculator },
+		score.AdaptiveP10MinBound, score.DefaultLatencyAdaptiveMaxMax)
 }
 
 // getAdaptiveSyncBounds returns the current P10 and P90 bounds for sync normalization
 // from the global T-Digest that aggregates data from all providers
 func (po *ProviderOptimizer) getAdaptiveSyncBounds() (p10, p90 float64) {
+	return po.adaptiveBounds("sync", func() *score.AdaptiveMaxCalculator { return po.globalSyncCalculator },
+		score.AdaptiveSyncP10MinBound, score.DefaultSyncAdaptiveMaxMax)
+}
+
+// adaptiveBounds reads P10 and P90 from the calculator calculator returns, under adaptiveLock. It
+// answers defaultP10 and defaultP90 when there is no optimizer or no calculator, and when the
+// bounds cannot normalise: not finite, not positive, or P90 not above P10. name is the dimension
+// the warning names.
+func (po *ProviderOptimizer) adaptiveBounds(name string, calculator func() *score.AdaptiveMaxCalculator, defaultP10, defaultP90 float64) (p10, p90 float64) {
 	if po == nil {
-		return score.AdaptiveSyncP10MinBound, score.DefaultSyncAdaptiveMaxMax
+		return defaultP10, defaultP90
 	}
 
 	po.adaptiveLock.RLock()
 	defer po.adaptiveLock.RUnlock()
 
-	if po.globalSyncCalculator == nil {
-		return score.AdaptiveSyncP10MinBound, score.DefaultSyncAdaptiveMaxMax
+	calc := calculator()
+	if calc == nil {
+		return defaultP10, defaultP90
 	}
 
-	p10, p90 = po.globalSyncCalculator.GetAdaptiveBounds()
+	p10, p90 = calc.GetAdaptiveBounds()
 	if math.IsNaN(p10) || math.IsNaN(p90) || math.IsInf(p10, 0) || math.IsInf(p90, 0) || p10 <= 0 || p90 <= 0 || p90 <= p10 {
-		utils.FormatWarning("invalid adaptive sync bounds, using defaults",
+		utils.FormatWarning("invalid adaptive "+name+" bounds, using defaults",
 			nil,
 			utils.LogAttr("p10", p10),
 			utils.LogAttr("p90", p90),
 		)
-		return score.AdaptiveSyncP10MinBound, score.DefaultSyncAdaptiveMaxMax
+		return defaultP10, defaultP90
 	}
 	return p10, p90
 }
