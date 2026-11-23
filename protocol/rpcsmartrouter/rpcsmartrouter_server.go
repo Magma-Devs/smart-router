@@ -1757,20 +1757,19 @@ func (rpcss *RPCSmartRouterServer) appendGraphQLWriteOutcomeHeader(result *commo
 	ensureWriteOutcomeHeader(result, graphQLWriteOutcomeUnknown)
 }
 
-// setGraphQLWriteAccepted sets the client HTTP status and outcome header on a served GraphQL
-// write whose reply the chain's write rows read as accepted (MAG-4909): on Sui, the write field ran
-// (W1: effects with SUCCESS or FAILURE, a transaction that ran and paid gas counting as accepted,
-// MAG-4742), with or without errors beside it and under any status, or an error below it (W2). No
-// other reply gets the header: not a node error (a refused transaction answers with a GraphQL error
-// inside a 200, which still returns err == nil), and no write on a chain without write rows.
+// setGraphQLWriteAccepted sets the outcome header on a served GraphQL write whose reply the chain's
+// write rows read as accepted (MAG-4909): on Sui, the write field ran (W1: effects with SUCCESS or
+// FAILURE, a transaction that ran and paid gas counting as accepted, MAG-4742), with or without
+// errors beside it and under any status, or an error below it (W2). The node's status is left as
+// is: a copy that ran inside a 429 or a 5xx reaches the client with that status, and the header
+// is what says it ran (MAG-5122 T14, MAG-5199). No other reply gets the header: not a node error
+// (a refused transaction answers with a GraphQL error inside a 200, which still returns
+// err == nil), and no write on a chain without write rows.
 func (rpcss *RPCSmartRouterServer) setGraphQLWriteAccepted(result *common.RelayResult, protocolMessage chainlib.ProtocolMessage) {
 	if result == nil || result.IsNodeError || result.Reply == nil || !isGraphQLWrite(protocolMessage) {
 		return
 	}
 	if outcome, known := graphQLWriteCopyOutcome(protocolMessage, result.Reply.Data, result.StatusCode); known && outcome == rpcInterfaceMessages.GraphQLWriteAccepted {
-		// ProcessingResult returns a copy of the winning result. Keep the provider attempt's
-		// status for diagnostics and serve the finalized body to the client under HTTP 200.
-		result.StatusCode = http.StatusOK
 		ensureWriteOutcomeHeader(result, graphQLWriteOutcomeAccepted)
 	}
 }
