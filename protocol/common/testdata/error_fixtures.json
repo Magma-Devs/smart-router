@@ -574,6 +574,26 @@
       "expected_name": "NODE_BITCOIN_NOT_CONNECTED"
     },
     {
+      "name": "bitcoin_tx_decode_failed",
+      "chain_family": "Bitcoin",
+      "transport": "jsonrpc",
+      "error_code": -22,
+      "error_message": "TX decode failed",
+      "expected_error_code": 3347,
+      "expected_name": "CHAIN_BITCOIN_DESERIALIZATION_ERROR",
+      "_note": "Bitcoin -22 (RPC_DESERIALIZATION_ERROR), sendrawtransaction of bytes that do not decode: the request's answer, not retried, not the endpoint's fault (MAG-5674)"
+    },
+    {
+      "name": "bitcoin_type_error",
+      "chain_family": "Bitcoin",
+      "transport": "jsonrpc",
+      "error_code": -3,
+      "error_message": "JSON value of type string is not of expected type number",
+      "expected_error_code": 3348,
+      "expected_name": "CHAIN_BITCOIN_TYPE_ERROR",
+      "_note": "Bitcoin -3 (RPC_TYPE_ERROR), getblockhash of a string: another provider is asked, the endpoint is not blamed (MAG-5674)"
+    },
+    {
       "name": "bitcoin_verify_error",
       "chain_family": "Bitcoin",
       "transport": "jsonrpc",

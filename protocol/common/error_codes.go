@@ -723,6 +723,23 @@ var (
 		Code: 3344, Name: "CHAIN_BITCOIN_WALLET_INSUFFICIENT_FUNDS", Category: CategoryExternal,
 		Description: "Wallet UTXO coin selection failed (RPC_WALLET_INSUFFICIENT_FUNDS, Bitcoin -6). Distinct from EVM CHAIN_INSUFFICIENT_FUNDS (3003) which is a tx submission failure.", Retryable: false,
 	})
+	// CHAIN_BITCOIN_DESERIALIZATION_ERROR: RPC_DESERIALIZATION_ERROR (-22), raw data the request
+	// carries that bitcoind cannot decode: a transaction ("TX decode failed"), a PSBT, a block or a
+	// header (MAG-5674). Every node decodes the same bytes the same way, so it is the request's
+	// answer, as -25 to -27 are: not retried, and not the endpoint's fault.
+	RouterErrorChainBitcoinDeserializationError = registerError(&RouterError{
+		Code: 3347, Name: "CHAIN_BITCOIN_DESERIALIZATION_ERROR", Category: CategoryExternal,
+		Description: "Raw data in the request could not be decoded (RPC_DESERIALIZATION_ERROR, Bitcoin -22)", Retryable: false,
+	})
+	// CHAIN_BITCOIN_TYPE_ERROR: RPC_TYPE_ERROR (-3), a parameter whose JSON type the method does not
+	// take (MAG-5674). bitcoind versions disagree on some of them (newer ones refuse a boolean
+	// verbosity that older ones read), so another provider is asked and the endpoint is not blamed:
+	// the data-scope axis.
+	RouterErrorChainBitcoinTypeError = registerError(&RouterError{
+		Code: 3348, Name: "CHAIN_BITCOIN_TYPE_ERROR", Category: CategoryExternal,
+		SubCategory: SubCategoryDataScope,
+		Description: "A parameter of a type this node does not take (RPC_TYPE_ERROR, Bitcoin -3); another provider may answer", Retryable: true,
+	})
 
 	// NEAR-specific (3360-3379) — Tier 2
 	// Source: NEAR RPC docs (error names in JSON-RPC error.cause.name)

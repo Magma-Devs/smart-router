@@ -2,6 +2,7 @@ package rpcsmartrouter
 
 import (
 	"errors"
+	"net/http"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
@@ -115,6 +116,37 @@ func healthVerdict(err error, chainFamily common.ChainFamily, transport common.T
 	// Not classified by the sender: classify from scratch through the same pipeline.
 	classified, _, _ := chainlib.ClassifyNodeErrorWithDetails(err, chainFamily, transport)
 	return classified
+}
+
+// answerInsideStatusError returns the answer the JSON-RPC sender's 5xx carries in its body, flagged
+// as the same answer inside a 2xx is, with the 5xx's status, when the endpoint is not at fault for
+// it; nil otherwise. The session release reads that instead of the error (MAG-5674).
+//
+// The body already decides the endpoint's health (healthVerdict) and the retry (retryVerdict); this
+// makes it decide the session's score too, as the rulebook's order of checks has it (Part IV, 3.1
+// P5). Without it, every such 5xx scored as a failed relay: an availability sample of 0 and a
+// consecutive error for each provider asked. bitcoind sends every error to a JSON-RPC 1.0 request
+// under a 500, so a request the node refused as malformed did that to every provider asked, while
+// the same reply inside a 200 scored as an answer.
+//
+// What stays a failure: a body the classifier reads as the endpoint's fault or cannot read, and a
+// status error with no body, such as a gateway's own page. The relay still fails with the status
+// error, so the retry and the client's reply do not change. Only the sender's 5xx qualifies: it is
+// the error the sender classified (classifyAndWrap), while the status errors relayInnerDirect makes
+// for a REST 5xx and for any 429 are not, and a 429 is read by its status alone.
+func answerInsideStatusError(err error, chainFamily common.ChainFamily) (answer *common.RelayResult, status int) {
+	var httpErr *routersession.HTTPStatusError
+	if common.AsRouterError(err) == nil || !errors.As(err, &httpErr) || httpErr == nil ||
+		httpErr.StatusCode < http.StatusInternalServerError || len(httpErr.Body) == 0 {
+		return nil, 0
+	}
+	verdict := healthVerdict(err, chainFamily, common.TransportJsonRPC)
+	if verdict == nil || verdict == common.RouterErrorUnknown || verdict.EndpointAtFault() {
+		return nil, 0
+	}
+	answer = &common.RelayResult{StatusCode: http.StatusOK, IsNodeError: true}
+	answer.ApplyRouterErrorClassification(verdict)
+	return answer, httpErr.StatusCode
 }
 
 // classifyAndWrap is a convenience that calls classifyDirectRPCError and returns
