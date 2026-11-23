@@ -137,18 +137,19 @@ func scanJsonrpcBatchElements(data []byte, fn func(elementBytes []byte) bool) er
 	}
 }
 
-// IsJsonrpcReply reports whether data is a JSON-RPC reply: an object carrying "result" or
-// "error", or a non-empty batch of only such objects. A JSON-RPC node answers in JSON-RPC, so a
-// body that is not one (a gateway's HTML page, an empty body, plain text, {}) is not the node's
-// answer, whatever the router read it as (MAG-5072).
+// IsJsonrpcReply reports whether data is a JSON-RPC reply: an object whose "error" is an error
+// object or that carries a "result", or a non-empty batch of only such objects. A JSON-RPC node
+// answers in JSON-RPC, so a body that is not one (a gateway's HTML page, an empty body, plain
+// text, {}, {"error":"invalid api key"}) is not the node's answer, whatever the router read it as
+// (MAG-5072).
 func IsJsonrpcReply(data []byte) bool {
 	if scan, err := scanJsonrpcEnvelope(data); err == nil {
-		return scan.hasResult || scan.hasError
+		return carriesJsonrpcAnswer(scan)
 	}
 	replies := 0
 	err := scanJsonrpcBatchElements(data, func(element []byte) bool {
 		scan, err := scanJsonrpcEnvelope(element)
-		if err != nil || !(scan.hasResult || scan.hasError) {
+		if err != nil || !carriesJsonrpcAnswer(scan) {
 			replies = -1
 			return false
 		}
@@ -156,6 +157,17 @@ func IsJsonrpcReply(data []byte) bool {
 		return true
 	})
 	return err == nil && replies > 0
+}
+
+// carriesJsonrpcAnswer reports whether a scanned object answers in JSON-RPC: its error is an
+// error object, or it has no error and carries a result. JSON-RPC requires the error member to be
+// an object, so a string error, the shape a vendor's gateway refuses with, is not the node's
+// answer. A null error reads as absent, as checkJsonrpcEnvelope reads it.
+func carriesJsonrpcAnswer(scan jsonrpcScanResult) bool {
+	if scan.hasError && !isJSONNull(scan.errorBytes) {
+		return len(scan.errorBytes) > 0 && scan.errorBytes[0] == '{'
+	}
+	return scan.hasResult
 }
 
 // SkipJSONWhitespace returns the index of the first byte at or after pos that is not JSON
