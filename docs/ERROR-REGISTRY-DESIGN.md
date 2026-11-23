@@ -829,12 +829,13 @@ in a catch-all, so a refusal is never `UNKNOWN_ERROR`, which is retried and scor
 A refusal about the transaction is no fault of the node, though some are the node's own view of it:
 a lagging node's sequence (32), its minimum gas price (13), its mempool (19, 20). It neither resets
 the endpoint's failure count nor adds to it, and it is never an availability failure. It closes the
-session as an answer, as every non-retryable node error does: on Tron, whose broadcasts are not
-hanging apis, it still gives the optimizer an availability sample with the refusal's latency. A Tron
-node with too few peers broadcasts nothing, which is its health, as XRPL's `noNetwork` is. "P2P
-broadcast failed." is not that: java-tron sends it after it took the transaction into its pending
-pool, when every peer had already announced the transaction, so the node holds it and is not blamed.
-Every refusal sets `router-identified-node-error: true` when it reaches the client, and is counted in
+session as an answer, as every non-retryable node error does, so on Tron, whose broadcasts are not
+hanging apis, it still gives the optimizer an availability sample with the refusal's latency. Only a
+refusal that comes after a sibling's acceptance is released without a score. A Tron node with too
+few peers broadcasts nothing, which is its health, as XRPL's `noNetwork` is. "P2P broadcast failed."
+is not that: java-tron sends it after it took the transaction into its pending pool, when every peer
+had already announced the transaction, so the node holds it and is not blamed. Every refusal sets
+`router-identified-node-error: true` when it reaches the client, and is counted in
 `smartrouter_errors_total` under its code. A gRPC refusal is the node's protobuf message, so it is
 not redacted: a rewritten string would break it.
 
