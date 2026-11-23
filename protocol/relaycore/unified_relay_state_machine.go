@@ -411,8 +411,13 @@ func (sm *UnifiedRelayStateMachine) endOfRoadReason(err error) string {
 // by the router's processing timeout and by the caller's own deadline, whichever is earlier. When the
 // caller's grpc-timeout was the earlier one, the request ended from outside, as a hang-up does: it is
 // not the budget running out, and no endpoint still working on it is blamed (rulebook D10).
+//
+// A write keeps the processing timeout's reading. Its deliveries are detached from the caller and run
+// on after the request ends, until the router cuts them off (statefulDeliveryLinger in rpcsmartrouter),
+// so the caller's deadline ends none of them. A delivery still silent at that cut-off is a hang, and
+// the write's outcome is unknown, as before. A write whose caller hung up still stops as CallerGone.
 func (sm *UnifiedRelayStateMachine) processingEndReason(processingCtx context.Context) string {
-	if common.CallerDeadlinePassed(processingCtx, time.Now()) {
+	if sm.selection != Stateful && common.CallerDeadlinePassed(processingCtx, time.Now()) {
 		return sm.stopReasonOr(StopReasonCallerGone)
 	}
 	return sm.endOfRoadReason(processingCtx.Err())

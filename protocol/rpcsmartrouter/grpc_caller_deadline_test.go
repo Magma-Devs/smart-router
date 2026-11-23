@@ -39,6 +39,12 @@ const slowGRPCNodeAnswer = 2 * time.Second
 // at the deadline the router sent, whichever comes first. It counts the calls it receives.
 func startSlowGRPCNode(t *testing.T) (addr string, calls *atomic.Int64) {
 	t.Helper()
+	return startGRPCNodeAnsweringAfter(t, slowGRPCNodeAnswer)
+}
+
+// startGRPCNodeAnsweringAfter is startSlowGRPCNode with the node's answer delay as a parameter.
+func startGRPCNodeAnsweringAfter(t *testing.T, answerAfter time.Duration) (addr string, calls *atomic.Int64) {
+	t.Helper()
 	calls = &atomic.Int64{}
 	addr = startGRPCNode(t, func(stream grpc.ServerStream) error {
 		method, _ := grpc.MethodFromServerStream(stream)
@@ -51,7 +57,7 @@ func startSlowGRPCNode(t *testing.T) (addr string, calls *atomic.Int64) {
 		}
 		calls.Add(1)
 		select {
-		case <-time.After(slowGRPCNodeAnswer):
+		case <-time.After(answerAfter):
 			return stream.SendMsg([]byte{0x08, 0x01})
 		case <-stream.Context().Done():
 			return status.FromContextError(stream.Context().Err()).Err()
@@ -158,7 +164,7 @@ func TestGRPCListener_CallsEndingAtTheCallersDeadlineLeaveEveryProviderOn(t *tes
 		nodeAddrs = append(nodeAddrs, addr)
 		nodeCalls = append(nodeCalls, calls)
 	}
-	client, endpoints, names, optimizer := startGRPCRouterOverSlowNodes(t, nodeAddrs)
+	client, endpoints, names, optimizer := startGRPCRouterOverSlowNodes(t, false, nodeAddrs)
 	availabilityBefore := make([]float64, len(names))
 	for i, name := range names {
 		report, _ := optimizer.GetReputationReportForProvider(name)
@@ -216,10 +222,41 @@ func TestGRPCListener_CallsEndingAtTheCallersDeadlineLeaveEveryProviderOn(t *tes
 	}
 }
 
+// A write is not read that way. Its delivery is detached from the caller and runs on after the
+// request ends, until the router cuts it off statefulDeliveryLinger later, so its caller's deadline
+// is not what ends it. A write that ends at its caller's deadline keeps the processing timeout's
+// reading, as before: its outcome is unknown, and a delivery still silent at the cut-off is counted
+// as a hang.
+func TestGRPCListener_AWriteEndingAtTheCallersDeadlineKeepsTheProcessingTimeout(t *testing.T) {
+	// At 1 the first count takes the endpoint out, which the test can read under the endpoint's lock.
+	benchAfter(t, 1)
+	read := captureRelayEnds(t)
+	addr, calls := startGRPCNodeAnsweringAfter(t, 2*statefulDeliveryLinger)
+	client, endpoints, _, _ := startGRPCRouterOverSlowNodes(t, true, []string{addr})
+
+	seen := len(read())
+	callCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	err := client.Invoke(callCtx, "/"+relayEndGRPCMethod, wrapperspb.Int64(5), &wrapperspb.Int64Value{})
+	require.Contains(t, []codes.Code{codes.DeadlineExceeded, codes.Unknown}, status.Code(err), "%v", err)
+
+	require.Eventually(t, func() bool { return len(newRelayEndsSince(read, seen)) > 0 }, 5*time.Second, 20*time.Millisecond)
+	events := newRelayEndsSince(read, seen)
+	require.Len(t, events, 1, "one relay_end for the write")
+	require.Equal(t, relayOutcomeWriteUnknown, relayEndField(t, events[0], "outcome"), "%s", events[0])
+	require.Equal(t, relaycore.StopReasonProcessingTimeout, relayEndField(t, events[0], "stop_reason"), "%s", events[0])
+	require.EqualValues(t, 500, relayEndField(t, events[0], "status"), "%s", events[0])
+
+	require.Eventually(t, func() bool { return !endpoints[0].IsEnabled() }, 2*statefulDeliveryLinger, 50*time.Millisecond,
+		"a delivery still silent when the router cut it off was not counted")
+	require.Equal(t, uint64(1), endpoints[0].ConnectionRefusals)
+	require.Equal(t, int64(1), calls.Load(), "the write reached the node once")
+}
+
 // startGRPCRouterOverSlowNodes is startRelayEndGRPCRouter over one provider per node address, each with
-// one endpoint. It returns a client of the listener, the providers' endpoints and names, and the
-// optimizer that scores them.
-func startGRPCRouterOverSlowNodes(t *testing.T, nodeAddrs []string) (*grpc.ClientConn, []*routersession.Endpoint, []string, *provideroptimizer.ProviderOptimizer) {
+// one endpoint, serving relayEndGRPCMethod as a read, or as a write when write is set. It returns a
+// client of the listener, the providers' endpoints and names, and the optimizer that scores them.
+func startGRPCRouterOverSlowNodes(t *testing.T, write bool, nodeAddrs []string) (*grpc.ClientConn, []*routersession.Endpoint, []string, *provideroptimizer.ProviderOptimizer) {
 	t.Helper()
 	if !rand.Initialized() {
 		rand.InitRandomSeed()
@@ -227,13 +264,17 @@ func startGRPCRouterOverSlowNodes(t *testing.T, nodeAddrs []string) (*grpc.Clien
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
+	stateful := "0"
+	if write {
+		stateful = "1"
+	}
 	var spec spectypes.Spec
 	require.NoError(t, json.Unmarshal([]byte(`{
       "index": "GRPCTEST", "name": "gRPC test", "enabled": true, "average_block_time": 1000,
       "api_collections": [{
         "enabled": true,
         "collection_data": {"api_interface": "grpc", "internal_path": "", "type": "", "add_on": ""},
-        "apis": [{"name": "`+relayEndGRPCMethod+`", "enabled": true, "compute_units": 10, "category": {"deterministic": false, "stateful": 0}}]
+        "apis": [{"name": "`+relayEndGRPCMethod+`", "enabled": true, "compute_units": 10, "category": {"deterministic": false, "stateful": `+stateful+`}}]
       }]
     }`), &spec))
 	parser, err := chainlib.NewGrpcChainParser()

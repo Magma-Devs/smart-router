@@ -103,6 +103,25 @@ func TestProcessingEndReason(t *testing.T) {
 		require.Equal(t, StopReasonCallerGone, sm.processingEndReason(processingCtx))
 	})
 
+	t.Run("a write keeps the processing timeout's reason", func(t *testing.T) {
+		// Its deliveries are detached from the caller and outlive the request, so its caller's deadline
+		// is not what ends them.
+		processingCtx, cancel := context.WithTimeout(callerCtx(t, 10*time.Millisecond), time.Hour)
+		defer cancel()
+		<-processingCtx.Done()
+		sm := &UnifiedRelayStateMachine{selection: Stateful}
+		require.Equal(t, StopReasonProcessingTimeout, sm.processingEndReason(processingCtx))
+	})
+
+	t.Run("a write whose caller hung up is still the caller's", func(t *testing.T) {
+		ctx, hangUp := context.WithCancel(callerCtx(t, time.Hour))
+		processingCtx, cancel := context.WithTimeout(ctx, time.Hour)
+		defer cancel()
+		hangUp()
+		sm := &UnifiedRelayStateMachine{selection: Stateful}
+		require.Equal(t, StopReasonCallerGone, sm.processingEndReason(processingCtx))
+	})
+
 	t.Run("a recorded policy reason still wins", func(t *testing.T) {
 		processingCtx, cancel := context.WithTimeout(callerCtx(t, 10*time.Millisecond), time.Hour)
 		defer cancel()

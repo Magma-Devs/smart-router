@@ -37,8 +37,9 @@ const (
 const StopReasonProcessingTimeout = "ProcessingTimeout"
 
 // StopReasonCallerGone marks a request whose context was cancelled from outside rather than by its
-// own deadline — a websocket or gRPC client that hung up mid-request, or a gRPC client whose own
-// grpc-timeout ran out before the router's processing timeout did.
+// own deadline — a websocket or gRPC client that hung up mid-request, or, on a request other than a
+// write, a gRPC client whose own grpc-timeout ran out before the router's processing timeout did
+// (processingEndReason).
 //
 // It exists so that ending is not spelled the same way as running out of budget. Availability
 // scoring reads the stop reason, and only the budget case may blame an endpoint: a caller closing
