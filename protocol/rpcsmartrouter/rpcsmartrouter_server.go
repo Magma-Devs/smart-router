@@ -6219,7 +6219,8 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		//    returns and its defer cancel() cancels the parent ctx, which cancels all still-in-flight
 		//    goroutines — those see context.Canceled as a result.
 		// 2. Client disconnect: the upstream caller closed the connection before we responded.
-		// Neither case is a provider fault — classifyEndpointHealth handles the carve-out
+		// The caller's own gRPC deadline running out is read the same way (D10).
+		// None of these is a provider fault — classifyEndpointHealth handles the carve-out
 		// using common.IsClientCancellation so every endpoint-health decision site uses the
 		// same rule.
 		//
@@ -7270,7 +7271,7 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 		})
 
 	// add is node error flag
-	if relayResult.IsNodeError {
+	if identifiedNodeError(protocolMessage, relayResult) {
 		metadataReply = append(metadataReply,
 			pairingtypes.Metadata{
 				Name:  common.IDENTIFIED_NODE_ERROR_HEADER,
@@ -7587,6 +7588,27 @@ func httpStatusRelayError(statusCode int, reply *pairingtypes.RelayReply) error 
 		httpErr.RetryAfter, _ = common.ParseRetryAfter(header, time.Now())
 	}
 	return httpErr
+}
+
+// identifiedNodeError reports whether a reply carries lava-identified-node-error: the header says
+// the node answered with an error, so it is set only when the reply shows that. On JSON-RPC and
+// Tendermint RPC a node always answers in JSON-RPC, so a body that is not a JSON-RPC reply (a
+// gateway's 401, 403 or 404 page, an empty body) is not the node's answer: it is forwarded as is,
+// without the header (MAG-5072, Omer 12 Nov), as a refused 429 already is (MAG-3030). An error a
+// node reports inside a JSON-RPC result (Tendermint's response code, XRPL's engine result) is
+// still its answer and keeps the header. Other interfaces are unchanged.
+func identifiedNodeError(protocolMessage chainlib.ProtocolMessage, relayResult *common.RelayResult) bool {
+	if relayResult == nil || !relayResult.IsNodeError {
+		return false
+	}
+	if protocolMessage == nil || protocolMessage.GetApiCollection() == nil {
+		return true
+	}
+	switch protocolMessage.GetApiCollection().CollectionData.ApiInterface {
+	case spectypes.APIInterfaceJsonRPC, spectypes.APIInterfaceTendermintRPC:
+		return rpcInterfaceMessages.IsJsonrpcReply(relayResult.GetReply().GetData())
+	}
+	return true
 }
 
 // redactNodeReply withholds the secrets in a node's error reply (utils.RedactSecrets). A reply
