@@ -71,10 +71,10 @@ type chainReverifyInputs struct {
 	convertProvidersToSessions func([]*routersession.RPCStaticProviderEndpoint) map[uint64]*routersession.ConsumerSessionsWithProvider
 	configuredStatic           []*routersession.RPCStaticProviderEndpoint
 	configuredBackup           []*routersession.RPCStaticProviderEndpoint
-	// validateFn is the per-provider validation callback applyReverification
-	// dispatches to. Production leaves it nil and applyReverification falls back
-	// to validateProvider (real network probe). Tests inject a fake to exercise
-	// updateEpoch's orchestration without standing up upstreams.
+	// validateFn is the per-provider validation callback probeReverification
+	// dispatches to. Production leaves it nil and probeReverification falls back
+	// to revalidateProviderCollections (real network probe). Tests inject a fake to
+	// exercise updateEpoch's orchestration without standing up upstreams.
 	validateFn func(context.Context, *routersession.RPCStaticProviderEndpoint) error
 	// recordAdmission publishes a freshly computed per-collection admission so the
 	// endpoint builder stops using the boot-time one. Nil in tests that do not
