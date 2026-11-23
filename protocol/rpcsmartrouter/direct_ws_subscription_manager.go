@@ -192,7 +192,7 @@ func (psbm *pendingSubscriptionsBroadcastManager) broadcastToChannelList(value b
 }
 
 // DirectWSSubscriptionManager manages WebSocket subscriptions directly to upstream endpoints
-// without going through Lava providers. It implements chainlib.WSSubscriptionManager.
+// without going through a provider-relay network. It implements chainlib.WSSubscriptionManager.
 //
 // The gRPC counterpart is DirectGRPCSubscriptionManager, which follows the same shape:
 // one upstream stream per distinct subscription, fanned out to per-client channels.
@@ -666,7 +666,7 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 	// No active subscription found, create new one
 	// Select best endpoint using sticky session, optimizer, or first available
 	startTime := time.Now()
-	selectedEndpoint, err := dwsm.selectEndpoint(ctx, clientKey, nil)
+	selectedEndpoint, err := dwsm.selectEndpoint(ctx, clientKey)
 	if err != nil {
 		dwsm.settlePendingSubscription(hashedParams, false)
 		dwsm.metricsManager.SetFailedWsSubscriptionRequestMetric(dwsm.chainID, dwsm.apiInterface)

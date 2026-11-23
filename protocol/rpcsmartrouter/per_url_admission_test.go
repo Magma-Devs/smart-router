@@ -270,7 +270,7 @@ func TestApplyReverification_ARateLimitedUrlBacksOffAndChangesNothing(t *testing
 	}
 	active := map[uint64]*routersession.ConsumerSessionsWithProvider{0: makeSession(provider.Name)}
 
-	next, demoted, promoted := applyReverification(t.Context(), inputs, active, reverifyTierStatic, 100)
+	next, demoted, promoted := probeAndApplyReverification(t.Context(), inputs, active, reverifyTierStatic, 100)
 	require.Contains(t, collectNames(next), provider.Name)
 	require.Empty(t, demoted)
 	require.Empty(t, promoted, "nothing moved, so nothing is rebuilt")
@@ -306,7 +306,7 @@ func TestApplyReverification_ARateLimitBehindAWebsocketFirstUrlHoldsTheRelayUrl(
 	}
 	active := map[uint64]*routersession.ConsumerSessionsWithProvider{0: makeSession(provider.Name)}
 
-	next, demoted, _ := applyReverification(t.Context(), inputs, active, reverifyTierStatic, 100)
+	next, demoted, _ := probeAndApplyReverification(t.Context(), inputs, active, reverifyTierStatic, 100)
 	require.Contains(t, collectNames(next), provider.Name)
 	require.Empty(t, demoted)
 	socket, throttled, archive := provider.NodeUrls[0].Url, provider.NodeUrls[1].Url, provider.NodeUrls[2].Url
@@ -339,7 +339,7 @@ func TestApplyReverification_AnAddonsOwnRateLimitHoldsNothing(t *testing.T) {
 	}
 	active := map[uint64]*routersession.ConsumerSessionsWithProvider{0: makeSession(provider.Name)}
 
-	next, demoted, _ := applyReverification(t.Context(), inputs, active, reverifyTierStatic, 100)
+	next, demoted, _ := probeAndApplyReverification(t.Context(), inputs, active, reverifyTierStatic, 100)
 	require.Contains(t, collectNames(next), provider.Name)
 	require.Empty(t, demoted)
 	require.Contains(t, up.methods("http", "/q/"+upTraceRate), "trace_block", "the add-on's check was asked, or this test proves nothing")
@@ -396,7 +396,7 @@ func TestApplyReverification_TheUrlGraceIsForAPairedProvider(t *testing.T) {
 		if paired {
 			active[0] = makeSession(provider.Name)
 		}
-		next, _, _ := applyReverification(t.Context(), inputs, active, reverifyTierStatic, 100)
+		next, _, _ := probeAndApplyReverification(t.Context(), inputs, active, reverifyTierStatic, 100)
 		return admissions.admissionFor(provider).URLRefused(0), collectNames(next)
 	}
 

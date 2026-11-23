@@ -1,5 +1,5 @@
 # Smart Router Direct RPC Configuration — Ethereum with a RESP cache backend
-# Mode: Direct connections to Ethereum JSON-RPC endpoints (no Lava providers!)
+# Mode: Direct connections to Ethereum JSON-RPC endpoints (no provider-relay network — direct upstreams)
 #
 # Same as smartrouter_eth.yml, but caching runs against a RESP-compatible
 # (Redis/Valkey) backend instead of the cache sidecar: the router executes the

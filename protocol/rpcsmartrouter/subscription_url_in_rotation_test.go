@@ -69,7 +69,7 @@ func TestBoot_NewWSSubscriptionSkipsAProviderTheRouterTookOut(t *testing.T) {
 			// Two urls in the tier means the optimizer chooses, so a pass on main is luck; every
 			// pick here must still land on primary-2.
 			for range 20 {
-				selected, err := manager.selectEndpoint(context.Background(), "", nil)
+				selected, err := manager.selectEndpoint(context.Background(), "")
 				require.NoError(t, err)
 				require.Equal(t, secondWS, selected.Url, "a new subscription goes to the provider in rotation")
 			}
@@ -127,7 +127,7 @@ func TestBoot_NewGRPCSubscriptionSkipsAURLTheRouterTookOut(t *testing.T) {
 			assert.Equal(t, inRotationRank, (*lendRank)(second))
 
 			for range 20 {
-				selected, err := manager.selectEndpoint(context.Background(), "", nil)
+				selected, err := manager.selectEndpoint(context.Background(), "")
 				require.NoError(t, err)
 				require.Equal(t, second, selected.Url, "a new stream goes to the url in rotation")
 			}

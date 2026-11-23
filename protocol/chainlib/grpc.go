@@ -421,7 +421,7 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 				// and never err's text, which lists the router's provider names. A plain error, as
 				// below, reaches the client as Unknown (MAG-3800).
 				apil.logger.LogRequestAndResponse("grpc in/out", true, method, relayBodyForLog(string(reqBody), cmdFlags.DebugRelays), "", message, msgSeed, time.Since(startTime), err)
-				// The request id goes in lava-guid, as on a served call and on the HTTP refusal,
+				// The request id goes in router-guid, as on a served call and on the HTTP refusal,
 				// since the sentence alone no longer carries it.
 				replyMetadata := convertRelayMetaDataToMDMetaData(relayReply.GetMetadata())
 				replyMetadata.Set(common.GUID_HEADER_NAME, msgSeed)
@@ -430,7 +430,7 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 			errMasking := apil.logger.GetUniqueGuidResponseForError(err, msgSeed)
 			apil.logger.LogRequestAndResponse("grpc in/out", true, method, relayBodyForLog(string(reqBody), cmdFlags.DebugRelays), "", errMasking, msgSeed, time.Since(startTime), err)
 			// Even on error the relay result may carry response metadata — notably the
-			// lava-cross-validation-* failure headers synthesized on a quorum/structural failure. Surface it
+			// router-cross-validation-* failure headers synthesized on a quorum/structural failure. Surface it
 			// (the proxy attaches it as gRPC trailers on the error path) so gRPC clients get the same
 			// structured cross-validation signal as the HTTP interfaces. nil/empty when there is nothing to
 			// propagate, preserving prior behavior for ordinary errors.
@@ -503,7 +503,7 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 
 	fmt.Printf(`
  ┌───────────────────────────────────────────────────┐
- │               Lava's Grpc Server                  │
+ │               Router's Grpc Server                │
  │               %s│
  │               Version: %s│
  └───────────────────────────────────────────────────┘
