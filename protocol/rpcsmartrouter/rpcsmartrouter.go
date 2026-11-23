@@ -4094,10 +4094,44 @@ func (rpsr *RPCSmartRouter) updateEpoch(ctx context.Context, epoch uint64) {
 			utils.LogAttr("time", time.Now().Format("15:04:05 MST")),
 		)
 
+		// Re-verify the configured providers before taking the lock. A provider that
+		// accepts the connection and never answers holds its probe for
+		// SpecReVerifyAttemptTimeout, and every /debug/* state read waits on rpsr.mu, so
+		// the probes run unlocked, as the retry loop's do, and only their verdicts are
+		// applied under the lock below (MAG-5318). Skipped when inputs are absent (test
+		// path constructs RPCSmartRouter directly). A retry of this chain waits for the
+		// pass, and drops what it probed meanwhile (chainReverifyInputs.epochPasses).
+		rpsr.mu.Lock()
+		inputs := rpsr.reverifyInputs[chainKey]
+		var resets uint64
+		if inputs != nil {
+			inputs.beginEpochPass()
+			resets = inputs.pairingResets
+		}
+		rpsr.mu.Unlock()
+		var probedStatic, probedBackup []reverifyProbe
+		if inputs != nil {
+			reverifyStart := time.Now()
+			probedStatic = probeReverification(ctx, inputs, inputs.configuredStatic, nil, nil)
+			probedBackup = probeReverification(ctx, inputs, inputs.configuredBackup, nil, nil)
+			// Per-chain re-verify is internally bounded by SpecReVerifyConcurrency,
+			// but updateEpoch iterates chains serially. Surfacing per-chain duration
+			// gives operators a signal when total tick time approaches epoch length —
+			// the cross-chain bound is Σ ⌈N_chain/conc⌉ × SpecReVerifyAttemptTimeout.
+			if elapsed := time.Since(reverifyStart); elapsed > SpecReVerifyAttemptTimeout {
+				utils.FormatWarning("re-verify: cycle exceeded single-attempt timeout — consider tuning SpecReVerifyConcurrency", nil,
+					utils.LogAttr("chainKey", chainKeyLog),
+					utils.LogAttr("elapsed", elapsed.String()),
+					utils.LogAttr("attemptTimeout", SpecReVerifyAttemptTimeout.String()),
+				)
+			}
+		}
+
 		// Lock for the read → create-fresh → write-back section.
 		// This prevents races with the retry loop, which merges
 		// recovered providers into rpsr.providerSessions under the same lock.
-		// The locked section is pure CPU work (map lookups + object creation).
+		// The pairing is read after the probes, so what a readmission or
+		// /debug/reset-pairing committed while they ran is kept, not overwritten.
 		rpsr.mu.Lock()
 		oldProviderSessions := rpsr.providerSessions[chainKey]
 		oldBackupSessions := rpsr.backupProviderSessions[chainKey]
@@ -4108,21 +4142,29 @@ func (rpsr *RPCSmartRouter) updateEpoch(ctx context.Context, epoch uint64) {
 		freshProviderSessions := freshenTier(oldProviderSessions, epoch, "Created fresh provider session for epoch", chainKeyLog)
 		freshBackupSessions := freshenTier(oldBackupSessions, epoch, "Created fresh backup provider session for epoch", chainKeyLog)
 
-		// Re-verify configured providers and reconcile against the fresh maps:
-		// drop entries whose provider failed validation (demote), and append
-		// new sessions for configured providers that pass but weren't active
-		// (promote — recovering from failed-init). Skipped when inputs are
-		// absent (test path constructs RPCSmartRouter directly). Demoted
-		// sessions are collected and their direct connections closed *after*
-		// UpdateAllProviders below — closing earlier would race in-flight
-		// relays still holding pointers to the prior pairing.
+		// Reconcile the probes against the fresh maps: drop entries whose provider
+		// failed validation (demote), and append new sessions for configured
+		// providers that pass but weren't active (promote — recovering from
+		// failed-init). Demoted sessions are collected and their direct connections
+		// closed *after* UpdateAllProviders below — closing earlier would race
+		// in-flight relays still holding pointers to the prior pairing.
+		//
+		// A /debug/reset-pairing that ran while the probes did stands: it re-admits what
+		// the re-verifier demoted, and these verdicts were probed before it, so they are
+		// dropped and the pass only freshens the pairing the reset left (MAG-5318).
+		reset := inputs != nil && inputs.pairingResets != resets
+		if reset {
+			utils.FormatInfo("re-verify: the pairing was reset while the epoch pass probed, its verdicts are dropped",
+				utils.LogAttr("epoch", epoch),
+				utils.LogAttr("chainKey", chainKeyLog),
+			)
+		}
 		var demotedSessions []*routersession.ConsumerSessionsWithProvider
-		if inputs := rpsr.reverifyInputs[chainKey]; inputs != nil {
-			reverifyStart := time.Now()
+		if inputs != nil && !reset {
 			var demotedStatic, demotedBackup []*routersession.ConsumerSessionsWithProvider
 			var promotedStatic, promotedBackup []string
-			freshProviderSessions, demotedStatic, promotedStatic = applyReverification(ctx, inputs, freshProviderSessions, reverifyTierStatic, epoch)
-			freshBackupSessions, demotedBackup, promotedBackup = applyReverification(ctx, inputs, freshBackupSessions, reverifyTierBackup, epoch)
+			freshProviderSessions, demotedStatic, promotedStatic = applyReverification(inputs, freshProviderSessions, reverifyTierStatic, epoch, probedStatic)
+			freshBackupSessions, demotedBackup, promotedBackup = applyReverification(inputs, freshBackupSessions, reverifyTierBackup, epoch, probedBackup)
 			demotedSessions = slices.Concat(demotedStatic, demotedBackup)
 
 			// A promoted provider supersedes any pending failed-init retry, the same
@@ -4145,21 +4187,13 @@ func (rpsr *RPCSmartRouter) updateEpoch(ctx context.Context, epoch uint64) {
 			// counted as an attempt for every provider it verified (decideReverification).
 			queueDemoted(&rpsr.failedStaticProviders, chainKey, inputs.configuredStatic, demotedStatic, promotedStatic)
 			queueDemoted(&rpsr.failedBackupProviders, chainKey, inputs.configuredBackup, demotedBackup, promotedBackup)
-			// Per-chain re-verify is internally bounded by SpecReVerifyConcurrency,
-			// but updateEpoch iterates chains serially. Surfacing per-chain duration
-			// gives operators a signal when total tick time approaches epoch length —
-			// the cross-chain bound is Σ ⌈N_chain/conc⌉ × SpecReVerifyAttemptTimeout.
-			if elapsed := time.Since(reverifyStart); elapsed > SpecReVerifyAttemptTimeout {
-				utils.FormatWarning("re-verify: cycle exceeded single-attempt timeout — consider tuning SpecReVerifyConcurrency", nil,
-					utils.LogAttr("chainKey", chainKeyLog),
-					utils.LogAttr("elapsed", elapsed.String()),
-					utils.LogAttr("attemptTimeout", SpecReVerifyAttemptTimeout.String()),
-				)
-			}
 		}
 
 		// Update stored sessions with fresh objects, and push them to the session manager.
 		after, err := rpsr.commitPairingLocked(chainKey, epoch, freshProviderSessions, freshBackupSessions, demotedSessions)
+		if inputs != nil {
+			inputs.endEpochPass()
+		}
 		rpsr.mu.Unlock()
 		if err != nil {
 			utils.FormatError("Failed to update providers on epoch change", err,
@@ -4619,7 +4653,10 @@ var retryValidateFn = func(ctx context.Context, provider *routersession.RPCStati
 // hangs does not hold every other provider's retry back by its timeout. Their verdicts
 // are applied under the router lock, against what other passes applied while they ran:
 // a provider whose probe an epoch pass overtook is in neither partition, since that
-// pass's verdict, newer, already stands (chainReverifyInputs.verdictAt).
+// pass's verdict, newer, already stands (chainReverifyInputs.verdictAt). The retry waits
+// for an epoch pass in flight on the chain before it reads the verdicts it keeps, and
+// one that starts while it probes leaves every provider in neither partition
+// (lockBetweenEpochPasses).
 func (rpsr *RPCSmartRouter) revalidateTier(
 	ctx context.Context,
 	failed []*routersession.RPCStaticProviderEndpoint,
@@ -4636,7 +4673,10 @@ func (rpsr *RPCSmartRouter) revalidateTier(
 		ran       []chainlib.CheckID
 	}
 	previous := make([]chainlib.ProviderAdmission, len(failed))
-	rpsr.mu.Lock()
+	passes, ok := rpsr.lockBetweenEpochPasses(ctx, rpcEndpoint.Key())
+	if !ok {
+		return nil, nil
+	}
 	if inputs := rpsr.reverifyInputs[rpcEndpoint.Key()]; inputs != nil {
 		for i, provider := range failed {
 			previous[i] = inputs.lastPass[retryKey(tier, provider.Name)]
@@ -4665,6 +4705,9 @@ func (rpsr *RPCSmartRouter) revalidateTier(
 	rpsr.mu.Lock()
 	defer rpsr.mu.Unlock()
 	inputs := rpsr.reverifyInputs[rpcEndpoint.Key()]
+	if inputs.epochPassSince(passes) {
+		return nil, nil
+	}
 	for i, provider := range failed {
 		result := probes[i]
 		if inputs != nil {
@@ -4897,6 +4940,9 @@ func (rpsr *RPCSmartRouter) rebuildPairingFromConfig() map[string][]string {
 		if sessionManager == nil || inputs == nil {
 			continue
 		}
+		// An epoch pass probing this chain now drops its verdicts, whether or not anything
+		// is restored: they were probed before this reset (chainReverifyInputs.pairingResets).
+		inputs.pairingResets++
 
 		mergedStatic, restoredStatic := mergeAbsentProviders(
 			rpsr.providerSessions[chainKey], inputs.configuredStatic, inputs.convertProvidersToSessions, currentEpoch)
