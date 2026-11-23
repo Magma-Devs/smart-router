@@ -97,6 +97,23 @@ func TestTronTxRefusalRows(t *testing.T) {
 	duplicate := ClassifyNodeErrorForRetry(ChainFamilyTron, TransportREST, 200, TronTxRefusalMessage("DUP_TRANSACTION_ERROR", ""))
 	require.True(t, duplicate.IsNonRetryable)
 	require.False(t, duplicate.IsNodeAtFault)
+
+	// The two NOT_ENOUGH_EFFECTIVE_CONNECTION replies of java-tron's broadcastTransaction. Before the
+	// transaction, the node is short of peers: at fault. After pushTransaction took it, "P2P broadcast
+	// failed." says no peer still needed it from this node: the node holds it, so it is not blamed.
+	fewPeers := TronTxRefusalMessage("NOT_ENOUGH_EFFECTIVE_CONNECTION", "Effective connection:0 lt minEffectiveConnection:1")
+	require.Equal(t, RouterErrorNodeServiceUnavailable.Name, ClassifyError(nil, ChainFamilyTron, TransportREST, 200, fewPeers).Name)
+	require.True(t, ClassifyNodeErrorForRetry(ChainFamilyTron, TransportREST, 200, fewPeers).IsNodeAtFault)
+	taken := TronTxRefusalMessage("NOT_ENOUGH_EFFECTIVE_CONNECTION", "P2P broadcast failed.")
+	for _, family := range []ChainFamily{ChainFamilyTron, ChainFamilyUnknown} {
+		require.Equal(t, RouterErrorChainTxAlreadyKnown.Name, ClassifyError(nil, family, TransportREST, 200, taken).Name, family.String())
+		require.Equal(t, RouterErrorChainTxAlreadyKnown.Name, ClassifyError(nil, family, TransportREST, 400, "HTTP 400: "+taken).Name, family.String())
+	}
+	takenVerdict := ClassifyNodeErrorForRetry(ChainFamilyTron, TransportREST, 200, taken)
+	require.False(t, takenVerdict.IsNodeAtFault, "a node that took the transaction is not blamed")
+	require.True(t, takenVerdict.IsNonRetryable)
+	require.Equal(t, RouterErrorNodeServiceUnavailable.Name,
+		ClassifyError(nil, ChainFamilyTron, TransportREST, 200, taken+" More text").Name, "only the exact message")
 }
 
 // The rows read only the messages the readers write: a node's own text that happens to start with a

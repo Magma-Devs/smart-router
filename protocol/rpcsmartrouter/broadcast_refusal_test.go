@@ -59,6 +59,10 @@ const (
 	tronHexAccepted    = `{"result":true,"code":"SUCCESS","message":"","transaction":"{}","txid":"` + refusalTronID + `"}`
 	tronHexDuplicate   = `{"result":false,"code":"DUP_TRANSACTION_ERROR","message":"","transaction":"{}","txid":"` + refusalTronID + `"}`
 	tronHexSigError    = `{"result":false,"code":"SIGERROR","message":"Validate signature error: miss sig or contract","transaction":"{}","txid":"` + refusalTronID + `"}`
+	// NOT_ENOUGH_EFFECTIVE_CONNECTION "P2P broadcast failed.", which java-tron sends after it took the
+	// transaction into its pending pool, when no peer still needed it from this node.
+	tronTxP2PFailed  = `{"code":"NOT_ENOUGH_EFFECTIVE_CONNECTION","txid":"` + refusalTronID + `","message":"5032502062726f616463617374206661696c65642e"}`
+	tronHexP2PFailed = `{"result":false,"code":"NOT_ENOUGH_EFFECTIVE_CONNECTION","message":"P2P broadcast failed.","transaction":"{}","txid":"` + refusalTronID + `"}`
 
 	grpcBroadcastMethod = "cosmos.tx.v1beta1.Service/BroadcastTx"
 )
@@ -224,6 +228,8 @@ func TestDirectRPCRelaySender_BroadcastRefusalVerdicts(t *testing.T) {
 		{name: "broadcasttransaction SIGERROR", path: tronTx, reply: []byte(tronTxSigError), wantNodeError: true},
 		{name: "broadcasttransaction SERVER_BUSY", path: tronTx, reply: []byte(tronTxServerBusy), wantNodeError: true, wantRateLimited: true},
 		{name: "broadcasttransaction NO_CONNECTION", path: tronTx, reply: []byte(tronTxNoConnection), wantNodeError: true, wantAtFault: true, wantScored: true},
+		{name: "broadcasttransaction NOT_ENOUGH_EFFECTIVE_CONNECTION after the node took it", path: tronTx, reply: []byte(tronTxP2PFailed), wantNodeError: true},
+		{name: "broadcasthex NOT_ENOUGH_EFFECTIVE_CONNECTION after the node took it", path: tronHex, reply: []byte(tronHexP2PFailed), wantNodeError: true},
 		{name: "broadcasthex accepted", path: tronHex, reply: []byte(tronHexAccepted), wantHealthy: true},
 		{name: "broadcasthex DUP_TRANSACTION_ERROR", path: tronHex, reply: []byte(tronHexDuplicate), wantNodeError: true},
 		{name: "broadcasthex SIGERROR", path: tronHex, reply: []byte(tronHexSigError), wantNodeError: true},
@@ -416,6 +422,8 @@ func TestBroadcastRefusal_FanOut(t *testing.T) {
 		// A node that cannot reach the network did not broadcast anything: the broadcast waits for the
 		// other node, and this one is blamed.
 		{name: "broadcasttransaction NO_CONNECTION", path: tronTx, first: []byte(tronTxNoConnection), later: []byte(tronTxAccepted), wantReply: []byte(tronTxAccepted), wantVerdict: "NODE_SERVICE_UNAVAILABLE", wantFirstRefusals: 4},
+		// A node that took the transaction but found every peer already had it is not blamed.
+		{name: "broadcasttransaction P2P broadcast failed", path: tronTx, first: []byte(tronTxP2PFailed), later: []byte(tronTxAccepted), wantReply: []byte(tronTxAccepted), wantVerdict: "CHAIN_TX_ALREADY_KNOWN", wantFirstRefusals: 3},
 
 		// Every node refuses: the client gets the first refusal as the node sent it, flagged.
 		{name: "every node refuses broadcast_tx_sync", path: syncPath, first: []byte(tmSyncSequence), later: []byte(tmSyncInMempool), wantReply: []byte(tmSyncSequence), wantNodeErrorFlag: true, wantVerdict: "CHAIN_INVALID_SEQUENCE", wantFirstRefusals: 3},
@@ -424,6 +432,7 @@ func TestBroadcastRefusal_FanOut(t *testing.T) {
 		{name: "every node refuses BroadcastTx, the log naming a url", path: grpcBroadcast(), first: grpcBroadcastNamingAURL, later: grpcBroadcastInMempool, wantReply: grpcBroadcastNamingAURL, wantNodeErrorFlag: true, wantVerdict: "CHAIN_INVALID_SIGNATURE", wantFirstRefusals: 3},
 		{name: "every node refuses broadcasttransaction", path: tronTx, first: []byte(tronTxSigError), later: []byte(tronTxDuplicate), wantReply: []byte(tronTxSigError), wantNodeErrorFlag: true, wantVerdict: "CHAIN_INVALID_SIGNATURE", wantFirstRefusals: 3},
 		{name: "every node refuses broadcasthex", path: tronHex, first: []byte(tronHexDuplicate), later: []byte(tronHexSigError), wantReply: []byte(tronHexDuplicate), wantNodeErrorFlag: true, wantVerdict: "CHAIN_TX_ALREADY_KNOWN", wantFirstRefusals: 3},
+		{name: "every node answers P2P broadcast failed", path: tronHex, first: []byte(tronHexP2PFailed), later: []byte(tronHexP2PFailed), wantReply: []byte(tronHexP2PFailed), wantNodeErrorFlag: true, wantVerdict: "CHAIN_TX_ALREADY_KNOWN", wantFirstRefusals: 3},
 
 		// Unchanged: a broadcast_tx_commit whose transaction ran is the answer, though it failed.
 		{name: "broadcast_tx_commit that ran is the answer", path: commitPath, first: []byte(tmCommitRanOut), later: []byte(tmCommitApplied), wantReply: []byte(tmCommitRanOut), wantFirstRefusals: 0},

@@ -273,6 +273,12 @@ func tronTxRefused(codes ...string) ErrorMatcher {
 	return MessageRegex(`^(?:HTTP \d+: )?` + regexp.QuoteMeta(tronTxRefusalPrefix) + `(?:` + strings.Join(codes, "|") + `)(?::|$)`)
 }
 
+// tronTxRefusedSaying matches TronTxRefusalMessage's message for one response code and one exact
+// message, with or without the direct-RPC sender's "HTTP <status>: " prefix.
+func tronTxRefusedSaying(code, message string) ErrorMatcher {
+	return MessageRegex(`^(?:HTTP \d+: )?` + regexp.QuoteMeta(TronTxRefusalMessage(code, message)) + `$`)
+}
+
 // tronTxRefusalRows classify a refused Tron transaction by its response code. java-tron checks the
 // node before the transaction:
 //   - NO_CONNECTION, NOT_ENOUGH_EFFECTIVE_CONNECTION: the node has too few peers to broadcast
@@ -280,11 +286,19 @@ func tronTxRefused(codes ...string) ErrorMatcher {
 //   - SERVER_BUSY: too many transactions pending. Healthy but busy, as XRPL's tooBusy: held off,
 //     not scored, and nothing was broadcast.
 //
+// One NOT_ENOUGH_EFFECTIVE_CONNECTION comes after the transaction instead: "P2P broadcast failed."
+// java-tron sends it once pushTransaction has taken the transaction into the node's pending pool,
+// when no peer still needed it from this node, because each had already announced it
+// (Wallet.broadcastTransaction, AdvService.fastBroadcastTransaction). The node and its peers hold
+// the transaction, which is what a node sees when another node of the same broadcast spread it
+// first. That is neither the node's health nor a refusal: it is read as a transaction already known.
+//
 // Every other code is about the transaction, the same from every node, and keeps the availability
 // gate off the node: a bad signature, a transaction already known, one too big, an account that
 // cannot pay for its bandwidth, and, through the catch-all, CONTRACT_VALIDATE_ERROR,
 // CONTRACT_EXE_ERROR, TAPOS_ERROR, TRANSACTION_EXPIRATION_ERROR, BLOCK_UNSOLIDIFIED and OTHER_ERROR.
 var tronTxRefusalRows = []errorMapping{
+	{tronTxRefusedSaying("NOT_ENOUGH_EFFECTIVE_CONNECTION", "P2P broadcast failed."), RouterErrorChainTxAlreadyKnown},
 	{tronTxRefused("NO_CONNECTION", "NOT_ENOUGH_EFFECTIVE_CONNECTION"), RouterErrorNodeServiceUnavailable},
 	{tronTxRefused("SERVER_BUSY"), RouterErrorNodeRateLimited},
 	{tronTxRefused("SIGERROR"), RouterErrorChainInvalidSignature},

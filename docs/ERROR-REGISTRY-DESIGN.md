@@ -822,14 +822,18 @@ in a catch-all, so a refusal is never `UNKNOWN_ERROR`, which is retried and scor
 | Tron `TOO_BIG_TRANSACTION_ERROR` | `CHAIN_TX_TOO_LARGE` | no |
 | Tron `BANDWITH_ERROR` | `CHAIN_INSUFFICIENT_FUNDS` | no |
 | Tron `SERVER_BUSY` | `NODE_RATE_LIMITED` (held off) | no |
-| Tron `NO_CONNECTION`, `NOT_ENOUGH_EFFECTIVE_CONNECTION` | `NODE_SERVICE_UNAVAILABLE` | **yes** |
+| Tron `NOT_ENOUGH_EFFECTIVE_CONNECTION` with "P2P broadcast failed." | `CHAIN_TX_ALREADY_KNOWN` | no |
+| Tron `NO_CONNECTION`, any other `NOT_ENOUGH_EFFECTIVE_CONNECTION` | `NODE_SERVICE_UNAVAILABLE` | **yes** |
 | any other Tron code | `CHAIN_TX_REJECTED` | no |
 
 A refusal about the transaction is the same from every node: it neither resets the endpoint's
 failure count nor adds to it, and is not scored. A Tron node with too few peers broadcasts nothing,
-which is its health, as XRPL's `noNetwork` is. Every refusal sets `lava-identified-node-error: true`
-when it reaches the client, and is counted in `smartrouter_errors_total` under its code. A gRPC
-refusal is the node's protobuf message, so it is not redacted: a rewritten string would break it.
+which is its health, as XRPL's `noNetwork` is. "P2P broadcast failed." is not that: java-tron sends
+it after it took the transaction into its pending pool, when every peer had already announced the
+transaction, so the node holds it and is not blamed. Every refusal sets
+`lava-identified-node-error: true` when it reaches the client, and is counted in
+`smartrouter_errors_total` under its code. A gRPC refusal is the node's protobuf message, so it is
+not redacted: a rewritten string would break it.
 
 A Cosmos REST `POST /cosmos/tx/v1beta1/txs` refusal was already a node error to the relay processor
 (§9); its sender flag and its classification by the log are unchanged.
