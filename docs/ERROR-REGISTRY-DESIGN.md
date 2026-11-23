@@ -312,6 +312,8 @@ type ErrorMatcher interface {
 // MessageContains("nonce too low") — substring match in error message
 // MessageRegex(`missing.*storage`) — regex match
 // HTTPStatusEquals(429)           — HTTP status code match
+// HTTPStatusContains(429)         — a status the router wrote into the message ("HTTP 429: …"),
+//                                   never a number in the node's own text (MAG-5324)
 // GRPCCodeEquals(codes.Unavailable) — gRPC status code match
 ```
 

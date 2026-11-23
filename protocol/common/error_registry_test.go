@@ -721,6 +721,27 @@ func TestMatcher_HTTPStatusContains(t *testing.T) {
 	assert.False(t, m500.Matches(0, "error code 5001"), "should not match 500 with trailing digit")
 	assert.False(t, m500.Matches(0, "tx 1500 confirmed"), "should not match 500 with leading digit")
 	assert.False(t, m500.Matches(0, "slot 15003 was skipped"), "should not match 500 embedded in 15003")
+
+	// MAG-5324: a number in the node's own text is not a status, whatever bounds it.
+	assert.False(t, m500.Matches(0, "spendable balance 100ulava is smaller than 500ulava: insufficient funds"), "a letter after it")
+	assert.False(t, m500.Matches(0, "invalid address 0x500"), "a letter before it")
+	assert.False(t, m500.Matches(0, "tx 500 failed"), "a word around it")
+	assert.False(t, m500.Matches(0, "500ulava is not enough"), "a letter after it, at the start")
+	assert.False(t, m.Matches(0, "port transfer, channel-429: channel not found"), "a hyphen before it")
+	assert.False(t, m.Matches(0, "failed to load state at height 429"), "at the end of the text")
+	assert.False(t, m.Matches(0, "upstream answered HTTP 429"), "HTTP inside the node's text")
+	assert.False(t, HTTPStatusContains(502).Matches(0, "osmo1qq502pkxyz"), "inside a bech32 address")
+
+	// Where the router writes a status.
+	assert.True(t, m.Matches(0, "HTTP 429: Too Many Requests"), "the JSON-RPC sender's prefix")
+	assert.True(t, m.Matches(0, "HTTP 429 Too Many Requests"), "routersession.HTTPStatusError")
+	assert.True(t, m.Matches(0, "HTTP 429"), "the REST fallback message")
+	assert.True(t, m.Matches(0, "429 Too Many Requests: {\"error\":\"slow down\"}"), "rpcclient.HTTPError's status line")
+	assert.True(t, m.Matches(0, "Disallowed status code error (429): websocket: bad handshake"), "StatusCodeError429")
+	assert.True(t, m.Matches(0, "websocket: bad handshake (HTTP status 429)"), "a refused WebSocket handshake")
+	assert.True(t, m500.Matches(0, "upstream returned a node error (HTTP 500)"), "a relay's failure")
+	assert.True(t, m500.Matches(0, "unexpected HTTP status code received from server: 500 (Internal Server Error)"), "grpc-go's gateway status")
+	assert.False(t, m.Matches(0, "HTTP 4290: x"), "a longer number")
 }
 
 func TestMatcher_GRPCCodeEquals(t *testing.T) {
@@ -968,8 +989,9 @@ func TestClassifyError_GRPCProviderFaultRowsComeAfterTheTextRows(t *testing.T) {
 		{4, "too many requests", RouterErrorNodeRateLimited},
 		{13, "method not implemented", RouterErrorNodeUnimplemented},
 		{15, "service not found", RouterErrorNodeUnimplemented},
-		{13, "upstream answered HTTP 401", RouterErrorNodeUnauthorized},
-		{1, "upstream answered HTTP 500", RouterErrorNodeInternalError},
+		// A status the router wrote (MAG-5324); one inside the node's own text decides nothing.
+		{13, "HTTP 401: upstream answered", RouterErrorNodeUnauthorized},
+		{1, "HTTP 500: upstream answered", RouterErrorNodeInternalError},
 	} {
 		assert.Equal(t, tc.want, ClassifyError(nil, ChainFamilyUnknown, TransportGRPC, tc.code, tc.message),
 			"gRPC %d %q", tc.code, tc.message)

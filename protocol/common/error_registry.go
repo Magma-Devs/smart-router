@@ -620,34 +620,69 @@ func CodeAndMessage(code int, substring string) ErrorMatcher {
 	return codeAndMessageMatcher{code: code, substring: strings.ToLower(substring)}
 }
 
-// HTTPStatusContains matches an HTTP status code in the error message with non-digit
-// boundary checks. This prevents false positives like "500" matching inside "25001500".
-// Prefer structured status codes (CodeEquals) when the HTTP status is available as an int.
+// HTTPStatusContains matches an HTTP status in an error message where the router wrote it, and
+// nowhere else. A number inside the node's own text is not a status: a Cosmos log's "500ulava" or
+// "channel-429", a sequence number or a height read as one blamed the endpoint or held every
+// provider off (MAG-5324). Prefer structured status codes (CodeEquals) when the HTTP status is
+// available as an int.
+//
+// The status must follow one of httpStatusLeads at the start of the message, or one of
+// httpStatusInnerLeads anywhere, and end at a character that is neither a letter nor a digit.
 type httpStatusMatcher struct {
 	status string
 }
 
-func (m httpStatusMatcher) Matches(_ int, errorMessage string) bool {
-	target := m.status
-	msg := errorMessage
-	for {
-		idx := strings.Index(msg, target)
-		if idx < 0 {
-			return false
+// httpStatusLeads are what the router writes right before a status at the start of a message,
+// lowercase:
+//   - "http " and "http status ": the prefix the JSON-RPC sender and ExtractNodeErrorDetails put on
+//     the message of a non-2xx reply ("HTTP 503: …"), and routersession.HTTPStatusError's own text
+//     ("HTTP 503 Service Unavailable");
+//   - GRPCGatewayStatusText: grpc-go's status for a gateway's plain HTTP reply;
+//   - StatusCodeError429's and StatusCodeError504's text, which RateLimited puts in front of the
+//     error it types;
+//   - nothing: the status line Go's HTTP client reads, as rpcclient.HTTPError prints it ("503
+//     Service Unavailable: <body>").
+var httpStatusLeads = []string{"http status ", "http ", GRPCGatewayStatusText + ": ", "disallowed status code error (", ""}
+
+// httpStatusInnerLeads are what the router writes before a status it adds in parentheses to an
+// error it wraps: a refused WebSocket handshake ("websocket: bad handshake (HTTP status 503)"), a
+// relay's failure ("upstream returned a node error (HTTP 503)"). Lowercase.
+var httpStatusInnerLeads = []string{"(http status ", "(http "}
+
+func (m httpStatusMatcher) Matches(errorCode int, errorMessage string) bool {
+	return m.matchesLowered(errorCode, strings.ToLower(errorMessage))
+}
+
+func (m httpStatusMatcher) matchesLowered(_ int, loweredMessage string) bool {
+	for _, lead := range httpStatusLeads {
+		if rest, ok := strings.CutPrefix(loweredMessage, lead); ok && m.startsWithStatus(rest) {
+			return true
 		}
-		// Check that the character before the match (if any) is not a digit
-		if idx > 0 && msg[idx-1] >= '0' && msg[idx-1] <= '9' {
-			msg = msg[idx+len(target):]
-			continue
-		}
-		// Check that the character after the match (if any) is not a digit
-		end := idx + len(target)
-		if end < len(msg) && msg[end] >= '0' && msg[end] <= '9' {
-			msg = msg[end:]
-			continue
-		}
-		return true
 	}
+	for _, lead := range httpStatusInnerLeads {
+		for msg := loweredMessage; ; {
+			_, rest, found := strings.Cut(msg, lead)
+			if !found {
+				break
+			}
+			if m.startsWithStatus(rest) {
+				return true
+			}
+			msg = rest
+		}
+	}
+	return false
+}
+
+// startsWithStatus reports whether text opens with the status as a whole word: "503", "503:" or
+// "503 Service Unavailable", never "5030" or "500ulava".
+func (m httpStatusMatcher) startsWithStatus(text string) bool {
+	rest, ok := strings.CutPrefix(text, m.status)
+	if !ok || rest == "" {
+		return ok
+	}
+	c := rest[0]
+	return !(c >= '0' && c <= '9' || c >= 'a' && c <= 'z')
 }
 
 func HTTPStatusContains(status int) ErrorMatcher {
