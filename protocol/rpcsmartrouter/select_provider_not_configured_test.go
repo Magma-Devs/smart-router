@@ -72,6 +72,7 @@ func TestSelectProvider_ANameTheRouterDoesNotHaveIsRefusedWith400(t *testing.T) 
 	require.NotContains(t, string(body), "node-a", "the reply must not list the router's providers")
 	require.NotEmpty(t, resp.Header.Get(common.GUID_HEADER_NAME))
 	require.Contains(t, string(body), resp.Header.Get(common.GUID_HEADER_NAME))
+	require.Equal(t, "eth_getBalance", resp.Header.Get(common.USER_REQUEST_TYPE), "the refusal carries the request's headers (MAG-5076)")
 
 	// The control: the configured name is served.
 	resp, body = send(t, "node-a")
@@ -84,6 +85,10 @@ func TestSelectProvider_ANameTheRouterDoesNotHaveIsRefusedWith400(t *testing.T) 
 	resp, body = send(t, "node-b")
 	require.Equal(t, http.StatusInternalServerError, resp.StatusCode, "%s", body)
 	require.NotContains(t, string(body), "Selected provider is not configured")
+	// It carries the request's headers all the same (MAG-5076).
+	require.NotEmpty(t, resp.Header.Get(common.GUID_HEADER_NAME))
+	require.Contains(t, string(body), resp.Header.Get(common.GUID_HEADER_NAME))
+	require.Equal(t, "eth_getBalance", resp.Header.Get(common.USER_REQUEST_TYPE))
 }
 
 // MAG-3800, through the router's real boot (CreateSmartRouterEndpoint): a pin is checked against

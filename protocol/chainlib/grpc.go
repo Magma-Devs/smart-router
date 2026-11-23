@@ -263,6 +263,11 @@ func (apip *GrpcChainParser) ParseMsg(url string, data []byte, connectionType st
 		return nil, utils.FormatError("failed to getApiCollection gRPC", err)
 	}
 
+	// A request no node can decode is refused here, once, before any provider is picked.
+	if err := checkGrpcRequestMessage(apip.registry, url, data); err != nil {
+		return nil, err
+	}
+
 	// handle headers
 	metadata, overwriteReqBlock, _ := apip.HandleHeaders(metadata, apiCollection, spectypes.Header_pass_send)
 	if name, ok := unsendableGrpcHeader(metadata); ok {
@@ -384,6 +389,9 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 	sendRelayCallback := func(ctx context.Context, method string, reqBody []byte) ([]byte, metadata.MD, error) {
 		guid := utils.GenerateUniqueIdentifier()
 		ctx = utils.WithUniqueIdentifier(ctx, guid)
+		// The call's deadline here is the caller's own grpc-timeout. Recorded so an attempt that
+		// ends at it is not counted against the endpoint (common.IsClientCancellation).
+		ctx = common.WithCallerDeadline(ctx)
 		msgSeed := strconv.FormatUint(guid, 10)
 		metadataValues, _ := metadata.FromIncomingContext(ctx)
 		ctx = utils.ExtractWantedHeadersFromCachedMap(metadataValues, ctx)

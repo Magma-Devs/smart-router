@@ -251,7 +251,7 @@ func TestRevalidateTier_NotesAndCountsTheFailedCheck(t *testing.T) {
 }
 
 func applyReverificationKeep(inputs *chainReverifyInputs, fresh map[uint64]*routersession.ConsumerSessionsWithProvider) map[uint64]*routersession.ConsumerSessionsWithProvider {
-	next, _, _ := applyReverification(context.Background(), inputs, fresh, reverifyTierStatic, 1)
+	next, _, _ := probeAndApplyReverification(context.Background(), inputs, fresh, reverifyTierStatic, 1)
 	return next
 }
 
@@ -266,7 +266,7 @@ func TestApplyReverification_RecordsTheFailedCheck(t *testing.T) {
 		},
 		rateLimitHoldoff: holdoff.NewRegistry(),
 	}
-	applyReverification(context.Background(), inputs, sessionsFor("tatum"), reverifyTierStatic, 1)
+	probeAndApplyReverification(context.Background(), inputs, sessionsFor("tatum"), reverifyTierStatic, 1)
 	require.Equal(t, "pruning", inputs.lastFailure["static|tatum"])
 }
 

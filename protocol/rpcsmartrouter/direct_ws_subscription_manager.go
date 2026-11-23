@@ -666,7 +666,7 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 	// No active subscription found, create new one
 	// Select best endpoint using sticky session, optimizer, or first available
 	startTime := time.Now()
-	selectedEndpoint, err := dwsm.selectEndpoint(ctx, clientKey, nil)
+	selectedEndpoint, err := dwsm.selectEndpoint(ctx, clientKey)
 	if err != nil {
 		dwsm.settlePendingSubscription(hashedParams, false)
 		dwsm.metricsManager.SetFailedWsSubscriptionRequestMetric(dwsm.chainID, dwsm.apiInterface)

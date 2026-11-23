@@ -2168,7 +2168,9 @@ func (g *GRPCDirectRPCConnection) handleGRPCError(ctx context.Context, err error
 	}
 
 	// The router's own deadline passed: a timeout, as on every HTTP transport, and the
-	// endpoint is still blamed for it. It is not the node's answer, so no response. A node
+	// endpoint is still blamed for it. It is not the node's answer, so no response. When the
+	// deadline bounding ctx is the caller's own grpc-timeout instead, the same error comes back,
+	// and common.IsClientCancellation is what keeps that one off the endpoint (D10). A node
 	// that sends DEADLINE_EXCEEDED or CANCELED itself, while the router's deadline is still
 	// open, did answer, and stays a node error below.
 	//

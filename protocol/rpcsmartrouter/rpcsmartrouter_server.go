@@ -1931,14 +1931,27 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 			return timedOut, err
 		}
 
-		// A GraphQL write pinned to a router-select-provider name the router does not have is refused
-		// before any provider is asked, so its reply says the write was never sent, as the
-		// listener's other refusals of a GraphQL write do (MAG-3800; Part I R-Q, Part II Q8). The
-		// listener writes the refusal and passes this reply's headers on; only this function knows
-		// the request is a write.
-		if isGraphQLWrite(protocolMessage) && errors.Is(err, routersession.SelectedProviderNotConfiguredError) {
+		// A request that ended before any provider was asked: a pin on a provider the router cannot
+		// use, no provider to ask, a deadline before the first dispatch. The listener writes the
+		// router's error, and this reply carries the request's own headers on it, Lava-Guid and
+		// lava-user-request-type among them, as every other failed reply does (MAG-5076; Part I §1:
+		// Lava-Guid on every reply). Returning nil sent the error with none. No attempt went out, so
+		// the reply names no provider and no retry. A cross-validated request is left out: the header
+		// builder would count a round that never ran.
+		if relayProcessor != nil && relayProcessor.GetSelection() != relaycore.CrossValidation && relayProcessor.GetUsedProviders().SessionsDispatched() == 0 {
+			// A write's targets are recorded when selection picks them. The consistency gate can then
+			// turn every one away, as it does a strict pin on a node too far behind the chain tip. No
+			// node received this write, so lava-fast-tx-participants must name none.
+			relayProcessor.SetStatefulRelayTargets(nil)
 			refused := &common.RelayResult{}
-			ensureWriteOutcomeHeader(refused, rpcInterfaceMessages.GraphQLWriteOutcomeNotSent)
+			rpcss.appendHeadersToRelayResult(ctx, refused, relayProcessor.ProtocolErrors(), relayProcessor, protocolMessage, protocolMessage.GetApi().GetName(), analytics, false)
+			// A GraphQL write pinned to a lava-select-provider name the router does not have is
+			// refused, so its reply says the write was never sent, as the listener's other refusals
+			// of a GraphQL write do (MAG-3800; Part I R-Q, Part II Q8). Only this function knows the
+			// request is a write.
+			if isGraphQLWrite(protocolMessage) && errors.Is(err, routersession.SelectedProviderNotConfiguredError) {
+				ensureWriteOutcomeHeader(refused, rpcInterfaceMessages.GraphQLWriteOutcomeNotSent)
+			}
 			return refused, err
 		}
 		return nil, err
@@ -6219,7 +6232,8 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		//    returns and its defer cancel() cancels the parent ctx, which cancels all still-in-flight
 		//    goroutines — those see context.Canceled as a result.
 		// 2. Client disconnect: the upstream caller closed the connection before we responded.
-		// Neither case is a provider fault — classifyEndpointHealth handles the carve-out
+		// The caller's own gRPC deadline running out is read the same way (D10).
+		// None of these is a provider fault — classifyEndpointHealth handles the carve-out
 		// using common.IsClientCancellation so every endpoint-health decision site uses the
 		// same rule.
 		//
@@ -7270,7 +7284,7 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 		})
 
 	// add is node error flag
-	if relayResult.IsNodeError {
+	if identifiedNodeError(protocolMessage, relayResult) {
 		metadataReply = append(metadataReply,
 			pairingtypes.Metadata{
 				Name:  common.IDENTIFIED_NODE_ERROR_HEADER,
@@ -7587,6 +7601,27 @@ func httpStatusRelayError(statusCode int, reply *pairingtypes.RelayReply) error 
 		httpErr.RetryAfter, _ = common.ParseRetryAfter(header, time.Now())
 	}
 	return httpErr
+}
+
+// identifiedNodeError reports whether a reply carries lava-identified-node-error: the header says
+// the node answered with an error, so it is set only when the reply shows that. On JSON-RPC and
+// Tendermint RPC a node always answers in JSON-RPC, so a body that is not a JSON-RPC reply (a
+// gateway's 401, 403 or 404 page, an empty body) is not the node's answer: it is forwarded as is,
+// without the header (MAG-5072, Omer 12 Nov), as a refused 429 already is (MAG-3030). An error a
+// node reports inside a JSON-RPC result (Tendermint's response code, XRPL's engine result) is
+// still its answer and keeps the header. Other interfaces are unchanged.
+func identifiedNodeError(protocolMessage chainlib.ProtocolMessage, relayResult *common.RelayResult) bool {
+	if relayResult == nil || !relayResult.IsNodeError {
+		return false
+	}
+	if protocolMessage == nil || protocolMessage.GetApiCollection() == nil {
+		return true
+	}
+	switch protocolMessage.GetApiCollection().CollectionData.ApiInterface {
+	case spectypes.APIInterfaceJsonRPC, spectypes.APIInterfaceTendermintRPC:
+		return rpcInterfaceMessages.IsJsonrpcReply(relayResult.GetReply().GetData())
+	}
+	return true
 }
 
 // redactNodeReply withholds the secrets in a node's error reply (utils.RedactSecrets). A reply

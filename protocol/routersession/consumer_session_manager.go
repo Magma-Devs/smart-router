@@ -2443,6 +2443,31 @@ func convertSelectionStatsToMetrics(stats *provideroptimizer.SelectionStats) (al
 	return allScores, rngValue
 }
 
+// warnOnSelectionStatsGap warns when the optimizer picked provider without selection stats
+// (noStats) or with stats that carry no provider scores (noScores): the provider-selected metric
+// then publishes no scores for the pick. A sticky pick and a fresh pick pass their own wording.
+func (csm *ConsumerSessionManager) warnOnSelectionStatsGap(ctx context.Context, provider string, stats *provideroptimizer.SelectionStats, addon string, extensions []string, noStats, noScores string) {
+	switch {
+	case stats == nil:
+		utils.FormatWarning(noStats, nil,
+			utils.LogAttr("provider", provider),
+			utils.LogAttr("chainId", csm.rpcEndpoint.ChainID),
+			utils.LogAttr("addon", addon),
+			utils.LogAttr("extensions", extensions),
+			utils.LogAttr("GUID", ctx),
+		)
+	case len(stats.UpstreamScores) == 0:
+		utils.FormatWarning(noScores, nil,
+			utils.LogAttr("provider", provider),
+			utils.LogAttr("selectedProvider", stats.SelectedProvider),
+			utils.LogAttr("chainId", csm.rpcEndpoint.ChainID),
+			utils.LogAttr("addon", addon),
+			utils.LogAttr("extensions", extensions),
+			utils.LogAttr("GUID", ctx),
+		)
+	}
+}
+
 // resolveSelectedProviderAddress maps a header-supplied provider name onto the address
 // the router registered. Provider names are free-form config strings and the pipeline
 // does not preserve their case — the helm chart folds node names into the router's
@@ -2768,24 +2793,9 @@ func (csm *ConsumerSessionManager) selectProviderAddresses(ctx context.Context, 
 		}
 		// Track provider selection for metrics with all provider scores
 		if len(providers) > 0 {
-			if selectionStats == nil {
-				utils.FormatWarning("Selection stats missing for sticky session provider", nil,
-					utils.LogAttr("provider", providers[0]),
-					utils.LogAttr("chainId", csm.rpcEndpoint.ChainID),
-					utils.LogAttr("addon", addon),
-					utils.LogAttr("extensions", extensions),
-					utils.LogAttr("GUID", ctx),
-				)
-			} else if len(selectionStats.UpstreamScores) == 0 {
-				utils.FormatWarning("Selection stats missing provider scores for sticky session", nil,
-					utils.LogAttr("provider", providers[0]),
-					utils.LogAttr("selectedProvider", selectionStats.SelectedProvider),
-					utils.LogAttr("chainId", csm.rpcEndpoint.ChainID),
-					utils.LogAttr("addon", addon),
-					utils.LogAttr("extensions", extensions),
-					utils.LogAttr("GUID", ctx),
-				)
-			}
+			csm.warnOnSelectionStatsGap(ctx, providers[0], selectionStats, addon, extensions,
+				"Selection stats missing for sticky session provider",
+				"Selection stats missing provider scores for sticky session")
 			allScores, rngValue := convertSelectionStatsToMetrics(selectionStats)
 			csm.consumerMetricsManager.SetProviderSelected(csm.rpcEndpoint.ChainID, csm.rpcEndpoint.ApiInterface, providers[0], allScores, rngValue)
 		}
@@ -2805,24 +2815,9 @@ func (csm *ConsumerSessionManager) selectProviderAddresses(ctx context.Context, 
 				csm.setSelectionStats(selectionStats)
 			}
 			// Track provider selection for metrics with all provider scores
-			if selectionStats == nil {
-				utils.FormatWarning("Selection stats missing for provider selection", nil,
-					utils.LogAttr("provider", provider[0]),
-					utils.LogAttr("chainId", csm.rpcEndpoint.ChainID),
-					utils.LogAttr("addon", addon),
-					utils.LogAttr("extensions", extensions),
-					utils.LogAttr("GUID", ctx),
-				)
-			} else if len(selectionStats.UpstreamScores) == 0 {
-				utils.FormatWarning("Selection stats missing provider scores", nil,
-					utils.LogAttr("provider", provider[0]),
-					utils.LogAttr("selectedProvider", selectionStats.SelectedProvider),
-					utils.LogAttr("chainId", csm.rpcEndpoint.ChainID),
-					utils.LogAttr("addon", addon),
-					utils.LogAttr("extensions", extensions),
-					utils.LogAttr("GUID", ctx),
-				)
-			}
+			csm.warnOnSelectionStatsGap(ctx, provider[0], selectionStats, addon, extensions,
+				"Selection stats missing for provider selection",
+				"Selection stats missing provider scores")
 			allScores, rngValue := convertSelectionStatsToMetrics(selectionStats)
 			for _, providerAddr := range provider {
 				ignoredProvidersListCopy[providerAddr] = struct{}{}
