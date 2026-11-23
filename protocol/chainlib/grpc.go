@@ -263,6 +263,11 @@ func (apip *GrpcChainParser) ParseMsg(url string, data []byte, connectionType st
 		return nil, utils.FormatError("failed to getApiCollection gRPC", err)
 	}
 
+	// A request no node can decode is refused here, once, before any provider is picked.
+	if err := checkGrpcRequestMessage(apip.registry, url, data); err != nil {
+		return nil, err
+	}
+
 	// handle headers
 	metadata, overwriteReqBlock, _ := apip.HandleHeaders(metadata, apiCollection, spectypes.Header_pass_send)
 	if name, ok := unsendableGrpcHeader(metadata); ok {
