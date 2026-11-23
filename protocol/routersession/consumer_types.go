@@ -1366,7 +1366,7 @@ func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSes
 					// session, smart-router health, and refusal counter all agree on
 					// what "the client cancelled" means. Note: context.DeadlineExceeded
 					// is NOT exempt here — a slow/unreachable endpoint should still
-					// increment refusals.
+					// increment refusals — unless the deadline was the caller's own.
 					if common.IsClientCancellation(err, ctx) {
 						utils.FormatDebug("skipping ConnectionRefusals increment: request context canceled (client disconnect)",
 							utils.LogAttr("err", err),
