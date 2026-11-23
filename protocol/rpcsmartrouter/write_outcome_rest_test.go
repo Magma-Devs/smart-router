@@ -98,7 +98,7 @@ func TestRESTListener_WriteOutcome(t *testing.T) {
 			require.NoError(t, err)
 			defer closeServer()
 			if tc.hang {
-				shortenLAVAWriteWindow(t, parser)
+				shortenWriteWindow(t, parser, "LAVA")
 			}
 			chainMessage, err := parser.ParseMsg(path, data, tc.method, nil, extensionslib.ExtensionInfo{})
 			require.NoError(t, err)

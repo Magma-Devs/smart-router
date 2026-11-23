@@ -120,9 +120,10 @@ func writeOutcomeHeader(t *testing.T, result *common.RelayResult) string {
 
 // MAG-3800: a write pinned to a lava-select-provider name the router does not have is refused
 // before any provider is asked. On GraphQL its reply says Lava-Write-Outcome: not_sent, as the
-// listener's other refusals of a GraphQL write do (Part I R-Q, Part II Q8). The other interfaces
-// carry no write outcome yet (MAG-5232), so they get no header.
-func TestGraphQLWrite_APinToANameTheRouterDoesNotHaveIsNotSent(t *testing.T) {
+// listener's other refusals of a GraphQL write do (Part I R-Q, Part II Q8), and so does a JSON-RPC
+// write (MAG-5232). REST carries no write outcome yet (MAG-5256), so it gets no header. Every
+// interface's refusal carries the request's own headers (MAG-5076).
+func TestWrite_APinToANameTheRouterDoesNotHaveIsNotSent(t *testing.T) {
 	rand.InitRandomSeed()
 	for _, tc := range writeInterfaceCases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -138,10 +139,11 @@ func TestGraphQLWrite_APinToANameTheRouterDoesNotHaveIsNotSent(t *testing.T) {
 			require.ErrorIs(t, err, routersession.SelectedProviderNotConfiguredError)
 			require.Equal(t, [2]int64{0, 0}, [2]int64{atomic.LoadInt64(&hits[0]), atomic.LoadInt64(&hits[1])}, "no provider is asked")
 			want := ""
-			if tc.apiInterface == spectypes.APIInterfaceGraphQL {
-				want = "not_sent"
+			if tc.apiInterface != spectypes.APIInterfaceRest {
+				want = writeOutcomeNotSent
 			}
 			require.Equal(t, want, writeOutcomeHeader(t, result))
+			require.NotEmpty(t, refusalReplyHeader(result, common.USER_REQUEST_TYPE), "the refusal carries no lava-user-request-type")
 		})
 	}
 }
