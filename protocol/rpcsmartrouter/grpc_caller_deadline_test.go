@@ -24,6 +24,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
+	"github.com/magma-Devs/smart-router/utils"
 	"github.com/magma-Devs/smart-router/utils/rand"
 )
 
@@ -164,10 +165,10 @@ func TestGRPCListener_CallsEndingAtTheCallersDeadlineLeaveEveryProviderOn(t *tes
 		nodeAddrs = append(nodeAddrs, addr)
 		nodeCalls = append(nodeCalls, calls)
 	}
-	client, endpoints, names, optimizer := startGRPCRouterOverSlowNodes(t, false, nodeAddrs)
-	availabilityBefore := make([]float64, len(names))
-	for i, name := range names {
-		report, _ := optimizer.GetReputationReportForProvider(name)
+	router := startGRPCRouterOverSlowNodes(t, false, nodeAddrs)
+	availabilityBefore := make([]float64, len(router.names))
+	for i, name := range router.names {
+		report, _ := router.optimizer.GetReputationReportForProvider(name)
 		require.NotNil(t, report, name)
 		availabilityBefore[i] = report.Availability
 	}
@@ -181,7 +182,7 @@ func TestGRPCListener_CallsEndingAtTheCallersDeadlineLeaveEveryProviderOn(t *tes
 			defer wg.Done()
 			callCtx, cancel := context.WithTimeout(context.Background(), burstCallerTimeout)
 			defer cancel()
-			err := client.Invoke(callCtx, "/"+relayEndGRPCMethod, wrapperspb.Int64(5), &wrapperspb.Int64Value{})
+			err := router.client.Invoke(callCtx, "/"+relayEndGRPCMethod, wrapperspb.Int64(5), &wrapperspb.Int64Value{})
 			codesSeen[i] = status.Code(err)
 		}()
 	}
@@ -202,7 +203,7 @@ func TestGRPCListener_CallsEndingAtTheCallersDeadlineLeaveEveryProviderOn(t *tes
 	// The attempts end at the callers' deadlines; give their bookkeeping time to land, and require
 	// that none of it ever counts against a provider.
 	require.Never(t, func() bool {
-		for _, endpoint := range endpoints {
+		for _, endpoint := range router.endpoints {
 			if !endpoint.IsEnabled() || endpoint.ConnectionRefusals > 0 {
 				return true
 			}
@@ -214,8 +215,8 @@ func TestGRPCListener_CallsEndingAtTheCallersDeadlineLeaveEveryProviderOn(t *tes
 	// does, with no QoS sample, so the optimizer still scores every provider as before the burst.
 	// The refusal count above cannot see this half: it is decided apart, where the attempt's session
 	// is released.
-	for i, name := range names {
-		report, _ := optimizer.GetReputationReportForProvider(name)
+	for i, name := range router.names {
+		report, _ := router.optimizer.GetReputationReportForProvider(name)
 		require.NotNil(t, report, name)
 		require.InDelta(t, availabilityBefore[i], report.Availability, 1e-9,
 			"%s: a call that ended at its caller's deadline was scored as an availability failure", name)
@@ -227,18 +228,25 @@ func TestGRPCListener_CallsEndingAtTheCallersDeadlineLeaveEveryProviderOn(t *tes
 // is not what ends it. A write that ends at its caller's deadline keeps the processing timeout's
 // reading, as before: its outcome is unknown, and a delivery still silent at the cut-off is counted
 // as a hang.
-func TestGRPCListener_AWriteEndingAtTheCallersDeadlineKeepsTheProcessingTimeout(t *testing.T) {
+//
+// The write goes to the router with the context its gRPC listener hands the relay, rather than from
+// a client. A gRPC client enforces its own deadline as well, and resets the call when it passes; the
+// router may read that reset before its own timer fires, and a caller that hangs up is a different
+// ending (CallerGone), on purpose. Without a client, only the deadline can end the call.
+func TestSendRelay_AGRPCWriteEndingAtTheCallersDeadlineKeepsTheProcessingTimeout(t *testing.T) {
 	// At 1 the first count takes the endpoint out, which the test can read under the endpoint's lock.
 	benchAfter(t, 1)
 	read := captureRelayEnds(t)
 	addr, calls := startGRPCNodeAnsweringAfter(t, 2*statefulDeliveryLinger)
-	client, endpoints, _, _ := startGRPCRouterOverSlowNodes(t, true, []string{addr})
+	router := startGRPCRouterOverSlowNodes(t, true, []string{addr})
+	endpoints := router.endpoints
 
 	seen := len(read())
-	callCtx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	err := client.Invoke(callCtx, "/"+relayEndGRPCMethod, wrapperspb.Int64(5), &wrapperspb.Int64Value{})
-	require.Contains(t, []codes.Code{codes.DeadlineExceeded, codes.Unknown}, status.Code(err), "%v", err)
+	ctx := utils.WithUniqueIdentifier(callerWithDeadline(t, time.Second), utils.GenerateUniqueIdentifier())
+	analytics := metrics.NewRelayAnalytics("dapp", "GRPCTEST", spectypes.APIInterfaceGrpc)
+	_, err := router.server.SendRelay(ctx, relayEndGRPCMethod, string([]byte{0x08, 0x05}), "", "dapp", "", analytics, nil)
+	var unclear *unclearWriteError
+	require.ErrorAs(t, err, &unclear, "the router answers that the write's outcome is unknown: %v", err)
 
 	require.Eventually(t, func() bool { return len(newRelayEndsSince(read, seen)) > 0 }, 5*time.Second, 20*time.Millisecond)
 	events := newRelayEndsSince(read, seen)
@@ -253,10 +261,19 @@ func TestGRPCListener_AWriteEndingAtTheCallersDeadlineKeepsTheProcessingTimeout(
 	require.Equal(t, int64(1), calls.Load(), "the write reached the node once")
 }
 
+// grpcRouterOverNodes is what startGRPCRouterOverSlowNodes starts: the router, a client of its gRPC
+// listener, and for each provider its endpoint and name, with the optimizer that scores them.
+type grpcRouterOverNodes struct {
+	server    *RPCSmartRouterServer
+	client    *grpc.ClientConn
+	endpoints []*routersession.Endpoint
+	names     []string
+	optimizer *provideroptimizer.ProviderOptimizer
+}
+
 // startGRPCRouterOverSlowNodes is startRelayEndGRPCRouter over one provider per node address, each with
-// one endpoint, serving relayEndGRPCMethod as a read, or as a write when write is set. It returns a
-// client of the listener, the providers' endpoints and names, and the optimizer that scores them.
-func startGRPCRouterOverSlowNodes(t *testing.T, write bool, nodeAddrs []string) (*grpc.ClientConn, []*routersession.Endpoint, []string, *provideroptimizer.ProviderOptimizer) {
+// one endpoint, serving relayEndGRPCMethod as a read, or as a write when write is set.
+func startGRPCRouterOverSlowNodes(t *testing.T, write bool, nodeAddrs []string) grpcRouterOverNodes {
 	t.Helper()
 	if !rand.Initialized() {
 		rand.InitRandomSeed()
@@ -334,5 +351,5 @@ func startGRPCRouterOverSlowNodes(t *testing.T, write bool, nodeAddrs []string) 
 	client, err := grpc.NewClient(listener.GetListeningAddress(), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = client.Close() })
-	return client, endpoints, names, optimizer
+	return grpcRouterOverNodes{server: server, client: client, endpoints: endpoints, names: names, optimizer: optimizer}
 }
