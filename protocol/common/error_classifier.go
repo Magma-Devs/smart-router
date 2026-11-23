@@ -235,10 +235,11 @@ func sdkTxRefused(code uint32) ErrorMatcher {
 
 // cosmosTxRefusalRows classify a refused Cosmos transaction by its code (cosmos-sdk
 // types/errors/errors.go). A broadcast's code is CheckTx's, so it comes from the ante handler, or
-// from the SDK's conversion of a CometBFT error. Each is a fact about the transaction or the chain,
-// the same from every node, so every row is a non-retryable chain error that keeps the
-// availability gate off the node. The mempool is the one node-local state here; the registry
-// already answers "mempool is full" with CHAIN_MEMPOOL_FULL, not at fault.
+// from the SDK's conversion of a CometBFT error. Each is about the transaction or the chain, never
+// the node's health, so every row is a non-retryable chain error that keeps the availability gate
+// off the node. Some are the node's own view of the transaction: a lagging node's sequence (32),
+// its minimum gas price (13), its mempool (19, 20); the registry already answers "mempool is full"
+// with CHAIN_MEMPOOL_FULL, not at fault.
 var cosmosTxRefusalRows = []errorMapping{
 	{sdkTxRefused(32), RouterErrorChainInvalidSequence},  // ErrWrongSequence: account sequence mismatch
 	{sdkTxRefused(19), RouterErrorChainTxAlreadyKnown},   // ErrTxInMempoolCache: tx already in mempool
