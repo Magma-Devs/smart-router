@@ -8,9 +8,7 @@ import (
 	dyncodec "github.com/magma-Devs/smart-router/protocol/chainlib/grpcproxy/dyncodec"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"google.golang.org/protobuf/encoding/protowire"
-	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
-	"google.golang.org/protobuf/types/dynamicpb"
 )
 
 // GrpcRequestNotProtobufError is the router's refusal of a binary gRPC request whose bytes are not
@@ -22,8 +20,8 @@ var GrpcRequestNotProtobufError = errors.New("the request message is not a valid
 // provider is asked. A JSON body is left to the descriptor conversion that sends it.
 //
 // Every binary body gets the wire-format check, which needs no descriptor. When the router
-// already holds the method's descriptor, the body is also decoded with it; a lookup is never
-// started or waited on here.
+// already holds the method's descriptor, the body is also read with it, inside its nested
+// messages; a lookup is never started or waited on here.
 func checkGrpcRequestMessage(registry *dyncodec.Registry, path string, data []byte) error {
 	if routersession.GRPCRequestNeedsDescriptor(data) {
 		return nil
@@ -69,16 +67,102 @@ func heldMethodInput(registry *dyncodec.Registry, path string) protoreflect.Mess
 	return method.Input()
 }
 
-// requestDecodeOptions decode a request only to see that it decodes. Unknown fields are skipped,
-// which still reads their bytes, and a proto2 required field left out is the node's to judge.
-var requestDecodeOptions = proto.UnmarshalOptions{AllowPartial: true, DiscardUnknown: true}
+// errRequestTooDeep is a request nested deeper than protobuf's decoders read.
+var errRequestTooDeep = errors.New("the request message is nested too deep")
 
-// decodeAsMessage decodes data as an input message. A string field that is not UTF-8 does not
-// count against it: nodes built on gogoproto, as Cosmos SDK nodes are, accept one.
+// decodeAsMessage reports whether data reads as an input message the way protobuf's decoders
+// read one, without building it, so it allocates nothing whatever the body holds: a field the
+// descriptor declares as a message, a group or a map entry is read inside, the elements of a
+// packed list are read, and every other field is read as the wire format check reads it, which
+// is how a decoder skips a field it does not know or that came with another wire type.
+//
+// It does not judge a string's UTF-8, since nodes built on gogoproto, as Cosmos SDK nodes are,
+// accept a string that is not UTF-8, and it passes a field number above protobuf's maximum, as
+// validProtobufWireFormat does. A proto2 required field left out is the node's to judge.
 func decodeAsMessage(input protoreflect.MessageDescriptor, data []byte) error {
-	err := requestDecodeOptions.Unmarshal(data, dynamicpb.NewMessage(input))
-	if err != nil && strings.Contains(err.Error(), "invalid UTF-8") {
-		return nil
+	return readMessage(input, data, protowire.DefaultRecursionLimit)
+}
+
+// readMessage reads data as a message of md. depth counts the levels of nesting left, as
+// protobuf's decoders count them.
+func readMessage(md protoreflect.MessageDescriptor, data []byte, depth int) error {
+	if depth--; depth < 0 {
+		return errRequestTooDeep
 	}
-	return err
+	fields := md.Fields()
+	for len(data) > 0 {
+		num, typ, n := protowire.ConsumeTag(data)
+		if n < 0 {
+			return protowire.ParseError(n)
+		}
+		data = data[n:]
+		if fd := fields.ByNumber(num); fd != nil {
+			if n, read, err := readDeclaredField(fd, typ, data, depth); read {
+				if err != nil {
+					return err
+				}
+				data = data[n:]
+				continue
+			}
+		}
+		if n = protowire.ConsumeFieldValue(num, typ, data); n < 0 {
+			return protowire.ParseError(n)
+		}
+		data = data[n:]
+	}
+	return nil
+}
+
+// readDeclaredField reads the value of fd that came with wire type typ when fd's own reading
+// differs from the wire format's: a message or map entry, a group, or a packed list. read is
+// false for any other field, which the caller reads with the wire format.
+func readDeclaredField(fd protoreflect.FieldDescriptor, typ protowire.Type, data []byte, depth int) (n int, read bool, err error) {
+	switch kind := fd.Kind(); {
+	case kind == protoreflect.MessageKind && typ == protowire.BytesType:
+		value, n := protowire.ConsumeBytes(data)
+		if n < 0 {
+			return 0, true, protowire.ParseError(n)
+		}
+		return n, true, readMessage(fd.Message(), value, depth)
+	case kind == protoreflect.GroupKind && typ == protowire.StartGroupType:
+		value, n := protowire.ConsumeGroup(fd.Number(), data)
+		if n < 0 {
+			return 0, true, protowire.ParseError(n)
+		}
+		return n, true, readMessage(fd.Message(), value, depth)
+	case fd.IsList() && typ == protowire.BytesType:
+		element, packable := packedElementType(kind)
+		if !packable {
+			return 0, false, nil
+		}
+		value, n := protowire.ConsumeBytes(data)
+		if n < 0 {
+			return 0, true, protowire.ParseError(n)
+		}
+		for len(value) > 0 {
+			m := protowire.ConsumeFieldValue(fd.Number(), element, value)
+			if m < 0 {
+				return 0, true, protowire.ParseError(m)
+			}
+			value = value[m:]
+		}
+		return n, true, nil
+	}
+	return 0, false, nil
+}
+
+// packedElementType is the wire type of one element of a packed list of kind, and false for a
+// kind that is never packed.
+func packedElementType(kind protoreflect.Kind) (protowire.Type, bool) {
+	switch kind {
+	case protoreflect.BoolKind, protoreflect.EnumKind,
+		protoreflect.Int32Kind, protoreflect.Sint32Kind, protoreflect.Uint32Kind,
+		protoreflect.Int64Kind, protoreflect.Sint64Kind, protoreflect.Uint64Kind:
+		return protowire.VarintType, true
+	case protoreflect.Fixed32Kind, protoreflect.Sfixed32Kind, protoreflect.FloatKind:
+		return protowire.Fixed32Type, true
+	case protoreflect.Fixed64Kind, protoreflect.Sfixed64Kind, protoreflect.DoubleKind:
+		return protowire.Fixed64Type, true
+	}
+	return 0, false
 }

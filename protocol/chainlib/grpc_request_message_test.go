@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
+	"math/rand"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -13,12 +14,14 @@ import (
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/reflection/grpc_reflection_v1"
+	"google.golang.org/protobuf/encoding/prototext"
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protodesc"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/reflect/protoregistry"
 	"google.golang.org/protobuf/types/descriptorpb"
+	"google.golang.org/protobuf/types/dynamicpb"
 )
 
 // wire builds a protobuf body field by field.
@@ -214,12 +217,17 @@ func TestGrpcParseMsg_DecodesTheBodyWhenTheDescriptorIsHeld(t *testing.T) {
 	notUTF8 := wire(nil).bytes(7, []byte{0xff, 0xfe})
 	// host (1) is a string; sent as a varint, the decoder keeps it as an unknown field.
 	otherWireType := wire(nil).varint(1, 1)
+	// The wire format check passes a field number above protobuf's maximum; so does the read.
+	aboveTheMaximum := wire(nil).bytes(1, []byte("host")).varint(protowire.MaxValidNumber+1, 1)
+	// A string that is not UTF-8 is read past, so what follows it is still read.
+	garbageAfterNotUTF8 := append(append(wire(nil), notUTF8...), nestedGarbage...)
 
 	t.Run("held by the remote's snapshot", func(t *testing.T) {
 		remote := &heldOnlyRemote{}
 		parser := grpcRequestCheckParser(t, remote)
 		require.ErrorIs(t, parseGrpcRequest(parser, nestedGarbage), GrpcRequestNotProtobufError)
-		for name, body := range map[string][]byte{"valid": valid, "unknown fields": withUnknown, "not UTF-8": notUTF8, "other wire type": otherWireType} {
+		require.ErrorIs(t, parseGrpcRequest(parser, garbageAfterNotUTF8), GrpcRequestNotProtobufError)
+		for name, body := range map[string][]byte{"valid": valid, "unknown fields": withUnknown, "not UTF-8": notUTF8, "other wire type": otherWireType, "above the maximum": aboveTheMaximum} {
 			require.NoError(t, parseGrpcRequest(parser, body), name)
 		}
 		require.Zero(t, remote.upstreamLookups.Load(), "the check never asks an upstream")
@@ -253,6 +261,256 @@ func TestGrpcRequestNotProtobufError_KeepsTheCauseForTheLog(t *testing.T) {
 	require.Contains(t, err.Error(), "unexpected EOF")
 	message, _ := refusedRequestMessage(err)
 	require.NotContains(t, message, "EOF")
+}
+
+// everyKindRequestFile declares a request with a field of every kind: scalars of each wire type,
+// a string, bytes, nested and recursive messages, packed and unpacked lists, a group, a repeated
+// group, an enum and a oneof. It is proto2, so protobuf's own decoder does not judge UTF-8 either,
+// and the two can be compared on any body.
+const everyKindRequestFile = `
+name: "chainlib_test/every_kind.proto" package: "chainlib_test.everykind" syntax: "proto2"
+message_type {
+  name: "Inner"
+  field { name: "a" number: 1 label: LABEL_OPTIONAL type: TYPE_INT32 }
+  field { name: "s" number: 2 label: LABEL_OPTIONAL type: TYPE_STRING }
+  field { name: "kids" number: 3 label: LABEL_REPEATED type: TYPE_MESSAGE type_name: ".chainlib_test.everykind.Inner" }
+}
+message_type {
+  name: "Request"
+  field { name: "i32" number: 1 label: LABEL_OPTIONAL type: TYPE_INT32 }
+  field { name: "s64" number: 2 label: LABEL_OPTIONAL type: TYPE_SINT64 }
+  field { name: "f32" number: 3 label: LABEL_OPTIONAL type: TYPE_FIXED32 }
+  field { name: "f64" number: 4 label: LABEL_OPTIONAL type: TYPE_FIXED64 }
+  field { name: "b" number: 5 label: LABEL_OPTIONAL type: TYPE_BOOL }
+  field { name: "d" number: 6 label: LABEL_OPTIONAL type: TYPE_DOUBLE }
+  field { name: "str" number: 7 label: LABEL_OPTIONAL type: TYPE_STRING }
+  field { name: "by" number: 8 label: LABEL_OPTIONAL type: TYPE_BYTES }
+  field { name: "inner" number: 9 label: LABEL_OPTIONAL type: TYPE_MESSAGE type_name: ".chainlib_test.everykind.Inner" }
+  field { name: "packed" number: 10 label: LABEL_REPEATED type: TYPE_INT64 options { packed: true } }
+  field { name: "unpacked" number: 11 label: LABEL_REPEATED type: TYPE_UINT32 }
+  field { name: "floats" number: 12 label: LABEL_REPEATED type: TYPE_FLOAT options { packed: true } }
+  field { name: "sfixed" number: 13 label: LABEL_REPEATED type: TYPE_SFIXED64 options { packed: true } }
+  field { name: "inners" number: 14 label: LABEL_REPEATED type: TYPE_MESSAGE type_name: ".chainlib_test.everykind.Inner" }
+  field { name: "g" number: 15 label: LABEL_OPTIONAL type: TYPE_GROUP type_name: ".chainlib_test.everykind.Request.G" }
+  field { name: "rg" number: 17 label: LABEL_REPEATED type: TYPE_GROUP type_name: ".chainlib_test.everykind.Request.RG" }
+  field { name: "e" number: 19 label: LABEL_OPTIONAL type: TYPE_ENUM type_name: ".chainlib_test.everykind.Request.E" }
+  field { name: "enums" number: 20 label: LABEL_REPEATED type: TYPE_ENUM type_name: ".chainlib_test.everykind.Request.E" options { packed: true } }
+  field { name: "oi" number: 21 label: LABEL_OPTIONAL type: TYPE_INT32 oneof_index: 0 }
+  field { name: "om" number: 22 label: LABEL_OPTIONAL type: TYPE_MESSAGE type_name: ".chainlib_test.everykind.Inner" oneof_index: 0 }
+  field { name: "strs" number: 23 label: LABEL_REPEATED type: TYPE_STRING }
+  nested_type { name: "G" field { name: "x" number: 16 label: LABEL_OPTIONAL type: TYPE_INT32 } field { name: "gi" number: 24 label: LABEL_OPTIONAL type: TYPE_MESSAGE type_name: ".chainlib_test.everykind.Inner" } }
+  nested_type { name: "RG" field { name: "y" number: 18 label: LABEL_OPTIONAL type: TYPE_BYTES } }
+  enum_type { name: "E" value { name: "A" number: 0 } value { name: "B" number: 1 } }
+  oneof_decl { name: "o" }
+}
+message_type {
+  name: "WithMaps"
+  field { name: "labels" number: 1 label: LABEL_REPEATED type: TYPE_MESSAGE type_name: ".chainlib_test.everykind.WithMaps.LabelsEntry" }
+  field { name: "byID" number: 2 label: LABEL_REPEATED type: TYPE_MESSAGE type_name: ".chainlib_test.everykind.WithMaps.ByIDEntry" }
+  nested_type { name: "LabelsEntry" field { name: "key" number: 1 label: LABEL_OPTIONAL type: TYPE_STRING } field { name: "value" number: 2 label: LABEL_OPTIONAL type: TYPE_MESSAGE type_name: ".chainlib_test.everykind.Inner" } options { map_entry: true } }
+  nested_type { name: "ByIDEntry" field { name: "key" number: 1 label: LABEL_OPTIONAL type: TYPE_INT64 } field { name: "value" number: 2 label: LABEL_OPTIONAL type: TYPE_BYTES } options { map_entry: true } }
+}
+`
+
+func everyKindRequest(t *testing.T, name protoreflect.Name) protoreflect.MessageDescriptor {
+	t.Helper()
+	fdp := &descriptorpb.FileDescriptorProto{}
+	require.NoError(t, prototext.Unmarshal([]byte(everyKindRequestFile), fdp))
+	fd, err := protodesc.NewFile(fdp, protoregistry.GlobalFiles)
+	require.NoError(t, err)
+	return fd.Messages().ByName(name)
+}
+
+// fillRandomly sets random values on m's fields, nesting at most depth messages deep.
+func fillRandomly(r *rand.Rand, m protoreflect.Message, depth int) {
+	text := []string{"", "a", "€", "日本", "𝄞x", "\x00"}
+	scalar := func(fd protoreflect.FieldDescriptor) protoreflect.Value {
+		switch fd.Kind() {
+		case protoreflect.BoolKind:
+			return protoreflect.ValueOfBool(r.Intn(2) == 0)
+		case protoreflect.EnumKind:
+			return protoreflect.ValueOfEnum(protoreflect.EnumNumber(r.Intn(3) - 1))
+		case protoreflect.Int32Kind, protoreflect.Sint32Kind, protoreflect.Sfixed32Kind:
+			return protoreflect.ValueOfInt32(int32(r.Uint32()))
+		case protoreflect.Int64Kind, protoreflect.Sint64Kind, protoreflect.Sfixed64Kind:
+			return protoreflect.ValueOfInt64(int64(r.Uint64()))
+		case protoreflect.Uint32Kind, protoreflect.Fixed32Kind:
+			return protoreflect.ValueOfUint32(r.Uint32())
+		case protoreflect.Uint64Kind, protoreflect.Fixed64Kind:
+			return protoreflect.ValueOfUint64(r.Uint64())
+		case protoreflect.FloatKind:
+			return protoreflect.ValueOfFloat32(r.Float32())
+		case protoreflect.DoubleKind:
+			return protoreflect.ValueOfFloat64(r.NormFloat64())
+		case protoreflect.StringKind:
+			return protoreflect.ValueOfString(text[r.Intn(len(text))])
+		}
+		b := make([]byte, r.Intn(6))
+		r.Read(b)
+		return protoreflect.ValueOfBytes(b)
+	}
+	fields := m.Descriptor().Fields()
+	for i := 0; i < fields.Len(); i++ {
+		fd := fields.Get(i)
+		message := fd.Kind() == protoreflect.MessageKind || fd.Kind() == protoreflect.GroupKind
+		switch {
+		case r.Intn(3) == 0:
+		case fd.IsMap():
+			entries := m.Mutable(fd).Map()
+			for n := r.Intn(4); n > 0; n-- {
+				value := entries.NewValue()
+				if fd.MapValue().Kind() == protoreflect.MessageKind {
+					fillRandomly(r, value.Message(), depth-1)
+				} else {
+					value = scalar(fd.MapValue())
+				}
+				entries.Set(scalar(fd.MapKey()).MapKey(), value)
+			}
+		case fd.IsList():
+			list := m.Mutable(fd).List()
+			for n := r.Intn(4); n > 0; n-- {
+				if !message {
+					list.Append(scalar(fd))
+				} else if depth > 0 {
+					element := list.NewElement()
+					fillRandomly(r, element.Message(), depth-1)
+					list.Append(element)
+				}
+			}
+		case message:
+			if depth > 0 {
+				fillRandomly(r, m.Mutable(fd).Message(), depth-1)
+			}
+		default:
+			m.Set(fd, scalar(fd))
+		}
+	}
+}
+
+// mutateRandomly changes body the way a cut, a stray byte or a bit flip would.
+func mutateRandomly(r *rand.Rand, body []byte) []byte {
+	out := append([]byte(nil), body...)
+	for n := 1 + r.Intn(3); n > 0; n-- {
+		if len(out) == 0 {
+			return append(out, byte(r.Intn(256)))
+		}
+		switch i := r.Intn(len(out)); r.Intn(4) {
+		case 0:
+			out[i] = byte(r.Intn(256))
+		case 1:
+			out = out[:i]
+		case 2:
+			out = append(out[:i], append([]byte{byte(r.Intn(256))}, out[i:]...)...)
+		default:
+			out[i] ^= 1 << uint(r.Intn(8))
+		}
+	}
+	return out
+}
+
+// The held descriptor's read gives protobuf's own decoder's verdict: on messages protobuf
+// encodes, and on the same bodies cut, flipped and given stray bytes.
+func TestDecodeAsMessage_ReadsABodyAsProtobufDecodesIt(t *testing.T) {
+	md := everyKindRequest(t, "Request")
+	decode := func(body []byte) error {
+		return proto.UnmarshalOptions{AllowPartial: true, DiscardUnknown: true}.Unmarshal(body, dynamicpb.NewMessage(md))
+	}
+	r := rand.New(rand.NewSource(5421))
+	refused := 0
+	for i := 0; i < 2000; i++ {
+		message := dynamicpb.NewMessage(md)
+		fillRandomly(r, message, 3)
+		body, err := proto.MarshalOptions{AllowPartial: true, Deterministic: i%2 == 0}.Marshal(message)
+		require.NoError(t, err)
+		require.NoError(t, decodeAsMessage(md, body), "message %d as protobuf encodes it", i)
+		require.NoError(t, decodeAsMessage(md, append(append([]byte(nil), body...), body...)), "message %d twice, which merges", i)
+		for j := 0; j < 8; j++ {
+			mutated := mutateRandomly(r, body)
+			decodeErr, readErr := decode(mutated), decodeAsMessage(md, mutated)
+			if decodeErr != nil && readErr == nil && tagAboveTheMaximum(mutated) {
+				continue // passed on purpose, as the wire format check passes it
+			}
+			require.Equal(t, decodeErr == nil, readErr == nil, "%x: decoder says %v, the read %v", mutated, decodeErr, readErr)
+			if decodeErr != nil {
+				refused++
+			}
+		}
+	}
+	require.Greater(t, refused, 1000, "the mutations reach bodies the decoder refuses")
+}
+
+// tagAboveTheMaximum reports whether body, or any length-delimited value or group inside it,
+// carries a field number above protobuf's maximum: the read passes one, as
+// validProtobufWireFormat does, and protobuf's decoder refuses it.
+func tagAboveTheMaximum(body []byte) bool {
+	for len(body) > 0 {
+		num, typ, n := protowire.ConsumeTag(body)
+		if n < 0 {
+			return false
+		}
+		if num > protowire.MaxValidNumber {
+			return true
+		}
+		body = body[n:]
+		n = protowire.ConsumeFieldValue(num, typ, body)
+		if n < 0 {
+			return false
+		}
+		switch typ {
+		case protowire.BytesType:
+			if value, _ := protowire.ConsumeBytes(body); tagAboveTheMaximum(value) {
+				return true
+			}
+		case protowire.StartGroupType:
+			if tagAboveTheMaximum(body[:n]) {
+				return true
+			}
+		}
+		body = body[n:]
+	}
+	return false
+}
+
+// Map entries are read inside like any message, whatever the entries hold.
+func TestDecodeAsMessage_ReadsMapEntries(t *testing.T) {
+	md := everyKindRequest(t, "WithMaps")
+	r := rand.New(rand.NewSource(5422))
+	for i := 0; i < 2000; i++ {
+		message := dynamicpb.NewMessage(md)
+		fillRandomly(r, message, 3)
+		body, err := proto.MarshalOptions{AllowPartial: true}.Marshal(message)
+		require.NoError(t, err)
+		require.NoError(t, decodeAsMessage(md, body), "message %d", i)
+		for j := 0; j < 8; j++ {
+			mutated := mutateRandomly(r, body)
+			_ = decodeAsMessage(md, mutated)
+			if validProtobufWireFormat(mutated) != nil {
+				require.Error(t, decodeAsMessage(md, mutated), "%x", mutated)
+			}
+		}
+	}
+	// A map entry's value that does not read as its message is refused.
+	require.Error(t, decodeAsMessage(md, wire(nil).bytes(1, wire(nil).bytes(1, []byte("k")).bytes(2, []byte{0x0a, 0x09}))))
+}
+
+// The read builds nothing, however many fields a body holds.
+func TestDecodeAsMessage_AllocatesNothing(t *testing.T) {
+	md := everyKindRequest(t, "Request")
+	const size = 1 << 20
+	emptyMessages, strs, packed := wire(nil), wire(nil), []byte(nil)
+	for len(emptyMessages) < size {
+		emptyMessages = emptyMessages.bytes(14, nil)
+		strs = strs.bytes(23, []byte("a"))
+		packed = protowire.AppendVarint(packed, 1)
+	}
+	for name, body := range map[string][]byte{
+		"repeated empty messages":           emptyMessages,
+		"repeated one-letter strings":       strs,
+		"a packed list of one-byte varints": wire(nil).bytes(10, packed),
+	} {
+		require.NoError(t, decodeAsMessage(md, body), name)
+		require.Zero(t, testing.AllocsPerRun(5, func() { _ = decodeAsMessage(md, body) }), name)
+	}
 }
 
 func BenchmarkCheckGrpcRequestMessage(b *testing.B) {
