@@ -22,7 +22,7 @@ const (
 	// cors related flags
 	CorsHeadersFlag         = "cors-headers"           // comma separated list of headers, or * for all, default simple cors specification headers
 	CorsCredentialsFlag     = "cors-credentials"       // comma separated list of headers, or * for all, default simple cors specification headers
-	CorsOriginFlag          = "cors-origin"            // comma separated list of origins, or * for all, default enabled completely
+	CorsOriginFlag          = "cors-origin"            // * for all (default), one origin, or a comma separated list (a listed request Origin is echoed back, see CORSAllowOrigin)
 	CorsMethodsFlag         = "cors-methods"           // comma separated list of methods, default "GET,POST,PUT,DELETE,OPTIONS"
 	CorsExposeHeadersFlag   = "cors-expose-headers"    // comma separated list of response headers to expose to the browser (Access-Control-Expose-Headers), or * for all. Empty = none exposed (browsers can then only read simple response headers).
 	CDNCacheDurationFlag    = "cdn-cache-duration"     // how long to cache the preflight response default 24 hours (in seconds) "86400"
@@ -152,7 +152,7 @@ const (
 	MaxSessionsPerProviderFlagName   = "max-sessions-per-provider"  // Max number of sessions allowed per provider
 	DefaultProcessingTimeoutFlagName = "default-processing-timeout" // default timeout for relay processing
 	MinRelayTimeoutFlagName          = "min-relay-timeout"          // minimum relay timeout floor (default 1s)
-	MaxCallerRelayTimeoutFlagName    = "max-caller-relay-timeout"   // how far a caller's lava-relay-timeout may stretch a request's budget (default 0: not at all)
+	MaxCallerRelayTimeoutFlagName    = "max-caller-relay-timeout"   // how far a caller's router-relay-timeout may stretch a request's budget (default 0: not at all)
 	CacheTimeoutFlagName             = "cache-timeout"              // per-relay cache lookup budget (default 50ms)
 	// CacheMaxEntryBytesFlagName caps the reply body the router writes to its cache: a larger
 	// reply is served but not written. Off by default (0): the cap applies only when the flag
@@ -184,9 +184,9 @@ const (
 type ConsumerCmdFlags struct {
 	HeadersFlag                       string        // comma separated list of headers, or * for all, default simple cors specification headers
 	CredentialsFlag                   string        // access-control-allow-credentials, defaults to "true"
-	OriginFlag                        string        // comma separated list of origins, or * for all, default enabled completely
+	OriginFlag                        string        // * for all (default), one origin, or a comma separated list; see CORSAllowOrigin
 	MethodsFlag                       string        // whether to allow access control headers *, most proxies have their own access control so its not required
-	ExposeHeadersFlag                 string        // Access-Control-Expose-Headers — response headers the browser is allowed to read (e.g. Lava-Provider-Address). Empty = none.
+	ExposeHeadersFlag                 string        // Access-Control-Expose-Headers — response headers the browser is allowed to read (e.g. Router-Provider-Address). Empty = none.
 	CDNCacheDuration                  string        // how long to cache the preflight response defaults 24 hours (in seconds) "86400"
 	RelaysHealthEnableFlag            bool          // enables relay health check
 	RelaysHealthIntervalFlag          time.Duration // interval for relay health check

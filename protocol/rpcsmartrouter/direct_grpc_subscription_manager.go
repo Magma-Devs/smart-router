@@ -608,7 +608,7 @@ func (dgm *DirectGRPCSubscriptionManager) createNewSubscription(
 	clientKey string,
 ) (reply *pairingtypes.RelayReply, replies <-chan *pairingtypes.RelayReply, err error) {
 	// Select endpoint
-	endpoint, err := dgm.selectEndpoint(ctx, clientKey, nil)
+	endpoint, err := dgm.selectEndpoint(ctx, clientKey)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to select endpoint: %w", err)
 	}

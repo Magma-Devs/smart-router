@@ -111,6 +111,10 @@ func (apip *JsonRPCChainParser) ParseMsg(url string, data []byte, connectionType
 	var blockFold requestedBlockFold
 	blockHashes := []string{}
 	parsedDefault := true
+	// This batch walk and TendermintChainParser.ParseMsg's share two blocks, an element's requested
+	// block and the batch's combined api, and stay two walks until an owner question is answered: a
+	// one-element batch gets its api's parse directive on Tendermint and none here (each parser's
+	// newBatchChainMessage). One walk would have to pick an answer.
 	for idx, msg := range msgs {
 		parsedInput := parser.NewParsedInput()
 		internalPath := ""
@@ -144,7 +148,7 @@ func (apip *JsonRPCChainParser) ParseMsg(url string, data []byte, connectionType
 		msgs[idx].BaseMessage = jsonrpcBaseMessage(metadata, settingHeaderDirective)
 		msg.BaseMessage = msgs[idx].BaseMessage
 
-		if overwriteReqBlock == "" {
+		if overwriteReqBlock == "" { //nolint:dupl // kept twin of the Tendermint batch walk; see the comment above the walk
 			// Fetch requested block, it is used for data reliability
 			parsedInput = parser.ParseBlockFromParams(msg, apiCont.api.BlockParsing, apiCont.api.Parsers)
 			if hashes, err := parsedInput.GetBlockHashes(); err == nil {
@@ -200,7 +204,7 @@ func (apip *JsonRPCChainParser) ParseMsg(url string, data []byte, connectionType
 		// not decide the batch's block at all; see requestedBlockFold (MAG-4381).
 		blockFold.add(parsedBlock, elementEarliest, parsedInput, overwriteReqBlock == "" && apiNamesNoBlock(apiCont.api))
 
-		if idx == 0 {
+		if idx == 0 { //nolint:dupl // kept twin of the Tendermint batch walk; see the comment above the walk
 			// on the first entry store them.
 			api = apiCont.api
 			apiCollection = apiCollectionForMessage

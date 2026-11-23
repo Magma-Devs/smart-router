@@ -59,16 +59,16 @@ func TestWSNoteSubscribeFailure_GenuineFailureStillScores(t *testing.T) {
 // tier when nothing does — a subscription must still be served.
 func TestWSSelectFromTier_SkipsHeldOffEndpoints(t *testing.T) {
 	reg := withFreshRelayHoldoff(t)
-	dwsm := &DirectWSSubscriptionManager{} // no optimizer: first-non-ignored selection
+	dwsm := &DirectWSSubscriptionManager{} // no optimizer: first-available selection
 	tier := []*common.NodeUrl{{Url: "wss://a.example/ws"}, {Url: "wss://b.example/ws"}}
 
 	reg.RecordRateLimit("wss://a.example/ws", "wss://a.example/ws", time.Minute)
-	ep, err := dwsm.selectFromTier(context.Background(), tier, nil, nil)
+	ep, err := dwsm.selectFromTier(context.Background(), tier, nil)
 	require.NoError(t, err)
 	require.Equal(t, "wss://b.example/ws", ep.Url, "the held-off endpoint must not be picked")
 
 	reg.RecordRateLimit("wss://b.example/ws", "wss://b.example/ws", time.Minute)
-	ep, err = dwsm.selectFromTier(context.Background(), tier, nil, nil)
+	ep, err = dwsm.selectFromTier(context.Background(), tier, nil)
 	require.NoError(t, err)
 	require.NotNil(t, ep, "with everything held off the tier still serves")
 }
