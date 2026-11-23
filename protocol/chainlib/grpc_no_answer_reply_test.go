@@ -44,7 +44,7 @@ func callGRPCListenerFailing(t *testing.T, cf common.ClientFacingError) (*status
 
 // MAG-5130: when no provider answered, the gRPC client gets the router's own status, UNAVAILABLE,
 // or DEADLINE_EXCEEDED when the relay timed out, with the router's sentence and the request id in
-// lava-guid. The transport error the relay failed with, and the address in it, never reach it.
+// router-guid. The transport error the relay failed with, and the address in it, never reach it.
 func TestGrpcChainListener_NoProviderAnswerIsTheRoutersStatus(t *testing.T) {
 	for _, tc := range []struct {
 		name    string

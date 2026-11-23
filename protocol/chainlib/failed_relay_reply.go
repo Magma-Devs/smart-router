@@ -111,10 +111,10 @@ func buildFailedRelayReply(relayResult *common.RelayResult, guid string, request
 }
 
 // grpcNoAnswerStatus is the router's own gRPC status when no provider answered (MAG-5130):
-// UNAVAILABLE, or DEADLINE_EXCEEDED when every provider timed out, with the GraphQL sentence. Like
-// the HTTP reply it names no provider, no address and no transport error, which stay in the router's
-// log under the request's guid. ok is false when the relay carries no such verdict, and in masked
-// mode, where the listener keeps its masked reply, as the HTTP listeners do.
+// UNAVAILABLE, or DEADLINE_EXCEEDED when a provider timed out and none answered, with the GraphQL
+// sentence. Like the HTTP reply it names no provider, no address and no transport error, which stay
+// in the router's log under the request's guid. ok is false when the relay carries no such
+// verdict, and in masked mode, where the listener keeps its masked reply, as the HTTP listeners do.
 func grpcNoAnswerStatus(relayResult *common.RelayResult) (st *status.Status, ok bool) {
 	cf := relayResult.GetClientFacing()
 	if cf == nil || cf.UpstreamStatus != 0 || metrics.ReturnMaskedErrors != "false" {
