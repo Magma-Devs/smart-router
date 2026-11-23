@@ -80,6 +80,9 @@ type stubRelaySender struct {
 	parseCalls int
 	reply      []byte // when set, SendRelay answers with it instead of refusing the call
 	sendErr    error  // when set, SendRelay fails with it
+	// failedResult is the result SendRelay returns beside sendErr, as a relay that recorded its
+	// failure does; nil when unset.
+	failedResult *common.RelayResult
 
 	mu      sync.Mutex
 	tracing *tracingIds // the caller ids on the context of the last ParseRelay or SendRelay
@@ -88,7 +91,7 @@ type stubRelaySender struct {
 func (s *stubRelaySender) SendRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, analytics *metrics.RelayMetrics, metadataValues []pairingtypes.Metadata) (*common.RelayResult, error) {
 	s.noteTracing(ctx)
 	if s.sendErr != nil {
-		return nil, s.sendErr
+		return s.failedResult, s.sendErr
 	}
 	if s.reply == nil {
 		return nil, errors.New("not used")
