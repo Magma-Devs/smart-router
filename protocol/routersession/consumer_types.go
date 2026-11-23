@@ -270,7 +270,13 @@ type Endpoint struct {
 	// it does not serve, and the vendor's 404 then reads as a verdict on the
 	// request.
 	InternalPath string
-	mu           sync.RWMutex // Protects Connections, ConnectionRefusals, Enabled, consecutiveHealthyProbes, disabledAt, disableReason, lastRecoveryPoll, probeReenabled, reenableProbeFlaps, stateReasons, outOfRotationCounts
+	// Methods mirrors common.NodeUrl.Methods: the apis this endpoint's url is restricted to.
+	// Selection keeps every other api off it, and sends an api it names only to the endpoints
+	// that name it while one of them is usable (servesMethod, restrictsToMethodLocked), as the
+	// chain router's method routes do (chainlib/chain_router.go). Nil takes every other api
+	// (MAG-5667).
+	Methods map[string]struct{}
+	mu      sync.RWMutex // Protects Connections, ConnectionRefusals, Enabled, consecutiveHealthyProbes, disabledAt, disableReason, lastRecoveryPoll, probeReenabled, reenableProbeFlaps, stateReasons, outOfRotationCounts
 
 	// Per-endpoint observed tip lives in the shared endpointtip store (single source of
 	// truth), keyed by chain+apiInterface+NetworkAddress — not on the Endpoint — so the
@@ -318,17 +324,40 @@ func (e *Endpoint) ServesInternalPath(internalPath string) bool {
 	return e.InternalPath == internalPath
 }
 
-// servesRequest reports whether this endpoint can take a relay of this collection: it is on the
-// request's internal path when the provider restricts to it (restrictsToPathLocked), it answers
-// relays (ServesDirectRelays), and it serves the add-on and extensions. It is the one rule both the
-// url walk and relayURLs apply, so the rate-limit read and the pick agree on which urls count
-// (MAG-4732). Whether the endpoint is usable right now is left to each caller: the walk relaxes it
-// for the reconnect probe and the last chance.
-func (e *Endpoint) servesRequest(addon string, extensions []string, restrictToPath bool, internalPath *string) bool {
-	if restrictToPath && !e.ServesInternalPath(*internalPath) {
+// servesRequest reports whether this endpoint can take a relay of this collection and method: it
+// is on the request's internal path when the provider restricts to it (restrictsToPathLocked), its
+// method list lets the method through (servesMethod), it answers relays (ServesDirectRelays), and
+// it serves the add-on and extensions. It is the one rule both the url walk and relayURLs apply, so
+// the rate-limit read and the pick agree on which urls count (MAG-4732). Whether the endpoint is
+// usable right now is left to each caller: the walk relaxes it for the reconnect probe and the
+// last chance.
+func (e *Endpoint) servesRequest(addon string, extensions []string, restriction routeRestriction, relayRoute *RelayRoute) bool {
+	if method := relayRoute.method(); method != "" && !e.servesMethod(method, restriction.method) {
+		return false
+	}
+	return e.servesCollection(addon, extensions, restriction.path, relayRoute)
+}
+
+// servesCollection is servesRequest without the method: the path, relay and add-on checks. It is
+// what restrictsToMethodLocked asks of an endpoint before reading its method list.
+func (e *Endpoint) servesCollection(addon string, extensions []string, restrictToPath bool, relayRoute *RelayRoute) bool {
+	if restrictToPath && !e.ServesInternalPath(*relayRoute.internalPath()) {
 		return false
 	}
 	return e.ServesDirectRelays() && e.CheckSupportForServices(addon, extensions)
+}
+
+// servesMethod reports whether this endpoint may take a relay for method. One with a method list
+// takes only what the list names. One without takes the rest: every method unless claimed, which
+// says a usable sibling that could take this request names the method (restrictsToMethodLocked).
+// The method then goes only to the endpoints that name it, as a method route comes first in the
+// chain router.
+func (e *Endpoint) servesMethod(method string, claimed bool) bool {
+	if len(e.Methods) == 0 {
+		return !claimed
+	}
+	_, named := e.Methods[method]
+	return named
 }
 
 // IsEnabled returns the endpoint's enable bit under the endpoint mutex. Enabled is written under
@@ -1119,18 +1148,55 @@ func (cswp *ConsumerSessionsWithProvider) restrictsToPathLocked(internalPath *st
 	return false
 }
 
+// restrictsToMethodLocked reports whether a relay for relayRoute's method goes only to the
+// endpoints whose method list names it: true when a usable endpoint that could otherwise take the
+// request (servesCollection) names it. This is the chain router's rule (chainlib/chain_router.go):
+// a url's method route comes before the catch-all on its path.
+//
+// Unlike the path, it reads health. The chain router had none to read. A url without a list can
+// answer the method, so while every url that names it is switched off or stalled the method goes
+// to the catch-all, rather than the provider being passed over for a method it can still answer.
+// A url restricted to other methods never takes it either way.
+//
+// cswp.Lock must be held; each endpoint's mu is taken after it.
+func (cswp *ConsumerSessionsWithProvider) restrictsToMethodLocked(addon string, extensions []string, restrictToPath bool, relayRoute *RelayRoute) bool {
+	method := relayRoute.method()
+	if method == "" {
+		return false
+	}
+	for _, endpoint := range cswp.Endpoints {
+		if _, named := endpoint.Methods[method]; named && endpoint.servesCollection(addon, extensions, restrictToPath, relayRoute) && endpoint.IsUsable() {
+			return true
+		}
+	}
+	return false
+}
+
+// routeRestrictionLocked is the path and method restriction for one request (restrictsToPathLocked,
+// restrictsToMethodLocked), read once per walk.
+//
+// cswp.Lock must be held.
+func (cswp *ConsumerSessionsWithProvider) routeRestrictionLocked(addon string, extensions []string, relayRoute *RelayRoute) routeRestriction {
+	restrictToPath := cswp.restrictsToPathLocked(relayRoute.internalPath())
+	return routeRestriction{
+		path:   restrictToPath,
+		method: cswp.restrictsToMethodLocked(addon, extensions, restrictToPath, relayRoute),
+	}
+}
+
 // relayURLs lists the url of every endpoint the walk below could hand out in normal selection for
-// a request of this collection: usable, able to answer a relay, serving the add-on, extensions and
-// internal path. These are the urls the rate-limit hold-off asks about when it decides whether the
-// whole provider is held (MAG-4732): a websocket url, a head-stalled url or another path's url
-// cannot take the request, so its being free does not make the provider free.
-func (cswp *ConsumerSessionsWithProvider) relayURLs(addon string, extensions []string, internalPath *string) []string {
+// a request of this collection and method: usable, able to answer a relay, serving the add-on,
+// extensions, internal path and method. These are the urls the rate-limit hold-off asks about when
+// it decides whether the whole provider is held (MAG-4732): a websocket url, a head-stalled url,
+// another path's url or a url restricted to other methods cannot take the request, so its being
+// free does not make the provider free.
+func (cswp *ConsumerSessionsWithProvider) relayURLs(addon string, extensions []string, relayRoute *RelayRoute) []string {
 	cswp.Lock.RLock()
 	defer cswp.Lock.RUnlock()
-	restrictToPath := cswp.restrictsToPathLocked(internalPath)
+	restriction := cswp.routeRestrictionLocked(addon, extensions, relayRoute)
 	urls := make([]string, 0, len(cswp.Endpoints))
 	for _, endpoint := range cswp.Endpoints {
-		if !endpoint.servesRequest(addon, extensions, restrictToPath, internalPath) || !endpoint.IsUsable() {
+		if !endpoint.servesRequest(addon, extensions, restriction, relayRoute) || !endpoint.IsUsable() {
 			continue
 		}
 		urls = append(urls, endpoint.NetworkAddress)
@@ -1187,29 +1253,29 @@ func (cswp *ConsumerSessionsWithProvider) endpointsInPickOrderLocked(mode endpoi
 // fetching an endpoint from a ConsumerSessionWithProvider and establishing a connection,
 // can fail without an error if trying to connect once to each endpoint but none of them are active.
 //
-// internalPath is the collection the relay resolved to, or nil when the caller
-// has no collection to match on (probes). "" is a REAL path — the spec's root
-// collection — and matches only the endpoint serving the root, so a chain that
-// enables both a root and versioned collections (STRK) keeps its root traffic
-// on the root url.
+// relayRoute is the collection and method the relay resolved to, or nil when the
+// caller has no collection to match on (probes). "" is a REAL path — the spec's
+// root collection — and matches only the endpoint serving the root, so a chain
+// that enables both a root and versioned collections (STRK) keeps its root
+// traffic on the root url.
 //
 // mode says what happens to an endpoint whose Enabled flag is off (endpointPickMode).
-func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSessionWithProvider(ctx context.Context, mode endpointPickMode, getAllEndpoints bool, addon string, extensionNames []string, internalPath *string, heldOff func(url string) bool) (connected bool, endpointsList []*EndpointAndChosenConnection, providerAddress string, err error) {
+func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSessionWithProvider(ctx context.Context, mode endpointPickMode, getAllEndpoints bool, addon string, extensionNames []string, relayRoute *RelayRoute, heldOff func(url string) bool) (connected bool, endpointsList []*EndpointAndChosenConnection, providerAddress string, err error) {
 	getConnectionFromConsumerSessionsWithProvider := func(ctx context.Context) (connected bool, endpointPtr []*EndpointAndChosenConnection, allDisabled bool) {
 		endpoints := make([]*EndpointAndChosenConnection, 0)
 		cswp.Lock.Lock()
 		defer cswp.Lock.Unlock()
-		restrictToPath := cswp.restrictsToPathLocked(internalPath)
+		restriction := cswp.routeRestrictionLocked(addon, extensionNames, relayRoute)
 		// A url held off after a rate limit goes to the back of the list, so a free sibling is
 		// handed out first; nothing is skipped for it. The last chance also tries the urls that
 		// can answer before the dead ones (endpointsInPickOrderLocked).
 		for _, endpoint := range cswp.endpointsInPickOrderLocked(mode, heldOff) {
-			// Another path's url, a websocket-only url (it can never answer a relay, see
-			// ServesDirectRelays) and a url without the add-on cannot take this request. Skipping a
-			// websocket url leaves the provider with no selectable endpoint once its https url is
-			// backed off, so the caller ignores the provider for this request and picks another,
-			// rather than handing out a session that fails on the spot.
-			if !endpoint.servesRequest(addon, extensionNames, restrictToPath, internalPath) {
+			// Another path's url, a url restricted to other methods, a websocket-only url (it can
+			// never answer a relay, see ServesDirectRelays) and a url without the add-on cannot take
+			// this request. Skipping a websocket url leaves the provider with no selectable endpoint
+			// once its https url is backed off, so the caller ignores the provider for this request
+			// and picks another, rather than handing out a session that fails on the spot.
+			if !endpoint.servesRequest(addon, extensionNames, restriction, relayRoute) {
 				continue
 			}
 			// A disabled endpoint is skipped in normal selection. The reconnect probe retries it

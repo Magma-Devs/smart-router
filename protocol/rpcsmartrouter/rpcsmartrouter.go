@@ -2981,6 +2981,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 					// names no add-on collection.
 					StandaloneAddons:  standaloneAddons,
 					InternalPath:      url.InternalPath,
+					Methods:           nodeUrlMethods(url),
 					Connections:       nil,
 					DirectConnections: []routersession.DirectRPCConnection{directConn}, // Smart router uses direct RPC
 				}
@@ -3004,6 +3005,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 				)
 				continue
 			}
+			warnMethodOnlyPaths(provider.Name, endpoints)
 
 			// Create provider session with static configuration.
 			// If stake is specified in the static provider config, use it (ulava).
