@@ -87,11 +87,11 @@ func TestGRPCListener_JSONRequestsTheMethodCannotReadAreRefusedAndLeaveEveryProv
 	require.Empty(t, snapshot.Blocked, "a provider was blocked")
 	require.Len(t, snapshot.ValidAddresses, providers)
 
-	// Every node still serves a write it can read.
-	_, _, err = invokeRaw(t, client, reflectedWriteMethod, []byte(`{"id":"7"}`))
+	// The router still serves a request the conversion reads. A read, not a write: a write's
+	// replies from every node would set the shared message's parsing data at once.
+	_, _, err = invokeRaw(t, client, reflectedReadMethod, []byte(`{"id":"8"}`))
 	require.NoError(t, err)
-	require.Eventually(t, func() bool { return served() == 1+providers }, 5*time.Second, 20*time.Millisecond,
-		"the write reached every node")
+	require.Equal(t, int32(2), served())
 }
 
 // A JSON write that no provider could convert for want of the method's definition (MAG-5675) also
