@@ -812,43 +812,7 @@ func parseDictionary(rpcInput RPCInput, input []string, dataSource int) ([]inter
 	if len(input) != 2 {
 		return nil, fmt.Errorf("invalid input format, input length: %d and needs to be 2", len(input))
 	}
-
-	// Unmarshall data
-	unmarshalledData, err := getDataToParse(rpcInput, dataSource)
-	if err != nil {
-		return nil, fmt.Errorf("invalid input format, data is not json: %s, error: %s", unmarshalledData, err)
-	}
-
-	// Extract arguments
-	propName := input[0]
-	innerSeparator := input[1]
-
-	switch unmarshalledDataTyped := unmarshalledData.(type) {
-	case []interface{}:
-		// If value attribute with propName exists in array return it
-		value := parseArrayOfInterfaces(unmarshalledDataTyped, propName, innerSeparator)
-		if value != nil {
-			return value, nil
-		}
-
-		// Else return an error
-		return nil, ValueNotSetError
-	case map[string]interface{}:
-		// If attribute with key propName exists return value
-		if val, ok := unmarshalledDataTyped[propName]; ok {
-			return appendInterfaceToInterfaceArrayWithError(blockInterfaceToString(val))
-		}
-
-		// Else return an error
-		return nil, ValueNotSetError
-	case string:
-		return appendInterfaceToInterfaceArrayWithError(blockInterfaceToString(unmarshalledDataTyped))
-	case nil:
-		// Handle nil params as "no parameters set"
-		return nil, ValueNotSetError
-	default:
-		return nil, fmt.Errorf("not Supported ParseDictionary with other types: %T", unmarshalledData)
-	}
+	return lookupDictionary(rpcInput, dataSource, input[0], input[1], nil)
 }
 
 // parseDictionaryOrOrdered return a value of prop specified in args if exists in dictionary
@@ -860,22 +824,28 @@ func parseDictionaryOrOrdered(rpcInput RPCInput, input []string, dataSource int)
 	if len(input) != 3 {
 		return nil, fmt.Errorf("ParseDictionaryOrOrdered: invalid input format, input length: %d and needs to be 3: %s", len(input), strings.Join(input, ","))
 	}
+	return lookupDictionary(rpcInput, dataSource, input[0], input[1], &input[2])
+}
 
+// lookupDictionary is the lookup parseDictionary and parseDictionaryOrOrdered share: propName's
+// value in a map, or in an array as a "propName<innerSeparator>value" string or a map element.
+// index is parseDictionaryOrOrdered's fallback, nil for parseDictionary: the array element at that
+// position, or the map entry keyed by its text. It must be an unsigned number, and is checked after
+// the data is read.
+func lookupDictionary(rpcInput RPCInput, dataSource int, propName, innerSeparator string, index *string) ([]interface{}, error) {
 	// Unmarshall data
 	unmarshalledData, err := getDataToParse(rpcInput, dataSource)
 	if err != nil {
 		return nil, fmt.Errorf("invalid input format, data is not json: %s, error: %s", unmarshalledData, err)
 	}
 
-	// Extract arguments
-	propName := input[0]
-	innerSeparator := input[1]
-	inp := input[2]
-
 	// Convert prop index to the uint
-	propIndex, err := strconv.ParseUint(inp, 10, 32)
-	if err != nil {
-		return nil, fmt.Errorf("invalid input format, input isn't an unsigned index: %s, error: %s", inp, err)
+	var propIndex uint64
+	if index != nil {
+		propIndex, err = strconv.ParseUint(*index, 10, 32)
+		if err != nil {
+			return nil, fmt.Errorf("invalid input format, input isn't an unsigned index: %s, error: %s", *index, err)
+		}
 	}
 
 	switch unmarshalledDataTyped := unmarshalledData.(type) {
@@ -886,22 +856,22 @@ func parseDictionaryOrOrdered(rpcInput RPCInput, input []string, dataSource int)
 			return value, nil
 		}
 
-		// If not make sure there are enough elements
-		if uint64(len(unmarshalledDataTyped)) <= propIndex {
+		// If not, fall back to the element at the index, when there is one
+		if index == nil || uint64(len(unmarshalledDataTyped)) <= propIndex {
 			return nil, ValueNotSetError
 		}
-
-		// Fetch value using prop index
-		block := unmarshalledDataTyped[propIndex]
-		return appendInterfaceToInterfaceArrayWithError(blockInterfaceToString(block))
+		return appendInterfaceToInterfaceArrayWithError(blockInterfaceToString(unmarshalledDataTyped[propIndex]))
 	case map[string]interface{}:
 		// If attribute with key propName exists return value
 		if val, ok := unmarshalledDataTyped[propName]; ok {
 			return appendInterfaceToInterfaceArrayWithError(blockInterfaceToString(val))
 		}
+		if index == nil {
+			return nil, ValueNotSetError
+		}
 
 		// If attribute with key index exists return value
-		if val, ok := unmarshalledDataTyped[inp]; ok {
+		if val, ok := unmarshalledDataTyped[*index]; ok {
 			return appendInterfaceToInterfaceArrayWithError(blockInterfaceToString(val))
 		}
 
@@ -909,7 +879,7 @@ func parseDictionaryOrOrdered(rpcInput RPCInput, input []string, dataSource int)
 		utils.FormatDebug("Failed parsing parseDictionaryOrOrdered",
 			utils.LogAttr("params", rpcInput.GetParams()),
 			utils.LogAttr("propName", propName),
-			utils.LogAttr("inp", inp),
+			utils.LogAttr("inp", *index),
 			utils.LogAttr("unmarshalledDataTyped", unmarshalledDataTyped),
 			utils.LogAttr("method", rpcInput.GetMethod()),
 			utils.LogAttr("err", ValueNotSetError),
