@@ -224,34 +224,112 @@ func TestRecompute_SoleVoterJumpInAStormBehindABadBackendIsNotTheBadBlock(t *tes
 	}
 }
 
-// TestRecompute_SoleVoterFollowsAStormThatKeepsOutrunningTheGuardOneRunAtATime: every answer is more than
-// OutlierThreshold over the last, so no answer is ever within the guard. Each pull-up ends its run, and the
-// next run takes the tip on, so the tip keeps moving and never goes stale; it is never past the endpoint.
-func TestRecompute_SoleVoterFollowsAStormThatKeepsOutrunningTheGuardOneRunAtATime(t *testing.T) {
+// TestRecompute_SoleVoterFollowsAStormFromOneSourceAtEveryTick: one node in a storm that keeps outrunning
+// the guard, every answer more than OutlierThreshold over the last, and now and then an answer a block lower
+// than the one before (two relays finishing out of order). That run is not mixed, so once it is long enough
+// every consensus tick takes the tip to the node's head, and the run goes on.
+func TestRecompute_SoleVoterFollowsAStormFromOneSourceAtEveryTick(t *testing.T) {
 	cs, clk := newSlowChainState(t)
 	const start = int64(1_000_000)
 	u := newSoleURL(cs)
 	u.answer(clk.now(), start)
 	cs.Recompute(u.vote())
-	head := start
-	moves := 0
-	last := start
+	head, last := start, start
+	followed := 0
 	for i := 1; i <= 240; i++ {
 		clk.advance(slowChainPoll)
 		head += 2 * cs.cfg.OutlierThreshold
-		u.answer(clk.now(), head)
-		if i%10 == 0 {
-			cs.Recompute(u.vote())
+		block := head
+		if i%10 == 5 {
+			block = last - 1 // out of order by a block: not a second backend
 		}
+		u.answer(clk.now(), block)
+		last = block
+		if i%10 != 0 {
+			continue
+		}
+		cs.Recompute(u.vote())
 		tip, fresh := cs.GetLatestBlock()
-		require.True(t, fresh, "poll %d: each run's pull-up keeps the tip fresh", i)
-		require.LessOrEqual(t, tip, head)
-		if tip != last {
-			moves++
-			last = tip
+		require.True(t, fresh, "poll %d", i)
+		if i < 40 {
+			require.Equal(t, start, tip, "poll %d: not before the run is long enough", i)
+			continue
 		}
+		require.Equal(t, head, tip, "poll %d: every tick takes the tip to the node's head", i)
+		followed++
 	}
-	require.GreaterOrEqual(t, moves, 4, "four hours of storm are four runs or more")
+	require.Equal(t, 21, followed)
+}
+
+// TestRecompute_SoleVoterJumpGoesNoHigherThanTheRunsOwnAnswers: the url's vote can be another pod's
+// observation (the fleet gate), which is not an answer. Here the other pod's polls met the bad backend, so the
+// url's stored block is the absurd one, while this pod's own polls, on alternate cycles, meet the good
+// backend in a storm. The pull-up takes the tip to the highest block this pod was answered, not to the vote.
+func TestRecompute_SoleVoterJumpGoesNoHigherThanTheRunsOwnAnswers(t *testing.T) {
+	cs, clk := newSlowChainState(t)
+	const start = int64(1_000_000)
+	u := newSoleURL(cs)
+	u.answer(clk.now(), start)
+	cs.Recompute(u.vote())
+	head := start + 2*cs.cfg.OutlierThreshold
+	for i := 1; i <= 80; i++ {
+		clk.advance(slowChainPoll)
+		head++
+		if i%2 == 1 {
+			// A skipped poll: the other pod's observation is adopted into the url's store and fed to the
+			// tip, as recordPeerObservation does. It is not an answer, so NoteAnswer never sees it.
+			if u.store.Set("solo", endpointtip.Tip{Block: absurdBlock, ObservedAt: clk.now(), Source: endpointtip.SourcePeer}, cs.cfg.StalenessWindow) {
+				cs.SetLatestBlock(absurdBlock)
+			}
+			continue
+		}
+		u.answer(clk.now(), head) // this pod's own poll, answered by the good backend
+	}
+	cs.Recompute(u.vote())
+	tip, vote := cs.GetLatestBlockAllowStale(), u.vote()[0].Block
+	require.Equal(t, absurdBlock, vote, "precondition: the vote is the other pod's block")
+	require.Equal(t, head, tip, "the tip stops at this pod's own highest answer")
+}
+
+// TestRecompute_SoleVoterRunIsMixedOnlyByADipPastTheGuard pins where a run counts as mixed. An answer up to
+// OutlierThreshold below the run's highest is the same source (a straggler, or two healthy backends a few
+// blocks apart), and the pull-up takes the run's highest block. One more block below is a second backend far
+// from the first, and the pull-up takes only the run's lowest.
+func TestRecompute_SoleVoterRunIsMixedOnlyByADipPastTheGuard(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		dip   func(threshold int64) int64
+		mixed bool
+	}{
+		{"a dip of OutlierThreshold is one source", func(threshold int64) int64 { return threshold }, false},
+		{"a dip of OutlierThreshold+1 is a second backend", func(threshold int64) int64 { return threshold + 1 }, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cs, clk := newSlowChainState(t)
+			const start = int64(1_000_000)
+			u := newSoleURL(cs)
+			u.answer(clk.now(), start)
+			cs.Recompute(u.vote())
+			high := start + 10*cs.cfg.OutlierThreshold
+			low := high - tc.dip(cs.cfg.OutlierThreshold)
+			for i := 0; i < soleVoterJumpAnswers; i++ {
+				clk.advance(slowChainPoll)
+				block := high
+				if i == 1 {
+					block = low // after the run's first answer, so it is below the run's highest
+				}
+				u.answer(clk.now(), block)
+			}
+			cs.Recompute(u.vote())
+			got, ok := cs.GetLatestBlock()
+			require.True(t, ok)
+			if tc.mixed {
+				require.Equal(t, low, got, "a mixed run takes the tip only to its lowest block")
+			} else {
+				require.Equal(t, high, got, "one source's run takes the tip to its highest block")
+			}
+		})
+	}
 }
 
 // TestNoteAnswer_RunsEndAndArePruned keeps jumpRuns bounded: an answer at or below the guard deletes the
