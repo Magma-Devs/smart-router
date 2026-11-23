@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/fullstorydev/grpcurl"
@@ -576,7 +577,7 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 	// and caching. CometBFT serves both forms on the same port.
 	if tendermintMessage, ok := chainMessage.GetRPCMessage().(*rpcInterfaceMessages.TendermintrpcMessage); ok {
 		if uri, fromURI := tendermintMessage.URIRequest(); fromURI {
-			fullURL, err := common.JoinURLPath(nodeUrl.Url, uri)
+			fullURL, err := tendermintURIRequestURL(nodeUrl.Url, uri)
 			if err != nil {
 				return nil, fmt.Errorf("failed to build Tendermint RPC URL: %w", err)
 			}
@@ -702,6 +703,30 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 	}
 
 	return result, nil
+}
+
+// tendermintURIRequestURL is the URL a client's Tendermint GET goes to: the client's path under the
+// node url's own path, and the client's query after the node url's own query. A node url can name
+// its key in either, and the JSON-RPC POST goes to the node url as configured, so the GET keeps
+// both (MAG-5267). uri is the client's path and query without the leading "/" (URIRequest).
+func tendermintURIRequestURL(nodeURL, uri string) (string, error) {
+	path, query, _ := strings.Cut(uri, "?")
+	// A leading "/" makes JoinURLPath append the path to the node url's own path. Without it the
+	// path is relative, and resolving it replaces the node url's last path segment and its query.
+	joined, err := common.JoinURLPath(nodeURL, "/"+path)
+	if err != nil || query == "" {
+		return joined, err
+	}
+	joinedURL, err := url.Parse(joined)
+	if err != nil {
+		return "", err
+	}
+	if joinedURL.RawQuery == "" {
+		joinedURL.RawQuery = query
+	} else {
+		joinedURL.RawQuery += "&" + query
+	}
+	return joinedURL.String(), nil
 }
 
 // classifyJSONRPCNodeError stamps the registry's verdict on a JSON-RPC or Tendermint reply that

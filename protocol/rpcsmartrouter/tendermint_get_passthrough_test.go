@@ -80,6 +80,35 @@ func TestTendermintGETReachesTheNodeAsAGET_MAG5267(t *testing.T) {
 		require.Equal(t, []receivedRequest{{method: http.MethodGet, path: "/status"}}, received())
 	})
 
+	// A node url can name its key in its path or its query. The JSON-RPC POST goes to the node url
+	// as configured, so the GET keeps both: the client's path goes under the node url's path, and
+	// the client's query after the node url's query.
+	t.Run("a GET under a node url with a path", func(t *testing.T) {
+		url, received := recordingTendermintNode(t)
+		get := tendermint
+		get.method, get.path, get.body = http.MethodGet, "/block?height=5", ""
+		read := startFailedReplyRouter(t, get, url+"/gateway/KEY")()
+		require.Equal(t, http.StatusOK, read.status)
+		require.Equal(t, []receivedRequest{{method: http.MethodGet, path: "/gateway/KEY/block", query: "height=5"}}, received(),
+			"the client's path goes under the node url's own path")
+	})
+
+	t.Run("a GET to a node url with a query", func(t *testing.T) {
+		url, received := recordingTendermintNode(t)
+		withQuery := tendermint
+		withQuery.method, withQuery.path, withQuery.body = http.MethodGet, "/block?height=5", ""
+		read := startFailedReplyRouter(t, withQuery, url+"/?key=K")()
+		require.Equal(t, http.StatusOK, read.status)
+		noQuery := tendermint
+		noQuery.method, noQuery.path, noQuery.body = http.MethodGet, "/status", ""
+		read = startFailedReplyRouter(t, noQuery, url+"/?key=K")()
+		require.Equal(t, http.StatusOK, read.status)
+		require.Equal(t, []receivedRequest{
+			{method: http.MethodGet, path: "/block", query: "key=K&height=5"},
+			{method: http.MethodGet, path: "/status", query: "key=K"},
+		}, received(), "the node url's own query is kept, and the client's follows it")
+	})
+
 	t.Run("a JSON-RPC POST", func(t *testing.T) {
 		url, received := recordingTendermintNode(t)
 		read := startFailedReplyRouter(t, tendermint, url)()
