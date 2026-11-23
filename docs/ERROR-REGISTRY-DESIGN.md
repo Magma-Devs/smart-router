@@ -834,7 +834,7 @@ hanging apis, it still gives the optimizer an availability sample with the refus
 node with too few peers broadcasts nothing, which is its health, as XRPL's `noNetwork` is. "P2P
 broadcast failed." is not that: java-tron sends it after it took the transaction into its pending
 pool, when every peer had already announced the transaction, so the node holds it and is not blamed.
-Every refusal sets `lava-identified-node-error: true` when it reaches the client, and is counted in
+Every refusal sets `router-identified-node-error: true` when it reaches the client, and is counted in
 `smartrouter_errors_total` under its code. A gRPC refusal is the node's protobuf message, so it is
 not redacted: a rewritten string would break it.
 
