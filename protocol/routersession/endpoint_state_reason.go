@@ -42,6 +42,13 @@ func (e *Endpoint) lendRankLocked() int {
 	}
 }
 
+// lendRank is lendRankLocked under e.mu.
+func (e *Endpoint) lendRank() int {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.lendRankLocked()
+}
+
 // IsUsable reports, under e.mu, whether selection may route to this endpoint right now. It differs
 // from IsEnabled, which describes only the event slot: an endpoint can be Enabled and still out of
 // rotation because a state reason (head-stalled) holds.
@@ -64,7 +71,18 @@ func (e *Endpoint) AddStateReason(reason EndpointDisableReason, at time.Time, bl
 		e.stateReasons = make(map[EndpointDisableReason]StateReasonRecord, 1)
 	}
 	e.stateReasons[reason] = StateReasonRecord{Reason: reason, Since: at, Block: block}
+	e.countOutOfRotationLocked(reason)
 	return true
+}
+
+// countOutOfRotationLocked records one more time the endpoint left rotation for reason (MAG-5244).
+// Called on the edge only: the Enabled→false transition (disableLocked) and a state reason that was
+// not held before (AddStateReason). Caller must hold e.mu for writing.
+func (e *Endpoint) countOutOfRotationLocked(reason EndpointDisableReason) {
+	if e.outOfRotationCounts == nil {
+		e.outOfRotationCounts = make(map[EndpointDisableReason]uint64, 1)
+	}
+	e.outOfRotationCounts[reason]++
 }
 
 // RemoveStateReason drops one state reason. It returns false when the reason was not held. It never
