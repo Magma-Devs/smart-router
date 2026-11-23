@@ -105,10 +105,10 @@ Uses a **tiered classification system** (see Section 3 for details):
 | 3004 | `CHAIN_GAS_TOO_LOW` | Intrinsic gas too low | No | EVM |
 | 3005 | `CHAIN_GAS_LIMIT_EXCEEDED` | Exceeds block gas limit | No | EVM |
 | 3006 | `CHAIN_TX_UNDERPRICED` | Transaction gas price too low | No | EVM |
-| 3007 | `CHAIN_TX_ALREADY_KNOWN` | Transaction already in mempool | No | EVM, Starknet, XRP |
+| 3007 | `CHAIN_TX_ALREADY_KNOWN` | Transaction already in mempool | No | EVM, Starknet, XRP, Cosmos, Tron |
 | 3008 | `CHAIN_TX_REPLACEMENT_UNDERPRICED` | Replacement tx gas too low | No | EVM |
 | 3009 | `CHAIN_MEMPOOL_FULL` | Mempool/tx pool is full | No | EVM, Cosmos |
-| 3010 | `CHAIN_TX_TOO_LARGE` | Transaction exceeds size limit | No | EVM, Solana |
+| 3010 | `CHAIN_TX_TOO_LARGE` | Transaction exceeds size limit | No | EVM, Solana, Cosmos, Tron |
 | 3011 | `CHAIN_MAX_FEE_BELOW_BASE` | Max fee per gas below base fee | No | EVM (EIP-1559) |
 | 3012 | `CHAIN_INVALID_SEQUENCE` | Invalid sequence (Cosmos nonce equivalent) | No | Cosmos |
 | 3013 | `CHAIN_INSUFFICIENT_FEE` | Insufficient fee | No | Cosmos |
@@ -644,7 +644,8 @@ _Blocked on protocol upgrade: sdkerrors carry ABCI codes used in the gRPC wire f
 | **TON** | Partial — TVM exit codes + custom HTTP | Yes (3 codes) | Lite-server timeout retryable, message expired retryable |
 | **Aptos** | Partial — custom REST error format | No (generic codes sufficient) | Error format differs but semantics map to generic codes |
 | **Stellar** | Yes — typed error URIs + result_codes | No (generic codes sufficient) | REST-based, HTTP codes sufficient for retry decisions |
-| **Cosmos SDK** | Standard — tx_response.code | No (generic codes sufficient) | Standard patterns, well-covered by generic tier |
+| **Cosmos SDK** | Standard — tx_response.code | No (generic codes sufficient) | Standard patterns, well-covered by generic tier. A broadcast refusal is classified by its code (§10) |
+| **Tron** | Partial — a broadcast's response code inside a 200 | No (generic codes sufficient) | §10 |
 
 ## 9. REST replies: any status outside 2xx is a node error
 
@@ -772,7 +773,10 @@ reading was the wrong one.
 ### 9.4 Not covered by this rule, on purpose
 
 - Tron and TON report errors inside a 200 body (`{"Error":…}`, `{"code":"SIGERROR"}`,
-  `{"ok":false}`) and need a body check per chain family — §5 step 2, a separate decision.
+  `{"ok":false}`) and need a body check per chain family — §5 step 2, a separate decision. Tron's
+  broadcast refusal (`{"code":"SIGERROR"}` on `/wallet/broadcasttransaction` and
+  `/wallet/broadcasthex`) is read since MAG-5323 (§10); `{"Error":…}` and TON's `{"ok":false}` are
+  not. TON's `/sendBoc` refuses with a 500, which this section already reads.
 - An empty or non-JSON **2xx** is still served as the answer and still ends a broadcast
   (MAG-3971). The fix site is the sender's existing malformed-2xx guard, not
   `CheckResponseError`, which cannot see whether the request is a write.
@@ -780,3 +784,63 @@ reading was the wrong one.
   node's reply (MAG-4060).
 - Cross-validation counts only successes toward a quorum, so on a REST interface under a CV
   policy identical not-found answers no longer form one. No tenant runs CV on REST today.
+
+## 10. A broadcast refused inside a success (MAG-5323)
+
+Three write paths answer a refused transaction with HTTP 200 or gRPC OK. Read as a success, the
+refusal ended a stateful broadcast whenever it arrived first, while another node took the
+transaction. Each is now a node error, read on its request only (the method or path, never the
+chain), as XRPL's submit is (MAG-4033):
+
+| Path | Refusal | Not a refusal |
+| --- | --- | --- |
+| Tendermint RPC `broadcast_tx_sync` | `result.code` ≠ 0 | |
+| Tendermint RPC `broadcast_tx_commit` | `result.check_tx.code` ≠ 0 | `result.tx_result.code` ≠ 0: the transaction ran |
+| gRPC `cosmos.tx.v1beta1.Service/BroadcastTx` | `tx_response.code` ≠ 0 at height 0 | a height: `BROADCAST_MODE_BLOCK` (before SDK v0.47), the transaction ran |
+| Tron `/wallet/broadcasttransaction`, `/wallet/broadcasthex` | `result` false or absent, with a `code` other than `SUCCESS` | |
+
+`broadcast_tx_async` answers before CheckTx and is not read. A Tendermint batch keeps the batch rule.
+
+The reader writes the message the registry classifies: `cosmos tx refused: code <code>, codespace
+<codespace>: <log>` and `tron tx refused: <code>: <message>`. Their rows are Tier-1 on the
+transports the readers run on (CANTO serves Cosmos interfaces and is an EVM chain), and the Cosmos
+rows also open the CosmosSDK Tier-2 list, so the code decides before a log's words. Each set ends
+in a catch-all, so a refusal is never `UNKNOWN_ERROR`, which is retried and scored.
+
+| Refusal | Code | At fault |
+| --- | --- | --- |
+| Cosmos `sdk` 32 | `CHAIN_INVALID_SEQUENCE` | no |
+| Cosmos `sdk` 19 | `CHAIN_TX_ALREADY_KNOWN` | no |
+| Cosmos `sdk` 13 | `CHAIN_INSUFFICIENT_FEE` | no |
+| Cosmos `sdk` 5 | `CHAIN_INSUFFICIENT_FUNDS` | no |
+| Cosmos `sdk` 4 | `CHAIN_INVALID_SIGNATURE` | no |
+| Cosmos `sdk` 9 | `CHAIN_ACCOUNT_NOT_FOUND` | no |
+| Cosmos `sdk` 11 | `CHAIN_OUT_OF_GAS` | no |
+| Cosmos `sdk` 20 | `CHAIN_MEMPOOL_FULL` | no |
+| Cosmos `sdk` 21 | `CHAIN_TX_TOO_LARGE` | no |
+| any other Cosmos code or codespace | `CHAIN_TX_REJECTED` | no |
+| Tron `SIGERROR` | `CHAIN_INVALID_SIGNATURE` | no |
+| Tron `DUP_TRANSACTION_ERROR` | `CHAIN_TX_ALREADY_KNOWN` | no |
+| Tron `TOO_BIG_TRANSACTION_ERROR` | `CHAIN_TX_TOO_LARGE` | no |
+| Tron `BANDWITH_ERROR` | `CHAIN_INSUFFICIENT_FUNDS` | no |
+| Tron `SERVER_BUSY` | `NODE_RATE_LIMITED` (held off) | no |
+| Tron `NOT_ENOUGH_EFFECTIVE_CONNECTION` with "P2P broadcast failed." | `CHAIN_TX_ALREADY_KNOWN` | no |
+| Tron `NO_CONNECTION`, any other `NOT_ENOUGH_EFFECTIVE_CONNECTION` | `NODE_SERVICE_UNAVAILABLE` | **yes** |
+| any other Tron code | `CHAIN_TX_REJECTED` | no |
+
+A refusal about the transaction is no fault of the node, though some are the node's own view of it:
+a lagging node's sequence (32), its minimum gas price (13), its mempool (19, 20). It neither resets
+the endpoint's failure count nor adds to it, and it is never an availability failure. It closes the
+session as an answer, as every non-retryable node error does, so on Tron, whose broadcasts are not
+hanging apis, it still gives the optimizer an availability sample with the refusal's latency. Only a
+refusal that comes after a sibling's acceptance is released without a score. A Tron node with too
+few peers broadcasts nothing, which is its health, as XRPL's `noNetwork` is. "P2P broadcast failed."
+is not that: java-tron sends it after it took the transaction into its pending pool, when every peer
+had already announced the transaction, so the node holds it and is not blamed. Every refusal sets
+`router-identified-node-error: true` when it reaches the client, and is counted in
+`smartrouter_errors_total` under its code. A gRPC refusal is the node's protobuf message, so it is
+not redacted: a rewritten string would break it.
+
+A Cosmos REST `POST /cosmos/tx/v1beta1/txs` refusal was already a node error to the relay processor
+(§9); its sender flag and its classification by the log are unchanged.
+

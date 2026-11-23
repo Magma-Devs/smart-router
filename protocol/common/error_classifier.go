@@ -6,6 +6,8 @@ import (
 	"io"
 	"net"
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -59,7 +61,9 @@ var chainErrorMappings = map[ChainFamily][]errorMapping{
 		{MessageContains("double spend"), RouterErrorChainDoubleSpend},
 		{MessageContains("txn-mempool-conflict"), RouterErrorChainDoubleSpend}, // Bitcoin Core specific
 	},
-	ChainFamilyCosmosSDK: {
+	// A refused broadcast's code decides first (cosmosTxRefusalRows): its log is free text, and the
+	// rows below would otherwise read it.
+	ChainFamilyCosmosSDK: slices.Concat(cosmosTxRefusalRows, []errorMapping{
 		// Cosmos SDK transaction errors. These must be Tier-2 (not Tier-1)
 		// because "insufficient fee" also collides with Starknet's dedicated
 		// CHAIN_STARKNET_INSUFFICIENT_FEE (code 53) which is handled in the
@@ -72,7 +76,7 @@ var chainErrorMappings = map[ChainFamily][]errorMapping{
 		// Generic Tier-1 doesn't carry this matcher because EVM uses different
 		// phrasing and would false-match contract calls against unfunded addresses.
 		{MessageContains("account not found"), RouterErrorChainAccountNotFound},
-	},
+	}),
 	ChainFamilyStarknet: {
 		// Source: Starknet JSON-RPC spec error codes
 		{CodeEquals(1), RouterErrorChainStarknetFailedToReceiveTx},
@@ -186,6 +190,124 @@ func IsXRPLRejection(engineResult string) bool {
 // codes, with or without the direct-RPC sender's "HTTP <status>: " prefix.
 func xrplMessageStartsWith(alternatives ...string) ErrorMatcher {
 	return MessageRegex(`^(?:HTTP \d+: )?(?:` + strings.Join(alternatives, "|") + `)\b`)
+}
+
+// ---------------------------------------------------------------------------
+// A node's refusal of a broadcast transaction, inside an ordinary reply (MAG-5323)
+// ---------------------------------------------------------------------------
+//
+// Tendermint RPC's broadcast_tx_sync and broadcast_tx_commit, Cosmos gRPC's BroadcastTx and Tron's
+// /wallet/broadcasttransaction and /wallet/broadcasthex answer a refused transaction with HTTP 200
+// or gRPC OK. rpcInterfaceMessages flags those replies and writes a message that starts with what
+// the node said, through CosmosTxRefusalMessage and TronTxRefusalMessage, and the rows below
+// classify that message. Each set ends in a catch-all, so a flagged refusal is never UNKNOWN_ERROR:
+// that is retryable and scored by the availability gate, which would blame a node for a client's
+// re-sent transaction.
+//
+// The readers are chosen by the request (the method, the path), not by the chain, so the rows are
+// Tier-1 on the transports those readers run on: CANTO serves Cosmos interfaces and is an EVM
+// chain. The Cosmos rows also open the CosmosSDK Tier-2 list, where they must come before the rows
+// that read a log's words. Anchored on a prefix no node writes, they match nothing else.
+
+// cosmosTxRefusalPrefix starts every message CosmosTxRefusalMessage writes.
+const cosmosTxRefusalPrefix = "cosmos tx refused: code "
+
+// CosmosTxRefusalMessage is the message a Cosmos node's refusal of a broadcast transaction is
+// classified by: its ABCI code, its codespace, and its log, which a refusal the SDK converts from a
+// CometBFT error (tx already in mempool, mempool is full, tx too large) does not have.
+//
+//	cosmos tx refused: code 32, codespace sdk: account sequence mismatch, expected 7, got 6: incorrect account sequence
+func CosmosTxRefusalMessage(codespace string, code uint32, log string) string {
+	message := cosmosTxRefusalPrefix + strconv.FormatUint(uint64(code), 10)
+	if codespace != "" {
+		message += ", codespace " + codespace
+	}
+	if log != "" {
+		message += ": " + log
+	}
+	return message
+}
+
+// sdkTxRefused matches CosmosTxRefusalMessage's message for one code of the Cosmos SDK's own
+// codespace, sdk, with or without the direct-RPC sender's "HTTP <status>: " prefix.
+func sdkTxRefused(code uint32) ErrorMatcher {
+	return MessageRegex(`^(?:HTTP \d+: )?` + regexp.QuoteMeta(cosmosTxRefusalPrefix+strconv.FormatUint(uint64(code), 10)+", codespace sdk") + `(?::|$)`)
+}
+
+// cosmosTxRefusalRows classify a refused Cosmos transaction by its code (cosmos-sdk
+// types/errors/errors.go). A broadcast's code is CheckTx's, so it comes from the ante handler, or
+// from the SDK's conversion of a CometBFT error. Each is about the transaction or the chain, never
+// the node's health, so every row is a non-retryable chain error that keeps the availability gate
+// off the node. Some are the node's own view of the transaction: a lagging node's sequence (32),
+// its minimum gas price (13), its mempool (19, 20); the registry already answers "mempool is full"
+// with CHAIN_MEMPOOL_FULL, not at fault.
+var cosmosTxRefusalRows = []errorMapping{
+	{sdkTxRefused(32), RouterErrorChainInvalidSequence},  // ErrWrongSequence: account sequence mismatch
+	{sdkTxRefused(19), RouterErrorChainTxAlreadyKnown},   // ErrTxInMempoolCache: tx already in mempool
+	{sdkTxRefused(13), RouterErrorChainInsufficientFee},  // ErrInsufficientFee
+	{sdkTxRefused(5), RouterErrorChainInsufficientFunds}, // ErrInsufficientFunds
+	{sdkTxRefused(4), RouterErrorChainInvalidSignature},  // ErrUnauthorized: signature verification failed
+	{sdkTxRefused(9), RouterErrorChainAccountNotFound},   // ErrUnknownAddress: the signer's account does not exist
+	{sdkTxRefused(11), RouterErrorChainOutOfGas},         // ErrOutOfGas, in the ante handler
+	{sdkTxRefused(20), RouterErrorChainMempoolFull},      // ErrMempoolIsFull
+	{sdkTxRefused(21), RouterErrorChainTxTooLarge},       // ErrTxTooLarge
+	// Any other code, of any codespace: a module's own refusal, a timeout height, a bad memo.
+	{MessageRegex(`^(?:HTTP \d+: )?` + regexp.QuoteMeta(cosmosTxRefusalPrefix) + `\d`), RouterErrorChainTxRejected},
+}
+
+// tronTxRefusalPrefix starts every message TronTxRefusalMessage writes.
+const tronTxRefusalPrefix = "tron tx refused: "
+
+// TronTxRefusalMessage is the message a Tron node's refusal of a broadcast transaction is classified
+// by: its response code (java-tron's Return.response_code) and its message.
+//
+//	tron tx refused: SIGERROR: Validate signature error: miss sig or contract
+func TronTxRefusalMessage(code, message string) string {
+	if message == "" {
+		return tronTxRefusalPrefix + code
+	}
+	return tronTxRefusalPrefix + code + ": " + message
+}
+
+// tronTxRefused matches TronTxRefusalMessage's message for any of the given response codes, with or
+// without the direct-RPC sender's "HTTP <status>: " prefix.
+func tronTxRefused(codes ...string) ErrorMatcher {
+	return MessageRegex(`^(?:HTTP \d+: )?` + regexp.QuoteMeta(tronTxRefusalPrefix) + `(?:` + strings.Join(codes, "|") + `)(?::|$)`)
+}
+
+// tronTxRefusedSaying matches TronTxRefusalMessage's message for one response code and one exact
+// message, with or without the direct-RPC sender's "HTTP <status>: " prefix.
+func tronTxRefusedSaying(code, message string) ErrorMatcher {
+	return MessageRegex(`^(?:HTTP \d+: )?` + regexp.QuoteMeta(TronTxRefusalMessage(code, message)) + `$`)
+}
+
+// tronTxRefusalRows classify a refused Tron transaction by its response code. java-tron checks the
+// node before the transaction:
+//   - NO_CONNECTION, NOT_ENOUGH_EFFECTIVE_CONNECTION: the node has too few peers to broadcast
+//     anything. That is the node's health, as XRPL's noNetwork is: retried elsewhere, and at fault.
+//   - SERVER_BUSY: too many transactions pending. Healthy but busy, as XRPL's tooBusy: held off,
+//     not scored, and nothing was broadcast.
+//
+// One NOT_ENOUGH_EFFECTIVE_CONNECTION comes after the transaction instead: "P2P broadcast failed."
+// java-tron sends it once pushTransaction has taken the transaction into the node's pending pool,
+// when no peer still needed it from this node, because each had already announced it
+// (Wallet.broadcastTransaction, AdvService.fastBroadcastTransaction). The node and its peers hold
+// the transaction, which is what a node sees when another node of the same broadcast spread it
+// first. That is neither the node's health nor a refusal: it is read as a transaction already known.
+//
+// Every other code is about the transaction, the same from every node, and keeps the availability
+// gate off the node: a bad signature, a transaction already known, one too big, an account that
+// cannot pay for its bandwidth, and, through the catch-all, CONTRACT_VALIDATE_ERROR,
+// CONTRACT_EXE_ERROR, TAPOS_ERROR, TRANSACTION_EXPIRATION_ERROR, BLOCK_UNSOLIDIFIED and OTHER_ERROR.
+var tronTxRefusalRows = []errorMapping{
+	{tronTxRefusedSaying("NOT_ENOUGH_EFFECTIVE_CONNECTION", "P2P broadcast failed."), RouterErrorChainTxAlreadyKnown},
+	{tronTxRefused("NO_CONNECTION", "NOT_ENOUGH_EFFECTIVE_CONNECTION"), RouterErrorNodeServiceUnavailable},
+	{tronTxRefused("SERVER_BUSY"), RouterErrorNodeRateLimited},
+	{tronTxRefused("SIGERROR"), RouterErrorChainInvalidSignature},
+	{tronTxRefused("DUP_TRANSACTION_ERROR"), RouterErrorChainTxAlreadyKnown},
+	{tronTxRefused("TOO_BIG_TRANSACTION_ERROR"), RouterErrorChainTxTooLarge},
+	{tronTxRefused("BANDWITH_ERROR"), RouterErrorChainInsufficientFunds}, //nolint:misspell // java-tron's spelling
+	{MessageRegex(`^(?:HTTP \d+: )?` + regexp.QuoteMeta(tronTxRefusalPrefix)), RouterErrorChainTxRejected},
 }
 
 // ---------------------------------------------------------------------------
@@ -647,6 +769,13 @@ func httpStatusMessageMappings() []errorMapping {
 // any reader can observe the map, so the runtime invariant ("read-only after
 // package init") holds. Do not add mutations outside this function.
 func init() {
+	// A broadcast's refusal opens the table of each transport its reader runs on: Tendermint RPC
+	// (JSON-RPC) and gRPC for Cosmos, REST for Tron. Their messages start with a prefix no node
+	// writes, so they shadow no row below, and first, no row below reads the node's free text.
+	genericErrorMappings[TransportJsonRPC] = slices.Concat(cosmosTxRefusalRows, genericErrorMappings[TransportJsonRPC])
+	genericErrorMappings[TransportGRPC] = slices.Concat(cosmosTxRefusalRows, genericErrorMappings[TransportGRPC])
+	genericErrorMappings[TransportREST] = slices.Concat(tronTxRefusalRows, genericErrorMappings[TransportREST])
+
 	// Append shared HTTP status message matchers to JSON-RPC transport
 	genericErrorMappings[TransportJsonRPC] = append(genericErrorMappings[TransportJsonRPC], httpStatusMessageMappings()...)
 
