@@ -1931,14 +1931,27 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 			return timedOut, err
 		}
 
-		// A GraphQL write pinned to a lava-select-provider name the router does not have is refused
-		// before any provider is asked, so its reply says the write was never sent, as the
-		// listener's other refusals of a GraphQL write do (MAG-3800; Part I R-Q, Part II Q8). The
-		// listener writes the refusal and passes this reply's headers on; only this function knows
-		// the request is a write.
-		if isGraphQLWrite(protocolMessage) && errors.Is(err, routersession.SelectedProviderNotConfiguredError) {
+		// A request that ended before any provider was asked: a pin on a provider the router cannot
+		// use, no provider to ask, a deadline before the first dispatch. The listener writes the
+		// router's error, and this reply carries the request's own headers on it, Lava-Guid and
+		// lava-user-request-type among them, as every other failed reply does (MAG-5076; Part I §1:
+		// Lava-Guid on every reply). Returning nil sent the error with none. No attempt went out, so
+		// the reply names no provider and no retry. A cross-validated request is left out: the header
+		// builder would count a round that never ran.
+		if relayProcessor != nil && relayProcessor.GetSelection() != relaycore.CrossValidation && relayProcessor.GetUsedProviders().SessionsDispatched() == 0 {
+			// A write's targets are recorded when selection picks them. The consistency gate can then
+			// turn every one away, as it does a strict pin on a node too far behind the chain tip. No
+			// node received this write, so lava-fast-tx-participants must name none.
+			relayProcessor.SetStatefulRelayTargets(nil)
 			refused := &common.RelayResult{}
-			ensureWriteOutcomeHeader(refused, rpcInterfaceMessages.GraphQLWriteOutcomeNotSent)
+			rpcss.appendHeadersToRelayResult(ctx, refused, relayProcessor.ProtocolErrors(), relayProcessor, protocolMessage, protocolMessage.GetApi().GetName(), analytics, false)
+			// A GraphQL write pinned to a lava-select-provider name the router does not have is
+			// refused, so its reply says the write was never sent, as the listener's other refusals
+			// of a GraphQL write do (MAG-3800; Part I R-Q, Part II Q8). Only this function knows the
+			// request is a write.
+			if isGraphQLWrite(protocolMessage) && errors.Is(err, routersession.SelectedProviderNotConfiguredError) {
+				ensureWriteOutcomeHeader(refused, rpcInterfaceMessages.GraphQLWriteOutcomeNotSent)
+			}
 			return refused, err
 		}
 		return nil, err
