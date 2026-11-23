@@ -84,7 +84,8 @@ func TestHandleGRPCError_UnansweredCallKeepsRepliesTheClientRead(t *testing.T) {
 		{"a gateway's HTTP 503", codes.Unavailable, "unexpected HTTP status code received from server: 503 (Service Unavailable); transport: received unexpected content-type \"text/html\""},
 		{"a gateway's HTTP 502", codes.Unavailable, "unexpected HTTP status code received from server: 502 (Bad Gateway)"},
 		{"no content-type", codes.Internal, "malformed header: missing HTTP content-type"},
-		{"slow down", codes.ResourceExhausted, "stream terminated by RST_STREAM with error code: ENHANCE_YOUR_CALM"},
+		{"slow down, by a stream reset", codes.ResourceExhausted, "stream terminated by RST_STREAM with error code: ENHANCE_YOUR_CALM"},
+		{"slow down, by a GOAWAY before the close", codes.Unavailable, grpcSlowDownGoAwayText},
 		{"reply too large", codes.ResourceExhausted, "grpc: received message larger than max (600000000 vs. 536870912)"},
 		{"two replies to a one-reply call", codes.Internal, "cardinality violation: expected <EOF> for non client-streaming RPCs, but received another message"},
 	} {
@@ -94,6 +95,33 @@ func TestHandleGRPCError_UnansweredCallKeepsRepliesTheClientRead(t *testing.T) {
 			require.NotNil(t, resp, "kept on the node-error arm, as before")
 			var lost *common.GRPCReplyLostError
 			require.False(t, errors.As(err, &lost))
+		})
+	}
+}
+
+// grpcSlowDownGoAwayText is what grpc-go writes for a call still in flight when the server sent a
+// GOAWAY with ENHANCE_YOUR_CALM and closed the connection.
+const grpcSlowDownGoAwayText = `closing transport due to: connection error: desc = "error reading from server: EOF", received prior goaway: code: ENHANCE_YOUR_CALM, debug data: "too_many_pings"`
+
+// A server asking the router to slow down is a rate limit, as before MAG-5130, in both forms: a
+// stream reset with ENHANCE_YOUR_CALM, and a GOAWAY with it before the server closed the
+// connection. Neither is a cut, so the endpoint is held off rather than counted as unreachable.
+func TestHandleGRPCError_SlowDownStaysARateLimit(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		code codes.Code
+		msg  string
+	}{
+		{"a stream reset", codes.ResourceExhausted, "stream terminated by RST_STREAM with error code: ENHANCE_YOUR_CALM"},
+		{"a GOAWAY before the close", codes.Unavailable, grpcSlowDownGoAwayText},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := &GRPCDirectRPCConnection{}
+			resp, err := g.handleGRPCError(context.Background(), status.Error(tc.code, tc.msg), nil, nil, grpcCallUnanswered)
+			require.NotNil(t, resp, "the node-error arm, where the rate-limit rows read it")
+			require.ErrorIs(t, err, common.StatusCodeError429)
+			var lost *common.GRPCReplyLostError
+			require.False(t, errors.As(err, &lost), "not a cut")
 		})
 	}
 }

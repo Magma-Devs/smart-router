@@ -2173,8 +2173,11 @@ var grpcNonGRPCReplyPrefixes = []string{
 // grpcLibraryEndedTheCall reports whether err is a status grpc-go wrote because the connection or
 // the stream ended, for a call whose node sent no status: UNAVAILABLE (a reset, a closed socket, a
 // failed keepalive, a draining connection), a stream the server reset without a status, or a
-// stream it closed without one (MAG-5130). A stream reset with ENHANCE_YOUR_CALM is left out: it
-// is the server asking the router to slow down, and the rate-limit rows read it.
+// stream it closed without one (MAG-5130). A status that names ENHANCE_YOUR_CALM is left out: it
+// is the server asking the router to slow down, and the rate-limit rows read it, as before. That
+// is a stream reset with that code, and a call still in flight when the server sent a GOAWAY with
+// it and closed the connection ("received prior goaway: code: ENHANCE_YOUR_CALM"). The endpoint is
+// held off, not counted as unreachable.
 //
 // Statuses the client writes about a reply it did receive (too large, undecodable, a second
 // message for a one-reply call) are not on the list: the node answered.
@@ -2186,9 +2189,12 @@ func grpcLibraryEndedTheCall(err error) bool {
 			return false
 		}
 	}
+	if strings.Contains(msg, "ENHANCE_YOUR_CALM") {
+		return false
+	}
 	switch {
 	case strings.HasPrefix(msg, "stream terminated by RST_STREAM"):
-		return !strings.Contains(msg, "ENHANCE_YOUR_CALM")
+		return true
 	case msg == "server closed the stream without sending trailers":
 		return true
 	default:
