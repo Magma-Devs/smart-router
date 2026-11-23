@@ -239,6 +239,34 @@ func CreateMockSpec() spectypes.Spec {
 	)
 }
 
+// CreateMockTronSpec returns the part of a Tron spec a REST broadcast needs: one REST collection
+// holding /wallet/broadcasttransaction, stateful as in the catalog's tron.json, beside one read
+// (/wallet/getaccount); java-tron serves both as POST. The router's bundled specs carry no Tron
+// chain, so it registers tron.json's families itself, as loading the catalog would: TRXT takes the
+// Tron family from its import of TRX.
+func CreateMockTronSpec(index string) spectypes.Spec {
+	common.RegisterChainFamilies(map[string]spectypes.Spec{
+		"TRX":  {Index: "TRX"},
+		"TRXT": {Index: "TRXT", Imports: []string{"TRX"}},
+	})
+	api := func(name string, category spectypes.SpecCategory) *spectypes.Api {
+		return &spectypes.Api{
+			Name:         name,
+			Enabled:      true,
+			ComputeUnits: 10,
+			BlockParsing: spectypes.BlockParser{ParserArg: []string{""}, ParserFunc: spectypes.PARSER_FUNC_EMPTY},
+			Category:     category,
+		}
+	}
+	spec := newMockSpec(index,
+		spectypes.CollectionData{ApiInterface: spectypes.APIInterfaceRest, Type: http.MethodPost},
+		api("/wallet/broadcasttransaction", spectypes.SpecCategory{Stateful: common.CONSISTENCY_SELECT_ALL_PROVIDERS}),
+		api("/wallet/getaccount", spectypes.SpecCategory{}),
+	)
+	spec.AverageBlockTime = 3000
+	return spec
+}
+
 // CreateMockXRPLSpec returns the part of an XRP Ledger spec a transaction submission needs: one
 // JSON-RPC collection holding submit and submit_multisigned, stateful and hanging as in the
 // catalog's ripple.json, beside one read (account_info). The router's bundled specs carry no XRPL

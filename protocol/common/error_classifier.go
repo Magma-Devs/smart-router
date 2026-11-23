@@ -91,13 +91,6 @@ var chainErrorMappings = map[ChainFamily][]errorMapping{
 		{CodeEquals(61), RouterErrorChainStarknetTxVersionUnsupported},
 		{CodeEquals(63), RouterErrorChainStarknetUnexpectedError},
 	},
-	ChainFamilyNEAR: {
-		// Source: NEAR RPC docs — matched by error.cause.name in message
-		{MessageContains("UNKNOWN_BLOCK"), RouterErrorChainNEARUnknownBlock},
-		{MessageContains("UNKNOWN_CHUNK"), RouterErrorChainNEARUnknownChunk},
-		{MessageContains("INVALID_SHARD_ID"), RouterErrorChainNEARInvalidShardID},
-		{MessageContains("NOT_SYNCED_YET"), RouterErrorChainNEARNotSyncedYet},
-	},
 	// Source: java-tron services/http/Util.java and RateLimiterServlet (MAG-5449). A servlet
 	// exception is a 2xx {"Error": "<class> : <message>"}; checkTronServletError flags it, and
 	// this row names the one message that is capacity, not a fault: RateLimiterServlet's own
@@ -105,6 +98,13 @@ var chainErrorMappings = map[ChainFamily][]errorMapping{
 	// never-success now that checkTronServletError marks it a node error — not a silent "no verdict".
 	ChainFamilyTron: {
 		{MessageContains("lack of computing resources"), RouterErrorNodeRateLimited},
+	},
+	ChainFamilyNEAR: {
+		// Source: NEAR RPC docs — matched by error.cause.name in message
+		{MessageContains("UNKNOWN_BLOCK"), RouterErrorChainNEARUnknownBlock},
+		{MessageContains("UNKNOWN_CHUNK"), RouterErrorChainNEARUnknownChunk},
+		{MessageContains("INVALID_SHARD_ID"), RouterErrorChainNEARInvalidShardID},
+		{MessageContains("NOT_SYNCED_YET"), RouterErrorChainNEARNotSyncedYet},
 	},
 	// Source: rippled (src/libxrpl/protocol/ErrorCodes.cpp, transaction results in TER.cpp).
 	// rippled reports a failed call inside an ordinary HTTP 200 result, as an API error in
