@@ -25,7 +25,7 @@
   "method": "concordium.v2.Queries/SendBlockItem",
   "outcome": "ok",
   "reply_bytes": 34,
-  "request_bytes": 20,
+  "request_bytes": 22,
   "schema": 2,
   "selection": "stateful",
   "served_by": "grpc-node",
