@@ -84,8 +84,17 @@ const (
 // behind a 1-of-2 balancer passes with chance 2^-31 per run. A time window alone holds only as
 // many answers as the url gives in it, which is 4 polls in two block times on a 12 s chain: there
 // a 1-of-2 bad backend was followed within minutes in simulation. The hold covers the other end:
-// a busy router gets 32 relay answers in under a second, and those can all come over one
-// keep-alive connection that the balancer pinned to one backend.
+// a busy router gets 32 relay answers in under a second, and a burst can ride one connection the
+// balancer sent to one backend. It does not cover a connection that stays on one backend for
+// longer than the hold: the shared transport keeps one HTTP/2 connection per host while traffic
+// flows (MAG-4211), and a url pinned to its bad backend answers nothing but the absurd block.
+//
+// The pull-up takes the tip to the lowest block of the run, not to the voter's block. The voter's
+// block is the highest one its url answered, and in a block storm the good backend's answers are
+// above the guard too: they extend the run instead of ending it, and the highest block is the bad
+// backend's. Every answer of the run is at or above its lowest, so a run with one honest answer
+// never lifts the tip past the chain. A pull-up ends the run, so a storm that keeps outrunning the
+// guard is followed one run at a time.
 //
 // The cost is a slower storm: on a 600 s chain, polled once a minute, the head is taken after 32
 // answers, about half an hour, plus up to one consensus tick. Relay traffic makes it sooner; a pod
@@ -259,6 +268,7 @@ type ChainState struct {
 // stamps are on the real base clock, like every stored ChainState timestamp.
 type jumpRun struct {
 	answers int       // answers in the run
+	low     int64     // the lowest block answered in the run: as far as a pull-up on it may go
 	firstAt time.Time // when the run's first answer came
 	lastAt  time.Time // when its latest answer came
 }
@@ -463,7 +473,8 @@ func (cs *ChainState) setLatestBlockLocked(block int64, nowReal time.Time) (late
 //     never reach SetLatestBlock. Without this the tip goes stale, the fresh-tip guard switches off,
 //     and the next absurd answer becomes the tip directly;
 //   - it keeps the url's run of answers above the guard (jumpRuns), which Recompute's sole-voter
-//     pull-up requires. An answer above the guard extends the run; any other answer ends it.
+//     pull-up requires, and the run's lowest block, which is as far as that pull-up goes. An answer
+//     above the guard extends the run; any other answer ends it.
 //
 // Returns whether the tip moved up.
 func (cs *ChainState) NoteAnswer(url string, block int64) (advanced bool) {
@@ -484,6 +495,9 @@ func (cs *ChainState) NoteAnswer(url string, block int64) (advanced bool) {
 		}
 		run.answers++
 		run.lastAt = nowReal
+		if run.low == 0 || block < run.low {
+			run.low = block
+		}
 		if cs.jumpRuns == nil {
 			cs.jumpRuns = make(map[string]jumpRun)
 		}
@@ -754,10 +768,19 @@ func (cs *ChainState) Recompute(snapshots []BlockObservation) {
 		// follow that same stored glitch and hold the tip there for a TTL. Following a voter that has a
 		// peer would let one endpoint's repeated absurd block drag a multi-endpoint tip (MAG-4632), so
 		// two or more voters still need a majority.
-		cs.latestBlock = sole.Block
-		cs.lastObservedAt = nowReal
-		cs.latestSince = nowReal
-		cs.initialized = true
+		//
+		// The tip goes to the run's lowest block, not to the voter's: in a storm behind a balancer with
+		// a bad backend, the voter's block is the bad backend's (see soleVoterJumpAnswers). The pull-up
+		// ends the run, and a run whose lowest block is no longer above the tip (the tip moved by
+		// another path) is spent too, so the next pull-up needs a run of its own.
+		target := min(sole.Block, cs.jumpRuns[sole.URL].low)
+		delete(cs.jumpRuns, sole.URL)
+		if target > cs.latestBlock {
+			cs.latestBlock = target
+			cs.lastObservedAt = nowReal
+			cs.latestSince = nowReal
+			cs.initialized = true
+		}
 	}
 }
 

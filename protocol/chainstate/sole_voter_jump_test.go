@@ -188,6 +188,72 @@ func TestRecompute_SoleVoterJumpWaitsForTheHold(t *testing.T) {
 	require.Equal(t, head, got, "once the run has lasted the hold, the jump is followed")
 }
 
+// TestRecompute_SoleVoterJumpInAStormBehindABadBackendIsNotTheBadBlock: a block storm reaches a url behind
+// a load balancer with one bad backend. The good backend's answers are above the guard too, so they extend
+// the run instead of ending it, and the url's stored block, its vote, is the bad backend's. The pull-up must
+// take the tip to the run's lowest block, which the good backend answered, and the tip then follows the good
+// backend; it must never take the bad block.
+func TestRecompute_SoleVoterJumpInAStormBehindABadBackendIsNotTheBadBlock(t *testing.T) {
+	for seed := int64(1); seed <= 20; seed++ {
+		cs, clk := newSlowChainState(t)
+		const start = int64(1_000_000)
+		u := newSoleURL(cs)
+		u.answer(clk.now(), start)
+		cs.Recompute(u.vote())
+		storm := start + 2*cs.cfg.OutlierThreshold // the chain's head jumps past the guard, then climbs a block a poll
+		r := rand.New(rand.NewSource(seed))
+		var good int64 // the good backend's latest answer
+		for i := 1; i <= 240; i++ {
+			clk.advance(slowChainPoll)
+			block := storm + int64(i)
+			if r.Intn(2) == 0 {
+				block = absurdBlock
+			} else {
+				good = block
+			}
+			u.answer(clk.now(), block)
+			if i%10 == 0 {
+				cs.Recompute(u.vote())
+			}
+			require.NotEqual(t, absurdBlock, cs.GetLatestBlockAllowStale(), "seed %d, poll %d: the tip took the bad backend's block", seed, i)
+		}
+		tip, fresh := cs.GetLatestBlock()
+		require.True(t, fresh, "seed %d", seed)
+		require.GreaterOrEqual(t, tip, storm, "seed %d: the tip follows the storm", seed)
+		require.LessOrEqual(t, tip, good, "seed %d: never past the good backend's head", seed)
+	}
+}
+
+// TestRecompute_SoleVoterFollowsAStormThatKeepsOutrunningTheGuardOneRunAtATime: every answer is more than
+// OutlierThreshold over the last, so no answer is ever within the guard. Each pull-up ends its run, and the
+// next run takes the tip on, so the tip keeps moving and never goes stale; it is never past the endpoint.
+func TestRecompute_SoleVoterFollowsAStormThatKeepsOutrunningTheGuardOneRunAtATime(t *testing.T) {
+	cs, clk := newSlowChainState(t)
+	const start = int64(1_000_000)
+	u := newSoleURL(cs)
+	u.answer(clk.now(), start)
+	cs.Recompute(u.vote())
+	head := start
+	moves := 0
+	last := start
+	for i := 1; i <= 240; i++ {
+		clk.advance(slowChainPoll)
+		head += 2 * cs.cfg.OutlierThreshold
+		u.answer(clk.now(), head)
+		if i%10 == 0 {
+			cs.Recompute(u.vote())
+		}
+		tip, fresh := cs.GetLatestBlock()
+		require.True(t, fresh, "poll %d: each run's pull-up keeps the tip fresh", i)
+		require.LessOrEqual(t, tip, head)
+		if tip != last {
+			moves++
+			last = tip
+		}
+	}
+	require.GreaterOrEqual(t, moves, 4, "four hours of storm are four runs or more")
+}
+
 // TestNoteAnswer_RunsEndAndArePruned keeps jumpRuns bounded: an answer at or below the guard deletes the
 // url's run, a run with no answer for a StalenessWindow starts over, and Recompute drops those runs, so the
 // map never holds more than the urls that answered above the guard within the last StalenessWindow.
