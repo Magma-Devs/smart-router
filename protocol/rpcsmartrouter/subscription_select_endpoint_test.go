@@ -146,6 +146,12 @@ func TestSelectEndpoint_Cascade(t *testing.T) {
 		{name: "last chance: the primaries before the backups", primary: []string{"primary-1"}, backup: []string{"backup-1"}, off: []string{"primary-1"}, stalled: []string{"backup-1"}, want: "primary-1"},
 		{name: "everything off: sticky stays where it is", primary: []string{"primary-1"}, backup: []string{"backup-1"}, sticky: "backup-1", off: []string{"primary-1", "backup-1"}, want: "backup-1", wantStickyAfter: "backup-1"},
 		{name: "everything out: off sticky gives way to a stalled url", primary: []string{"primary-1"}, backup: []string{"backup-1"}, sticky: "backup-1", stalled: []string{"primary-1"}, off: []string{"backup-1"}, want: "primary-1", wantStickyAfter: "backup-1"},
+
+		// The hold-off narrows the urls of one rank, never across ranks: a url in rotation that is
+		// held off still goes before one out of rotation, and the last chance skips a held-off url
+		// while another of its rank is ready.
+		{name: "held-off url in rotation goes before an off url", primary: []string{"primary-1", "primary-2"}, backup: []string{"backup-1"}, heldOff: []string{"primary-1"}, off: []string{"primary-2"}, want: "primary-1"},
+		{name: "last chance skips a held-off url while another of its rank is ready", primary: []string{"primary-1", "primary-2"}, off: []string{"primary-1", "primary-2"}, heldOff: []string{"primary-1"}, want: "primary-2"},
 	}
 
 	for _, manager := range subscriptionManagerCases() {
