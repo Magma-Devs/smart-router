@@ -441,7 +441,7 @@ specs/              — Chain specification JSON files
 
 ### Debug endpoints
 
-When started with `--debug-address <addr>` (and `devMode.enabled=true`), the router serves a small reset HTTP API for integration tests. It is **off by default and absent from production builds**.
+When started with `--debug-address <addr>`, the router serves a small reset HTTP API for integration tests. It is **off by default**, and every build carries it, so pass the flag only where the test harness alone reaches the address (for example `--debug-address 127.0.0.1:9999`).
 
 The reset tests rely on is **`POST /debug/reset-all`**, which drains the router's internal state stores (optimizer scores, Ristretto, seen-block caches, session-manager state) and — so a single call returns the router to a serving state after an all-providers-down stress burst — also **re-enables endpoint health and cold-rebuilds pairing**.
 

@@ -409,15 +409,18 @@ Prometheus counter, so it answers on a router run without `--metrics-listen-addr
   it lost), anything on gRPC, a write, and the router's own health check. A client that hangs up
   does not end an attempt on the HTTP or WebSocket listeners: the attempt runs on, and the same
   rules decide its row.
-* `Method` is the API name the request was relayed as. A GraphQL operation with two root fields
-  is `chainIdentifier&checkpoint`, not the metric's `batch:` label. Two kinds of name are the
-  request's own text: a `Default-...` name for an api the spec does not declare, and a batch's or
-  operation's `&`-joined names. Each kind keeps its own rows only within a budget per chain and
-  interface, with the method label's numbers (32 `Default-` names, 64 joined names), and only up
-  to 512 bytes. Past that the attempt is counted on the `Default-other` or `batch:other` row, so the
-  tally stays bounded whatever a client sends. An admitted name keeps its row. The label's own
-  budget is per chain, and it counts a path's shape and a batch's set of methods rather than the
-  name, so the label and these rows can differ for the same traffic.
+* `Method` is the API name the request was relayed as, named as `relay_end` names it
+  ([RELAY-END-EVENT.md](RELAY-END-EVENT.md)): without its leading slash, capped at 256 characters,
+  and `Default-REDACTED` for an api the spec does not declare that the request named by URL (a REST
+  path, a Tendermint URI), whose name would be the caller's own path. A GraphQL operation with two
+  root fields is `chainIdentifier&checkpoint`, not the metric's `batch:` label. Two kinds of name
+  are still the request's own text: a `Default-...` name for an undeclared method named in the body
+  (JSON-RPC), and a batch's or operation's `&`-joined names. Each kind keeps its own rows only within
+  a budget per chain and interface, with the method label's numbers (32 `Default-` names, 64 joined
+  names). Past that the attempt is counted on the `Default-other` or `batch:other` row, so the tally
+  stays bounded whatever a client sends. An admitted name keeps its row. The label's own budget is
+  per chain, and it counts a path's shape and a batch's set of methods rather than the name, so the
+  label and these rows can differ for the same traffic.
 
 Both counts are per attempt: a retry that answered hides the first attempt from the caller, and
 this is where its classification shows. `chain_id`, `api_interface` and `provider` narrow the

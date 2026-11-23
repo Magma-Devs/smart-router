@@ -716,19 +716,31 @@ func relayEndMethod(apiName string, namedByURL bool) string {
 // with a body as JSON-RPC, over POST or WebSocket, and one without as a URI. REST, and any interface
 // not listed here, counts as a URL, so an interface added later withholds rather than leaks.
 func relayEndNamedByURL(protocolMessage chainlib.ProtocolMessage, apiInterface string) bool {
+	var requestBody []byte
+	if apiInterface == spectypes.APIInterfaceTendermintRPC && protocolMessage != nil {
+		requestBody = protocolMessage.RelayPrivateData().GetData()
+	}
+	return requestNamedByURL(apiInterface, requestBody)
+}
+
+// requestNamedByURL is relayEndNamedByURL for a caller that holds the request's body rather than
+// its protocol message, as a relay attempt does.
+func requestNamedByURL(apiInterface string, requestBody []byte) bool {
 	switch apiInterface {
 	case spectypes.APIInterfaceJsonRPC, spectypes.APIInterfaceGraphQL, spectypes.APIInterfaceGrpc:
 		return false
 	case spectypes.APIInterfaceTendermintRPC:
-		return len(protocolMessage.RelayPrivateData().GetData()) == 0
+		return len(requestBody) == 0
 	}
 	return true
 }
 
-// relayAnswerMethod names a request on the debug answer ring (GET /debug/relay-answers) the way
-// relay_end names it: without the leading slash, an unlisted api named by URL withheld, and capped
-// at relayEndMethodLimit. The ring keeps the last few thousand answers, so the raw api name would
-// put a caller's own path on the debug route and let one entry be as long as the request.
+// relayAnswerMethod names a request on a debug route the way relay_end names it: without the
+// leading slash, an unlisted api named by URL withheld, and capped at relayEndMethodLimit. The
+// answer ring (GET /debug/relay-answers) and the relay-error tally (GET /debug/relay-errors) read
+// it, and the cross-validation events (GET /debug/cross-validation-events) apply the same rule
+// (MAG-5422). The raw api name would put a caller's own path on the route and let one entry be as
+// long as the request.
 func relayAnswerMethod(protocolMessage chainlib.ProtocolMessage, apiInterface string) string {
 	if protocolMessage == nil || protocolMessage.GetApi() == nil {
 		return ""
