@@ -16,6 +16,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/endpointtip"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
@@ -48,6 +49,9 @@ type failedReplyInterface struct {
 	// upstreamTimeout is the node-url timeout of every upstream, which lengthens each attempt's
 	// own budget past the request's (NodeUrl.LowerContextTimeoutWithDuration).
 	upstreamTimeout time.Duration
+	// staleUpstreams: every upstream reports a head far behind the chain tip, so the consistency
+	// gate turns it away.
+	staleUpstreams bool
 }
 
 func failedReplyInterfaces() []failedReplyInterface {
@@ -126,6 +130,14 @@ func startFailedReplyRouter(t *testing.T, iface failedReplyInterface, upstreamUR
 		chainParser: parser, sessionManager: sessionManager, listenEndpoint: rpcEndpoint,
 		rpcSmartRouterLogs: logs,
 		consistencyConfig:  relaycore.DefaultConsistencyValidationConfig(),
+	}
+	if iface.staleUpstreams {
+		server.chainState = seedChainTip(200)
+		for _, upstreamURL := range upstreamURLs {
+			seedEndpointTip(iface.chainID, iface.apiInterface, upstreamURL, 50)
+			key := endpointtip.Key(iface.chainID, iface.apiInterface, upstreamURL)
+			t.Cleanup(func() { endpointtip.Default().Remove(key) })
+		}
 	}
 	listener, err := chainlib.NewChainListener(ctx, rpcEndpoint, server, nil, logs, parser, nil, NewNoOpWSSubscriptionManager(iface.chainID, iface.apiInterface))
 	require.NoError(t, err)
@@ -432,6 +444,48 @@ func TestFailedRelayReply_ARequestRefusedBeforeDispatchKeepsTheRequestHeaders_MA
 				require.Empty(t, read.header.Get(common.RETRY_COUNT_HEADER_NAME), "no attempt went out")
 			})
 		}
+	}
+}
+
+// MAG-5076: a strict pin on an upstream too far behind the chain tip is turned away by the
+// consistency gate, after selection picked it and before anything is sent. The refusal carries the
+// request's headers as the other refusals do. A write had the upstream on record as a target, but
+// the upstream never received it, so lava-fast-tx-participants must not name it.
+func TestFailedRelayReply_AStrictPinTheConsistencyGateTurnsAwayKeepsTheRequestHeaders_MAG5076(t *testing.T) {
+	if !rand.Initialized() {
+		rand.InitRandomSeed()
+	}
+	iface := failedReplyInterfaces()[0]
+	require.Equal(t, "jsonrpc", iface.name)
+	iface.staleUpstreams = true
+	iface.headers = map[string]string{common.SELECT_PROVIDER_HEADER_NAME: "upstream-1", common.SELECT_PROVIDER_STRICT_HEADER_NAME: "true"}
+	for _, tc := range []struct {
+		name   string
+		body   string
+		method string
+		write  bool
+	}{
+		{"read", iface.body, "eth_blockNumber", false},
+		{"write", `{"jsonrpc":"2.0","id":77,"method":"eth_sendRawTransaction","params":["0xf86c"]}`, "eth_sendRawTransaction", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			iface.body = tc.body
+			var arrivals atomic.Int32
+			read := startFailedReplyRouter(t, iface, hangingUpstream(t, &arrivals))()
+			require.Equal(t, http.StatusInternalServerError, read.status, read.body)
+			require.Contains(t, read.body, "too far behind the chain tip", "setup: the consistency gate must be what refused the pin")
+			require.Zero(t, arrivals.Load(), "setup: the pinned upstream must not be asked")
+
+			require.NotEmpty(t, read.guid, "the reply carries no Lava-Guid")
+			require.Contains(t, read.body, read.guid)
+			require.Equal(t, tc.method, read.header.Get(common.USER_REQUEST_TYPE))
+			require.Empty(t, read.header.Values(common.PROVIDER_ADDRESS_HEADER_NAME), "no provider was asked")
+			require.Empty(t, read.header.Values(common.RETRY_COUNT_HEADER_NAME), "no attempt went out")
+			require.Empty(t, read.header.Values(common.STATEFUL_ALL_PROVIDERS_HEADER_NAME), "no node received the request")
+			if tc.write {
+				require.Equal(t, "true", read.header.Get(common.STATEFUL_API_HEADER), "setup: the request must be a write")
+			}
+		})
 	}
 }
 

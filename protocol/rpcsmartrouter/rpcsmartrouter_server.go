@@ -1936,6 +1936,10 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 		// the reply names no provider and no retry. A cross-validated request is left out: the header
 		// builder would count a round that never ran.
 		if relayProcessor != nil && relayProcessor.GetSelection() != relaycore.CrossValidation && relayProcessor.GetUsedProviders().SessionsDispatched() == 0 {
+			// A write's targets are recorded when selection picks them. The consistency gate can then
+			// turn every one away, as it does a strict pin on a node too far behind the chain tip. No
+			// node received this write, so lava-fast-tx-participants must name none.
+			relayProcessor.SetStatefulRelayTargets(nil)
 			refused := &common.RelayResult{}
 			rpcss.appendHeadersToRelayResult(ctx, refused, relayProcessor.ProtocolErrors(), relayProcessor, protocolMessage, protocolMessage.GetApi().GetName(), analytics, false)
 			// A GraphQL write pinned to a lava-select-provider name the router does not have is
