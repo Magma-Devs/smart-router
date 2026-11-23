@@ -16,7 +16,7 @@ import (
 )
 
 // A call whose handling stops with a panic, in the unary callback or in the stream callback, is
-// answered INTERNAL with one fixed sentence and its request id in lava-guid, the id the callback
+// answered INTERNAL with one fixed sentence and its request id in router-guid, the id the callback
 // saw. The server keeps serving: the next call on the same connection is answered.
 func TestGRPCProxy_AHandlerPanicAnswersInternalAndKeepsServing(t *testing.T) {
 	// failing decodes the request and reports the request id when the request asks to fail.

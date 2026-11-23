@@ -143,7 +143,7 @@ func NewGRPCProxyWithReflection(cb ProxyCallBack, healthCheckPath string, cmdFla
 }
 
 // HandlerFailedMessage is all a caller is told when the router fails while handling its request:
-// the details go to the router's log, under the request id the caller gets in lava-guid.
+// the details go to the router's log, under the request id the caller gets in router-guid.
 const HandlerFailedMessage = "the router failed to handle the request"
 
 func makeProxyFunc(callBack ProxyCallBack, streamCallBack StreamProxyCallBack) grpc.StreamHandler {
@@ -167,7 +167,7 @@ func makeProxyFunc(callBack ProxyCallBack, streamCallBack StreamProxyCallBack) g
 }
 
 // handlerFailed answers a call whose handling stopped with a panic: INTERNAL with
-// HandlerFailedMessage and the request id in lava-guid, while the failure and its stack go to the
+// HandlerFailedMessage and the request id in router-guid, while the failure and its stack go to the
 // router's log at ERROR under that id. The server keeps serving every other call.
 func handlerFailed(ctx context.Context, stream grpc.ServerStream, methodName string, failure any) error {
 	guid, _ := utils.GetUniqueIdentifier(ctx)
