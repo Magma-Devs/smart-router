@@ -329,8 +329,11 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 		// effect of --enable-fork-detection visible: rpc_endpoint_fetch_latest_{success,fails}
 		// count EVENTS (new block detected / latest-block fetch failed), not requests, so
 		// neither of them moves when request volume changes.
-		OnTrackerRequest: func(endpointURL, kind string) {
+		// rpc_endpoint_internal_operations_total counts the same requests by outcome, and replaces
+		// the tracker metric after a release of both (MAG-4563).
+		OnTrackerRequest: func(endpointURL, kind string, err error) {
 			rpcss.smartRouterEndpointMetrics.RecordTrackerRequest(listenEndpoint.ChainID, listenEndpoint.ApiInterface, endpointURL, kind)
+			rpcss.smartRouterEndpointMetrics.RecordInternalOperation(listenEndpoint.ChainID, listenEndpoint.ApiInterface, endpointURL, kind, err)
 		},
 		OnNewBlock: func(endpointURL string, fromBlock, toBlock int64) {
 			utils.FormatTrace("endpoint ChainTracker detected new block",
@@ -3392,6 +3395,17 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 						utils.LogAttr("GUID", goroutineCtx),
 					)
 				}
+			} else if errors.Is(err, routersession.ErrNoMethodDefinition) {
+				// The router held no definition of the gRPC method to convert the JSON request
+				// with, so nothing was sent and the endpoint's availability was never tested
+				// (MAG-5134). The failure arm below would score it 0 and count a consecutive
+				// error against an endpoint that was never asked. Released like a session that
+				// was selected and not used.
+				if errSession := rpcss.sessionManager.OnSessionDiscarded(singleConsumerSession, err); errSession != nil {
+					utils.FormatWarning("OnSessionDiscarded failed for direct RPC", errSession,
+						utils.LogAttr("GUID", goroutineCtx),
+					)
+				}
 			} else if err == nil && !localRelayResult.IsRateLimited && lostBroadcast(localRelayResult.IsNodeError) {
 				// A rejection after another upstream accepted the write is about the transaction,
 				// not this upstream (lostBroadcastRejection): no score either way, as when a loser
@@ -4319,6 +4333,17 @@ func runProbeCycleCore(
 		// sends no sample this cycle. A fresh observation is judged as usual, held off or not; the
 		// re-enable pass above is unaffected.
 		if !verdict.Alive {
+			// Unknown is not dead either (MAG-5134). A gRPC url whose poll fails only because no
+			// provider of the chain has given the router a definition of the poll method has a
+			// height nobody can read; the url itself may be fine. It is left out of its provider's
+			// sample, as a held-off url is, rather than feeding the provider availability 0.
+			if obs.LastPollNoDefinition {
+				utils.FormatDebug("probe leaves an endpoint with no method definition out of its provider's sample",
+					utils.LogAttr("endpoint", ep.Endpoint.NetworkAddress),
+					utils.LogAttr("provider", ep.ProviderAddress),
+				)
+				continue
+			}
 			if readyAt := relayHoldoff().URLReadyAt(ep.HoldoffKey, ep.Endpoint.NetworkAddress); !readyAt.IsZero() {
 				utils.FormatDebug("probe leaves a rate-limited endpoint out of its provider's sample",
 					utils.LogAttr("endpoint", ep.Endpoint.NetworkAddress),
@@ -5499,11 +5524,12 @@ func (rpcss *RPCSmartRouterServer) replyHeaderDirectives() []*spectypes.Header {
 // so nothing the router minted is in the set. The reply is the lookup's own unmarshalled
 // copy and is filtered in place.
 func (rpcss *RPCSmartRouterServer) filterCachedReplyMetadata(reply *pairingtypes.RelayReply, protocolMessage chainlib.ProtocolMessage) {
-	if reply == nil || len(reply.Metadata) == 0 {
+	if reply == nil || (len(reply.Metadata) == 0 && len(reply.Trailers) == 0) {
 		return
 	}
 	interfaceDirectives, collectionDirectives := rpcss.cachedReplyDirectives(protocolMessage)
 	reply.Metadata = common.FilterUpstreamReplyMetadata(reply.Metadata, interfaceDirectives, collectionDirectives)
+	reply.Trailers = common.FilterUpstreamReplyMetadata(reply.Trailers, interfaceDirectives, collectionDirectives)
 }
 
 // cachedReplyDirectives is the pair of directive lists a cached reply is filtered with,

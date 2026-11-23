@@ -2697,6 +2697,16 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 		return err
 	}
 	chainID := rpcEndpoint.ChainID
+	// A client gRPC request whose block the parser could not read for want of a method
+	// definition is counted per chain, with the reason (MAG-4563).
+	if grpcParser, ok := chainParser.(*chainlib.GrpcChainParser); ok {
+		grpcParser.SetUnreadBlockObserver(func(reason string) {
+			smartRouterMetricsManager.RecordGRPCRequestBlockUnread(rpcEndpoint.ChainID, rpcEndpoint.ApiInterface, reason)
+		})
+	}
+	// The chain's gRPC method definitions, from any of its providers (MAG-5134): nil on other
+	// interfaces.
+	chainDescriptors := chainlib.GrpcChainDescriptors(chainParser)
 
 	// Load spec from static file or query from blockchain
 	// Smart router queries spec once during initialization (no ongoing updates)
@@ -2968,6 +2978,17 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 					utils.LogAttr("protocol", directConn.GetProtocol()),
 					utils.LogAttr("provider", provider.Name),
 				)
+				// A gRPC connection shares its method definitions with the chain's other
+				// providers and reads theirs when its own node gives none (MAG-5134), and its
+				// reflection work is counted as the router's own (MAG-4563). Both are set
+				// before the prewarm below runs its first lookup.
+				if grpcConn, ok := directConn.(*routersession.GRPCDirectRPCConnection); ok {
+					grpcConn.SetChainDescriptors(chainDescriptors)
+					endpointURL := url.Url
+					grpcConn.SetReflectionObserver(func(err error) {
+						smartRouterMetricsManager.RecordInternalOperation(rpcEndpoint.ChainID, rpcEndpoint.ApiInterface, endpointURL, metrics.InternalOperationReflection, err)
+					})
+				}
 				createdConnections = append(createdConnections, directConn)
 
 				endpoint := &routersession.Endpoint{
@@ -3325,6 +3346,11 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 			optimizer, // Pass optimizer for endpoint selection (same as WS manager)
 			nil,       // Use default GRPCStreamingConfig
 		)
+		// Its pools share the chain's method definitions (MAG-5134) and count their lookups as
+		// the router's own (MAG-4563).
+		grpcSubManager.SetChainDescriptors(chainDescriptors, func(endpointURL string, err error) {
+			smartRouterMetricsManager.RecordInternalOperation(rpcEndpoint.ChainID, rpcEndpoint.ApiInterface, endpointURL, metrics.InternalOperationReflection, err)
+		})
 		// Start background cleanup goroutine
 		grpcSubManager.SetEndpointNames(providerNamesByURL(relevantStaticProviderList, relevantBackupProviderList))
 		grpcSubManager.SetURLLendRank(sessionManager.URLLendRank)
@@ -3604,6 +3630,11 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 			// fails before any listener binds, and the error names every collision so one edit to
 			// the config fixes it.
 			if err := routersession.ValidateUniqueProviderNames(directRPCEndpoints, backupDirectRPCEndpoints); err != nil {
+				return utils.FormatError("invalid direct-rpc endpoints definition", err)
+			}
+			// Same reasoning for gRPC grpc-config: each node url's must be valid, and a chain's
+			// must agree across both lists (MAG-5134).
+			if err := routersession.ValidateGRPCConfigs(directRPCEndpoints, backupDirectRPCEndpoints); err != nil {
 				return utils.FormatError("invalid direct-rpc endpoints definition", err)
 			}
 

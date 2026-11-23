@@ -3,14 +3,51 @@ package dyncodec
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
+	"github.com/jhump/protoreflect/grpcreflect"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/grpcproxy"
 	"google.golang.org/protobuf/reflect/protodesc"
 	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/reflect/protoregistry"
 	"google.golang.org/protobuf/types/descriptorpb"
 )
+
+// Why a request's block went unread for want of a method definition (MAG-4563). The lookup
+// happens inside the parser, before any endpoint is chosen, so no per-endpoint metric sees it:
+// these are counted per chain, by UnreadBlockReason.
+var (
+	// ErrNoSnapshot is no reflection snapshot held yet: the first requests after boot.
+	ErrNoSnapshot = errors.New("no gRPC reflection snapshot held yet")
+	// ErrNotInSnapshot is a snapshot that does not hold the method, and an upstream that does
+	// not have it either, or was asked lately (reflectionSnapshotRetry).
+	ErrNotInSnapshot = errors.New("method not in the gRPC reflection snapshot")
+	// ErrUpstreamLookupFailed is a lookup of the method on the upstream that failed.
+	ErrUpstreamLookupFailed = errors.New("gRPC reflection lookup on the upstream failed")
+)
+
+// Values UnreadBlockReason returns: the reason label of the per-chain counter.
+const (
+	UnreadBlockNoSnapshot           = "no_snapshot"
+	UnreadBlockNotInSnapshot        = "not_in_snapshot"
+	UnreadBlockUpstreamLookupFailed = "upstream_lookup_failed"
+)
+
+// UnreadBlockReason names why a request's block could not be read for want of a method
+// definition, and returns "" for any other failure.
+func UnreadBlockReason(err error) string {
+	switch {
+	case errors.Is(err, ErrNoSnapshot):
+		return UnreadBlockNoSnapshot
+	case errors.Is(err, ErrNotInSnapshot):
+		return UnreadBlockNotInSnapshot
+	case errors.Is(err, ErrUpstreamLookupFailed):
+		return UnreadBlockUpstreamLookupFailed
+	}
+	return ""
+}
 
 var _ ProtoFileRegistry = (*SnapshotRemote)(nil)
 
@@ -89,13 +126,16 @@ func (r *SnapshotRemote) ProtoFileByPath(path string) (*descriptorpb.FileDescrip
 func (r *SnapshotRemote) ProtoFileContainingSymbol(name protoreflect.FullName) (*descriptorpb.FileDescriptorProto, error) {
 	snapshot, err := r.snapshot()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", ErrNoSnapshot, err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), snapshotLookupWait)
 	defer cancel()
 	d, err := snapshot.LookupDescriptor(ctx, name)
 	if err != nil {
-		return nil, err
+		if errors.Is(err, protoregistry.NotFound) || grpcreflect.IsElementNotFoundError(err) {
+			return nil, fmt.Errorf("%w: %w", ErrNotInSnapshot, err)
+		}
+		return nil, fmt.Errorf("%w: %w", ErrUpstreamLookupFailed, err)
 	}
 	return protodesc.ToFileDescriptorProto(d.ParentFile()), nil
 }

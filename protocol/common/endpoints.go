@@ -505,10 +505,10 @@ func (gc *GrpcConfig) Validate() error {
 // nothing else. GetReflectionTimeout is what budgets gRPC descriptor lookups, so
 // an out-of-bounds value there is not cosmetic: a nanosecond timeout fails every
 // lookup on the endpoint, and a multi-minute one holds a pooled client for that
-// long. Validate as a whole cannot stand in — it also requires a descriptor-set
-// path for "hybrid", which DescriptorSourceForNode deliberately tolerates by
-// degrading to reflection, so calling it from the connection path would reject
-// configurations that work today.
+// long. Validate as a whole cannot stand in here — it also requires a descriptor-set
+// path for "hybrid", which DescriptorSourceForNode tolerates by degrading to
+// reflection. Boot refuses that config (routersession.ValidateGRPCConfigs); the
+// connection path, which tests and tools also build, keeps to this narrower check.
 func (gc *GrpcConfig) ValidateReflectionTimeout() error {
 	// Bound what GetReflectionTimeout will actually return, which is the 5s default
 	// for anything <= 0. Rejecting a value the getter never yields would make a

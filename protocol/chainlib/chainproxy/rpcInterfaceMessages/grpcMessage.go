@@ -33,6 +33,10 @@ type GrpcMessage struct {
 	Registry *dyncodec.Registry
 	Codec    *dyncodec.Codec
 	chainproxy.BaseMessage
+
+	// OnUnreadBlock, when set, is told why the request's block could not be read for want of a
+	// method definition (dyncodec.UnreadBlockReason), for the per-chain counter (MAG-4563).
+	OnUnreadBlock func(reason string)
 }
 
 // get msg hash byte array containing all the relevant information for a unique request. (headers / api / params)
@@ -64,6 +68,19 @@ func (gm GrpcMessage) GetParams() interface{} {
 	}
 	parsedData, err := gm.dynamicResolve()
 	if err != nil {
+		// A block the router cannot read for want of a method definition is counted per chain
+		// with its reason, and logged at debug: it happens on every such request until a
+		// definition arrives (MAG-4563). Any other failure stays an error.
+		if reason := dyncodec.UnreadBlockReason(err); reason != "" {
+			utils.FormatDebug("gRPC request block unread: no method definition",
+				utils.LogAttr("reason", reason),
+				utils.LogAttr("method", gm.Path),
+				utils.LogAttr("error", err.Error()))
+			if gm.OnUnreadBlock != nil {
+				gm.OnUnreadBlock(reason)
+			}
+			return nil
+		}
 		utils.FormatError("failed to dynamicResolve", err)
 		return nil
 	}

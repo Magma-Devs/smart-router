@@ -10,6 +10,7 @@ package endpointstate
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -55,7 +56,7 @@ func TestSendRawRequest_CountsRequestsThatReachTheTransport(t *testing.T) {
 		&routersession.Endpoint{NetworkAddress: "http://node.example", Enabled: true},
 		conn, nil, "ETH1", spectypes.APIInterfaceJsonRPC,
 	)
-	poller.onTrackerRequest = func(kind string) { rec.record("http://node.example", kind) }
+	poller.onTrackerRequest = func(kind string, _ error) { rec.record("http://node.example", kind) }
 
 	for i := 0; i < 3; i++ {
 		_, err := poller.sendRawRequest(context.Background(), []byte("{}"), "POST", "eth_blockNumber", metrics.TrackerRequestKindLatestBlock)
@@ -69,12 +70,34 @@ func TestSendRawRequest_CountsRequestsThatReachTheTransport(t *testing.T) {
 		"block-hash requests must be counted separately — this is the series that goes to zero when fork detection is off")
 }
 
+// The hook is told how each send ended, for rpc_endpoint_internal_operations_total's outcome
+// label (MAG-4563): nil for an answered request, the error for a failed one, which still counts.
+func TestSendRawRequest_ReportsHowTheSendEnded(t *testing.T) {
+	var outcomes []error
+	conn := &recordingConnection{url: "http://node.example", respBody: []byte(`{"ok":true}`)}
+	poller := NewEndpointPoller(
+		&routersession.Endpoint{NetworkAddress: "http://node.example", Enabled: true},
+		conn, nil, "ETH1", spectypes.APIInterfaceJsonRPC,
+	)
+	poller.onTrackerRequest = func(_ string, err error) { outcomes = append(outcomes, err) }
+
+	_, err := poller.sendRawRequest(context.Background(), []byte("{}"), "POST", "eth_blockNumber", metrics.TrackerRequestKindLatestBlock)
+	require.NoError(t, err)
+	conn.err = errors.New("connection reset")
+	_, err = poller.sendRawRequest(context.Background(), []byte("{}"), "POST", "eth_blockNumber", metrics.TrackerRequestKindLatestBlock)
+	require.Error(t, err)
+
+	require.Len(t, outcomes, 2, "both requests went out")
+	require.NoError(t, outcomes[0])
+	require.ErrorIs(t, outcomes[1], conn.err)
+}
+
 // TestSendRawRequest_NotCountedWhenNothingIsSent: with no connection the request never
 // leaves, so counting it would over-report load the customer's node never saw.
 func TestSendRawRequest_NotCountedWhenNothingIsSent(t *testing.T) {
 	rec := &requestRecorder{}
 	poller := &EndpointPoller{endpointURL: "http://node.example"}
-	poller.onTrackerRequest = func(kind string) { rec.record("http://node.example", kind) }
+	poller.onTrackerRequest = func(kind string, _ error) { rec.record("http://node.example", kind) }
 
 	_, err := poller.sendRawRequest(context.Background(), []byte("{}"), "POST", "eth_blockNumber", metrics.TrackerRequestKindLatestBlock)
 	require.Error(t, err, "no direct connection is wired")
@@ -134,7 +157,7 @@ func TestTrackerRequestCounter_ByKind_EndToEnd(t *testing.T) {
 			AverageBlockTime:    100 * time.Millisecond,
 			BlocksToSave:        1,
 			EnableForkDetection: enableForkDetection,
-			OnTrackerRequest: func(endpointURL, kind string) {
+			OnTrackerRequest: func(endpointURL, kind string, _ error) {
 				mu.Lock()
 				defer mu.Unlock()
 				counts[kind]++

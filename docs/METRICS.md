@@ -85,6 +85,10 @@ name and the `disabled` sentinel live in
   - `method` — RPC method name.
   - `kind` — closed-set request classifier (`rpc_endpoint_tracker_requests_total` only):
     `latest_block` or `block_hash`. Never a raw method name — that would be unbounded.
+  - `operation` — closed-set classifier of the router's own requests
+    (`rpc_endpoint_internal_operations_total` only): `latest_block` and `block_hash`, the
+    tracker's two kinds, or `reflection`, gRPC method-definition lookups.
+  - `outcome` — `success` or `failed` (`rpc_endpoint_internal_operations_total` only).
   - `source` — closed-set gate classifier (`rpc_endpoint_tracker_gate_skips_total` only):
     `relay` or `peer`.
   - `op` — closed-set fleet-store operation (`rpc_endpoint_tracker_gate_errors_total` only):
@@ -128,7 +132,8 @@ They split into **endpoint-scoped** (`rpc_endpoint_*`) and **router-scoped**
 | `rpc_endpoint_fetch_block_fails` | Counter | `spec`, `apiInterface`, `endpoint_id` | Failed specific-block fetches. |
 | `rpc_endpoint_fetch_latest_success` | Counter | `spec`, `apiInterface`, `endpoint_id` | New-block **detections** by the chain tracker, not successful requests — see the note below. |
 | `rpc_endpoint_fetch_block_success` | Counter | `spec`, `apiInterface`, `endpoint_id` | Successful specific-block fetches. |
-| `rpc_endpoint_tracker_requests_total` | Counter | `spec`, `apiInterface`, `endpoint_id`, `kind` | Upstream requests the per-endpoint chain tracker actually sent, by `kind` (`latest_block`, `block_hash`). The only metric that measures tracker **request volume** — see the note below. |
+| `rpc_endpoint_tracker_requests_total` | Counter | `spec`, `apiInterface`, `endpoint_id`, `kind` | Upstream requests the per-endpoint chain tracker actually sent, by `kind` (`latest_block`, `block_hash`). The only metric that measures tracker **request volume** — see the note below. Replaced by `rpc_endpoint_internal_operations_total` and emitted beside it for one release: move dashboards and alerts to `rpc_endpoint_internal_operations_total{operation=~"latest_block\|block_hash"}`. |
+| `rpc_endpoint_internal_operations_total` | Counter | `spec`, `apiInterface`, `endpoint_id`, `operation`, `outcome` | Requests the router sent an upstream on its own behalf, by `operation` and `outcome` (MAG-4563). `latest_block` and `block_hash` are the tracker's requests, counted where `rpc_endpoint_tracker_requests_total` counts them, with how the send ended: summed over `outcome`, each equals that metric's series of the same `kind`. `reflection` is the router's gRPC method-definition work on a url: the warm-up sweep that takes its snapshot, snapshot reads, lookups of names a snapshot lacks, and on-demand lookups. None of these is a client request, and none moves a client failure counter or provider QoS. |
 | `rpc_endpoint_tracker_gate_errors_total` | Counter | `spec`, `apiInterface`, `endpoint_id`, `op` | Failed calls to the shared fleet observation store, by `op`: `fetch` (reading a peer's observation before polling — the pod polled instead) or `publish` (sharing this pod's own observation). Non-zero means the cache backend is unreachable, slow, or older than the observation RPCs. |
 | `rpc_endpoint_tracker_gate_skips_total` | Counter | `spec`, `apiInterface`, `endpoint_id`, `source` | Poll cycles the tracker's traffic gate suppressed (no upstream request sent), by `source`: `relay` (served traffic kept the tip fresh), `peer` (another pod's poll, borrowed through the cache backend — needs `--shared-state` and a cache backend, `--cache-be` or `resp-cache:`), or `idle` (the chain served no client request within `--chain-tracker-idle-after`). The other half of the tracker's cadence next to `rpc_endpoint_tracker_requests_total`. |
 
@@ -381,6 +386,16 @@ node on the router offers it, the request is still served without it and the rep
 | Metric | Type | Labels | Description |
 | --- | --- | --- | --- |
 | `smartrouter_extension_unavailable_total` | Counter | `spec`, `apiInterface`, `extension` | Requests served without an extension the caller asked for, once per request per such extension — the same replies that carry `Lava-Extension-Unavailable`. Never counts an extension the router adds on its own (`archive` for a deep `eth_call`). `extension` is bounded by the spec: only names the spec defines as extensions (plus `websocket`) can be recorded, so arbitrary caller values do not create series. Non-zero means callers depend on an extension this deployment has no node for. |
+
+#### gRPC requests whose block went unread
+
+The router reads a gRPC request's block with the method's definition, inside the parser, before
+an upstream is chosen. When it holds none, the request is still served, but its block is unknown:
+it is not read from or written to the cache, and not routed by height.
+
+| Metric | Type | Labels | Description |
+| --- | --- | --- | --- |
+| `smartrouter_grpc_request_block_unread_total` | Counter | `spec`, `apiInterface`, `reason` | Client gRPC requests whose block the router could not read for want of a method definition, once per request however often its block is parsed (MAG-4563). `reason` is `no_snapshot` (no reflection snapshot held yet: the first requests after boot), `not_in_snapshot` (the snapshot does not hold the method, and the upstream does not have it either or was asked lately) or `upstream_lookup_failed` (a lookup of the method on the upstream failed). Per chain, since no upstream has been chosen yet. Each one is logged at debug. |
 
 #### Errors
 

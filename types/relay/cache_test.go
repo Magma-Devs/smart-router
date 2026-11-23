@@ -168,6 +168,10 @@ func TestRelayReplyFieldListIsLocked(t *testing.T) {
 		"finalized_blocks_hashes",
 		"sig_blocks",
 		"metadata",
+		// A gRPC reply's trailer metadata (MAG-5129). Optional: omitted when empty, so a
+		// reply on any other interface encodes as before. A reader of a foreign entry
+		// filters it as it filters metadata (performance.SanitizeForeignCacheReply).
+		"trailers",
 	}
 	const why = "the inner reply's field list changed. Same reading as the test " +
 		"above: this is what a reader in another zone sees, field by field."
@@ -181,6 +185,7 @@ func TestRelayReplyFieldListIsLocked(t *testing.T) {
 		FinalizedBlocksHashes: []byte("x"),
 		SigBlocks:             []byte("x"),
 		Metadata:              []Metadata{{}},
+		Trailers:              []Metadata{{}},
 	}), "what encoding/json emits and what the struct declares disagree")
 }
 

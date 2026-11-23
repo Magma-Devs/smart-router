@@ -140,6 +140,26 @@ func TestSanitizeForeignCacheReplyAppliesTheSpecsReplyDirectives(t *testing.T) {
 	}, reply.Metadata)
 }
 
+// A gRPC reply's trailers (MAG-5129) cross the trust boundary under the same filter as its
+// headers: a foreign entry's trailers keep only what the spec passes, and nothing the router owns.
+func TestSanitizeForeignCacheReplyFiltersTrailersLikeHeaders(t *testing.T) {
+	reply := &pairingtypes.RelayReply{
+		Trailers: []pairingtypes.Metadata{
+			{Name: "x-sui-checkpoint-height", Value: "346536121"},
+			{Name: "lava-provider-address", Value: "provider@provider1"},
+			{Name: "x-backend", Value: "fullnode-fra-03"},
+		},
+	}
+	directives := []*spectypes.Header{
+		{Name: "x-sui-checkpoint-height", Kind: spectypes.Header_pass_reply},
+		{Name: "lava-provider-address", Kind: spectypes.Header_pass_reply},
+	}
+
+	SanitizeForeignCacheReply(reply, directives)
+
+	require.Equal(t, []pairingtypes.Metadata{{Name: "x-sui-checkpoint-height", Value: "346536121"}}, reply.Trailers)
+}
+
 func TestSanitizeForeignCacheReplyNilAndEmptySafe(t *testing.T) {
 	require.NotPanics(t, func() { SanitizeForeignCacheReply(nil) })
 	reply := &pairingtypes.RelayReply{}

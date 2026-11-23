@@ -37,6 +37,40 @@ func TestProbeVerdictConfigFor_SourcesLagToleranceFromConsistency(t *testing.T) 
 
 // recordingAppender captures AppendProbeData calls so tests can assert the one-sample-per-provider
 // rule and the fed values.
+// A gRPC url whose poll fails only because no provider of the chain has given a definition of the
+// poll method has a height nobody can read; the url itself may be fine. Unknown is not dead: it is
+// left out of its provider's sample, as a held-off url is, instead of feeding the provider
+// availability 0 every cycle (MAG-5134).
+func TestProbeCycle_EndpointWithNoMethodDefinitionIsNotScoredUnavailable(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	unknown := endpointstate.EndpointObservation{LastPollAttempt: now.Add(-time.Second), ConsecutivePollFailures: 5, LastPollNoDefinition: true}
+	down := endpointstate.EndpointObservation{LastPollAttempt: now.Add(-time.Second), ConsecutivePollFailures: 5}
+	fresh := freshObs(1000, now.Add(-time.Second), now.Add(-time.Second), 20*time.Millisecond)
+	ref := provideroptimizer.SyncReference{ConsensusConfigured: true, Block: 1000, Time: now, Fresh: true}
+	run := func(obsByURL map[string]endpointstate.EndpointObservation, endpoints ...*routersession.EndpointWithDirectConnection) []probeCall {
+		swapRelayHoldoff(t, holdoff.NewRegistryWithClock(func() time.Time { return now }))
+		getObs := func(url string) (endpointstate.EndpointObservation, bool) {
+			obs, ok := obsByURL[url]
+			return obs, ok
+		}
+		rec := &recordingAppender{}
+		runProbeCycleCore(endpoints, getObs, 1000, true, ref, now, probeCfg(), rec, nil)
+		return rec.calls
+	}
+
+	calls := run(map[string]endpointstate.EndpointObservation{"grpc://a:9090": unknown}, ep("grpc://a:9090", "provider1", true))
+	require.Empty(t, calls, "a provider whose only endpoint has no definition is not sampled")
+
+	calls = run(map[string]endpointstate.EndpointObservation{"grpc://a:9090": unknown, "grpc://b:9090": fresh},
+		ep("grpc://a:9090", "provider1", true), ep("grpc://b:9090", "provider1", true))
+	require.Len(t, calls, 1)
+	require.Equal(t, 1.0, calls[0].availability, "the endpoint with no definition is neither healthy nor counted")
+
+	calls = run(map[string]endpointstate.EndpointObservation{"grpc://a:9090": down}, ep("grpc://a:9090", "provider1", true))
+	require.Len(t, calls, 1)
+	require.Equal(t, 0.0, calls[0].availability, "an endpoint whose polls fail for any other reason is still unavailable")
+}
+
 type recordingAppender struct {
 	calls []probeCall
 }

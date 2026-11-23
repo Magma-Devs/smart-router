@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
+	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 )
 
@@ -142,6 +143,64 @@ func ValidateUniqueProviderNames(lists ...[]*RPCStaticProviderEndpoint) error {
 	return fmt.Errorf(
 		"duplicate provider names: %s — a provider name is the router's identity for a node, so two nodes sharing one on the same chain and api-interface cannot be told apart; give each a distinct name",
 		strings.Join(collisions, "; "),
+	)
+}
+
+// ValidateGRPCConfigs checks the grpc-config of every gRPC node url across the lists a router loads
+// (MAG-5134). Each must be valid on its own (common.GrpcConfig.Validate: a known descriptor-source,
+// a descriptor-set-path where file or hybrid needs one, a reflection-timeout within bounds), and
+// every gRPC node url of one chain must declare the same descriptor-source and
+// descriptor-set-path, across providers and tiers.
+//
+// The chain's method definitions are shared by all its providers and its block parsing resolves
+// through one registry, so node urls that disagree parsed against a different descriptor set from
+// one run to the next; and a hybrid url with no path ran as reflection-only with nothing said.
+// Checked at boot over every list, like ValidateUniqueProviderNames, and every problem is reported,
+// sorted, so one edit to the config fixes them all.
+func ValidateGRPCConfigs(lists ...[]*RPCStaticProviderEndpoint) error {
+	var problems []string
+	sources := map[string]map[string][]string{} // chain -> "source (path)" -> urls
+	for _, list := range lists {
+		for _, ext := range list {
+			if ext == nil || ext.ApiInterface != spectypes.APIInterfaceGrpc {
+				continue
+			}
+			for i := range ext.NodeUrls {
+				url := &ext.NodeUrls[i]
+				redacted := utils.RedactURL(url.Url)
+				if err := url.GrpcConfig.Validate(); err != nil {
+					problems = append(problems, fmt.Sprintf("%s on chain %s: %s", redacted, ext.ChainID, err))
+				}
+				declared := url.GrpcConfig.GetDescriptorSource()
+				if url.GrpcConfig.DescriptorSetPath != "" {
+					declared += " (" + url.GrpcConfig.DescriptorSetPath + ")"
+				}
+				if sources[ext.ChainID] == nil {
+					sources[ext.ChainID] = map[string][]string{}
+				}
+				sources[ext.ChainID][declared] = append(sources[ext.ChainID][declared], redacted)
+			}
+		}
+	}
+	for chainID, byDeclared := range sources {
+		if len(byDeclared) < 2 {
+			continue
+		}
+		declarations := make([]string, 0, len(byDeclared))
+		for declared, urls := range byDeclared {
+			sort.Strings(urls)
+			declarations = append(declarations, fmt.Sprintf("%s by %s", declared, strings.Join(urls, ", ")))
+		}
+		sort.Strings(declarations)
+		problems = append(problems, fmt.Sprintf("chain %s mixes descriptor-source: %s", chainID, strings.Join(declarations, "; ")))
+	}
+	if len(problems) == 0 {
+		return nil
+	}
+	sort.Strings(problems)
+	return fmt.Errorf(
+		"invalid gRPC grpc-config: %s — every gRPC node url of a chain must declare one valid descriptor-source and descriptor-set-path, since the chain's providers share their method definitions",
+		strings.Join(problems, "; "),
 	)
 }
 

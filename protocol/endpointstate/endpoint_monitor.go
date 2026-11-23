@@ -222,7 +222,7 @@ type EndpointMonitor struct {
 	// onTrackerRequest counts upstream tracker requests. Deliberately NOT generation-gated
 	// the way observations are: a late request from a replaced tracker still reached the
 	// node, so dropping it would under-report real load.
-	onTrackerRequest func(endpointURL, kind string)
+	onTrackerRequest func(endpointURL, kind string, err error)
 
 	// Context for managing goroutines (parent context for all trackers)
 	ctx    context.Context
@@ -290,9 +290,10 @@ type EndpointChainTrackerConfig struct {
 	OnGateError func(endpointURL, op string)
 
 	// OnTrackerRequest, if set, is invoked once per upstream request a tracker actually sends,
-	// with the endpoint URL and the request kind (metrics.TrackerRequestKind*). It backs the
-	// only metric that measures tracker REQUEST VOLUME — see RecordTrackerRequest.
-	OnTrackerRequest func(endpointURL, kind string)
+	// with the endpoint URL, the request kind (metrics.TrackerRequestKind*) and how the send
+	// ended (nil on success). It backs the metrics that measure tracker REQUEST VOLUME — see
+	// RecordTrackerRequest and RecordInternalOperation.
+	OnTrackerRequest func(endpointURL, kind string, err error)
 }
 
 // NewEndpointMonitor creates a new manager for per-endpoint ChainTrackers.
@@ -533,8 +534,8 @@ func (m *EndpointMonitor) GetOrCreateTracker(
 	// Count every upstream request this tracker sends. Set only when a consumer is wired, so
 	// the transport pays nothing (a nil check) otherwise.
 	if m.onTrackerRequest != nil {
-		fetcher.onTrackerRequest = func(kind string) {
-			m.onTrackerRequest(endpointURL, kind)
+		fetcher.onTrackerRequest = func(kind string, err error) {
+			m.onTrackerRequest(endpointURL, kind, err)
 		}
 	}
 

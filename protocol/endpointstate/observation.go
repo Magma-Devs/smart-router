@@ -1,10 +1,12 @@
 package endpointstate
 
 import (
+	"errors"
 	"math"
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/endpointtip"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 )
 
 // ObservationSource identifies where a block observation came from. It is a type ALIAS for the leaf
@@ -58,6 +60,11 @@ type EndpointObservation struct {
 	LastPollLatency         time.Duration // transport round-trip of the last successful poll
 	LastPollError           string        // last poll error (empty if the last poll succeeded)
 	ConsecutivePollFailures int           // reset to 0 on a successful poll
+	// LastPollNoDefinition says the last poll failed only because no provider of the chain has
+	// given a definition of the gRPC method it calls (routersession.ErrNoMethodDefinition). The
+	// endpoint's height is unknown, not the endpoint down, so the probe leaves it out of its
+	// provider's availability sample (MAG-5134). Cleared by any other poll outcome.
+	LastPollNoDefinition bool
 
 	// Stall evidence (MAG-3986), written by the poll path, the relay path and the traffic gate,
 	// from THIS pod's own polls and relays only — never a peer pod's:
@@ -200,6 +207,7 @@ func (m *EndpointMonitor) recordPollObservation(endpointURL string, gen uint64, 
 	}
 	o.LastPollAttempt = at
 
+	o.LastPollNoDefinition = err != nil && errors.Is(err, routersession.ErrNoMethodDefinition)
 	if err == nil && block > 0 {
 		o.LastSuccessfulPoll = at
 		o.LastPollLatency = latency

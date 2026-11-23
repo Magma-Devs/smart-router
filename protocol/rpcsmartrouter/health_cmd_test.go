@@ -1,11 +1,13 @@
 package rpcsmartrouter
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -13,6 +15,8 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	commonlib "github.com/magma-Devs/smart-router/protocol/common"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
+	"github.com/magma-Devs/smart-router/utils"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -232,6 +236,31 @@ func TestCollectHealthProviders_InlineNameIsRedacted(t *testing.T) {
 	assert.Equal(t, keyed, providers[0].nodeUrls[0].Url, "the url itself is dialed as given")
 	assert.True(t, providers[0].nodeUrls[0].AuthConfig.UseTLS, "inline grpc flags reach the node url")
 	assert.True(t, providers[0].nodeUrls[0].AuthConfig.AllowInsecure)
+}
+
+// This command is what an operator reaches for when a config will not boot, so a gRPC
+// grpc-config the router refuses at boot (MAG-5134) is reported, as a duplicate provider name is,
+// and the config is still probed.
+func TestCollectHealthProviders_WarnsOfAGRPCConfigBootRefuses(t *testing.T) {
+	config := filepath.Join(t.TempDir(), "router.yml")
+	require.NoError(t, os.WriteFile(config, []byte(`direct-rpc:
+  - name: "cosmos-grpc"
+    chain-id: "COSMOSHUB"
+    api-interface: "grpc"
+    node-urls:
+      - url: "grpcs://cosmos-grpc.example:443"
+        grpc-config:
+          descriptor-source: "hybrid"
+`), 0o600))
+	var logged bytes.Buffer
+	t.Cleanup(utils.SetStdLogger(zerolog.New(&logged)))
+
+	providers, err := collectHealthProviders([]string{config}, false, commonlib.AuthConfig{})
+
+	require.NoError(t, err)
+	require.Len(t, providers, 1, "the config is probed anyway")
+	require.Contains(t, logged.String(), "REFUSE TO START")
+	require.Contains(t, logged.String(), "descriptor-set-path is required")
 }
 
 // --- the per-url probe, against local upstreams ---------------------------------

@@ -74,9 +74,6 @@ func (healthyReporter) IsHealthy() bool { return true }
 // parses with a one-method gRPC spec, and returns a client connection to it.
 func dialGrpcDirectivesListener(t *testing.T) (*grpc.ClientConn, *parsingRelaySender) {
 	t.Helper()
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-
 	raw := `{
       "index": "SUIT", "name": "Sui Testnet", "enabled": true, "average_block_time": 222,
       "api_collections": [{
@@ -104,6 +101,15 @@ func dialGrpcDirectivesListener(t *testing.T) (*grpc.ClientConn, *parsingRelaySe
 
 	endpoint := &routersession.RPCEndpoint{NetworkAddress: "127.0.0.1:0", ChainID: "SUIT", ApiInterface: spectypes.APIInterfaceGrpc}
 	sender := &parsingRelaySender{rpcss: &RPCSmartRouterServer{chainParser: parser, listenEndpoint: endpoint}}
+	return dialGRPCListener(t, endpoint, sender, parser), sender
+}
+
+// dialGRPCListener starts the router's real gRPC listener on endpoint, in front of sender, and
+// returns a client connection to it. Both are stopped when the test ends.
+func dialGRPCListener(t *testing.T, endpoint *routersession.RPCEndpoint, sender chainlib.RelaySender, parser chainlib.ChainParser) *grpc.ClientConn {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
 	logger, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
 	require.NoError(t, err)
 
@@ -137,7 +143,7 @@ func dialGrpcDirectivesListener(t *testing.T) (*grpc.ClientConn, *parsingRelaySe
 	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close() })
-	return conn, sender
+	return conn
 }
 
 func invokeWithMetadata(t *testing.T, conn *grpc.ClientConn, kv ...string) {

@@ -3,7 +3,9 @@ package routersession
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jhump/protoreflect/desc"
@@ -12,6 +14,8 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/utils"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 )
 
 // descriptorResolution is a single in-flight service-descriptor lookup, shared by
@@ -56,6 +60,29 @@ type GRPCDescriptorResolver struct {
 	// opening their own. resolveMu guards it.
 	resolveMu sync.Mutex
 	inflight  map[string]*descriptorResolution
+
+	// failed holds each service whose last lookup failed, until it may be looked up again
+	// (MAG-5134): a node that offers no lookup, is slow, or limits it is asked again only
+	// after reflectionSnapshotRetry, or after the wait it named. Meanwhile the method comes
+	// from another provider of the chain, or not at all. resolveMu guards it.
+	failed map[string]lookupFailure
+
+	// chain is the chain's shared store (MAG-5134): every service resolved here is added to
+	// it, and a method this resolver has no definition of is taken from it. Nil shares nothing.
+	chain atomic.Pointer[ChainDescriptors]
+
+	// onLookup, when set, is told how each lookup this resolver ran ended, for the router's
+	// internal-operations metric (MAG-4563).
+	onLookup atomic.Pointer[func(error)]
+
+	// now is the clock failed is kept on; nil is time.Now. Tests substitute it.
+	now func() time.Time
+}
+
+// lookupFailure is a failed lookup and the time the service may be looked up again.
+type lookupFailure struct {
+	err     error
+	retryAt time.Time
 }
 
 // NewGRPCDescriptorResolver builds a resolver over cache, which the owner keeps a
@@ -75,7 +102,24 @@ func NewGRPCDescriptorResolver(
 		borrow:     borrow,
 		cache:      cache,
 		inflight:   map[string]*descriptorResolution{},
+		failed:     map[string]lookupFailure{},
 	}
+}
+
+// SetChainDescriptors shares this resolver's definitions with the other providers of its chain,
+// and lets it read theirs (MAG-5134).
+func (r *GRPCDescriptorResolver) SetChainDescriptors(chain *ChainDescriptors) {
+	r.chain.Store(chain)
+}
+
+// SetLookupObserver sets the function told how each lookup this resolver runs ended.
+func (r *GRPCDescriptorResolver) SetLookupObserver(observe func(error)) {
+	r.onLookup.Store(&observe)
+}
+
+// ChainMethod returns the definition another provider of the chain gave for service.method.
+func (r *GRPCDescriptorResolver) ChainMethod(service, method string) (*desc.MethodDescriptor, bool) {
+	return r.chain.Load().Method(service, method)
 }
 
 // MethodDescriptor retrieves the method descriptor from cache, or waits on a
@@ -95,6 +139,12 @@ func (r *GRPCDescriptorResolver) MethodDescriptor(
 	// Check cache first
 	if methodDesc, found, _ := r.cache.Load(fullMethodName); found {
 		return methodDesc, nil
+	}
+
+	// A service whose lookup failed lately is not looked up again yet: the method comes from
+	// another provider of the chain, or not at all (MAG-5134).
+	if lastErr := r.recentFailure(service); lastErr != nil {
+		return r.fromChain(service, methodName, lastErr)
 	}
 
 	resolution := r.resolveService(service)
@@ -122,9 +172,7 @@ func (r *GRPCDescriptorResolver) MethodDescriptor(
 	if finished && resolution.err == nil {
 		methodDescriptor := resolution.svc.FindMethodByName(methodName)
 		if methodDescriptor == nil {
-			return nil, utils.FormatError("method not found in service", nil,
-				utils.LogAttr("service", service),
-				utils.LogAttr("method", methodName))
+			return r.fromChain(service, methodName, fmt.Errorf("method %s not found in service %s", methodName, service))
 		}
 		return methodDescriptor, nil
 	}
@@ -152,6 +200,10 @@ func (r *GRPCDescriptorResolver) MethodDescriptor(
 	// Passing ctx.Err() through rather than flattening it into a message is what
 	// keeps the sentinel reachable by errors.Is.
 	if ctxErr := ctx.Err(); ctxErr != nil {
+		// A definition another provider gave is in hand and costs nothing to return.
+		if methodDesc, ok := r.ChainMethod(service, methodName); ok {
+			return methodDesc, nil
+		}
 		// The lookup itself is NOT abandoned here — it runs on its own budget and
 		// caches what it finds, so the next caller on this endpoint is not cold. That
 		// is what stops one slow endpoint being permanently unusable (MAG-2860).
@@ -163,7 +215,73 @@ func (r *GRPCDescriptorResolver) MethodDescriptor(
 
 	// Unreachable unless the lookup finished: the select above only returns on one
 	// of the two channels, and a live ctx means it was resolution.done.
-	return nil, resolution.err
+	return r.fromChain(service, methodName, resolution.err)
+}
+
+// fromChain returns the definition another provider of the chain gave for service.method, when
+// this provider's own lookup gave none, and otherwise ErrNoMethodDefinition with cause, the reason
+// this provider gave none.
+func (r *GRPCDescriptorResolver) fromChain(service, method string, cause error) (*desc.MethodDescriptor, error) {
+	if methodDescriptor, ok := r.ChainMethod(service, method); ok {
+		return methodDescriptor, nil
+	}
+	return nil, fmt.Errorf("%w: %w", ErrNoMethodDefinition, cause)
+}
+
+// recentFailure returns the error of the last lookup of service while that lookup is still
+// held against it, and nil once it may be looked up again.
+func (r *GRPCDescriptorResolver) recentFailure(service string) error {
+	r.resolveMu.Lock()
+	defer r.resolveMu.Unlock()
+	failure, ok := r.failed[service]
+	if !ok {
+		return nil
+	}
+	if !r.clock().Before(failure.retryAt) {
+		delete(r.failed, service)
+		return nil
+	}
+	return failure.err
+}
+
+// noteLookupOutcome records how a lookup of service ended. A success clears an earlier failure.
+// A failure holds the service off for reflectionSnapshotRetry, the spacing the reflection
+// snapshot keeps after a failure, or for the wait the node named when it limited the lookup,
+// whichever is longer (MAG-5134). A lookup the connection's closing ended is not the node's
+// doing and is not held. The record starts over once it holds reflectionLookupMisses services,
+// as the snapshot's does: a client can name any service.
+func (r *GRPCDescriptorResolver) noteLookupOutcome(service string, err error) {
+	r.resolveMu.Lock()
+	defer r.resolveMu.Unlock()
+	if err == nil {
+		delete(r.failed, service)
+		return
+	}
+	if errors.Is(err, ErrGRPCConnectionClosed) || r.lifetime.Err() != nil {
+		return
+	}
+	wait := reflectionSnapshotRetry
+	if named, ok := common.RetryAfterFrom(err); ok && named > wait {
+		wait = named
+	}
+	if len(r.failed) >= reflectionLookupMisses {
+		r.failed = map[string]lookupFailure{}
+	}
+	r.failed[service] = lookupFailure{err: err, retryAt: r.clock().Add(wait)}
+}
+
+func (r *GRPCDescriptorResolver) clock() time.Time {
+	if r.now != nil {
+		return r.now()
+	}
+	return time.Now()
+}
+
+// observeLookup tells the lookup observer how one lookup ended.
+func (r *GRPCDescriptorResolver) observeLookup(err error) {
+	if observe := r.onLookup.Load(); observe != nil && *observe != nil {
+		(*observe)(err)
+	}
 }
 
 // resolveService starts — or joins — the one running lookup of `service` on this
@@ -214,10 +332,10 @@ func (r *GRPCDescriptorResolver) publishServiceResolution(
 ) {
 	resolution.svc, resolution.err = serviceDescriptor, err
 
-	// Drop the entry BEFORE publishing, so a caller that arrives after a failed
-	// lookup starts a fresh one instead of joining a finished one and being handed
-	// its stale error. Waiters already holding this resolution still get the real
-	// answer. The cost is a short window in which a second lookup can start while
+	// Drop the entry BEFORE publishing, so a caller that arrives after the lookup
+	// does not join a finished one. Once a failure has been held off
+	// (noteLookupOutcome), a later caller starts a fresh lookup. Waiters already
+	// holding this resolution still get the real answer. The cost is a short window in which a second lookup can start while
 	// this one is finishing; the cache check in MethodDescriptor makes that a
 	// no-op as soon as one of them succeeds.
 	r.resolveMu.Lock()
@@ -234,6 +352,8 @@ func (r *GRPCDescriptorResolver) runServiceResolution(service string, resolution
 	started := time.Now()
 
 	serviceDescriptor, err := r.lookupService(service)
+	r.noteLookupOutcome(service, err)
+	r.observeLookup(err)
 	if err == nil {
 		// Cache before publishing: a waiter woken by the close below re-checks the
 		// cache, and finding it already filled is one less way to race.
@@ -292,8 +412,10 @@ func (r *GRPCDescriptorResolver) lookupService(service string) (*desc.ServiceDes
 
 	// Resolve through the node's configured descriptor source. In "reflection" mode
 	// (the default) this is exactly the reflection client below; in "file" mode the
-	// client is built but never queried.
-	cl := grpcreflect.NewClientAuto(ctx, conn)
+	// client is built but never queried. The client runs on a recorder of its streams'
+	// trailers, where a node that limits lookups names its wait.
+	trailers := &reflectionTrailers{ClientConnInterface: conn}
+	cl := grpcreflect.NewClientAuto(ctx, trailers)
 	defer cl.Reset()
 
 	descriptorSource, err := rpcInterfaceMessages.DescriptorSourceForGrpcConfig(r.grpcConfig, rpcInterfaceMessages.DescriptorSourceFromServer(cl))
@@ -303,7 +425,8 @@ func (r *GRPCDescriptorResolver) lookupService(service string) (*desc.ServiceDes
 
 	serviceDescriptor, err := resolveServiceFrom(descriptorSource, service)
 	if err != nil {
-		return nil, utils.FormatError("failed to find service descriptor", err,
+		err = rateLimitedLookup(err, trailers.last())
+		return nil, utils.FormatWarning("failed to find service descriptor", err,
 			utils.LogAttr("service", service),
 			utils.LogAttr("descriptor-source", r.grpcConfig.GetDescriptorSource()),
 			utils.LogAttr("reflection-timeout", r.grpcConfig.GetReflectionTimeout()))
@@ -313,10 +436,54 @@ func (r *GRPCDescriptorResolver) lookupService(service string) (*desc.ServiceDes
 }
 
 // cacheServiceMethods stores every method of a resolved service under
-// service.method, so one lookup serves every method of the service.
+// service.method, so one lookup serves every method of the service, and adds the service
+// to the chain's store for the chain's other providers (MAG-5134).
 func (r *GRPCDescriptorResolver) cacheServiceMethods(serviceDescriptor *desc.ServiceDescriptor) {
 	service := serviceDescriptor.GetFullyQualifiedName()
 	for _, method := range serviceDescriptor.GetMethods() {
 		r.cache.Store(service+"."+method.GetName(), method)
 	}
+	r.chain.Load().AddService(serviceDescriptor)
+}
+
+// reflectionTrailers is the client connection a reflection session runs on. It keeps the trailer
+// of the last stream it opened, where a node that limits reflection names its wait
+// (grpc-retry-pushback-ms, or retry-after from a fronting proxy).
+type reflectionTrailers struct {
+	grpc.ClientConnInterface
+
+	mu      sync.Mutex
+	trailer *metadata.MD
+}
+
+func (t *reflectionTrailers) NewStream(ctx context.Context, streamDesc *grpc.StreamDesc, method string, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+	trailer := new(metadata.MD)
+	t.mu.Lock()
+	t.trailer = trailer
+	t.mu.Unlock()
+	return t.ClientConnInterface.NewStream(ctx, streamDesc, method, append(opts, grpc.Trailer(trailer))...)
+}
+
+// last returns the trailer of the last stream, filled once that stream has ended.
+func (t *reflectionTrailers) last() metadata.MD {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.trailer == nil {
+		return nil
+	}
+	return *t.trailer
+}
+
+// rateLimitedLookup types a lookup the node refused for rate as a rate limit carrying the wait it
+// named, read the way a relay's refusal is (common.RateLimitFromGRPC), so the resolver holds the
+// service off for that wait. Any other error comes back as it is.
+func rateLimitedLookup(err error, trailer metadata.MD) error {
+	st, ok := status.FromError(err)
+	if !ok {
+		return err
+	}
+	if wait, limited := common.RateLimitFromGRPC(uint32(st.Code()), st.Message(), trailer); limited {
+		return common.RateLimited(err, wait)
+	}
+	return err
 }

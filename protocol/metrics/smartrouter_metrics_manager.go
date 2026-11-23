@@ -58,6 +58,8 @@ type SmartRouterMetricsManager struct {
 	endpointTrackerRequests        *prometheus.CounterVec // rpc_endpoint_tracker_requests_total
 	endpointTrackerGateSkips       *prometheus.CounterVec // rpc_endpoint_tracker_gate_skips_total
 	endpointTrackerGateErrors      *prometheus.CounterVec // rpc_endpoint_tracker_gate_errors_total
+	endpointInternalOperations     *prometheus.CounterVec // rpc_endpoint_internal_operations_total
+	routerGRPCRequestBlockUnread   *prometheus.CounterVec // smartrouter_grpc_request_block_unread_total
 
 	// Router-scoped metrics (labels: spec, apiInterface, function)
 	routerTotalRelaysServiced *prometheus.CounterVec   // smartrouter_total_relays_serviced
@@ -375,6 +377,28 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		Name: "rpc_endpoint_tracker_gate_errors_total",
 		Help: "Total failed fleet-observation-store calls made by the per-endpoint tracker gate, by op (fetch, publish).",
 	}, []string{"spec", "apiInterface", "endpoint_id", "op"}))
+
+	// Counts the requests the router sends an upstream on its own behalf, by operation and
+	// outcome (MAG-4563): the tracker's latest_block and block_hash polls, and reflection, the
+	// router's gRPC method-definition work (the warm-up sweep, snapshot reads, lookups of names a
+	// snapshot lacks, and on-demand definition lookups). It replaces
+	// rpc_endpoint_tracker_requests_total, which is still emitted for one release so dashboards
+	// and alerts can move: its kinds are this series' latest_block and block_hash summed over
+	// outcome. Nothing here touches a customer failure counter or provider QoS.
+	m.endpointInternalOperations = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "rpc_endpoint_internal_operations_total",
+		Help: "Total requests the router sent an upstream on its own behalf, by operation (latest_block, block_hash, reflection) and outcome (success, failed).",
+	}, []string{"spec", "apiInterface", "endpoint_id", "operation", "outcome"}))
+
+	// Counts the client gRPC requests whose block the router could not read for want of a
+	// method definition, by reason (MAG-4563). The lookup runs in the parser, before an endpoint
+	// is chosen, so it is per chain: no_snapshot (none held yet, the first requests after boot),
+	// not_in_snapshot, upstream_lookup_failed. Such a request is still served; its block is
+	// unknown, so it is not cached or routed by height.
+	m.routerGRPCRequestBlockUnread = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "smartrouter_grpc_request_block_unread_total",
+		Help: "Total client gRPC requests whose block the router could not read for want of a method definition, by reason (no_snapshot, not_in_snapshot, upstream_lookup_failed).",
+	}, []string{"spec", "apiInterface", "reason"}))
 
 	// =========================================================================
 	// Endpoint-scoped histogram (labels: spec, apiInterface, endpoint_id, function)
@@ -881,12 +905,12 @@ func boolGauge(b bool) float64 {
 
 // incForEveryProvider counts one event on vec for every provider configured with endpointID, on
 // the {spec, apiInterface, endpoint_id, <vec's fourth label>} series.
-func (m *SmartRouterMetricsManager) incForEveryProvider(vec *prometheus.CounterVec, spec, apiInterface, endpointID, value string) {
+func (m *SmartRouterMetricsManager) incForEveryProvider(vec *prometheus.CounterVec, spec, apiInterface, endpointID string, values ...string) {
 	if vec == nil {
 		return
 	}
 	for _, providerName := range m.resolveProviderNames(endpointID) {
-		incCounter(vec, spec, apiInterface, providerName, value)
+		incCounter(vec, append([]string{spec, apiInterface, providerName}, values...)...)
 	}
 }
 
@@ -1577,6 +1601,34 @@ func (m *SmartRouterMetricsManager) RecordTrackerRequest(spec, apiInterface, end
 		return
 	}
 	m.incForEveryProvider(m.endpointTrackerRequests, spec, apiInterface, endpointID, kind)
+}
+
+// InternalOperationReflection is the operation label of the router's gRPC method-definition
+// work on rpc_endpoint_internal_operations_total. The tracker's operations are its request kinds,
+// TrackerRequestKindLatestBlock and TrackerRequestKindBlockHash.
+const InternalOperationReflection = "reflection"
+
+// RecordInternalOperation records ONE request the router sent an upstream on its own behalf,
+// success when err is nil, fanned out across every provider sharing the URL like
+// RecordTrackerRequest.
+func (m *SmartRouterMetricsManager) RecordInternalOperation(spec, apiInterface, endpointID, operation string, err error) {
+	if m == nil {
+		return
+	}
+	outcome := "success"
+	if err != nil {
+		outcome = "failed"
+	}
+	m.incForEveryProvider(m.endpointInternalOperations, spec, apiInterface, endpointID, operation, outcome)
+}
+
+// RecordGRPCRequestBlockUnread records ONE client gRPC request whose block could not be read for
+// want of a method definition, with the reason.
+func (m *SmartRouterMetricsManager) RecordGRPCRequestBlockUnread(spec, apiInterface, reason string) {
+	if m == nil {
+		return
+	}
+	incCounter(m.routerGRPCRequestBlockUnread, spec, apiInterface, reason)
 }
 
 // =============================================================================
