@@ -791,11 +791,12 @@ and the verdict came from `raw_log` alone, which is empty on some refusals, so t
 to the whole body, where the tx hash's digits matched the HTTP status rows.
 
 Now the sender flags a refusal on the broadcast path (`RestMessage.RefusesTransaction`) as the
-node's error. A GET of an already-broadcast transaction answers the same shape and is not read here
-(MAG-5326). The message the registry classifies is `cosmos tx refused: code <code>, codespace
-<codespace>: <log>`; its rows are Tier-1 on REST and also open the CosmosSDK Tier-2 list, so the
-code decides before a log's words, and they end in a catch-all, so a refusal is never
-`UNKNOWN_ERROR`, which is retried and scored.
+node's error, and the broadcast's message, which the registry classifies, is `cosmos tx refused:
+code <code>, codespace <codespace>: <log>`. Its rows are Tier-1 on REST and also open the CosmosSDK
+Tier-2 list, so the code decides before a log's words, and they end in a catch-all, so a refusal is
+never `UNKNOWN_ERROR`, which is retried and scored. A GET of a transaction that was included and
+failed answers the same shape; it is no refusal, and it keeps its old flag and its `raw_log`
+message (MAG-5326).
 
 | Refusal | Code | At fault |
 | --- | --- | --- |

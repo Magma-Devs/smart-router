@@ -60,7 +60,7 @@ func (rm *RestMessage) GetRawRequestHash() ([]byte, error) {
 // health gate reads it. A REST upstream always answers with a real status.
 func (jm RestMessage) CheckResponseError(data []byte, httpStatusCode int) (hasError bool, errorMessage string) {
 	if httpStatusCode == 0 || (httpStatusCode >= 200 && httpStatusCode < 300) {
-		if cosmosTxErr, errMsg := checkCosmosTxError(data); cosmosTxErr {
+		if cosmosTxErr, errMsg := checkCosmosTxError(data, jm.apiPath() == cosmosBroadcastPath); cosmosTxErr {
 			return cosmosTxErr, errMsg
 		}
 		return false, ""
@@ -86,7 +86,12 @@ func ServerErrorIsNodeReply(httpStatusCode int, data []byte) bool {
 
 // checkCosmosTxError detects errors in Cosmos SDK transaction responses
 // Cosmos returns HTTP 200 for both success and failed txs - must check tx_response.code
-func checkCosmosTxError(data []byte) (bool, string) {
+//
+// On the broadcast, a failure is the node refusing the transaction, and the message is
+// CosmosTxRefusalMessage: the code and codespace the registry's refusal rows classify by, which
+// the raw_log alone drops (MAG-5451). Any other reply with a tx_response (a GET of a transaction
+// that was included and failed) keeps the raw_log, as before.
+func checkCosmosTxError(data []byte, broadcast bool) (bool, string) {
 	var txResp cosmosTxResponse
 	if err := json.Unmarshal(data, &txResp); err != nil {
 		return false, "" // Not a Cosmos tx response, treat as success
@@ -94,7 +99,10 @@ func checkCosmosTxError(data []byte) (bool, string) {
 
 	// Non-zero code indicates error in Cosmos SDK
 	if txResp.TxResponse.Code != cosmosSDKSuccessCode {
-		return true, common.CosmosTxRefusalMessage(txResp.TxResponse.Codespace, uint32(txResp.TxResponse.Code), txResp.TxResponse.RawLog)
+		if broadcast {
+			return true, common.CosmosTxRefusalMessage(txResp.TxResponse.Codespace, uint32(txResp.TxResponse.Code), txResp.TxResponse.RawLog)
+		}
+		return true, txResp.TxResponse.RawLog
 	}
 
 	return false, ""
@@ -112,7 +120,7 @@ func (jm RestMessage) RefusesTransaction(data []byte) bool {
 	if jm.apiPath() != cosmosBroadcastPath {
 		return false
 	}
-	refused, _ := checkCosmosTxError(data)
+	refused, _ := checkCosmosTxError(data, true)
 	return refused
 }
 

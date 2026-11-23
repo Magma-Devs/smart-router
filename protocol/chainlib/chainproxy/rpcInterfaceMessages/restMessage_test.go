@@ -5,8 +5,6 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-
-	"github.com/magma-Devs/smart-router/protocol/common"
 )
 
 func TestRestMessage(t *testing.T) {
@@ -305,11 +303,7 @@ func TestCheckResponseError_CosmosTransaction_VariousErrorCodes(t *testing.T) {
 
 			require.Equal(t, tc.expectError, hasError, "Error detection mismatch for %s", tc.name)
 			if tc.expectError {
-				// The message carries the code (and codespace, when the node sent one) ahead of
-				// the log, not the bare raw_log: MAG-5451 needs them for the registry's rows, and
-				// an empty raw_log must not fall back to classifying the whole response body.
-				require.Equal(t, common.CosmosTxRefusalMessage("", uint32(tc.code), tc.rawLog), errorMessage,
-					"Error message should be the code-prefixed refusal message for %s", tc.name)
+				require.Equal(t, tc.rawLog, errorMessage, "Error message should match raw_log for %s", tc.name)
 			}
 		})
 	}
@@ -861,11 +855,20 @@ func TestRestMessage_RefusesTransaction(t *testing.T) {
 
 // TestCheckResponseError_CosmosRefusal_EmptyLogKeepsCode is the hash case from MAG-5451: an empty
 // raw_log used to give an empty message, so the metric fell back to the whole body, where the tx
-// hash's digits matched the HTTP status rows. The message now always carries the code.
+// hash's digits matched the HTTP status rows. On the broadcast the message now always carries the
+// code. Any other reply with a tx_response, a GET of a transaction that was included and failed,
+// keeps the raw_log as before: it is no refusal, and the ticket leaves reads unchanged.
 func TestCheckResponseError_CosmosRefusal_EmptyLogKeepsCode(t *testing.T) {
-	body := `{"tx_response":{"height":"0","txhash":"5C504ED4AA429502","codespace":"sdk","code":19,"raw_log":""}}`
-	hasError, message := RestMessage{}.CheckResponseError([]byte(body), 200)
+	refused := `{"tx_response":{"height":"0","txhash":"5C504ED4AA429502","codespace":"sdk","code":19,"raw_log":""}}`
+	broadcast := RestMessage{SpecPath: "/cosmos/tx/v1beta1/txs", Path: "/cosmos/tx/v1beta1/txs"}
+	hasError, message := broadcast.CheckResponseError([]byte(refused), 200)
 	require.True(t, hasError)
 	require.Equal(t, "cosmos tx refused: code 19, codespace sdk", message)
 	require.NotContains(t, message, "5C504ED4", "the tx hash must never reach the message the registry reads")
+
+	failed := `{"tx_response":{"height":"17","txhash":"5C504ED4AA429502","codespace":"sdk","code":11,"raw_log":"out of gas"}}`
+	read := RestMessage{SpecPath: "/cosmos/tx/v1beta1/txs/{hash}", Path: "/cosmos/tx/v1beta1/txs/5C504ED4AA429502"}
+	hasError, message = read.CheckResponseError([]byte(failed), 200)
+	require.True(t, hasError)
+	require.Equal(t, "out of gas", message, "a read keeps the raw_log")
 }
