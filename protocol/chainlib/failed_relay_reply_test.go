@@ -184,7 +184,7 @@ func TestFailedRelayReply_GraphQLNoAnswerIsTheRoutersGraphQLError(t *testing.T) 
 			require.True(t, ok)
 			require.Equal(t, tc.wantStatus, reply.status)
 			require.False(t, reply.fromUpstream)
-			require.Equal(t, "5907", reply.guid, "the reply also sends the guid as Lava-Guid")
+			require.Equal(t, "5907", reply.guid, "the reply also sends the guid as Router-Guid")
 			require.Equal(t, "application/json; charset=utf-8", reply.contentType)
 
 			var fields map[string]json.RawMessage

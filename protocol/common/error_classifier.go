@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 	"syscall"
+	"time"
 
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"google.golang.org/grpc/status"
@@ -110,7 +111,7 @@ var chainErrorMappings = map[ChainFamily][]errorMapping{
 		// Engine results (submit, submit_multisigned): what happened to the transaction, never that
 		// the node is broken, so each is a non-retryable chain error that keeps the availability gate
 		// off the node. The catch-all row also matches terQUEUED, which IsXRPLRejection carves out so
-		// the classifier never flags it; one reaching here some other way (a lava-identified-node-error
+		// the classifier never flags it; one reaching here some other way (a router-identified-node-error
 		// hint, a provider-supplied body) is better labelled a rejection, non-retryable and not at
 		// fault, than left UNKNOWN_ERROR, which is retryable and scored
 		// (TestXRPLTerQueuedRowKeepsTheGateOff).
@@ -523,31 +524,56 @@ func grpcErrorMappings() []errorMapping {
 
 	return append(mappings, []errorMapping{
 		{GRPCCodeEquals(14), RouterErrorNodeServiceUnavailable}, // codes.Unavailable
-		// Deliberately NOT registered, each for its own reason — do not add them
-		// as a block, which is how `Code >= 13` went wrong in the first place:
-		//   4  DeadlineExceeded  - this endpoint was too slow; another may not be.
-		//                          Demoting it is the correct signal. On the direct
-		//                          relay path only the node's own deadline reaches
-		//                          here: the router's, and the node's echo of it, are
-		//                          resolved by handleGRPCError against the clock
-		//                          (MAG-4925). chainlib's gRPC proxy (spec
-		//                          re-verification) has no such check.
+		// 1, 4, 13 and 15 are provider faults too; their rows are grpcProviderFaultMappings,
+		// which init appends after every text row. Deliberately NOT registered, each for its
+		// own reason — do not add them as a block, which is how `Code >= 13` went wrong in
+		// the first place (MAG-5132 decides them):
 		//   7  PermissionDenied  - credentials are configured per endpoint, so one
 		//   16 Unauthenticated     rejecting ours is unusable to us and should demote.
 		//   8  ResourceExhausted - ambiguous in the gRPC spec (per-user quota vs.
 		//                          out of disk). The rate-limit text rows (see above)
 		//                          catch the quota case without asserting the code
 		//                          alone means "healthy but busy".
-		//   1  Canceled          - a LOCAL cancellation never reaches this table;
-		//                          handleGRPCError resolves it structurally. One that
-		//                          does reach here is remote and unproven.
-		//   15 DataLoss          - no node we route to sends it: not Cosmos SDK, CometBFT,
-		//                          ibc-go, wasmd, Lava, Concordium or Sui (MAG-3995). A row
-		//                          would be a verdict on a status nobody has seen.
 		// Message-based matchers for gRPC errors conveyed without status codes
 		{MessageContains("unimplemented"), RouterErrorNodeUnimplemented},
 		{MessageContains("not implemented"), RouterErrorNodeUnimplemented},
 		{MessageContains("service not found"), RouterErrorNodeUnimplemented},
+	}...)
+}
+
+// grpcProviderFaultMappings are the statuses the rulebook's gRPC status table calls a provider
+// fault besides UNAVAILABLE ("4, 13, 14, 15, and 1 sent by the node"). Each counts toward
+// --bench-after, as UNAVAILABLE does. Without a row they classified UNKNOWN_ERROR, which
+// EndpointAtFault never blames, so a node answering INTERNAL to every request was never switched
+// off (MAG-3564).
+//
+// init appends them after every other gRPC row, the HTTP status texts included. A reply a text row
+// decides today (a rate limit, "not implemented", an HTTP status in the message) keeps that
+// verdict; only one that ended UNKNOWN_ERROR changes. Whether the status should outrank the text is
+// MAG-5132's call.
+//
+// Only a status the node sent reaches here on the direct relay path. handleGRPCError turns the
+// router's own cancel, its deadline and the node's echo of that deadline into errors before any
+// table is read (MAG-2687, MAG-4925). chainlib's gRPC proxy, which runs only the verification
+// queries, has no such check, and a verification fails either way. GRPCNodeCodeEquals leaves out
+// the status grpc-go makes up for a gateway's HTTP reply: an HTTP 400 arrives as INTERNAL, and no
+// node sent it.
+//
+// The rows for GRPCRequestDecodeTexts come first. INTERNAL is also a gRPC server's answer to a
+// request message it cannot decode (gRPC's status-code table: "Error parsing request proto",
+// INTERNAL, sent by the server). That answer is about the request's bytes, which every provider
+// refuses the same way, so it is the caller's: not retried and not counted, as INVALID_ARGUMENT is.
+func grpcProviderFaultMappings() []errorMapping {
+	mappings := make([]errorMapping, 0, len(GRPCRequestDecodeTexts)+4)
+	for _, text := range GRPCRequestDecodeTexts {
+		mappings = append(mappings, errorMapping{CodeAndMessage(13, text), RouterErrorUserInvalidRequest}) // codes.Internal
+	}
+	return append(mappings, []errorMapping{
+		{GRPCNodeCodeEquals(13), RouterErrorNodeInternalError}, // codes.Internal
+		{GRPCNodeCodeEquals(15), RouterErrorNodeInternalError}, // codes.DataLoss
+		// The node's own deadline: the work may still have run, as behind a gateway's 504.
+		{GRPCNodeCodeEquals(4), RouterErrorNodeGatewayTimeout}, // codes.DeadlineExceeded
+		{GRPCNodeCodeEquals(1), RouterErrorNodeServerError},    // codes.Canceled
 	}...)
 }
 
@@ -632,6 +658,8 @@ func init() {
 	// Append HTTPStatusContains matchers to gRPC transport — HTTP status codes can appear
 	// in gRPC error messages when the underlying transport is HTTP (e.g. provider relay errors)
 	genericErrorMappings[TransportGRPC] = append(genericErrorMappings[TransportGRPC], httpStatusMessageMappings()...)
+	// Last, so no text row above changes its verdict; see grpcProviderFaultMappings.
+	genericErrorMappings[TransportGRPC] = append(genericErrorMappings[TransportGRPC], grpcProviderFaultMappings()...)
 }
 
 // ---------------------------------------------------------------------------
@@ -992,7 +1020,7 @@ type stringConnectionFallback struct {
 	// substrings that, if any are present, disqualify the row. Used to carve
 	// exceptions out of a broad match (e.g. GOAWAY except ENHANCE_YOUR_CALM).
 	mustNotContain []string
-	// lava error returned when the row matches.
+	// router error returned when the row matches.
 	result *RouterError
 	// transportOnly marks a row that only describes how Go's net, net/http and io word a failed
 	// connection. DetectConnectionErrorInReplyText skips it: a node's reply proves the connection
@@ -1129,19 +1157,25 @@ func DetectConnectionErrorInReplyText(text string) *RouterError {
 
 // IsClientCancellation reports whether err represents a request that was
 // cancelled by the client / relay orchestration, as opposed to an upstream
-// (provider/endpoint) fault. Two scenarios reach this path:
+// (provider/endpoint) fault. Three scenarios reach this path:
 //
 //  1. Relay race: multiple goroutines race in parallel. When one wins, the
 //     parent context's cancel() fires and the losing goroutines observe
 //     context.Canceled as their result — no provider is at fault.
 //  2. Client disconnect: the upstream caller closed the connection before we
 //     responded, producing context.Canceled on the in-flight request.
+//  3. The caller's own deadline: a gRPC client's grpc-timeout ran out while
+//     the attempt was still waiting. The call ends with
+//     context.DeadlineExceeded, as the router's own timeout does, but nobody
+//     is blamed for a deadline the caller chose (rulebook D10). It counts only
+//     when that deadline is the one bounding ctx (CallerDeadlinePassed); the
+//     router's own, earlier deadline still blames the endpoint.
 //
-// The rule is: the error must be context.Canceled AND the context itself must
-// now carry an error. A standalone context.Canceled without ctx.Err() would
-// be suspicious — it should never happen in practice, but the conjunction
-// guards against misclassifying a provider-emitted "context canceled" string
-// as a client cancellation.
+// The rule for the first two: the error must be context.Canceled AND the
+// context itself must now carry an error. A standalone context.Canceled
+// without ctx.Err() would be suspicious — it should never happen in practice,
+// but the conjunction guards against misclassifying a provider-emitted
+// "context canceled" string as a client cancellation.
 //
 // Call this at endpoint-health / refusal-counter decision points instead of
 // hand-rolling an errors.Is(err, context.Canceled) check — having one rule in
@@ -1151,5 +1185,8 @@ func IsClientCancellation(err error, ctx context.Context) bool {
 	if err == nil || ctx == nil {
 		return false
 	}
-	return errors.Is(err, context.Canceled) && ctx.Err() != nil
+	if errors.Is(err, context.Canceled) && ctx.Err() != nil {
+		return true
+	}
+	return errors.Is(err, context.DeadlineExceeded) && CallerDeadlinePassed(ctx, time.Now())
 }
