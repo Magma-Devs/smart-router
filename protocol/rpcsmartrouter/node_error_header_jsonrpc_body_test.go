@@ -74,4 +74,15 @@ func TestNodeErrorHeader_OnlyOnAJSONRPCReply_MAG5072(t *testing.T) {
 			})
 		})
 	}
+
+	// The rule is JSON-RPC's. REST keeps the header on every node error, a gateway's page included:
+	// its own chapter owns its rule.
+	t.Run("rest", func(t *testing.T) {
+		rest := failedReplyInterfaces()[1]
+		require.Equal(t, "rest", rest.name)
+		read := startFailedReplyRouter(t, rest, answeringUpstream(t, http.StatusNotFound, page, "text/html"))()
+		require.Equal(t, http.StatusNotFound, read.status)
+		require.Equal(t, page, read.body)
+		require.Equal(t, "true", read.nodeError)
+	})
 }
