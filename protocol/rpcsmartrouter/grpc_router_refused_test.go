@@ -2,7 +2,6 @@ package rpcsmartrouter
 
 import (
 	"context"
-	"errors"
 	"net"
 	"testing"
 	"time"
@@ -41,13 +40,10 @@ func TestSendGRPCRelay_RefusedConnectionIsUnreachable(t *testing.T) {
 
 	srv.Stop() // closes the listener and every connection: the port is now closed
 
-	// A call that went out on a connection the stop was still closing is cut during the call, which
-	// is a reset (MAG-5130); the next one finds the port closed.
 	var result *common.RelayResult
 	require.Eventually(t, func() bool {
 		result, err = sender.sendGRPCRelay(context.Background(), chainMessage, 5*time.Second)
-		var undelivered *common.GRPCCallUndeliveredError
-		return errors.As(err, &undelivered)
+		return err != nil
 	}, 10*time.Second, 50*time.Millisecond, "a call on the closed port must fail")
 
 	require.Nil(t, result, "a refused connection is not an answer from the node")

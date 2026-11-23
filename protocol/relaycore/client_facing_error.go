@@ -21,7 +21,6 @@ var transportFailureCodes = map[uint32]bool{
 	1006: false, // connection closed
 	1007: true,  // context deadline
 	1009: false, // network or host unreachable
-	1012: false, // gRPC call the router's own client could not deliver (MAG-4355)
 }
 
 // clientFacingFromProtocolError decides what the caller should read for a failed relay. Two

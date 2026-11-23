@@ -11,7 +11,6 @@ import (
 	"time"
 
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
-	"google.golang.org/grpc/status"
 )
 
 // ---------------------------------------------------------------------------
@@ -904,20 +903,6 @@ func DetectConnectionError(err error) *RouterError {
 	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 		return RouterErrorConnectionClosed
 	}
-	// A gRPC call whose connection ended after the request went out and before the node's status
-	// came back (MAG-5130). Read before the string table: the request may have reached the node,
-	// so only a row that says so may name it, never one for a connection that never opened.
-	var lost *GRPCReplyLostError
-	if errors.As(err, &lost) {
-		msg := strings.ToLower(err.Error())
-		if strings.Contains(msg, "rst_stream") {
-			return RouterErrorConnectionReset
-		}
-		if le := detectConnectionErrorFromString(msg); le != nil && le.MayHaveReachedNode {
-			return le
-		}
-		return RouterErrorConnectionClosed
-	}
 
 	// Layer 2: string fallback for errors wrapped without %w.
 	if le := detectConnectionErrorFromString(strings.ToLower(err.Error())); le != nil {
@@ -963,8 +948,7 @@ func DetectConnectionError(err error) *RouterError {
 // dial disable its endpoint as `unreachable`, as a refused JSON-RPC dial does, rather than as
 // `node-error` through the registry's row for a node-sent UNAVAILABLE.
 type GRPCCallUndeliveredError struct {
-	// Err is the status grpc-go returned, or the error that kept the connection from being set
-	// up, kept for logs and for the text rows above.
+	// Err is the status grpc-go returned, kept for logs and for the text rows above.
 	Err error
 }
 
@@ -974,42 +958,6 @@ func (e *GRPCCallUndeliveredError) Error() string {
 
 // Unwrap keeps the gRPC status reachable, so status.FromError and errors.Is still see it.
 func (e *GRPCCallUndeliveredError) Unwrap() error { return e.Err }
-
-// GRPCReplyLostError marks a gRPC status the router's own client produced after the call reached
-// the node: the stream was open, then the connection or the stream ended before the node's status
-// arrived (MAG-5130). No node answered, so it is "no reply", a connection fault like a reset on
-// JSON-RPC, never the node's answer. The request may have reached the node, so a write it carried
-// may have run.
-//
-// grpc-go words such a status with the socket's addresses ("read tcp <router>-><node>: ..."). They
-// are replaced before the status is kept, so neither the client nor a log line built from the error
-// gets them.
-type GRPCReplyLostError struct {
-	// Err is grpc-go's status, its message without addresses.
-	Err error
-}
-
-// NewGRPCReplyLostError wraps grpc-go's status for a call the node never answered.
-func NewGRPCReplyLostError(err error) *GRPCReplyLostError {
-	st := status.Convert(err)
-	return &GRPCReplyLostError{Err: status.Error(st.Code(), RedactSocketAddresses(st.Message()))}
-}
-
-func (e *GRPCReplyLostError) Error() string {
-	return "gRPC call ended before the node answered: " + e.Err.Error()
-}
-
-// Unwrap keeps the gRPC status reachable, so status.FromError still sees it.
-func (e *GRPCReplyLostError) Unwrap() error { return e.Err }
-
-// socketAddressInText is an IP address in a socket error, with its port when it has one: IPv4,
-// or IPv6 in brackets, the way Go's net package writes a connection's two ends.
-var socketAddressInText = regexp.MustCompile(`\[[0-9A-Fa-f:.%]*:[0-9A-Fa-f:.%]*\](?::\d+)?|\b\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?\b`)
-
-// RedactSocketAddresses replaces each IP address in text, and its port, with "[address]".
-func RedactSocketAddresses(text string) string {
-	return socketAddressInText.ReplaceAllString(text, "[address]")
-}
 
 // stringConnectionFallback is one row of the string-fallback table used by
 // detectConnectionErrorFromString. The first matching row wins, so ordering
