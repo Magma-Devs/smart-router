@@ -9,8 +9,6 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/parser"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	"github.com/magma-Devs/smart-router/utils"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
 // noAnswerShape is the error body a listener's router-made replies already use: a JSON-RPC 2.0
@@ -23,7 +21,7 @@ const (
 	noAnswerJsonError
 	// noAnswerGraphQL is the router's own GraphQL error (MAG-5119): one error with the code
 	// NO_PROVIDER_ANSWER, the guid in extensions and in Router-Guid, no data key, and a sentence
-	// that names no provider (noProviderAnswerMessage).
+	// that names no provider (graphQLNoAnswerMessage).
 	noAnswerGraphQL
 )
 
@@ -78,7 +76,7 @@ func buildFailedRelayReply(relayResult *common.RelayResult, guid string, request
 		// it stays in the router's log line, under the same guid (MAG-5119).
 		return failedRelayReply{
 			status:      relayResult.GetStatusCode(),
-			body:        convertToGraphQLError(noProviderAnswerMessage(cf), graphQLNoProviderAnswerCode, guid),
+			body:        convertToGraphQLError(graphQLNoAnswerMessage(cf), graphQLNoProviderAnswerCode, guid),
 			contentType: fiber.MIMEApplicationJSONCharsetUTF8,
 			guid:        guid,
 		}, true
@@ -110,27 +108,9 @@ func buildFailedRelayReply(relayResult *common.RelayResult, guid string, request
 	return failedRelayReply{status: relayResult.GetStatusCode(), body: body, contentType: fiber.MIMEApplicationJSONCharsetUTF8}, true
 }
 
-// grpcNoAnswerStatus is the router's own gRPC status when no provider answered (MAG-5130):
-// UNAVAILABLE, or DEADLINE_EXCEEDED when a provider timed out and none answered, with the GraphQL
-// sentence. Like the HTTP reply it names no provider, no address and no transport error, which stay
-// in the router's log under the request's guid. ok is false when the relay carries no such
-// verdict, and in masked mode, where the listener keeps its masked reply, as the HTTP listeners do.
-func grpcNoAnswerStatus(relayResult *common.RelayResult) (st *status.Status, ok bool) {
-	cf := relayResult.GetClientFacing()
-	if cf == nil || cf.UpstreamStatus != 0 || metrics.ReturnMaskedErrors != "false" {
-		return nil, false
-	}
-	code := codes.Unavailable
-	if cf.TimedOut {
-		code = codes.DeadlineExceeded
-	}
-	return status.New(code, noProviderAnswerMessage(cf)), true
-}
-
-// noProviderAnswerMessage is the router's no-answer sentence on GraphQL and gRPC. It names the
-// request's timeout when every provider timed out, and nothing else: no provider, no address, no
-// transport error.
-func noProviderAnswerMessage(cf *common.ClientFacingError) string {
+// graphQLNoAnswerMessage is the GraphQL no-answer sentence. It names the request's timeout when
+// every provider timed out, and nothing else: no provider, no address, no transport error.
+func graphQLNoAnswerMessage(cf *common.ClientFacingError) string {
 	if cf.TimedOut {
 		if cf.Timeout > 0 {
 			return "no provider answered within " + cf.Timeout.String()

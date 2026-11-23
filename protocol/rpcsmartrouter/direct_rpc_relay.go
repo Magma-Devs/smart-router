@@ -875,16 +875,12 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 	// own it, and the flag stays false so the availability gate reads the carve-out), and a 2xx
 	// carrying an application error in its body (a Cosmos tx_response.code) is a
 	// request/application error, not a node error at the transport level.
-	//
-	// A 2xx that is the node refusing a broadcast transaction (Tron's, MAG-5323) is a node error, as
-	// on JSON-RPC and gRPC: the reply says the node answered with an error, and it is no proof the
-	// endpoint is healthy.
 	var isNodeError bool
 	switch {
 	case response.StatusCode == 429:
 		isNodeError = false
 	case response.StatusCode == 0 || (response.StatusCode >= 200 && response.StatusCode < 300):
-		isNodeError = hasError && restMessage.RefusesTransaction(response.Body)
+		isNodeError = false
 	default:
 		isNodeError = hasError
 	}
@@ -1149,10 +1145,12 @@ func (d *DirectRPCRelaySender) sendGRPCRelay(
 			// steps every other node-error path uses — CheckResponseError, StatusCode,
 			// ApplyNodeErrorClassification — rather than applying a separate rule here.
 			//
-			// The success path below runs the same three steps. It is reached only
-			// with StatusCode = http.StatusOK, which GrpcMessage.CheckResponseError
-			// treats as "no error" except on a BroadcastTx reply that refuses the
-			// transaction: the one node error a gRPC OK carries (MAG-5323).
+			// Note this arm is the ONLY one that classifies a gRPC node error. The
+			// success path 40 lines below runs the same three steps, but its
+			// CheckResponseError can never report an error: it is reached only with
+			// StatusCode = http.StatusOK, which GrpcMessage.CheckResponseError treats
+			// as "no error" by definition. Its shape is the model to copy; its
+			// hasError branch is unreachable on this transport.
 			//
 			// This arm previously left StatusCode at its 0 default and derived
 			// IsNodeError from `Code >= 13`. Both were wrong, independently:
@@ -1239,8 +1237,7 @@ func (d *DirectRPCRelaySender) sendGRPCRelay(
 		utils.LogAttr("response_size", len(response.Data)),
 	)
 
-	// Check for errors in response using chainMessage. Under gRPC OK that is a BroadcastTx refusing
-	// the transaction (MAG-5323), with its message, which the registry's refusal rows classify.
+	// Check for errors in response using chainMessage
 	hasError, errorMessage := chainMessage.CheckResponseError(response.Data, response.StatusCode)
 	if hasError {
 		utils.FormatDebug("gRPC response contains error",
