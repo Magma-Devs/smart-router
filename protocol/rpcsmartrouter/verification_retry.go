@@ -392,9 +392,14 @@ func (rpsr *RPCSmartRouter) pairedProvidersOf(chainKey string, due dueChecks) (s
 // without the router lock, as the epoch pass's do: at a retry's cadence holding it
 // would stall every chain behind one provider's timeout. The verdicts are
 // applied under it (decideReverification), and the pairing is pushed only when it moved:
-// UpdateAllProviders resets the session manager's per-epoch state.
+// UpdateAllProviders resets the session manager's per-epoch state. A retry waits for an
+// epoch pass in flight on the chain, and drops its verdicts when one starts while it
+// probes (lockBetweenEpochPasses).
 func (rpsr *RPCSmartRouter) retryPaired(ctx context.Context, chainKey string, static, backup []*routersession.RPCStaticProviderEndpoint, due dueChecks) {
-	rpsr.mu.Lock()
+	passes, ok := rpsr.lockBetweenEpochPasses(ctx, chainKey)
+	if !ok {
+		return
+	}
 	inputs := rpsr.reverifyInputs[chainKey]
 	var lastStatic, lastBackup map[string]chainlib.ProviderAdmission
 	if inputs != nil {
@@ -408,6 +413,10 @@ func (rpsr *RPCSmartRouter) retryPaired(ctx context.Context, chainKey string, st
 	probedBackup := probeReverification(ctx, inputs, backup, due.of(reverifyTierBackup), lastBackup)
 
 	rpsr.mu.Lock()
+	if inputs.epochPassSince(passes) {
+		rpsr.mu.Unlock()
+		return
+	}
 	epoch := rpsr.epochTimer.GetCurrentEpoch()
 	nextStatic, demotedStatic, promotedStatic := decideReverification(inputs, rpsr.providerSessions[chainKey], reverifyTierStatic, epoch, probedStatic, true)
 	nextBackup, demotedBackup, promotedBackup := decideReverification(inputs, rpsr.backupProviderSessions[chainKey], reverifyTierBackup, epoch, probedBackup, true)
@@ -443,6 +452,32 @@ func (inputs *chainReverifyInputs) lastPassesOf(tier reverifyTier, providers []*
 		}
 	}
 	return passes
+}
+
+// lockBetweenEpochPasses takes rpsr.mu once no epoch pass is in flight on the chain, and
+// returns with it held and the count of passes started so far. A retry reads the
+// verdicts it keeps under that hold, so it keeps the pass's, as it did when the pass held
+// the lock across its probes (MAG-5318), and compares the count when it applies its own
+// (epochPassSince). Only the chain's retries wait: the debug routes and the pass itself
+// wait on no probe. ok is false, and the lock not held, when ctx ends first.
+func (rpsr *RPCSmartRouter) lockBetweenEpochPasses(ctx context.Context, chainKey string) (passes uint64, ok bool) {
+	for {
+		rpsr.mu.Lock()
+		inputs := rpsr.reverifyInputs[chainKey]
+		if inputs == nil || inputs.epochPassDone == nil {
+			if inputs != nil {
+				passes = inputs.epochPasses
+			}
+			return passes, true
+		}
+		done := inputs.epochPassDone
+		rpsr.mu.Unlock()
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return 0, false
+		}
+	}
 }
 
 // retryScheduleFor is a chain's retry schedule, nil before its inputs are registered.

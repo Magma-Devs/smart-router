@@ -4099,9 +4099,13 @@ func (rpsr *RPCSmartRouter) updateEpoch(ctx context.Context, epoch uint64) {
 		// SpecReVerifyAttemptTimeout, and every /debug/* state read waits on rpsr.mu, so
 		// the probes run unlocked, as the retry loop's do, and only their verdicts are
 		// applied under the lock below (MAG-5318). Skipped when inputs are absent (test
-		// path constructs RPCSmartRouter directly).
+		// path constructs RPCSmartRouter directly). A retry of this chain waits for the
+		// pass, and drops what it probed meanwhile (chainReverifyInputs.epochPasses).
 		rpsr.mu.Lock()
 		inputs := rpsr.reverifyInputs[chainKey]
+		if inputs != nil {
+			inputs.beginEpochPass()
+		}
 		rpsr.mu.Unlock()
 		var probedStatic, probedBackup []reverifyProbe
 		if inputs != nil {
@@ -4124,7 +4128,7 @@ func (rpsr *RPCSmartRouter) updateEpoch(ctx context.Context, epoch uint64) {
 		// Lock for the read → create-fresh → write-back section.
 		// This prevents races with the retry loop, which merges
 		// recovered providers into rpsr.providerSessions under the same lock.
-		// The pairing is read after the probes, so what the retry loop or
+		// The pairing is read after the probes, so what a readmission or
 		// /debug/reset-pairing committed while they ran is kept, not overwritten.
 		rpsr.mu.Lock()
 		oldProviderSessions := rpsr.providerSessions[chainKey]
@@ -4174,6 +4178,9 @@ func (rpsr *RPCSmartRouter) updateEpoch(ctx context.Context, epoch uint64) {
 
 		// Update stored sessions with fresh objects, and push them to the session manager.
 		after, err := rpsr.commitPairingLocked(chainKey, epoch, freshProviderSessions, freshBackupSessions, demotedSessions)
+		if inputs != nil {
+			inputs.endEpochPass()
+		}
 		rpsr.mu.Unlock()
 		if err != nil {
 			utils.FormatError("Failed to update providers on epoch change", err,
@@ -4633,7 +4640,10 @@ var retryValidateFn = func(ctx context.Context, provider *routersession.RPCStati
 // hangs does not hold every other provider's retry back by its timeout. Their verdicts
 // are applied under the router lock, against what other passes applied while they ran:
 // a provider whose probe an epoch pass overtook is in neither partition, since that
-// pass's verdict, newer, already stands (chainReverifyInputs.verdictAt).
+// pass's verdict, newer, already stands (chainReverifyInputs.verdictAt). The retry waits
+// for an epoch pass in flight on the chain before it reads the verdicts it keeps, and
+// one that starts while it probes leaves every provider in neither partition
+// (lockBetweenEpochPasses).
 func (rpsr *RPCSmartRouter) revalidateTier(
 	ctx context.Context,
 	failed []*routersession.RPCStaticProviderEndpoint,
@@ -4650,7 +4660,10 @@ func (rpsr *RPCSmartRouter) revalidateTier(
 		ran       []chainlib.CheckID
 	}
 	previous := make([]chainlib.ProviderAdmission, len(failed))
-	rpsr.mu.Lock()
+	passes, ok := rpsr.lockBetweenEpochPasses(ctx, rpcEndpoint.Key())
+	if !ok {
+		return nil, nil
+	}
 	if inputs := rpsr.reverifyInputs[rpcEndpoint.Key()]; inputs != nil {
 		for i, provider := range failed {
 			previous[i] = inputs.lastPass[retryKey(tier, provider.Name)]
@@ -4679,6 +4692,9 @@ func (rpsr *RPCSmartRouter) revalidateTier(
 	rpsr.mu.Lock()
 	defer rpsr.mu.Unlock()
 	inputs := rpsr.reverifyInputs[rpcEndpoint.Key()]
+	if inputs.epochPassSince(passes) {
+		return nil, nil
+	}
 	for i, provider := range failed {
 		result := probes[i]
 		if inputs != nil {

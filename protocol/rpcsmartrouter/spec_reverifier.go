@@ -142,6 +142,44 @@ type chainReverifyInputs struct {
 	// another pass, the epoch's, and is dropped: applying it would count that pass's
 	// failure twice. Guarded by RPCSmartRouter.mu; lazily allocated.
 	verdictAt map[string]time.Time
+	// epochPasses counts the epoch passes started on this chain, and epochPassDone is
+	// closed once the passes in flight have committed, nil while none is. A pass probes
+	// without the router lock (MAG-5318), so a retry of the chain waits for it before it
+	// reads the verdicts it keeps, and drops its own verdicts when a pass started while it
+	// probed (lockBetweenEpochPasses, epochPassSince). Start times alone cannot order the
+	// two: a retry re-runs only its due checks and keeps the other verdicts it read, so one
+	// that started during the pass would win over the pass's whole verdict with older
+	// ones. Guarded by RPCSmartRouter.mu.
+	epochPasses        uint64
+	epochPassesRunning int
+	epochPassDone      chan struct{}
+}
+
+// beginEpochPass marks an epoch pass in flight on the chain. Callers hold
+// RPCSmartRouter.mu, and call endEpochPass once the pass has committed.
+func (inputs *chainReverifyInputs) beginEpochPass() {
+	inputs.epochPasses++
+	if inputs.epochPassesRunning == 0 {
+		inputs.epochPassDone = make(chan struct{})
+	}
+	inputs.epochPassesRunning++
+}
+
+// endEpochPass marks an epoch pass committed, and lets the retries waiting for it go
+// once no other is in flight. Callers hold RPCSmartRouter.mu.
+func (inputs *chainReverifyInputs) endEpochPass() {
+	inputs.epochPassesRunning--
+	if inputs.epochPassesRunning == 0 {
+		close(inputs.epochPassDone)
+		inputs.epochPassDone = nil
+	}
+}
+
+// epochPassSince reports whether an epoch pass started on the chain after a retry read
+// passes (lockBetweenEpochPasses). That pass verifies every provider whole and its
+// verdicts are the newer, so the retry's are dropped. Callers hold RPCSmartRouter.mu.
+func (inputs *chainReverifyInputs) epochPassSince(passes uint64) bool {
+	return inputs != nil && inputs.epochPasses != passes
 }
 
 // superseded reports whether a verdict newer than a probe started at started was
