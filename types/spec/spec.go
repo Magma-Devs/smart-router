@@ -18,6 +18,17 @@ type Spec struct {
 	AllowedBlockLagForQosSync     int64            `json:"allowed_block_lag_for_qos_sync,omitempty"`
 	Imports                       []string         `json:"imports,omitempty"`
 	ApiCollections                []*ApiCollection `json:"api_collections,omitempty"`
+
+	// FinalityFieldPath and FinalityFieldFinalValue name the field in a reply body by which the
+	// node itself says whether the data it answered with is final, and the value that means it
+	// is: on Ripple "result.validated" and "true". The path is dot-separated from the root of
+	// the reply. The value is the field's raw JSON text, and in the spec file it is always a
+	// JSON string: "true" for a field that holds the boolean true, "\"final\"" for one that
+	// holds the string final. A bare true or a number here does not decode, and the spec does
+	// not load. Both empty (the default) means the chain's replies carry no such field and
+	// block_distance_for_finalized_data alone decides. See Spec.FinalityField.
+	FinalityFieldPath       string `json:"finality_field_path,omitempty"`
+	FinalityFieldFinalValue string `json:"finality_field_final_value,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -64,6 +75,16 @@ func (m *Spec) GetAverageBlockTime() int64 {
 		return m.AverageBlockTime
 	}
 	return 0
+}
+
+// FinalityField returns the reply field by which a node of this chain says whether its answer
+// is final, and the raw JSON value that means final. Both are empty unless the spec sets both:
+// half a declaration names nothing to compare, so it reads as no declaration.
+func (m *Spec) FinalityField() (path, finalValue string) {
+	if m == nil || m.FinalityFieldPath == "" || m.FinalityFieldFinalValue == "" {
+		return "", ""
+	}
+	return m.FinalityFieldPath, m.FinalityFieldFinalValue
 }
 
 func (m *Spec) GetAllowedBlockLagForQosSync() int64 {

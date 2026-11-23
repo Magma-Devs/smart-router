@@ -110,7 +110,8 @@ func TestRelayEnd_GRPCWrites(t *testing.T) {
 		{name: "grpc_simulate_not_a_write", method: "cosmos.tx.v1beta1.Service/Simulate", reply: refused},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			request := []byte(tc.name)
+			// A protobuf message, field 1 holding the case's name: the router refuses bytes that are not one.
+			request := append([]byte{0x0a, byte(len(tc.name))}, tc.name...)
 			mu.Lock()
 			answer, received = func() ([]byte, error) { return tc.reply, tc.nodeErr }, nil
 			mu.Unlock()

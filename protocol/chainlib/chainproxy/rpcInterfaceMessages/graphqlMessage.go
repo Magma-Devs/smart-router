@@ -11,6 +11,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
+	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/parser"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 )
@@ -21,30 +22,11 @@ import (
 // subsystem downstream is keyed on one string.
 const GraphQLMethodSeparator = "&"
 
-// GraphQL error codes that mean the NODE failed, not the caller, each with the HTTP status the
-// error registry classifies it under (see ClassificationStatus). Everything else — including an
-// error carrying no code at all — is the caller's answer.
-//
-// The direction of that default is load-bearing. A malformed query fails identically on every
-// provider, so counting one as a node error burns the retry budget and demotes the whole fleet on
-// a single bad customer request.
-//
-// Sui's GraphQL server defines seven codes (sui-indexer-alt-graphql, src/error.rs `mod code`).
-// BAD_USER_INPUT, GRAPHQL_PARSE_FAILED and GRAPHQL_VALIDATION_FAILED are the caller's. The other
-// four are listed here:
-//   - RESOURCE_EXHAUSTED: a rate or query-cost limit, so a 429. The rate-limit hold-off engages
-//     and the busy endpoint is not scored.
-//   - INTERNAL_SERVER_ERROR: a 500. Retried, and scored against the endpoint.
-//   - REQUEST_TIMEOUT: the query ran out of the server's time budget (src/extensions/timeout.rs
-//     answers it as an ordinary response, not a 5xx), so a 504. Retried and scored. Read as the
-//     caller's answer it would end the relay, and a pinned read could cache the timeout as that
-//     checkpoint's answer.
-//   - FEATURE_UNAVAILABLE: this operator's deployment lacks the store the query needs, so a 403.
-//     The registry files that as a node capability: retried on another endpoint, not scored.
-//
-// UNAVAILABLE and DEADLINE_EXCEEDED are not Sui codes; they are kept so a GraphQL server that
-// uses gRPC-style names for the same faults is not read as answering successfully.
-var graphQLNodeErrorCodes = map[string]int{
+// graphQLWriteNodeErrorCodes are the codes that make an error on a MUTATION the node's fault, each
+// with the HTTP status the error registry classifies it under. A mutation's other errors are the
+// caller's (a 400). Writes keep this table until their own verdicts land (MAG-5122); reads use
+// graphQLReadRows (MAG-5121).
+var graphQLWriteNodeErrorCodes = map[string]int{
 	graphQLRateLimitCode:    http.StatusTooManyRequests,
 	"INTERNAL_SERVER_ERROR": http.StatusInternalServerError,
 	"REQUEST_TIMEOUT":       http.StatusGatewayTimeout,
@@ -186,20 +168,6 @@ func decodeGraphQLRequestEnvelope(data []byte) (graphQLRequestEnvelope, error) {
 	default:
 		return envelope, RefuseGraphQLRequest("graphql request body cannot be read")
 	}
-}
-
-// graphQLResponseEnvelope is the GraphQL-over-HTTP response body. `data` is decoded as a raw
-// message so a populated-but-null `data` is distinguishable from an absent one.
-type graphQLResponseEnvelope struct {
-	Data   json.RawMessage     `json:"data"`
-	Errors []graphQLErrorEntry `json:"errors"`
-}
-
-type graphQLErrorEntry struct {
-	Message    string `json:"message"`
-	Extensions *struct {
-		Code string `json:"code"`
-	} `json:"extensions"`
 }
 
 // GraphQLRootField is one root selection of a GraphQL operation.
@@ -637,121 +605,118 @@ func (gm *GraphQLMessage) GetRawRequestHash() ([]byte, error) {
 	return rawRequestHash("graphql", gm.GetHeaders(), gm.GetMethod(), gm.Msg)
 }
 
-// CheckResponseError classifies a GraphQL reply.
+// CheckResponseError classifies a GraphQL reply: hasError is false only for an answer.
 //
-// GraphQL answers everything over HTTP 200 — a validation failure, a rate limit and a successful
-// read all carry the same status — so the status code alone cannot say whether the node failed.
-// A status outside 2xx never got that far, and follows RestMessage.CheckResponseError: it is a
-// node error, and the error registry's REST rows classify it (a 400 as the caller's, not retried
-// and not scored). Counted as a success, a gateway's instant 4xx would end a mutation's broadcast
-// while a sibling was still executing it. A status of 0 is "not set" and reads as 2xx, as it does
-// for REST.
-//
-// Inside a 2xx, the body first has to be a GraphQL response at all: a non-empty `errors` array,
-// or `data` that is an object. The GraphQL spec allows nothing else (a response without data
-// must carry errors, and data is null only when an error nulled it). A body with neither came
-// from whatever answered in front of the node: `{}`, `{"data":null}`, a gateway's
-// `{"error":"Invalid API key"}`, the JSON-RPC envelope of an upstream on the wrong path. Such a body
-// is a node error, and ClassificationStatus files it as a bad gateway, so it is retried on another
-// provider, blamed on the endpoint and never cached, and a write's broadcast keeps waiting for a
-// sibling. Read as the answer, a gateway's instant 200 ended a broadcast with no transaction id
-// while the other provider executed the transaction (MAG-4369, Fuel Sepolia).
-//
-// A GraphQL response then follows three rules, each one measured against live Sui mainnet:
-//
-//  1. An empty or absent `errors` array is a success, even when every field in `data` is null.
-//     A read for a record the node does not hold returns `{"data":{"checkpoint":null}}` with no
-//     errors, for a checkpoint that never existed, one past the tip, an unknown transaction or
-//     an unknown object alike (both public operators, 2026-10-18), and that is the node
-//     answering correctly. A top-level `{"data":null}` without errors is not that answer.
-//  2. An error is the node's fault only when it carries a code in graphQLNodeErrorCodes.
-//  3. Everything else, INCLUDING an error with no extensions block at all, is the caller's
-//     answer: passed through, not retried, not counted against the endpoint. A wrong argument
-//     type returns an error with no code whatsoever, and that query fails the same way on every
-//     provider in the fleet.
-//
-// A mutation is the exception to rule 3: any error on it is a node error. A write is broadcast,
-// and the first reply that is not a node error ends the broadcast as its result, so a rejection
-// read as a success would be returned while a sibling was still executing the same transaction.
-// That is what JSON-RPC does with every error object. ClassificationStatus keeps the caller's
-// errors among them out of retries and scoring.
+// GraphQL answers most errors inside an HTTP 200, so the status alone cannot say what a reply
+// means. A read is classified by readVerdict (MAG-5121) and filed under OwnClassification's entry; a
+// write by writeVerdict, filed by the shared rows under ClassificationStatus, until the write
+// verdicts land (MAG-5122).
 func (gm *GraphQLMessage) CheckResponseError(data []byte, httpStatusCode int) (hasError bool, errorMessage string) {
-	if httpStatusCode != 0 && (httpStatusCode < 200 || httpStatusCode >= 300) {
-		return true, extractErrorMessage(data, httpStatusCode)
+	verdict, isError := gm.verdict(data, httpStatusCode)
+	if !isError {
+		return false, ""
 	}
-
-	envelope, isResponse := readGraphQLResponse(data)
-	if !isResponse {
-		return true, graphQLNotAResponsePrefix + extractErrorMessage(data, httpStatusCode)
-	}
-
-	for _, entry := range envelope.Errors {
-		if graphQLErrorIsNodeFault(entry) {
-			return true, entry.Message
-		}
-	}
-	if gm.IsMutation() && len(envelope.Errors) > 0 {
-		return true, envelope.Errors[0].Message
-	}
-	return false, ""
+	return true, verdict.message
 }
 
-// ClassificationStatus returns the HTTP status the error registry should classify a GraphQL
-// node error under. A status outside 2xx is its own answer. Inside a 2xx the status says nothing:
-// a body that is not a GraphQL response classifies as a 502, what a gateway answering in the
-// node's place is, which the registry retries elsewhere and blames on the endpoint; otherwise the
-// error's code stands in for the status, through graphQLNodeErrorCodes. A mutation error that is
-// not a node fault (CheckResponseError's mutation rule) is the caller's and classifies as a 400,
-// not retried and not scored. Anything else keeps the reply's status.
+// ClassificationStatus returns the HTTP status a GraphQL node error stands for (see
+// graphQLVerdictKind): the code its log line carries, and on a write the status the shared registry
+// rows classify it under. A read is filed by OwnClassification instead. For an answer it is the
+// reply's own status.
 func (gm *GraphQLMessage) ClassificationStatus(data []byte, httpStatusCode int) int {
+	verdict, isError := gm.verdict(data, httpStatusCode)
+	if !isError {
+		return httpStatusCode
+	}
+	return verdict.status
+}
+
+// OwnClassification is the registry entry a read's error reply is filed under by GraphQL's own
+// rows (MAG-5121). It is nil for an answer and for a write: a write is still filed by the shared
+// rows under ClassificationStatus, until the write verdicts land (MAG-5122).
+func (gm *GraphQLMessage) OwnClassification(data []byte, httpStatusCode int) *common.RouterError {
+	verdict, isError := gm.verdict(data, httpStatusCode)
+	if !isError {
+		return nil
+	}
+	return verdict.classified
+}
+
+// ReplyVerdict is CheckResponseError, ClassificationStatus and OwnClassification from one reading
+// of the reply, for a caller that needs them all: each of them decodes the whole body.
+func (gm *GraphQLMessage) ReplyVerdict(data []byte, httpStatusCode int) (hasError bool, errorMessage string, classificationStatus int, classified *common.RouterError) {
+	verdict, isError := gm.verdict(data, httpStatusCode)
+	if !isError {
+		return false, "", httpStatusCode, nil
+	}
+	return true, verdict.message, verdict.status, verdict.classified
+}
+
+func (gm *GraphQLMessage) verdict(data []byte, httpStatusCode int) (graphQLVerdict, bool) {
+	if gm.IsMutation() {
+		return writeVerdict(data, httpStatusCode)
+	}
+	verdict, isError := readVerdict(data, httpStatusCode)
+	if isError && verdict.classified == nil {
+		// A read's error is never filed by the shared rows: a row that names no registry entry
+		// (a chain's row added without one) is filed by its kind instead (MAG-5121).
+		verdict.classified = graphQLClassifiedOfKind(verdict.kind, verdict.status)
+	}
+	return verdict, isError
+}
+
+// writeVerdict is a mutation's verdict, unchanged by MAG-5121 except that every reply is now
+// readable (a numeric code no longer turns it into a 502):
+//
+//   - A status outside 2xx is a node error under its own status (the gateway-refusal exception
+//     aside). Counted as a success, a gateway's instant 4xx would end the broadcast while a sibling
+//     was still executing the transaction.
+//   - A 2xx that is not a GraphQL response (no errors, data not an object) is a bad gateway:
+//     retried, blamed, never the broadcast's result (MAG-4369).
+//   - Any error is a node error: the first reply that is not one ends the broadcast as its result,
+//     so a rejection read as a success would be returned while a sibling was still executing. A
+//     code in graphQLWriteNodeErrorCodes is the node's fault under its status; any other error is
+//     the caller's (a 400: not retried, not scored).
+func writeVerdict(data []byte, httpStatusCode int) (graphQLVerdict, bool) {
 	if httpStatusCode != 0 && (httpStatusCode < 200 || httpStatusCode >= 300) {
-		return graphQLGatewayRefusalStatus(data, httpStatusCode)
+		status := graphQLGatewayRefusalStatus(data, httpStatusCode)
+		return graphQLVerdict{kind: graphQLKindOfStatus(status), status: status, message: extractErrorMessage(data, httpStatusCode)}, true
 	}
-	envelope, isResponse := readGraphQLResponse(data)
+	reply, isResponse := readGraphQLReply(data)
 	if !isResponse {
-		return http.StatusBadGateway
+		return graphQLVerdict{kind: graphQLVerdictFault, status: http.StatusBadGateway, message: graphQLNotAResponseMessage(data, httpStatusCode)}, true
 	}
-	for _, entry := range envelope.Errors {
-		if graphQLErrorIsNodeFault(entry) {
-			return graphQLNodeErrorCodes[entry.Extensions.Code]
+	if len(reply.errors) == 0 {
+		return graphQLVerdict{kind: graphQLVerdictAnswer, status: httpStatusCode}, false
+	}
+	for _, replyError := range reply.errors {
+		if status, isNodeFault := graphQLWriteNodeErrorCodes[replyError.code]; isNodeFault {
+			kind := graphQLVerdictFault
+			if status == http.StatusTooManyRequests {
+				kind = graphQLVerdictThrottled
+			}
+			return graphQLVerdict{kind: kind, status: status, message: replyError.message}, true
 		}
 	}
-	if gm.IsMutation() && len(envelope.Errors) > 0 {
-		return http.StatusBadRequest
-	}
-	return httpStatusCode
+	return graphQLVerdict{kind: graphQLVerdictCaller, status: http.StatusBadRequest, message: reply.errors[0].message}, true
 }
 
-// graphQLNotAResponsePrefix opens the error message of a 2xx body that is not a GraphQL response,
-// so the log line says why a 200 counted as a node error. The body's own message follows it, and
-// the registry's message rows still read that.
-const graphQLNotAResponsePrefix = "reply is not a GraphQL response (no data object, no errors): "
+// graphQLNotAResponsePrefix and graphQLNotJSONPrefix open the error message of a 2xx body that is
+// not a GraphQL response, so the log line says why a 200 counted as a node error: JSON with neither
+// a data object nor errors, or a body that is not JSON at all (an HTML or text page). The body's
+// own message follows, and the registry's message rows still read that.
+const (
+	graphQLNotAResponsePrefix = "reply is not a GraphQL response (no data object, no errors): "
+	graphQLNotJSONPrefix      = "reply is not a GraphQL response (not JSON): "
+)
 
-// readGraphQLResponse decodes a 2xx body and reports whether it is a GraphQL response at all: a
-// non-empty errors array, or data that is an object. JSON of another shape (a top-level null, a
-// string, errors that is not an array) is not one either.
-func readGraphQLResponse(data []byte) (envelope graphQLResponseEnvelope, isResponse bool) {
-	if err := json.Unmarshal(data, &envelope); err != nil {
-		return graphQLResponseEnvelope{}, false
+// graphQLNotAResponseMessage is the error message of a 2xx body that is not a GraphQL response.
+func graphQLNotAResponseMessage(body []byte, httpStatusCode int) string {
+	prefix := graphQLNotAResponsePrefix
+	if !json.Valid(body) {
+		prefix = graphQLNotJSONPrefix
 	}
-	return envelope, len(envelope.Errors) > 0 || graphQLDataIsObject(envelope.Data)
-}
-
-// graphQLDataIsObject reports whether a response's raw data member holds an object. An absent
-// member and a JSON null both decode to something that is not one.
-func graphQLDataIsObject(data json.RawMessage) bool {
-	trimmed := bytes.TrimLeft(data, " \t\r\n")
-	return len(trimmed) > 0 && trimmed[0] == '{'
-}
-
-// graphQLErrorIsNodeFault reports whether one error entry is the node's fault. An entry with no
-// extensions block, or an unrecognized code, is the caller's — see CheckResponseError rule 3.
-func graphQLErrorIsNodeFault(entry graphQLErrorEntry) bool {
-	if entry.Extensions == nil {
-		return false
-	}
-	_, isNodeError := graphQLNodeErrorCodes[entry.Extensions.Code]
-	return isNodeError
+	return prefix + extractErrorMessage(body, httpStatusCode)
 }
 
 // GetParams returns the arguments of the operation's single root field, so block_parsing can

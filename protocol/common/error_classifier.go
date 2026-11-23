@@ -523,31 +523,56 @@ func grpcErrorMappings() []errorMapping {
 
 	return append(mappings, []errorMapping{
 		{GRPCCodeEquals(14), RouterErrorNodeServiceUnavailable}, // codes.Unavailable
-		// Deliberately NOT registered, each for its own reason — do not add them
-		// as a block, which is how `Code >= 13` went wrong in the first place:
-		//   4  DeadlineExceeded  - this endpoint was too slow; another may not be.
-		//                          Demoting it is the correct signal. On the direct
-		//                          relay path only the node's own deadline reaches
-		//                          here: the router's, and the node's echo of it, are
-		//                          resolved by handleGRPCError against the clock
-		//                          (MAG-4925). chainlib's gRPC proxy (spec
-		//                          re-verification) has no such check.
+		// 1, 4, 13 and 15 are provider faults too; their rows are grpcProviderFaultMappings,
+		// which init appends after every text row. Deliberately NOT registered, each for its
+		// own reason — do not add them as a block, which is how `Code >= 13` went wrong in
+		// the first place (MAG-5132 decides them):
 		//   7  PermissionDenied  - credentials are configured per endpoint, so one
 		//   16 Unauthenticated     rejecting ours is unusable to us and should demote.
 		//   8  ResourceExhausted - ambiguous in the gRPC spec (per-user quota vs.
 		//                          out of disk). The rate-limit text rows (see above)
 		//                          catch the quota case without asserting the code
 		//                          alone means "healthy but busy".
-		//   1  Canceled          - a LOCAL cancellation never reaches this table;
-		//                          handleGRPCError resolves it structurally. One that
-		//                          does reach here is remote and unproven.
-		//   15 DataLoss          - no node we route to sends it: not Cosmos SDK, CometBFT,
-		//                          ibc-go, wasmd, Lava, Concordium or Sui (MAG-3995). A row
-		//                          would be a verdict on a status nobody has seen.
 		// Message-based matchers for gRPC errors conveyed without status codes
 		{MessageContains("unimplemented"), RouterErrorNodeUnimplemented},
 		{MessageContains("not implemented"), RouterErrorNodeUnimplemented},
 		{MessageContains("service not found"), RouterErrorNodeUnimplemented},
+	}...)
+}
+
+// grpcProviderFaultMappings are the statuses the rulebook's gRPC status table calls a provider
+// fault besides UNAVAILABLE ("4, 13, 14, 15, and 1 sent by the node"). Each counts toward
+// --bench-after, as UNAVAILABLE does. Without a row they classified UNKNOWN_ERROR, which
+// EndpointAtFault never blames, so a node answering INTERNAL to every request was never switched
+// off (MAG-3564).
+//
+// init appends them after every other gRPC row, the HTTP status texts included. A reply a text row
+// decides today (a rate limit, "not implemented", an HTTP status in the message) keeps that
+// verdict; only one that ended UNKNOWN_ERROR changes. Whether the status should outrank the text is
+// MAG-5132's call.
+//
+// Only a status the node sent reaches here on the direct relay path. handleGRPCError turns the
+// router's own cancel, its deadline and the node's echo of that deadline into errors before any
+// table is read (MAG-2687, MAG-4925). chainlib's gRPC proxy, which runs only the verification
+// queries, has no such check, and a verification fails either way. GRPCNodeCodeEquals leaves out
+// the status grpc-go makes up for a gateway's HTTP reply: an HTTP 400 arrives as INTERNAL, and no
+// node sent it.
+//
+// The rows for GRPCRequestDecodeTexts come first. INTERNAL is also a gRPC server's answer to a
+// request message it cannot decode (gRPC's status-code table: "Error parsing request proto",
+// INTERNAL, sent by the server). That answer is about the request's bytes, which every provider
+// refuses the same way, so it is the caller's: not retried and not counted, as INVALID_ARGUMENT is.
+func grpcProviderFaultMappings() []errorMapping {
+	mappings := make([]errorMapping, 0, len(GRPCRequestDecodeTexts)+4)
+	for _, text := range GRPCRequestDecodeTexts {
+		mappings = append(mappings, errorMapping{CodeAndMessage(13, text), RouterErrorUserInvalidRequest}) // codes.Internal
+	}
+	return append(mappings, []errorMapping{
+		{GRPCNodeCodeEquals(13), RouterErrorNodeInternalError}, // codes.Internal
+		{GRPCNodeCodeEquals(15), RouterErrorNodeInternalError}, // codes.DataLoss
+		// The node's own deadline: the work may still have run, as behind a gateway's 504.
+		{GRPCNodeCodeEquals(4), RouterErrorNodeGatewayTimeout}, // codes.DeadlineExceeded
+		{GRPCNodeCodeEquals(1), RouterErrorNodeServerError},    // codes.Canceled
 	}...)
 }
 
@@ -632,6 +657,8 @@ func init() {
 	// Append HTTPStatusContains matchers to gRPC transport — HTTP status codes can appear
 	// in gRPC error messages when the underlying transport is HTTP (e.g. provider relay errors)
 	genericErrorMappings[TransportGRPC] = append(genericErrorMappings[TransportGRPC], httpStatusMessageMappings()...)
+	// Last, so no text row above changes its verdict; see grpcProviderFaultMappings.
+	genericErrorMappings[TransportGRPC] = append(genericErrorMappings[TransportGRPC], grpcProviderFaultMappings()...)
 }
 
 // ---------------------------------------------------------------------------
