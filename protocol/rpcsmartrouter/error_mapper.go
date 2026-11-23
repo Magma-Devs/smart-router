@@ -32,6 +32,13 @@ func classifyDirectRPCError(err error, chainFamily common.ChainFamily, transport
 	if errors.Is(err, routersession.ErrNoMethodDescriptor) {
 		return common.RouterErrorNodeUnimplemented, common.NewRouterErrorWrapping(common.RouterErrorNodeUnimplemented, err)
 	}
+	// A JSON gRPC request that is not JSON the method's message reads was never sent either, and
+	// every node refuses it the same way (MAG-5676). USER_INVALID_PARAMS is the caller's mistake: not
+	// retried, and not the endpoint's fault. Unrecognised, a cut-short body read as a dropped
+	// connection and anything else as an unknown error, and either marked the endpoint unhealthy.
+	if errors.Is(err, routersession.ErrGRPCRequestNotValidJSON) {
+		return common.RouterErrorUserInvalidParams, common.NewRouterErrorWrapping(common.RouterErrorUserInvalidParams, err)
+	}
 
 	// The one classification pipeline every node-error path uses: connection shape first, then
 	// the JSON-RPC / gRPC / HTTP code and message, then the registry.
@@ -123,6 +130,14 @@ func healthVerdict(err error, chainFamily common.ChainFamily, transport common.T
 	// Not classified by the sender: classify from scratch through the same pipeline.
 	classified, _, _ := chainlib.ClassifyNodeErrorWithDetails(err, chainFamily, transport)
 	return classified
+}
+
+// requestNeverSent reports whether err is a relay the router gave up on before the request reached
+// the node: a JSON gRPC request this node gave no method definition for (MAG-5675), or one that is
+// not JSON the method's message reads (MAG-5676). Such an attempt tested nothing about the endpoint
+// and cannot have delivered a write.
+func requestNeverSent(err error) bool {
+	return errors.Is(err, routersession.ErrNoMethodDescriptor) || errors.Is(err, routersession.ErrGRPCRequestNotValidJSON)
 }
 
 // classifyAndWrap is a convenience that calls classifyDirectRPCError and returns

@@ -1520,6 +1520,12 @@ func unclearWriteOutcomeFor(protocolMessage chainlib.ProtocolMessage, relayProce
 	cutOffMidDelivery := false
 	var cutOffs writeCutOffs
 	for _, protocolError := range protocolErrors {
+		// A request the router gave up on before it reached the node settles that endpoint: it
+		// cannot hold the transaction (MAG-5676). Read by the error itself, since the text it is
+		// classified by below names no cause and would read UNKNOWN_ERROR.
+		if requestNeverSent(protocolError.Err) {
+			continue
+		}
 		// Unmatched errors classify as UNKNOWN_ERROR, which carries the flag for the same reason,
 		// so a nil check here would be dead code rather than a safety net.
 		if protocolError.RouterError != nil && protocolError.RouterError.MayHaveReachedNode {
@@ -3393,13 +3399,14 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 						utils.LogAttr("GUID", goroutineCtx),
 					)
 				}
-			} else if errors.Is(err, routersession.ErrNoMethodDescriptor) {
-				// The node's lookup gave no definition of the gRPC method to convert the JSON request
-				// with, so nothing was sent and the endpoint's availability was never tested
-				// (MAG-5675). The failure arm below would score it 0 and count a consecutive error
+			} else if requestNeverSent(err) {
+				// The JSON request could not be converted for this node, for want of the gRPC
+				// method's definition (MAG-5675) or because it is not JSON the method's message
+				// reads (MAG-5676), so nothing was sent and the endpoint's availability was never
+				// tested. The failure arm below would score it 0 and count a consecutive error
 				// against an endpoint that was never asked. Released like a session that was
 				// selected and not used. A cancelled relay keeps its own release: the error carries
-				// this only when the lookup ended with the relay's context still live.
+				// either only when the conversion ended with the relay's context still live.
 				if errSession := rpcss.sessionManager.OnSessionDiscarded(singleConsumerSession, err); errSession != nil {
 					utils.FormatWarning("OnSessionDiscarded failed for direct RPC", errSession,
 						utils.LogAttr("GUID", goroutineCtx),

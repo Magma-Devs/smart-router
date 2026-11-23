@@ -1,6 +1,8 @@
 package chainlib
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -16,14 +18,23 @@ import (
 // caller's to fix: the listener answers INVALID_ARGUMENT, and no provider is asked.
 var GrpcRequestNotProtobufError = errors.New("the request message is not a valid protobuf message")
 
-// checkGrpcRequestMessage refuses a binary gRPC request that no node can decode, before any
-// provider is asked. A JSON body is left to the descriptor conversion that sends it.
+// checkGrpcRequestMessage refuses a gRPC request that no node can decode, before any provider is
+// asked.
 //
 // Every binary body gets the wire-format check, which needs no descriptor. When the router
 // already holds the method's descriptor, the body is also read with it, inside its nested
 // messages; a lookup is never started or waited on here.
+//
+// A JSON body (one that starts with { or [) is converted with the method's descriptor when it is
+// sent. Its first value is read here the way that conversion reads it (grpcurl's JSON request
+// parser decodes one JSON value, then converts it), so a body that does not parse, is cut short,
+// or puts a leading { or [ in front of anything else is refused here (MAG-5676). A value of the
+// wrong type for its field is found by the conversion.
 func checkGrpcRequestMessage(registry *dyncodec.Registry, path string, data []byte) error {
 	if routersession.GRPCRequestNeedsDescriptor(data) {
+		if err := json.NewDecoder(bytes.NewReader(data)).Decode(new(json.RawMessage)); err != nil {
+			return fmt.Errorf("%w: %v", routersession.ErrGRPCRequestNotValidJSON, err)
+		}
 		return nil
 	}
 	if err := validProtobufWireFormat(data); err != nil {
