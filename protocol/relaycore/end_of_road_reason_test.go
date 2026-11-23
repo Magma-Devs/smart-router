@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/stretchr/testify/require"
 )
 
@@ -56,5 +57,77 @@ func TestEndOfRoadReason(t *testing.T) {
 	// silently the next time someone edits the constants.
 	t.Run("the two reasons are different", func(t *testing.T) {
 		require.NotEqual(t, StopReasonProcessingTimeout, StopReasonCallerGone)
+	})
+}
+
+// A gRPC caller's own grpc-timeout bounds the processing context too. When it is earlier than the
+// router's processing timeout, the request ended from outside, as a hang-up does, and the attempts
+// still waiting on it are not the endpoints running out of road (rulebook D10).
+func TestProcessingEndReason(t *testing.T) {
+	callerCtx := func(t *testing.T, timeout time.Duration) context.Context {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		t.Cleanup(cancel)
+		return common.WithCallerDeadline(ctx)
+	}
+
+	t.Run("the caller's deadline came first", func(t *testing.T) {
+		processingCtx, cancel := context.WithTimeout(callerCtx(t, 10*time.Millisecond), time.Hour)
+		defer cancel()
+		<-processingCtx.Done()
+		sm := &UnifiedRelayStateMachine{}
+		require.Equal(t, StopReasonCallerGone, sm.processingEndReason(processingCtx))
+	})
+
+	t.Run("the router's processing timeout came first", func(t *testing.T) {
+		processingCtx, cancel := context.WithTimeout(callerCtx(t, time.Hour), 10*time.Millisecond)
+		defer cancel()
+		<-processingCtx.Done()
+		sm := &UnifiedRelayStateMachine{}
+		require.Equal(t, StopReasonProcessingTimeout, sm.processingEndReason(processingCtx))
+	})
+
+	t.Run("a caller that sent no deadline", func(t *testing.T) {
+		processingCtx, cancel := context.WithTimeout(common.WithCallerDeadline(context.Background()), 10*time.Millisecond)
+		defer cancel()
+		<-processingCtx.Done()
+		sm := &UnifiedRelayStateMachine{}
+		require.Equal(t, StopReasonProcessingTimeout, sm.processingEndReason(processingCtx))
+	})
+
+	t.Run("a hang-up", func(t *testing.T) {
+		ctx, hangUp := context.WithCancel(callerCtx(t, time.Hour))
+		processingCtx, cancel := context.WithTimeout(ctx, time.Hour)
+		defer cancel()
+		hangUp()
+		sm := &UnifiedRelayStateMachine{}
+		require.Equal(t, StopReasonCallerGone, sm.processingEndReason(processingCtx))
+	})
+
+	t.Run("a write keeps the processing timeout's reason", func(t *testing.T) {
+		// Its deliveries are detached from the caller and outlive the request, so its caller's deadline
+		// is not what ends them.
+		processingCtx, cancel := context.WithTimeout(callerCtx(t, 10*time.Millisecond), time.Hour)
+		defer cancel()
+		<-processingCtx.Done()
+		sm := &UnifiedRelayStateMachine{selection: Stateful}
+		require.Equal(t, StopReasonProcessingTimeout, sm.processingEndReason(processingCtx))
+	})
+
+	t.Run("a write whose caller hung up is still the caller's", func(t *testing.T) {
+		ctx, hangUp := context.WithCancel(callerCtx(t, time.Hour))
+		processingCtx, cancel := context.WithTimeout(ctx, time.Hour)
+		defer cancel()
+		hangUp()
+		sm := &UnifiedRelayStateMachine{selection: Stateful}
+		require.Equal(t, StopReasonCallerGone, sm.processingEndReason(processingCtx))
+	})
+
+	t.Run("a recorded policy reason still wins", func(t *testing.T) {
+		processingCtx, cancel := context.WithTimeout(callerCtx(t, 10*time.Millisecond), time.Hour)
+		defer cancel()
+		<-processingCtx.Done()
+		sm := &UnifiedRelayStateMachine{}
+		sm.setStopReason("Stateful")
+		require.Equal(t, "Stateful", sm.processingEndReason(processingCtx))
 	})
 }

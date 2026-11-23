@@ -139,6 +139,11 @@ type ConsumerSessionManager struct {
 	// backup providers - emergency fallback providers when no regular providers are available
 	backupProviders map[string]*ConsumerSessionsWithProvider // key == provider address
 
+	// configuredProviderNames is every provider name in the router's config, on any chain or
+	// interface, primary and backup, whether or not it passed verification
+	// (SetConfiguredProviderNames). nil until set.
+	configuredProviderNames []string
+
 	// blocked backup providers - backup providers blocked this epoch due to failures.
 	// Separate from currentlyBlockedProviderAddresses because backup providers are not in validAddresses.
 	blockedBackupProviders map[string]struct{}
@@ -814,6 +819,59 @@ func (csm *ConsumerSessionManager) GetAllDirectRPCEndpoints() []*EndpointWithDir
 	collect(csm.backupProviders, true)
 
 	return results
+}
+
+// URLLendRank ranks url the way relay selection ranks a url on its last chance (lendRankLocked):
+// 0 in rotation, 1 switched on but held by a state reason (head-stalled: the node answers, a block
+// behind), 2 switched off after repeated failures. One url can back several endpoints in the pairing
+// and the backup list (the chart writes an archive node-url twice), and the url takes the best rank
+// among them. A url with no endpoint here ranks 0: nothing is known against it.
+//
+// A websocket url never takes a relay (Endpoint.ServesDirectRelays), so nothing ever switches it off
+// or holds it head-stalled. It takes its provider's rank instead, the best rank among the provider's
+// urls that can take a relay, and so reads out of rotation exactly when the provider does
+// (ConsumerSessionsWithProvider.inRotation). A provider with no such url is judged by its own urls.
+//
+// The subscription managers pick from their own url lists and read this to place a new subscription
+// on a url in rotation while one is left (MAG-4161).
+func (csm *ConsumerSessionManager) URLLendRank(url string) int {
+	csm.lock.RLock()
+	defer csm.lock.RUnlock()
+
+	rank, found := 0, false
+	for _, providers := range []map[string]*ConsumerSessionsWithProvider{csm.pairing, csm.backupProviders} {
+		for _, cswp := range providers {
+			for _, endpoint := range cswp.Endpoints {
+				if endpoint.NetworkAddress != url {
+					continue
+				}
+				endpointRank := endpoint.lendRank()
+				if !endpoint.ServesDirectRelays() {
+					if providerRank, relayCapable := relayLendRank(cswp.Endpoints); relayCapable {
+						endpointRank = providerRank
+					}
+				}
+				if !found || endpointRank < rank {
+					rank, found = endpointRank, true
+				}
+			}
+		}
+	}
+	return rank
+}
+
+// relayLendRank is the best lend rank among the endpoints that can take a relay, and whether there is
+// one.
+func relayLendRank(endpoints []*Endpoint) (rank int, relayCapable bool) {
+	for _, endpoint := range endpoints {
+		if !endpoint.ServesDirectRelays() {
+			continue
+		}
+		if endpointRank := endpoint.lendRank(); !relayCapable || endpointRank < rank {
+			rank, relayCapable = endpointRank, true
+		}
+	}
+	return rank, relayCapable
 }
 
 func (csm *ConsumerSessionManager) RemoveAddonAddresses(addon string, extensions []string) {
@@ -1882,6 +1940,20 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 		stickiness = ""
 	}
 
+	// The caller's own lava-select-provider name, before a sticky claim below can fill
+	// selectedProvider. Only that name can be the caller's mistake: a refusal of it that names no
+	// provider of this router at all is marked SelectedProviderNotConfiguredError, which the
+	// listeners answer as a refused request (MAG-3800). A blocked provider, one that lacks the
+	// add-on, a name matching two providers by case, and a sticky claim whose provider is gone keep
+	// the plain SelectedProviderUnavailableError: none of them is the caller's mistake.
+	if headerPin := selectedProvider; headerPin != "" {
+		defer func() {
+			if errors.Is(errRet, SelectedProviderUnavailableError) && !csm.selectedProviderConfigured(headerPin) {
+				errRet = fmt.Errorf("%w: %w", SelectedProviderNotConfiguredError, errRet)
+			}
+		}()
+	}
+
 	// Cross-pod stickiness resolves BEFORE any lock is taken, because it may call the fleet
 	// store and no network round trip may happen while csm.lock is held.
 	//
@@ -2310,6 +2382,45 @@ func (csm *ConsumerSessionManager) providerByAddress(address string) *ConsumerSe
 		return provider
 	}
 	return csm.backupProviders[address]
+}
+
+// SetConfiguredProviderNames records every provider name in the router's config, on any chain or
+// interface, primary and backup, healthy or not. csm.pairing and csm.backupProviders hold only this
+// route's providers that passed verification, so they cannot tell a name that is not configured at
+// all from a configured provider that is out of rotation or has no URL for this route (MAG-3800).
+func (csm *ConsumerSessionManager) SetConfiguredProviderNames(names []string) {
+	csm.lock.Lock()
+	defer csm.lock.Unlock()
+	csm.configuredProviderNames = append([]string{}, names...)
+}
+
+// selectedProviderConfigured reports whether name, a lava-select-provider value, names a provider
+// this router is configured with: a primary or a backup, in rotation or not, in any letter case, the
+// way resolveSelectedProviderAddress matches it. With no configured list recorded, every name
+// counts as configured: an unknown answer must not tell a caller their provider does not exist in
+// the middle of an outage. It takes the read lock itself, so the caller must not hold csm.lock.
+func (csm *ConsumerSessionManager) selectedProviderConfigured(name string) bool {
+	csm.lock.RLock()
+	defer csm.lock.RUnlock()
+	if csm.configuredProviderNames == nil {
+		return true
+	}
+	for _, configured := range csm.configuredProviderNames {
+		if strings.EqualFold(configured, name) {
+			return true
+		}
+	}
+	for address := range csm.pairing {
+		if strings.EqualFold(address, name) {
+			return true
+		}
+	}
+	for address := range csm.backupProviders {
+		if strings.EqualFold(address, name) {
+			return true
+		}
+	}
+	return false
 }
 
 // convertSelectionStatsToMetrics converts SelectionStats to metrics format with all provider scores
