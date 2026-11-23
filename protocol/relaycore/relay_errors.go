@@ -153,6 +153,12 @@ func (r *RelayErrors) mergeAllErrors() error {
 type RelayResponse struct {
 	RelayResult common.RelayResult
 	Err         error
+
+	// answerRing and answerSeq name this answer's entry on the debug answer record (relay_answers.go),
+	// set by SetResponse before the answer is queued, so handleResponse can add its verdict. nil
+	// when nothing recorded it.
+	answerRing *relayAnswerRing
+	answerSeq  uint64
 }
 
 // TODO: there's no need to save error twice and provider info twice, this can just be a RelayResponse

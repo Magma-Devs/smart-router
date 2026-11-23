@@ -278,7 +278,7 @@ var _ chainlib.RelayRejectionReporter = (*RPCSmartRouterServer)(nil)
 
 // writeRelayEnd writes the relay's relay_end event. Each exit calls it once.
 func (rpcss *RPCSmartRouterServer) writeRelayEnd(ctx context.Context, in relayEndInput) {
-	utils.LogEvent(relayEndEvent, rpcss.buildRelayEnd(ctx, in))
+	emitRelayEnd(rpcss.buildRelayEnd(ctx, in))
 }
 
 // ReportRejectedRelay writes the relay_end of a request a listener parsed itself and could not hand
@@ -723,6 +723,17 @@ func relayEndNamedByURL(protocolMessage chainlib.ProtocolMessage, apiInterface s
 		return len(protocolMessage.RelayPrivateData().GetData()) == 0
 	}
 	return true
+}
+
+// relayAnswerMethod names a request on the debug answer ring (GET /debug/relay-answers) the way
+// relay_end names it: without the leading slash, an unlisted api named by URL withheld, and capped
+// at relayEndMethodLimit. The ring keeps the last few thousand answers, so the raw api name would
+// put a caller's own path on the debug route and let one entry be as long as the request.
+func relayAnswerMethod(protocolMessage chainlib.ProtocolMessage, apiInterface string) string {
+	if protocolMessage == nil || protocolMessage.GetApi() == nil {
+		return ""
+	}
+	return relayEndMethod(protocolMessage.GetApi().Name, relayEndNamedByURL(protocolMessage, apiInterface))
 }
 
 func relayEndSelection(selection relaycore.Selection) string {

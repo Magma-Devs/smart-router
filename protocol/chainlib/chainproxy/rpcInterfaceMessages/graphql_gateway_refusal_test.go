@@ -19,12 +19,16 @@ const quickNodeWrongPathReply = `{"jsonrpc":"2.0","id":null,"error":{"code":-326
 // query, the same from every node, and must stay the caller's.
 const graphQLValidationErrorReply = `{"errors":[{"message":"Cannot query field \"nope\" on type \"Query\".","locations":[{"line":1,"column":3}],"extensions":{"code":"GRAPHQL_VALIDATION_FAILED"}}]}`
 
-// classifyLikeTheGraphQLSender classifies a reply from the inputs sendGraphQLRelay hands the
-// registry: the message's classification status and CheckResponseError's message.
+// classifyLikeTheGraphQLSender classifies a reply as sendGraphQLRelay does: a read by its own rows
+// (OwnClassification), a write by the shared rows under the message's classification status and
+// CheckResponseError's message.
 func classifyLikeTheGraphQLSender(t *testing.T, message *GraphQLMessage, body string, status int) *common.RouterError {
 	t.Helper()
 	hasError, errorMessage := message.CheckResponseError([]byte(body), status)
 	require.True(t, hasError, "a reply outside 2xx is a node error")
+	if own := message.OwnClassification([]byte(body), status); own != nil {
+		return own
+	}
 	return common.ClassifyError(nil, common.ChainFamilyUnknown, common.TransportREST, message.ClassificationStatus([]byte(body), status), errorMessage)
 }
 
@@ -38,10 +42,17 @@ func TestGraphQLGatewayJSONRPCEnvelopeIsARouteRefusal(t *testing.T) {
 	mutation, err := ParseGraphQLMsg([]byte(`{"query":"mutation { executeTransaction(transactionDataBcs: \"x\", signatures: [\"y\"]) { digest } }"}`))
 	require.NoError(t, err)
 
-	for _, message := range []*GraphQLMessage{query, mutation} {
+	// A write is filed by the shared rows, where the envelope rule remaps the 400 to a route
+	// refusal. A read is filed by GraphQL's own status table (MAG-5121), where any 4xx it does not
+	// name is already "another provider may serve it": the same effect, its own name.
+	want := map[*GraphQLMessage]*common.RouterError{
+		mutation: common.RouterErrorNodeMethodNotAllowed,
+		query:    common.RouterErrorNodeUnrecognizedError,
+	}
+	for message, wantClassified := range want {
 		classified := classifyLikeTheGraphQLSender(t, message, quickNodeWrongPathReply, http.StatusBadRequest)
-		require.Equal(t, common.RouterErrorNodeMethodNotAllowed.Code, classified.Code,
-			"QuickNode's wrong-path 400 must classify as a route refusal, got %s", classified.Name)
+		require.Equal(t, wantClassified.Code, classified.Code,
+			"QuickNode's wrong-path 400 must not be the caller's, got %s", classified.Name)
 		require.True(t, classified.Retryable, "another provider can serve the request")
 		require.False(t, classified.EndpointAtFault(), "the gateway answered truthfully about its route")
 		require.False(t, classified.SubCategory.IsUnsupportedMethod(), "not a method the chain lacks")
@@ -56,8 +67,10 @@ func TestGraphQLGatewayJSONRPCEnvelopeIsARouteRefusal(t *testing.T) {
 // TestGraphQLGatewayJSONRPCEnvelopeRemapsOnlyTheCallerRows pins which statuses the envelope rule
 // touches: only those the registry files as the caller's malformed request. A rate limit keeps its
 // hold-off, a refusal, a not-found, a conflict and a server fault keep their own rows.
+//
+// The rule applies to writes only: a read is filed by GraphQL's own status table (MAG-5121).
 func TestGraphQLGatewayJSONRPCEnvelopeRemapsOnlyTheCallerRows(t *testing.T) {
-	query, err := ParseGraphQLMsg([]byte(`{"query":"{ chainIdentifier }"}`))
+	write, err := ParseGraphQLMsg([]byte(`{"query":"mutation { executeTransaction(transactionDataBcs: \"x\", signatures: [\"y\"]) { digest } }"}`))
 	require.NoError(t, err)
 
 	remapped := map[int]bool{
@@ -74,7 +87,7 @@ func TestGraphQLGatewayJSONRPCEnvelopeRemapsOnlyTheCallerRows(t *testing.T) {
 		http.StatusRequestHeaderFieldsTooLarge:  true,
 	}
 	for status := 400; status < 600; status++ {
-		got := query.ClassificationStatus([]byte(quickNodeWrongPathReply), status)
+		got := write.ClassificationStatus([]byte(quickNodeWrongPathReply), status)
 		if remapped[status] {
 			require.Equal(t, http.StatusMethodNotAllowed, got, "status %d carries the caller's row and a gateway's envelope", status)
 			continue
@@ -94,8 +107,10 @@ func TestGraphQLGatewayJSONRPCEnvelopeRemapsOnlyTheCallerRows(t *testing.T) {
 // TestGraphQLGatewayJSONRPCEnvelopeIsShapeStrict: the rule keys on a JSON-RPC error envelope, a
 // "jsonrpc" member and an "error" object with a code, not on "not a GraphQL response". Anything else
 // under a caller status keeps the caller's verdict.
+//
+// Pinned on a write, the only one the rule still applies to (MAG-5121).
 func TestGraphQLGatewayJSONRPCEnvelopeIsShapeStrict(t *testing.T) {
-	query, err := ParseGraphQLMsg([]byte(`{"query":"{ chainIdentifier }"}`))
+	write, err := ParseGraphQLMsg([]byte(`{"query":"mutation { executeTransaction(transactionDataBcs: \"x\", signatures: [\"y\"]) { digest } }"}`))
 	require.NoError(t, err)
 
 	notEnvelopes := []struct {
@@ -115,7 +130,7 @@ func TestGraphQLGatewayJSONRPCEnvelopeIsShapeStrict(t *testing.T) {
 	}
 	for _, test := range notEnvelopes {
 		t.Run(test.name, func(t *testing.T) {
-			require.Equal(t, http.StatusBadRequest, query.ClassificationStatus([]byte(test.body), http.StatusBadRequest))
+			require.Equal(t, http.StatusBadRequest, write.ClassificationStatus([]byte(test.body), http.StatusBadRequest))
 		})
 	}
 
@@ -129,10 +144,10 @@ func TestGraphQLGatewayJSONRPCEnvelopeIsShapeStrict(t *testing.T) {
 	}
 	for _, test := range envelopes {
 		t.Run(test.name, func(t *testing.T) {
-			require.Equal(t, http.StatusMethodNotAllowed, query.ClassificationStatus([]byte(test.body), http.StatusBadRequest))
+			require.Equal(t, http.StatusMethodNotAllowed, write.ClassificationStatus([]byte(test.body), http.StatusBadRequest))
 		})
 	}
 
 	// Inside a 2xx the envelope rule does not apply: that path has its own rules.
-	require.NotEqual(t, http.StatusMethodNotAllowed, query.ClassificationStatus([]byte(quickNodeWrongPathReply), http.StatusOK))
+	require.NotEqual(t, http.StatusMethodNotAllowed, write.ClassificationStatus([]byte(quickNodeWrongPathReply), http.StatusOK))
 }
