@@ -29,6 +29,7 @@ type subscriptionCascade struct {
 	selectEndpoint func(ctx context.Context, clientKey string) (*common.NodeUrl, error)
 	stickyStore    *routersession.StickySessionStore
 	endpointsByURL map[string]*common.NodeUrl
+	setURLLendRank func(lendRank func(url string) int)
 }
 
 func subscriptionManagerCases() []subscriptionManagerCase {
@@ -38,7 +39,7 @@ func subscriptionManagerCases() []subscriptionManagerCase {
 			url:  func(endpoint string) string { return "wss://" + endpoint + ".example.com" },
 			build: func(primary, backup []*common.NodeUrl, optimizer WebSocketEndpointOptimizer) subscriptionCascade {
 				manager := NewDirectWSSubscriptionManager(getTestMetricsManager(), "jsonrpc", "ETH", "jsonrpc", primary, backup, optimizer, nil)
-				return subscriptionCascade{manager.selectEndpoint, manager.stickyStore, manager.endpointsByURL}
+				return subscriptionCascade{manager.selectEndpoint, manager.stickyStore, manager.endpointsByURL, manager.SetURLLendRank}
 			},
 			exhausted: "no WebSocket endpoints available (primary and backup both exhausted)",
 		},
@@ -47,7 +48,7 @@ func subscriptionManagerCases() []subscriptionManagerCase {
 			url:  func(endpoint string) string { return "grpc://" + endpoint + ".example.com:9090" },
 			build: func(primary, backup []*common.NodeUrl, optimizer WebSocketEndpointOptimizer) subscriptionCascade {
 				manager := NewDirectGRPCSubscriptionManager(nil, "ETH", "grpc", primary, backup, optimizer, nil)
-				return subscriptionCascade{manager.selectEndpoint, manager.stickyStore, manager.endpointsByURL}
+				return subscriptionCascade{manager.selectEndpoint, manager.stickyStore, manager.endpointsByURL, manager.SetURLLendRank}
 			},
 			exhausted: "no gRPC endpoints available",
 		},
@@ -77,6 +78,10 @@ func TestSelectEndpoint_Cascade(t *testing.T) {
 		sticky string
 		// heldOff are the endpoints on a rate-limit hold-off.
 		heldOff []string
+		// stalled and off are the endpoints the router has out of rotation: held head-stalled
+		// (lend rank 1) and switched off after repeated failures (lend rank 2).
+		stalled []string
+		off     []string
 		// pick, when set, is the optimizer: it gets the tier's endpoint names and returns
 		// the chosen ones. Unset means no optimizer.
 		pick func(tier []string) []string
@@ -122,6 +127,25 @@ func TestSelectEndpoint_Cascade(t *testing.T) {
 		{name: "every endpoint held off: optimizer is offered the full tier", primary: []string{"primary-1", "primary-2", "primary-3"}, backup: []string{"backup-1"}, heldOff: []string{"primary-1", "primary-2", "primary-3"}, pick: pickIfPresent("primary-3"), want: "primary-3", wantOptimizerCalls: 1},
 		{name: "one ready endpoint left: single-endpoint path, optimizer skipped", primary: []string{"primary-1", "primary-2"}, heldOff: []string{"primary-1"}, pick: pickIfPresent("primary-1"), want: "primary-2"},
 		{name: "single-endpoint tier held off: still serves", primary: []string{"primary-1"}, backup: []string{"backup-1"}, heldOff: []string{"primary-1"}, pick: pickIfPresent("backup-1"), want: "primary-1"},
+
+		// MAG-4161: a url out of rotation gets no new subscription while one in rotation is left.
+		{name: "off primary is skipped: next primary", primary: []string{"primary-1", "primary-2"}, backup: []string{"backup-1"}, off: []string{"primary-1"}, want: "primary-2"},
+		{name: "stalled primary is skipped: next primary", primary: []string{"primary-1", "primary-2"}, stalled: []string{"primary-1"}, want: "primary-2"},
+		{name: "every primary out: backup, not a primary out of rotation", primary: []string{"primary-1", "primary-2"}, backup: []string{"backup-1"}, off: []string{"primary-1"}, stalled: []string{"primary-2"}, want: "backup-1"},
+		{name: "off backup is skipped: next backup", backup: []string{"backup-1", "backup-2"}, off: []string{"backup-1"}, want: "backup-2"},
+		{name: "off sticky is skipped and keeps its affinity", primary: []string{"primary-1", "primary-2"}, sticky: "primary-1", off: []string{"primary-1"}, want: "primary-2", wantStickyAfter: "primary-1"},
+		{name: "off sticky on backup is skipped: primary", primary: []string{"primary-1"}, backup: []string{"backup-1"}, sticky: "backup-1", off: []string{"backup-1"}, want: "primary-1", wantStickyAfter: "backup-1"},
+		{name: "sticky in rotation wins while another url is off", primary: []string{"primary-1", "primary-2"}, sticky: "primary-2", off: []string{"primary-1"}, want: "primary-2", wantStickyAfter: "primary-2"},
+		{name: "optimizer is never offered an off url", primary: []string{"primary-1", "primary-2", "primary-3"}, off: []string{"primary-2"}, pick: pickIfPresent("primary-2"), want: "primary-1", wantOptimizerCalls: 1},
+
+		// Last chance: with nothing in rotation left, a url out of rotation beats no
+		// subscription, in the order relay selection lends one.
+		{name: "everything off: last chance takes the first primary", primary: []string{"primary-1"}, backup: []string{"backup-1"}, off: []string{"primary-1", "backup-1"}, want: "primary-1"},
+		{name: "primary empty, every backup off: last chance takes the first backup", backup: []string{"backup-1", "backup-2"}, off: []string{"backup-1", "backup-2"}, want: "backup-1"},
+		{name: "last chance: a stalled url before a switched-off one", primary: []string{"primary-1", "primary-2"}, off: []string{"primary-1"}, stalled: []string{"primary-2"}, want: "primary-2"},
+		{name: "last chance: the primaries before the backups", primary: []string{"primary-1"}, backup: []string{"backup-1"}, off: []string{"primary-1"}, stalled: []string{"backup-1"}, want: "primary-1"},
+		{name: "everything off: sticky stays where it is", primary: []string{"primary-1"}, backup: []string{"backup-1"}, sticky: "backup-1", off: []string{"primary-1", "backup-1"}, want: "backup-1", wantStickyAfter: "backup-1"},
+		{name: "everything out: off sticky gives way to a stalled url", primary: []string{"primary-1"}, backup: []string{"backup-1"}, sticky: "backup-1", stalled: []string{"primary-1"}, off: []string{"backup-1"}, want: "primary-1", wantStickyAfter: "backup-1"},
 	}
 
 	for _, manager := range subscriptionManagerCases() {
@@ -175,6 +199,16 @@ func TestSelectEndpoint_Cascade(t *testing.T) {
 					}
 
 					cascade := manager.build(nodeURLs(sc.primary), backup, optimizer)
+					if sc.stalled != nil || sc.off != nil {
+						rankOf := map[string]int{}
+						for _, name := range sc.stalled {
+							rankOf[manager.url(name)] = 1
+						}
+						for _, name := range sc.off {
+							rankOf[manager.url(name)] = 2
+						}
+						cascade.setURLLendRank(func(url string) int { return rankOf[url] })
+					}
 					if sc.sticky != "" {
 						cascade.stickyStore.Set("client-1", &routersession.StickySession{Provider: manager.url(sc.sticky)})
 					}

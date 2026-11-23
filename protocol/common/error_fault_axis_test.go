@@ -96,6 +96,8 @@ var faultAxisTable = []faultAxisCase{
 	// submission, and that is the client's call: ExecuteTransaction is stateful, so the router
 	// never re-sends a write. Non-retryable here keeps the answer out of the endpoint's score.
 	{2019, "NODE_ABORTED", SubCategoryNone, false, "validators' verdict on a Sui write; resubmitting is the client's call"},
+	{2020, "NODE_UNRECOGNIZED_ERROR", SubCategoryNodeCapability, true, "GraphQL: an error no row reads; when unsure, retry without blame (MAG-5121)"},
+	{2021, "NODE_URL_REFUSED", SubCategoryNone, true, "GraphQL: 404/405/redirect on the one url; the config is wrong (MAG-5121)"},
 	{3001, "CHAIN_NONCE_TOO_LOW", SubCategoryNone, false, ""},
 	{3002, "CHAIN_NONCE_TOO_HIGH", SubCategoryNone, false, ""},
 	{3003, "CHAIN_INSUFFICIENT_FUNDS", SubCategoryNone, false, ""},
