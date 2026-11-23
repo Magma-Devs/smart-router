@@ -211,7 +211,7 @@ its upstream connection drops, write no event.
 
 In debug mode (`--debug-address`), `GET /debug/relay-end?guid=<GUID>` returns the event of one
 request, so a test asserts on the router's record of the request it sent instead of searching the
-log (MAG-4899). `guid` is the event's `GUID`: the reply's `Lava-Guid` header, or the error id of an
+log (MAG-4899). `guid` is the event's `GUID`: the reply's `Router-Guid` header, or the error id of an
 error reply without one. A WebSocket message answered successfully and a gRPC stream opened
 successfully reply with no GUID, so their events are kept but can be found only through
 `/debug/logs`; their error replies carry it, as `Error_GUID` or in the gRPC status text.

@@ -177,7 +177,7 @@ func TestGRPCListener_ARefusedPinCarriesTheRequestHeaders_MAG5076(t *testing.T) 
 			var trailer metadata.MD
 			err := client.Invoke(callCtx, "/"+relayEndGRPCMethod, wrapperspb.Int64(5), &wrapperspb.Int64Value{}, grpc.Trailer(&trailer))
 			require.Equal(t, tc.code, status.Code(err), "%v", err)
-			require.NotEmpty(t, trailer.Get(common.GUID_HEADER_NAME), "the refusal carries no lava-guid")
+			require.NotEmpty(t, trailer.Get(common.GUID_HEADER_NAME), "the refusal carries no router-guid")
 			require.Equal(t, []string{relayEndGRPCMethod}, trailer.Get(common.USER_REQUEST_TYPE))
 			require.Empty(t, trailer.Get(common.PROVIDER_ADDRESS_HEADER_NAME), "no provider was asked")
 		})
