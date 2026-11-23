@@ -383,8 +383,6 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 	}
 
 	lis := GetListenerWithRetryGrpc("tcp", apil.endpoint.NetworkAddress)
-	addr := lis.Addr().String()
-	apil.listeningAddress.Store(&addr)
 	apiInterface := apil.endpoint.ApiInterface
 	sendRelayCallback := func(ctx context.Context, method string, reqBody []byte) ([]byte, metadata.MD, error) {
 		guid := utils.GenerateUniqueIdentifier()
@@ -485,6 +483,10 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 
 	// setup chain parser
 	apil.chainParser.setupForConsumer(reflectionSource)
+	// The address is published once the parser can read a request, so a caller that waits for
+	// it never parses against a registry that is still being built.
+	addr := lis.Addr().String()
+	apil.listeningAddress.Store(&addr)
 
 	utils.FormatInfo("Server listening", utils.Attribute{Key: "Address", Value: lis.Addr()})
 
