@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"maps"
 	"mime"
+	"net/http"
 	"reflect"
 	"slices"
 	"strconv"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/cacheformat"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
+	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/parser"
 	"github.com/magma-Devs/smart-router/protocol/performance"
@@ -25,6 +27,7 @@ import (
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/magma-Devs/smart-router/utils/sigs"
+	"google.golang.org/grpc/codes"
 )
 
 const (
@@ -1795,6 +1798,14 @@ func (cf *ChainFetcher) verifyVia(ctx context.Context, router ChainRouter, chain
 		)
 	}
 
+	if nodeErr := grpcNodeErrorReply(reply, chainMessage); nodeErr != nil {
+		return utils.FormatWarning("[-] verify failed: the node answered with an error", nodeErr,
+			utils.LogAttr("chain_id", chainId),
+			utils.LogAttr("Api_interface", cf.endpoint.ApiInterface),
+			utils.LogAttr("Method", parsing.GetApiName()),
+		)
+	}
+
 	parserInput, err := FormatResponseForParsing(reply.RelayReply, chainMessage)
 	if err != nil {
 		return utils.FormatWarning("[-] verify failed to parse result", err,
@@ -1956,6 +1967,13 @@ func (cf *ChainFetcher) fetchLatestBlockNumVia(ctx context.Context, router Chain
 	if err != nil {
 		return spectypes.NOT_APPLICABLE, utils.FormatDebugErr(tagName+" failed sending chainMessage", err, []utils.Attribute{{Key: "chainID", Value: cf.endpoint.ChainID}, {Key: "APIInterface", Value: cf.endpoint.ApiInterface}}...)
 	}
+	if nodeErr := grpcNodeErrorReply(reply, chainMessage); nodeErr != nil {
+		return spectypes.NOT_APPLICABLE, utils.FormatDebugErr(tagName+" the node answered with an error", nodeErr, []utils.Attribute{
+			{Key: "chainId", Value: chainId},
+			{Key: "nodeUrl", Value: proxyUrl.Url},
+			{Key: "Method", Value: parsing.ApiName},
+		}...)
+	}
 	parserInput, err := FormatResponseForParsing(reply.RelayReply, chainMessage)
 	if err != nil {
 		return spectypes.NOT_APPLICABLE, utils.FormatDebug(tagName+" Failed formatResponseForParsing", []utils.Attribute{
@@ -2070,6 +2088,14 @@ func (cf *ChainFetcher) fetchSingleBlockHashByNum(ctx context.Context, blockNum 
 	}
 
 	responseData := reply.RelayReply.Data
+
+	if nodeErr := grpcNodeErrorReply(reply, chainMessage); nodeErr != nil {
+		return "", responseData, utils.FormatDebugErr(tagName+" the node answered with an error", nodeErr, []utils.Attribute{
+			{Key: "chainId", Value: chainId},
+			{Key: "nodeUrl", Value: proxyUrl.Url},
+			{Key: "Method", Value: parsing.ApiName},
+		}...)
+	}
 
 	parserInput, err := FormatResponseForParsing(reply.RelayReply, chainMessage)
 	if err != nil {
@@ -2241,6 +2267,25 @@ func RateLimitedErrorBody(chainID string, code int, message string) error {
 		return nil
 	}
 	return common.RateLimited(fmt.Errorf("json-rpc error %d: %s", code, message), 0)
+}
+
+// grpcNodeErrorReply returns the error a gRPC node answered with, or nil when reply is the method's
+// own reply. GrpcChainProxy.SendNodeMsg hands a node's error back as a reply, not as an error
+// (parseGrpcNodeErrorToReply): its body is a GrpcNodeErrorResponse in JSON and its StatusCode is
+// the node's gRPC code, where a served reply is the method's protobuf message with StatusCode 200.
+// Decoding that JSON as the method's reply can only fail, and it failed as "proto: bad wiretype",
+// which hid what the node said: a node that refuses a verification's method read as a router
+// that cannot parse the chain's replies (MAG-5002).
+func grpcNodeErrorReply(reply *RelayReplyWrapper, chainMessage ChainMessageForSend) error {
+	if _, isGrpc := chainMessage.GetRPCMessage().(*rpcInterfaceMessages.GrpcMessage); !isGrpc || reply.StatusCode == http.StatusOK {
+		return nil
+	}
+	nodeError := GrpcNodeErrorResponse{ErrorCode: uint32(reply.StatusCode)}
+	if reply.RelayReply != nil {
+		// A body that does not decode still leaves the status code, which is the node's.
+		_ = json.Unmarshal(reply.RelayReply.Data, &nodeError)
+	}
+	return fmt.Errorf("gRPC status %s: %s", codes.Code(nodeError.ErrorCode), nodeError.ErrorMessage)
 }
 
 func FormatResponseForParsing(reply *pairingtypes.RelayReply, chainMessage ChainMessageForSend) (parsable parser.RPCInput, err error) {
