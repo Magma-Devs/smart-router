@@ -188,6 +188,7 @@ func TestTronBroadcastRefusal(t *testing.T) {
 		{name: "a read on /walletsolidity", specPath: "/walletsolidity/broadcasttransaction", reply: `{"code":"OTHER_ERROR","message":"x"}`},
 		{name: "the servlet's own error", specPath: tx, reply: `{"Error":"class java.lang.NullPointerException : null"}`},
 		{name: "result true wins", specPath: tx, reply: `{"result":true,"code":"OTHER_ERROR"}`},
+		{name: "code SUCCESS without result true", specPath: hex, reply: `{"code":"SUCCESS","message":"","txid":"77dd"}`},
 		{name: "a code that is not a name", specPath: tx, reply: `{"code":5,"txid":"77dd"}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
