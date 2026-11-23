@@ -388,6 +388,9 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 	apiInterface := apil.endpoint.ApiInterface
 	sendRelayCallback := func(ctx context.Context, method string, reqBody []byte) ([]byte, metadata.MD, error) {
 		guid := requestGUID(&ctx)
+		// The call's deadline here is the caller's own grpc-timeout. Recorded so an attempt that
+		// ends at it is not counted against the endpoint (common.IsClientCancellation).
+		ctx = common.WithCallerDeadline(ctx)
 		msgSeed := strconv.FormatUint(guid, 10)
 		metadataValues, _ := metadata.FromIncomingContext(ctx)
 		ctx = utils.ExtractWantedHeadersFromCachedMap(metadataValues, ctx)
