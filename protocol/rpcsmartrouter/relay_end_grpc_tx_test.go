@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -43,17 +42,17 @@ func relayEndConcordiumReply(t *testing.T, hash []byte) []byte {
 
 func TestRelayEnd_GRPCSubmitReplies(t *testing.T) {
 	t.Run("BroadcastTx", func(t *testing.T) {
-		tx, found := rpcInterfaceMessages.ReadCosmosBroadcastTx(relayEndHexBytes(t, relayEndCosmosGRPCRefused))
+		tx, found := cosmosGRPCBroadcast(relayEndHexBytes(t, relayEndCosmosGRPCRefused))
 		require.True(t, found)
-		require.Equal(t, rpcInterfaceMessages.CosmosBroadcastTx{Hash: relayEndCosmosHash, Codespace: "sdk", Code: 5, RawLog: "spendable balance 10uatom is smaller than 1000uatom: insufficient funds"}, tx)
+		require.Equal(t, cosmosGRPCTx{hash: relayEndCosmosHash, codespace: "sdk", code: 5, rawLog: "spendable balance 10uatom is smaller than 1000uatom: insufficient funds"}, tx)
 
-		tx, found = rpcInterfaceMessages.ReadCosmosBroadcastTx(relayEndHexBytes(t, relayEndCosmosGRPCAccepted))
+		tx, found = cosmosGRPCBroadcast(relayEndHexBytes(t, relayEndCosmosGRPCAccepted))
 		require.True(t, found, "a code of 0 is not on the wire")
-		require.Equal(t, rpcInterfaceMessages.CosmosBroadcastTx{Hash: relayEndCosmosHash, RawLog: "[]"}, tx)
+		require.Equal(t, cosmosGRPCTx{hash: relayEndCosmosHash, rawLog: "[]"}, tx)
 
-		tx, found = rpcInterfaceMessages.ReadCosmosBroadcastTx([]byte{0x0a, 0x00})
+		tx, found = cosmosGRPCBroadcast([]byte{0x0a, 0x00})
 		require.True(t, found, "an empty tx_response still names code 0")
-		require.Empty(t, tx.Hash)
+		require.Empty(t, tx.hash)
 
 		for name, reply := range map[string][]byte{
 			"a node error, the router's JSON":  []byte(`{"error_message":"signature verification failed","error_code":3}`),
@@ -61,7 +60,7 @@ func TestRelayEnd_GRPCSubmitReplies(t *testing.T) {
 			"cut short":                        relayEndHexBytes(t, relayEndCosmosGRPCRefused)[:40],
 			"tx_response that does not decode": {0x0a, 0x02, 0x12, 0x40},
 		} {
-			_, found := rpcInterfaceMessages.ReadCosmosBroadcastTx(reply)
+			_, found := cosmosGRPCBroadcast(reply)
 			require.False(t, found, name)
 		}
 	})
