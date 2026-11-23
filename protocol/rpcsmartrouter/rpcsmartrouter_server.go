@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -6418,7 +6419,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	// A node's error goes back to the caller as the reply, so it is redacted like every error the
 	// router writes itself, before it is returned, cached or compared: a node that repeats the
 	// url it was called on, or the key, must not hand the operator's key to the caller (MAG-4863).
-	if result.IsNodeError {
+	if result.IsNodeError && !isProtobufNodeReply(directConnection, result.Reply) {
 		redactNodeReply(result.Reply)
 	}
 
@@ -7630,4 +7631,13 @@ func redactNodeReply(reply *pairingtypes.RelayReply) {
 	if reply != nil {
 		reply.Data = utils.RedactSecretsBytes(reply.Data)
 	}
+}
+
+// isProtobufNodeReply reports whether a node error's reply is a gRPC node's own protobuf message: a
+// BroadcastTx refusing the transaction under gRPC OK (MAG-5323). It is not redacted. Its strings
+// are framed by their lengths, so rewriting one breaks the message and the client cannot read the
+// refusal at all. A failed gRPC status's reply is the router's JSON, which is.
+func isProtobufNodeReply(connection routersession.DirectRPCConnection, reply *pairingtypes.RelayReply) bool {
+	return connection != nil && connection.GetProtocol() == routersession.DirectRPCProtocolGRPC &&
+		reply != nil && !json.Valid(reply.Data)
 }
