@@ -27,8 +27,9 @@ type graphQLChainRows struct {
 	notFound func(request *GraphQLMessage, body []byte) (message string, notFound bool)
 }
 
-// graphQLNotFoundStatus is the status a not-found verdict stands for: the error registry files it as
-// NODE_DATA_NOT_HELD (retried on another provider, the endpoint neither blamed nor rewarded).
+// graphQLNotFoundStatus is the status a not-found verdict stands for in its log line. The verdict
+// names its registry entry itself, NODE_DATA_NOT_HELD (retried on another provider, the endpoint
+// neither blamed nor rewarded).
 const graphQLNotFoundStatus = http.StatusNotFound
 
 // graphQLChainFamilyRows are the chains that have a GraphQL list, keyed by the error registry's

@@ -157,11 +157,14 @@ func TestSuiGraphQLRelay_NullTransactionUnderCrossValidation(t *testing.T) {
 		{"two say null: the null they agree on", [3]string{suiLookupFound, suiLookupNull, suiLookupNull}, suiLookupNull, true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			hits, server := newSuiLookupCrossValidationServer(t, chainParser, logs, test.replies)
-			result, sendErr := sendSuiLookupCrossValidated(t, chainParser, server)
+			hits, server := newSuiLookupServer(t, chainParser, logs, test.replies[:], nil)
+			result, sendErr := sendSuiLookup(t, chainParser, server, map[string]string{
+				common.CROSS_VALIDATION_HEADER_MAX_PARTICIPANTS:    "3",
+				common.CROSS_VALIDATION_HEADER_AGREEMENT_THRESHOLD: "2",
+			})
 			require.NoError(t, sendErr)
 			require.NotNil(t, result.Reply)
-			require.Equal(t, [3]int64{1, 1, 1}, [3]int64{atomic.LoadInt64(&hits[0]), atomic.LoadInt64(&hits[1]), atomic.LoadInt64(&hits[2])}, "one copy per provider")
+			require.Equal(t, []int64{1, 1, 1}, loadSuiLookupHits(hits), "one copy per provider")
 			require.Equal(t, http.StatusOK, result.StatusCode)
 			require.Empty(t, result.CrossValidationFailureReason)
 			require.GreaterOrEqual(t, result.CrossValidation, 2, "served by a quorum")
@@ -172,15 +175,63 @@ func TestSuiGraphQLRelay_NullTransactionUnderCrossValidation(t *testing.T) {
 	}
 }
 
-// newSuiLookupCrossValidationServer is three primary Sui GraphQL upstreams, each answering its reply.
-func newSuiLookupCrossValidationServer(t *testing.T, chainParser chainlib.ChainParser, logs *metrics.RPCConsumerLogs, replies [3]string) (*[3]int64, *RPCSmartRouterServer) {
+// TestSuiGraphQLRelay_NullTransactionAsksOneMoreProvider (MAG-4909 R23, Omer, 4 Nov): a null
+// transaction gets one more provider asked, then the null is the answer, not the whole retry
+// budget. With every provider answering null, the budget would ask four (three retries), backups
+// included.
+func TestSuiGraphQLRelay_NullTransactionAsksOneMoreProvider(t *testing.T) {
+	rand.InitRandomSeed()
+	logs, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
+	require.NoError(t, err)
+	chainParser := newSuiLookupParser(t)
+	null4 := []string{suiLookupNull, suiLookupNull, suiLookupNull, suiLookupNull}
+
+	t.Run("four primaries, all null: two asked, then the null", func(t *testing.T) {
+		for i := 0; i < 5; i++ {
+			hits, server := newSuiLookupServer(t, chainParser, logs, null4, nil)
+			result, sendErr := sendSuiLookup(t, chainParser, server, nil)
+			require.NoError(t, sendErr)
+			require.Equal(t, int64(2), sumSuiLookupHits(hits), "one more provider, then the null: %v", loadSuiLookupHits(hits))
+			require.JSONEq(t, suiLookupNull, string(result.Reply.Data))
+			require.False(t, result.IsNodeError)
+			require.True(t, result.IsNotFoundAnswer)
+		}
+	})
+
+	t.Run("three primaries and a backup, all null: the backup is not asked", func(t *testing.T) {
+		for i := 0; i < 5; i++ {
+			hits, server := newSuiLookupServer(t, chainParser, logs, null4[:3], null4[3:])
+			result, sendErr := sendSuiLookup(t, chainParser, server, nil)
+			require.NoError(t, sendErr)
+			got := loadSuiLookupHits(hits)
+			require.Equal(t, int64(2), sumSuiLookupHits(hits), "%v", got)
+			require.Zero(t, got[3], "the backup tier is not reached for a null")
+			require.JSONEq(t, suiLookupNull, string(result.Reply.Data))
+		}
+	})
+
+	t.Run("one null among providers that hold it: their answer, at most two asked", func(t *testing.T) {
+		for i := 0; i < 5; i++ {
+			hits, server := newSuiLookupServer(t, chainParser, logs, []string{suiLookupNull, suiLookupFound, suiLookupFound, suiLookupFound}, nil)
+			result, sendErr := sendSuiLookup(t, chainParser, server, nil)
+			require.NoError(t, sendErr)
+			require.LessOrEqual(t, sumSuiLookupHits(hits), int64(2), "%v", loadSuiLookupHits(hits))
+			require.JSONEq(t, suiLookupFound, string(result.Reply.Data))
+			require.False(t, result.IsNotFoundAnswer)
+		}
+	})
+}
+
+// newSuiLookupServer is Sui GraphQL upstreams, primaries then backups, each answering its reply.
+func newSuiLookupServer(t *testing.T, chainParser chainlib.ChainParser, logs *metrics.RPCConsumerLogs, primaries, backups []string) ([]int64, *RPCSmartRouterServer) {
 	t.Helper()
 	ctx := context.Background()
-	hits := &[3]int64{}
+	replies := append(append([]string{}, primaries...), backups...)
+	hits := make([]int64, len(replies))
 	rpcEndpoint := &routersession.RPCEndpoint{ChainID: "SUI", ApiInterface: spectypes.APIInterfaceGraphQL}
 	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "SUI")
 	csm := routersession.NewConsumerSessionManager(rpcEndpoint, optimizer, nil, "test-router", routersession.NewActiveSubscriptionProvidersStorage())
-	providers := make(map[uint64]*routersession.ConsumerSessionsWithProvider, len(replies))
+	tiers := []map[uint64]*routersession.ConsumerSessionsWithProvider{{}, {}}
 	for i, reply := range replies {
 		counter := &hits[i]
 		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -194,9 +245,13 @@ func newSuiLookupCrossValidationServer(t *testing.T, chainParser chainlib.ChainP
 		endpoint := &routersession.Endpoint{NetworkAddress: upstream.URL, Enabled: true, DirectConnections: []routersession.DirectRPCConnection{connection}}
 		provider := routersession.NewConsumerSessionWithProvider(fmt.Sprintf("sui-%d", i), []*routersession.Endpoint{endpoint}, 100000, 1, 1)
 		provider.StaticProvider = true
-		providers[uint64(i)] = provider
+		tier := 0
+		if i >= len(primaries) {
+			tier = 1
+		}
+		tiers[tier][uint64(i)] = provider
 	}
-	require.NoError(t, csm.UpdateAllProviders(1, providers, nil))
+	require.NoError(t, csm.UpdateAllProviders(1, tiers[0], tiers[1]))
 	return hits, &RPCSmartRouterServer{
 		listenEndpoint:     rpcEndpoint,
 		chainParser:        chainParser,
@@ -206,9 +261,8 @@ func newSuiLookupCrossValidationServer(t *testing.T, chainParser chainlib.ChainP
 	}
 }
 
-// sendSuiLookupCrossValidated sends the lookup through SendParsedRelay with the caller's
-// cross-validation headers: three participants, two must agree.
-func sendSuiLookupCrossValidated(t *testing.T, chainParser chainlib.ChainParser, server *RPCSmartRouterServer) (*common.RelayResult, error) {
+// sendSuiLookup sends the lookup through SendParsedRelay with the caller's directive headers.
+func sendSuiLookup(t *testing.T, chainParser chainlib.ChainParser, server *RPCSmartRouterServer, headers map[string]string) (*common.RelayResult, error) {
 	t.Helper()
 	ctx := context.Background()
 	body := []byte(suiLookupQuery)
@@ -216,11 +270,24 @@ func sendSuiLookupCrossValidated(t *testing.T, chainParser chainlib.ChainParser,
 	require.NoError(t, err)
 	relayData := relayprotocol.NewRelayData(ctx, http.MethodPost, "", body, 0, spectypes.LATEST_BLOCK, spectypes.APIInterfaceGraphQL,
 		chainMessage.GetRPCMessage().GetHeaders(), chainlib.GetAddon(chainMessage), common.GetExtensionNames(chainMessage.GetExtensions()))
-	protocolMessage := chainlib.NewProtocolMessage(chainMessage, map[string]string{
-		common.CROSS_VALIDATION_HEADER_MAX_PARTICIPANTS:    "3",
-		common.CROSS_VALIDATION_HEADER_AGREEMENT_THRESHOLD: "2",
-	}, relayData, "dapp", "1.2.3.4")
+	protocolMessage := chainlib.NewProtocolMessage(chainMessage, headers, relayData, "dapp", "1.2.3.4")
 	callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	return server.SendParsedRelay(callCtx, nil, protocolMessage)
+}
+
+func loadSuiLookupHits(hits []int64) []int64 {
+	loaded := make([]int64, len(hits))
+	for i := range hits {
+		loaded[i] = atomic.LoadInt64(&hits[i])
+	}
+	return loaded
+}
+
+func sumSuiLookupHits(hits []int64) int64 {
+	var total int64
+	for _, hit := range loadSuiLookupHits(hits) {
+		total += hit
+	}
+	return total
 }

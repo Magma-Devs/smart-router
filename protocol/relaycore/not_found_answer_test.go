@@ -1,6 +1,7 @@
 package relaycore
 
 import (
+	"errors"
 	"net/http"
 	"testing"
 
@@ -97,4 +98,39 @@ func TestClassifyStragglerResponse_NotFoundAnswer(t *testing.T) {
 	fault := graphQLNodeErrorResponse("provider-b", graphQLErrorReply("boom", "INTERNAL_SERVER_ERROR"))
 	outcome, _ = classifyStragglerResponse(fault, consensus, protocolMessage)
 	require.Equal(t, common.CrossValidationStragglerOutcomeNodeError, outcome)
+}
+
+// TestResultsManager_NotFoundTally pins what the policy reads to ask one more provider after a
+// not-found answer (MAG-4909 R23): how many arrived, and how many results of any kind came after
+// the first.
+func TestResultsManager_NotFoundTally(t *testing.T) {
+	protocolMessage := suiLookupProtocolMessage(t)
+	fault := func() *RelayResponse {
+		return graphQLNodeErrorResponse("provider-b", graphQLErrorReply("boom", "INTERNAL_SERVER_ERROR"))
+	}
+	unreachable := func() *RelayResponse {
+		return &RelayResponse{Err: errors.New("connection refused"), RelayResult: common.RelayResult{ProviderInfo: common.ProviderInfo{ProviderAddress: "provider-c"}}}
+	}
+	for _, test := range []struct {
+		name                       string
+		responses                  []func() *RelayResponse
+		wantAnswers, wantAfterNull int
+	}{
+		{"none", []func() *RelayResponse{fault, fault}, 0, 0},
+		{"null first", []func() *RelayResponse{suiNullTransactionResponse}, 1, 0},
+		{"a fault, then null: nothing after it yet", []func() *RelayResponse{fault, suiNullTransactionResponse}, 1, 0},
+		{"null, then null", []func() *RelayResponse{suiNullTransactionResponse, suiNullTransactionResponse}, 2, 1},
+		{"null, then a fault", []func() *RelayResponse{suiNullTransactionResponse, fault}, 1, 1},
+		{"null, then a provider that could not be reached", []func() *RelayResponse{suiNullTransactionResponse, unreachable}, 1, 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			resultsManager := newResultsManager(1, "SUI", false)
+			for _, response := range test.responses {
+				_ = resultsManager.SetResponse(response(), protocolMessage)
+			}
+			answers, afterNull := resultsManager.NotFoundAnswers()
+			require.Equal(t, test.wantAnswers, answers)
+			require.Equal(t, test.wantAfterNull, afterNull)
+		})
+	}
 }

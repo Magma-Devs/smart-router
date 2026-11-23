@@ -46,6 +46,8 @@ type ResultsManager interface {
 	GetBestNodeErrorMessageForUser() RelayError
 	GetBestProtocolErrorMessageForUser() RelayError
 	NodeErrors() (ret []common.RelayResult)
+	// NotFoundAnswers is ResultsSummary.NotFoundAnswers and ResultsAfterNotFound.
+	NotFoundAnswers() (answers, resultsAfter int)
 }
 
 type ResultsManagerInst struct {
@@ -60,6 +62,26 @@ type ResultsManagerInst struct {
 	// provider is asked. A cross-validated read has already asked several, and they agree on the
 	// null as on any other answer, so cross-validation sets it.
 	notFoundIsAnswer bool
+	// notFoundAnswers and resultsAfterNotFound are the policy's not-found tally (see noteResult).
+	notFoundAnswers      int
+	resultsAfterNotFound int
+}
+
+// noteResult counts one recorded result toward the not-found tally: every result after the first
+// not-found answer, and each not-found answer. Called with rp.lock held, once per result recorded.
+func (rp *ResultsManagerInst) noteResult(isNotFoundAnswer bool) {
+	if rp.notFoundAnswers > 0 {
+		rp.resultsAfterNotFound++
+	}
+	if isNotFoundAnswer {
+		rp.notFoundAnswers++
+	}
+}
+
+func (rp *ResultsManagerInst) NotFoundAnswers() (answers, resultsAfter int) {
+	rp.lock.RLock()
+	defer rp.lock.RUnlock()
+	return rp.notFoundAnswers, rp.resultsAfterNotFound
 }
 
 func NewResultsManager(guid uint64, chainID string) ResultsManager {
@@ -97,6 +119,7 @@ func (rp *ResultsManagerInst) setErrorResponse(response *RelayResponse) {
 		utils.Attribute{Key: "providerTrailer", Value: response.RelayResult.ProviderTrailer},
 	)
 	rp.protocolResponseErrors.AddError(RelayError{Err: response.Err, ProviderInfo: response.RelayResult.ProviderInfo, Response: response, RouterError: classified})
+	rp.noteResult(false)
 }
 
 // only when locked
@@ -145,6 +168,7 @@ func (rp *ResultsManagerInst) setValidResponse(response *RelayResponse, protocol
 	// on subscribe results, we just append to successful results instead of parsing results because we already have a validation.
 	if chainlib.IsFunctionTagOfType(protocolMessage, spectypes.FUNCTION_TAG_SUBSCRIBE) {
 		rp.successResults = append(rp.successResults, response.RelayResult)
+		rp.noteResult(false)
 		return nil
 	}
 
@@ -248,9 +272,11 @@ func (rp *ResultsManagerInst) setValidResponse(response *RelayResponse, protocol
 			utils.LogAttr("requestHeaders", reqHeaders),
 		)
 		rp.nodeResponseErrors.AddError(RelayError{Err: err, ProviderInfo: response.RelayResult.ProviderInfo, Response: response, RouterError: nodeClassified, JSONRPCErrorCode: jsonRPCErrorCode, GRPCStatus: grpcStatus})
+		rp.noteResult(response.RelayResult.IsNotFoundAnswer)
 		return err
 	}
 	rp.successResults = append(rp.successResults, response.RelayResult)
+	rp.noteResult(response.RelayResult.IsNotFoundAnswer)
 	return nil
 }
 

@@ -396,8 +396,8 @@ var suiLookupByDigestFields = map[string]bool{
 
 // suiTransactionNotFound is R23 (MAG-4909; MAG-5121 P6): a 2xx reply with no errors in which a
 // transaction or transactionEffects field (under the caller's alias or its name) is null. The
-// provider may only be behind, so another provider is asked; if none holds it, the null is the
-// answer.
+// provider may only be behind, so one more provider is asked; if that one does not hold it
+// either, the null is the answer.
 //
 // data is first decoded into pointers to empty structs: a field that resolved to an object is
 // walked without being kept, so a large transaction costs no copy, and a null leaves its pointer
@@ -413,7 +413,7 @@ func suiTransactionNotFound(request *GraphQLMessage, body []byte) (message strin
 	if len(lookupKeys) == 0 {
 		return "", false
 	}
-	isNull := func(key string) bool { return false }
+	var isNull func(key string) bool
 	var objects struct {
 		Data map[string]*struct{} `json:"data"`
 	}

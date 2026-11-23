@@ -40,8 +40,10 @@ func TestSuiTransactionNotFound(t *testing.T) {
 		{"a null on another field is the answer", suiCheckpointRead, 200, `{"data":{"checkpoint":null}}`, false, effectAnswer},
 		{"a null under the alias of another field is the answer", `{"query":"{ transaction: checkpoint(sequenceNumber: 1) { digest } }"}`, 200, `{"data":{"transaction":null}}`, false, effectAnswer},
 		{"data null with no errors stays a provider fault", lookup, 200, `{"data":null}`, false, effectFault},
-		{"an error beside the null is read by the error rows", lookup, 200,
-			`{"data":{"transaction":null},"errors":[{"message":"boom","path":["transaction"],"extensions":{"code":"INTERNAL_SERVER_ERROR"}}]}`, false, effectFault},
+		{
+			"an error beside the null is read by the error rows", lookup, 200,
+			`{"data":{"transaction":null},"errors":[{"message":"boom","path":["transaction"],"extensions":{"code":"INTERNAL_SERVER_ERROR"}}]}`, false, effectFault,
+		},
 		{"a null under a 5xx is the status's", lookup, 503, `{"data":{"transaction":null}}`, false, effectFault},
 	}
 	for _, test := range tests {

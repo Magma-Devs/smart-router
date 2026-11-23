@@ -662,6 +662,8 @@ func (rp *RelayProcessor) GetResultsSummary() ResultsSummary {
 		}
 	}
 
+	notFoundAnswers, resultsAfterNotFound := rp.NotFoundAnswers()
+
 	return ResultsSummary{
 		SuccessCount:              resultsCount,
 		NodeErrors:                nodeErrors,
@@ -673,6 +675,8 @@ func (rp *RelayProcessor) GetResultsSummary() ResultsSummary {
 		HasPermanentProtocolError: hasPermanentProtocolError,
 		HasEpochMismatch:          hasEpochMismatch,
 		OnlyRateLimited:           onlyRateLimited(nodeErrorResults, protocolErrorResults),
+		NotFoundAnswers:           notFoundAnswers,
+		ResultsAfterNotFound:      resultsAfterNotFound,
 	}
 }
 
@@ -1500,8 +1504,9 @@ func (rp *RelayProcessor) processCrossValidationResult(
 }
 
 // processNonCrossValidationResult handles Stateful and Stateless modes, which share the same result
-// selection: first success, else the first non-retryable node error, else the first node error, else a
-// failure result built from the best node/protocol error. (Stateful fans out without retries and
+// selection: first success, else the first non-retryable node error, else the first not-found answer
+// (served as an answer), else the first node error, else a failure result built from the best
+// node/protocol error. (Stateful fans out without retries and
 // Stateless retries sequentially, but that difference lives in the state machine, not here.)
 func (rp *RelayProcessor) processNonCrossValidationResult(
 	successResults, nodeErrors []common.RelayResult,
