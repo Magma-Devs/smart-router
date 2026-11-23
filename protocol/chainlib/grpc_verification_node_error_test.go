@@ -91,6 +91,15 @@ func TestGrpcVerificationReportsTheNodesRefusal(t *testing.T) {
 		_, err := chainFetcher.FetchLatestBlockNum(ctx)
 		assertNodesRefusal(t, err)
 	})
+	t.Run("block hash", func(t *testing.T) {
+		// GRPCTEST has no block-by-number directive; the head's method stands in for one. The
+		// request parser ignores the unknown field the template fills.
+		blockByNum := *parsing
+		blockByNum.FunctionTag = spectypes.FUNCTION_TAG_GET_BLOCK_BY_NUM
+		blockByNum.FunctionTemplate = `{"height":"%d"}`
+		_, _, err := chainFetcher.fetchSingleBlockHashByNum(ctx, 5, &blockByNum, apiCollection.CollectionData, spectypes.FUNCTION_TAG_GET_BLOCK_BY_NUM.String())
+		assertNodesRefusal(t, err)
+	})
 }
 
 func TestGrpcNodeErrorReply(t *testing.T) {
