@@ -15,10 +15,12 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
+	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/endpointtip"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
+	"github.com/magma-Devs/smart-router/protocol/relayprotocol"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils/rand"
@@ -485,6 +487,63 @@ func TestFailedRelayReply_AStrictPinTheConsistencyGateTurnsAwayKeepsTheRequestHe
 			if tc.write {
 				require.Equal(t, "true", read.header.Get(common.STATEFUL_API_HEADER), "setup: the request must be a write")
 			}
+		})
+	}
+}
+
+// MAG-5076 leaves a cross-validated request out. One that ends before any attempt goes out ran no
+// round, so its reply carries no cross-validation verdict and the router writes no compliance record
+// for it. The header builder would have filed it as a failed round.
+func TestSendParsedRelay_ACrossValidatedRequestThatEndsBeforeDispatchHasNoVerdict_MAG5076(t *testing.T) {
+	if !rand.Initialized() {
+		rand.InitRandomSeed()
+	}
+	records := observeCrossValidationRecords(t)
+	ctx := context.Background()
+	logs, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
+	require.NoError(t, err)
+	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, "ETH1", spectypes.APIInterfaceJsonRPC,
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }), nil, "../../", nil)
+	if closeServer != nil {
+		t.Cleanup(closeServer)
+	}
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		name    string
+		callCtx func() (context.Context, context.CancelFunc)
+		err     error
+	}{
+		{"the caller left", func() (context.Context, context.CancelFunc) {
+			callCtx, cancel := context.WithCancel(ctx)
+			cancel()
+			return callCtx, cancel
+		}, context.Canceled},
+		{"the deadline passed", func() (context.Context, context.CancelFunc) {
+			return context.WithDeadline(ctx, time.Now().Add(-time.Second))
+		}, context.DeadlineExceeded},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hits, server := newPinOverrideServer(t, chainParser, logs, false)
+			body := []byte(`{"jsonrpc":"2.0","method":"eth_getBalance","params":["0x0000000000000000000000000000000000000001","latest"],"id":1}`)
+			chainMessage, err := chainParser.ParseMsg("", body, http.MethodPost, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
+			require.NoError(t, err)
+			relayData := relayprotocol.NewRelayData(ctx, http.MethodPost, "", body, 0, spectypes.LATEST_BLOCK, spectypes.APIInterfaceJsonRPC,
+				chainMessage.GetRPCMessage().GetHeaders(), chainlib.GetAddon(chainMessage), common.GetExtensionNames(chainMessage.GetExtensions()))
+			protocolMessage := chainlib.NewProtocolMessage(chainMessage, map[string]string{
+				common.CROSS_VALIDATION_HEADER_MAX_PARTICIPANTS:    "3",
+				common.CROSS_VALIDATION_HEADER_AGREEMENT_THRESHOLD: "2",
+			}, relayData, "dapp", "1.2.3.4")
+
+			callCtx, cancel := tc.callCtx()
+			defer cancel()
+			result, err := server.SendParsedRelay(callCtx, nil, protocolMessage)
+			require.ErrorIs(t, err, tc.err)
+			require.Equal(t, []int64{0, 0, 0}, loadPinOverrideHits(hits), "setup: no upstream may be asked")
+			for _, metadata := range result.GetReply().GetMetadata() {
+				require.NotEqual(t, common.CROSS_VALIDATION_STATUS_HEADER_NAME, metadata.Name, "a round that never ran has no verdict")
+			}
+			require.Empty(t, records(), "a round that never ran has no compliance record")
 		})
 	}
 }
