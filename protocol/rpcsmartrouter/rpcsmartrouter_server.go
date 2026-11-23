@@ -6030,7 +6030,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 	// served prefers the upstream that accepted the write. A preference, not a pin: selection falls
 	// back on its own when that upstream cannot take the read (GetSessionsOptions.PreferredProvider).
 	// The caller's own directives outrank it, cross-validation needs more than one upstream, and
-	// like the directives it holds for the first attempt only.
+	// it holds for the first attempt only.
 	if selectedProvider == "" && stickiness == "" && selection != relaycore.CrossValidation && usedProviders.BatchNumber() == 0 {
 		if pin := rpcss.readYourWrites.pinFor(protocolMessage); pin != "" {
 			sessionOpts.PreferredProvider = pin
