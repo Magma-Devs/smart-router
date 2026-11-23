@@ -298,15 +298,21 @@ func (r *gatedRetryRig) paired(name string) bool {
 }
 
 // startPass runs an epoch pass in the background; the returned channel closes once it has
-// committed.
-func (r *gatedRetryRig) startPass(t *testing.T) <-chan struct{} {
+// committed. The test's cleanup opens gates, which the pass's probes may wait on, before
+// it waits for the pass to end.
+func (r *gatedRetryRig) startPass(t *testing.T, gates ...*probeGate) <-chan struct{} {
 	t.Helper()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		r.rpsr.updateEpoch(context.Background(), r.rpsr.epochTimer.GetCurrentEpoch())
 	}()
-	t.Cleanup(func() { <-done })
+	t.Cleanup(func() {
+		for _, gate := range gates {
+			gate.open()
+		}
+		<-done
+	})
 	return done
 }
 
@@ -338,7 +344,7 @@ func TestUpdateEpoch_ARetryInFlightWhenThePassStartsCountsOnce(t *testing.T) {
 		_ = gate.wait(ctx)
 		return errors.New("unreachable")
 	})
-	t.Cleanup(func() { retryGate.open(); passGate.open() })
+	t.Cleanup(retryGate.open)
 
 	retried := make(chan struct{})
 	go func() {
@@ -346,7 +352,7 @@ func TestUpdateEpoch_ARetryInFlightWhenThePassStartsCountsOnce(t *testing.T) {
 		rig.retryFlaky(context.Background())
 	}()
 	waitFor(t, retryGate.entered, "the retry to probe flaky")
-	passed := rig.startPass(t)
+	passed := rig.startPass(t, passGate)
 	waitFor(t, passGate.entered, "the epoch pass to probe flaky")
 	retryGate.open()
 	settle(retried)
@@ -376,7 +382,7 @@ func TestUpdateEpoch_AnOutOfPairingRetryInFlightWhenThePassStartsIsDropped(t *te
 	defer swapBootValidate(func(ctx context.Context, p *routersession.RPCStaticProviderEndpoint) error {
 		return retryGate.wait(ctx)
 	})()
-	t.Cleanup(func() { retryGate.open(); passGate.open() })
+	t.Cleanup(retryGate.open)
 	rig.rpsr.providerSessions[rig.chainKey] = map[uint64]*routersession.ConsumerSessionsWithProvider{0: createTestProviderSession("steady", 1)}
 	rig.rpsr.failedStaticProviders[rig.chainKey] = []*routersession.RPCStaticProviderEndpoint{rig.flaky}
 
@@ -387,7 +393,7 @@ func TestUpdateEpoch_AnOutOfPairingRetryInFlightWhenThePassStartsIsDropped(t *te
 			[]*routersession.RPCStaticProviderEndpoint{rig.flaky}, nil, nil, true)
 	}()
 	waitFor(t, retryGate.entered, "the retry to probe flaky")
-	passed := rig.startPass(t)
+	passed := rig.startPass(t, passGate)
 	waitFor(t, passGate.entered, "the epoch pass to probe flaky")
 	retryGate.open()
 	settle(retried)
@@ -471,10 +477,9 @@ func TestUpdateEpoch_AResetPairingWhileThePassProbesLeavesTheWholePairing(t *tes
 		_ = passGate.wait(ctx)
 		return errors.New("unreachable")
 	})
-	t.Cleanup(passGate.open)
 	rig.inputs.demoteFailStreak = map[string]int{retryKey(reverifyTierStatic, "flaky"): 1} // its next failed pass demotes it
 
-	passed := rig.startPass(t)
+	passed := rig.startPass(t, passGate)
 	waitFor(t, passGate.entered, "the epoch pass to probe flaky")
 	reset := make(chan struct{})
 	go func() {
