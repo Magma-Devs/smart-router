@@ -1333,10 +1333,20 @@ func checkMappingsForShadows(t *testing.T, mappings []errorMapping) {
 	}
 }
 
+// unscopedMatcher is the matcher a family-scoped row wraps, or m itself.
+func unscopedMatcher(m ErrorMatcher) ErrorMatcher {
+	if scoped, ok := m.(familyScopedMatcher); ok {
+		return scoped.ErrorMatcher
+	}
+	return m
+}
+
 func checkShadow(t *testing.T, i, j int, a, b errorMapping) {
 	t.Helper()
 	// We can't generically test all possible inputs, but we can check
-	// specific known-ambiguous patterns:
+	// specific known-ambiguous patterns. A family-scoped row is checked by the
+	// matcher it wraps: on its families it shadows, and is shadowed, like any row.
+	a.Matcher, b.Matcher = unscopedMatcher(a.Matcher), unscopedMatcher(b.Matcher)
 
 	// MessageContains shadowing: if a.substring is a substring of b.substring
 	aMsg, aIsMsg := a.Matcher.(messageContainsMatcher)
