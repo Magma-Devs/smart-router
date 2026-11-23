@@ -1,6 +1,8 @@
 package rpcInterfaceMessages
 
 import (
+	"net/http"
+
 	"github.com/magma-Devs/smart-router/protocol/common"
 )
 
@@ -20,7 +22,15 @@ type graphQLChainRows struct {
 	// transactionDigest is the digest of the transaction a write carries, or "" when the request
 	// does not let the chain's formula compute it.
 	transactionDigest func(field *graphQLMutationField) string
+	// notFound reads a read's 2xx reply with no errors (MAG-5121 P6): its message and true when a
+	// chain not-found row matches it, an answer whose record this provider says it does not hold.
+	notFound func(request *GraphQLMessage, body []byte) (message string, notFound bool)
 }
+
+// graphQLNotFoundStatus is the status a not-found verdict stands for in its log line. The verdict
+// names its registry entry itself, NODE_DATA_NOT_HELD (retried on another provider, the endpoint
+// neither blamed nor rewarded).
+const graphQLNotFoundStatus = http.StatusNotFound
 
 // graphQLChainFamilyRows are the chains that have a GraphQL list, keyed by the error registry's
 // families, as jsonrpcChainFamilyRules is for JSON-RPC.
@@ -62,6 +72,29 @@ func (gm *GraphQLMessage) chainReadError(replyError graphQLReplyError) (graphQLV
 		return graphQLVerdict{}, false
 	}
 	return gm.chainRows.readError(gm, replyError)
+}
+
+// chainNotFound reads a read's 2xx reply with no errors through the request's chain not-found rows.
+func (gm *GraphQLMessage) chainNotFound(body []byte) (graphQLVerdict, bool) {
+	if gm == nil || gm.chainRows == nil || gm.chainRows.notFound == nil || gm.IsMutation() {
+		return graphQLVerdict{}, false
+	}
+	message, notFound := gm.chainRows.notFound(gm, body)
+	if !notFound {
+		return graphQLVerdict{}, false
+	}
+	return graphQLVerdict{kind: graphQLVerdictNotFound, status: graphQLNotFoundStatus, message: message, classified: common.RouterErrorNodeDataNotHeld}, true
+}
+
+// ReplyIsNotFound reports whether a read's reply matched a chain not-found row (MAG-5121 P6): an
+// answer that this provider does not hold the record. The relay asks another provider, and if none
+// holds it the client gets this reply as an answer, never cached (common.RelayResult.IsNotFoundAnswer).
+func (gm *GraphQLMessage) ReplyIsNotFound(data []byte, httpStatusCode int) bool {
+	if gm == nil || gm.IsMutation() {
+		return false
+	}
+	verdict, isError := readVerdict(data, httpStatusCode, gm)
+	return isError && verdict.kind == graphQLVerdictNotFound
 }
 
 // hasChainWriteRows reports whether the request is a write on a chain whose list reads write copies.

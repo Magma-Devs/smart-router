@@ -36,6 +36,12 @@ type graphQLVerdictKind int
 
 const (
 	graphQLVerdictAnswer graphQLVerdictKind = iota
+	// graphQLVerdictNotFound is a chain not-found row (MAG-5121 P6): an answer whose record this
+	// provider says it does not hold, such as a null transaction looked up by its digest. It may
+	// only be behind, so one more provider is asked, without blame (MAG-4909 R23); when that one
+	// does not hold it either, the client gets the null as an answer. It comes only from a reply
+	// with no errors, so it is never weighed against another kind.
+	graphQLVerdictNotFound
 	graphQLVerdictCaller
 	graphQLVerdictUnknown
 	graphQLVerdictElsewhere
@@ -372,6 +378,10 @@ func readVerdict(body []byte, httpStatusCode int, request *GraphQLMessage) (verd
 	}
 	if len(reply.errors) == 0 {
 		if is2xx {
+			// P6: the chain's not-found rows first, then the answer.
+			if notFound, isNotFound := request.chainNotFound(body); isNotFound {
+				return notFound, true
+			}
 			return graphQLVerdict{kind: graphQLVerdictAnswer, status: httpStatusCode}, false
 		}
 		// data and no errors under an error status: the status decides.

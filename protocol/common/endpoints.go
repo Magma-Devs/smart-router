@@ -656,6 +656,15 @@ type RelayResult struct {
 	// different tier may serve it — but the endpoint is healthy, so the direct-RPC
 	// availability gate excludes it. Same axis as IsDataScope, one level up.
 	IsNodeCapability bool
+	// IsNotFoundAnswer — the reply is an answer whose record this provider says it does not hold,
+	// sent in a 2xx (a GraphQL chain not-found row, MAG-5121: Sui's null transaction looked up by its
+	// digest). While a request is in flight it is a data-scope node error, so one more provider is
+	// asked (MAG-4909 R23, ResultsSummary.NotFoundAnswers). When that one does not hold the record
+	// either, it is served as an answer: no node-error header, and never cached, since a provider
+	// that holds the record later must be asked again. A cross-validated read has already asked
+	// several providers, so there it is an answer from the start, and counts toward the quorum as
+	// any other reply does.
+	IsNotFoundAnswer bool
 	// IsNodeAtFault — positive evidence the endpoint itself is broken or unable to serve, as
 	// opposed to answering truthfully about a request it cannot satisfy. This is what the
 	// endpoint-health counter reads; see RouterError.EndpointAtFault for why it is not Retryable.

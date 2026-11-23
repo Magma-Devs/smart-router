@@ -154,7 +154,7 @@ func NewRelayProcessor(
 		startedAt:                    time.Now(),
 		crossValidationParams:        crossValidationParams,
 		responses:                    make(chan *RelayResponse, responseBufferSize(selection, crossValidationParams)), // buffered to prevent blocking
-		ResultsManager:               NewResultsManager(guid, chainID),
+		ResultsManager:               newResultsManager(guid, chainID, selection == CrossValidation),
 		guid:                         guid,
 		debugRelay:                   relayStateMachine.GetDebugState(),
 		metricsInf:                   metricsInf,
@@ -662,6 +662,8 @@ func (rp *RelayProcessor) GetResultsSummary() ResultsSummary {
 		}
 	}
 
+	notFoundAnswers, resultsAfterNotFound := rp.NotFoundAnswers()
+
 	return ResultsSummary{
 		SuccessCount:              resultsCount,
 		NodeErrors:                nodeErrors,
@@ -673,6 +675,8 @@ func (rp *RelayProcessor) GetResultsSummary() ResultsSummary {
 		HasPermanentProtocolError: hasPermanentProtocolError,
 		HasEpochMismatch:          hasEpochMismatch,
 		OnlyRateLimited:           onlyRateLimited(nodeErrorResults, protocolErrorResults),
+		NotFoundAnswers:           notFoundAnswers,
+		ResultsAfterNotFound:      resultsAfterNotFound,
 	}
 }
 
@@ -1069,7 +1073,8 @@ func classifyStragglerResponse(response *RelayResponse, consensusHash [32]byte, 
 		return common.CrossValidationStragglerOutcomeProtocolError, [32]byte{}
 	}
 	if protocolMessage != nil {
-		if foundError, _ := protocolMessage.CheckResponseError(reply.Data, response.RelayResult.StatusCode); foundError {
+		// A not-found answer is an answer under cross-validation, as at quorum time (notFoundIsAnswer).
+		if foundError, _ := protocolMessage.CheckResponseError(reply.Data, response.RelayResult.StatusCode); foundError && !response.RelayResult.IsNotFoundAnswer {
 			return common.CrossValidationStragglerOutcomeNodeError, [32]byte{}
 		}
 	}
@@ -1499,8 +1504,9 @@ func (rp *RelayProcessor) processCrossValidationResult(
 }
 
 // processNonCrossValidationResult handles Stateful and Stateless modes, which share the same result
-// selection: first success, else the first non-retryable node error, else the first node error, else a
-// failure result built from the best node/protocol error. (Stateful fans out without retries and
+// selection: first success, else the first non-retryable node error, else the first not-found answer
+// (served as an answer), else the first node error, else a failure result built from the best
+// node/protocol error. (Stateful fans out without retries and
 // Stateless retries sequentially, but that difference lives in the state machine, not here.)
 func (rp *RelayProcessor) processNonCrossValidationResult(
 	successResults, nodeErrors []common.RelayResult,
@@ -1521,6 +1527,17 @@ func (rp *RelayProcessor) processNonCrossValidationResult(
 		for i := range nodeErrors {
 			if nodeErrors[i].IsNonRetryable {
 				result := nodeErrors[i]
+				return &result, nil
+			}
+		}
+		// No provider held the record, and one answered that it does not (MAG-5121 P6): that
+		// answer is the reply, as an answer (no node-error header), and it is never cached
+		// (IsNotFoundAnswer). It beats a fault or a refusal from another provider: those are claims
+		// about the provider, this one is about the record.
+		for i := range nodeErrors {
+			if nodeErrors[i].IsNotFoundAnswer {
+				result := nodeErrors[i]
+				result.IsNodeError = false
 				return &result, nil
 			}
 		}

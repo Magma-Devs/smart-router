@@ -16,6 +16,7 @@ var suiGraphQLRows = graphQLChainRows{
 	writeField:        suiExecuteTransactionField,
 	writeCopy:         suiWriteCopy,
 	transactionDigest: suiTransactionDigest,
+	notFound:          suiTransactionNotFound,
 }
 
 // suiExecuteTransactionField is Sui's write, the one mutation its GraphQL server has
@@ -383,4 +384,60 @@ func containsAnyEntry(entries []string, substring string) bool {
 		}
 	}
 	return false
+}
+
+// suiLookupByDigestFields are the reads R23 covers: a transaction looked up by its digest. Sui
+// answers null for one it does not hold, which on a provider that is behind or pruned reads "never
+// ran", and a client that believes it signs again.
+var suiLookupByDigestFields = map[string]bool{
+	"transaction":        true,
+	"transactionEffects": true,
+}
+
+// suiTransactionNotFound is R23 (MAG-4909; MAG-5121 P6): a 2xx reply with no errors in which a
+// transaction or transactionEffects field (under the caller's alias or its name) is null. The
+// provider may only be behind, so one more provider is asked; if that one does not hold it
+// either, the null is the answer.
+//
+// data is first decoded into pointers to empty structs: a field that resolved to an object is
+// walked without being kept, so a large transaction costs no copy, and a null leaves its pointer
+// nil. A query that also selects a root field of another shape (a scalar beside the lookup) does
+// not fit, and data is read again keeping each field raw.
+func suiTransactionNotFound(request *GraphQLMessage, body []byte) (message string, notFound bool) {
+	var lookupKeys []string
+	for _, rootField := range request.RootFields {
+		if suiLookupByDigestFields[rootField.Name] {
+			lookupKeys = append(lookupKeys, rootField.ResponseKey)
+		}
+	}
+	if len(lookupKeys) == 0 {
+		return "", false
+	}
+	var isNull func(key string) bool
+	var objects struct {
+		Data map[string]*struct{} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &objects); err == nil {
+		isNull = func(key string) bool {
+			value, present := objects.Data[key]
+			return present && value == nil
+		}
+	} else {
+		var raw struct {
+			Data map[string]json.RawMessage `json:"data"`
+		}
+		if err := json.Unmarshal(body, &raw); err != nil {
+			return "", false
+		}
+		isNull = func(key string) bool {
+			value, present := raw.Data[key]
+			return present && strings.TrimSpace(string(value)) == "null"
+		}
+	}
+	for _, key := range lookupKeys {
+		if isNull(key) {
+			return "Sui: " + key + " is null: this provider does not hold the transaction (R23)", true
+		}
+	}
+	return "", false
 }
