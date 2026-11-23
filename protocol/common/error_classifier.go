@@ -213,6 +213,26 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 		{CodeAndMessage(-32600, "unsupported method"), RouterErrorNodeMethodNotSupported},
 		{CodeEquals(-32600), RouterErrorUserInvalidRequest},
 		{CodeEquals(-32602), RouterErrorUserInvalidParams},
+		// CometBFT's -32603 "Internal error", by the reason in its data (MAG-5325; cometbft v0.38
+		// mempool/errors.go, rpc/core). None is the endpoint failing: the transaction is a
+		// duplicate, too big, or met a full mempool; the height or transaction is outside what
+		// this node holds, and another node may hold it; or the transaction passed CheckTx and was
+		// not committed within the node's timeout, which says nothing of the node and leaves the
+		// transaction able to land (NODE_ABORTED, as Sui's answer of the same kind). Any other
+		// data stays NODE_INTERNAL_ERROR below.
+		{cometBFTInternalError(`tx already exists in cache`), RouterErrorChainTxAlreadyKnown},
+		{cometBFTInternalError(`mempool is (?:full|still rechecking)`), RouterErrorChainMempoolFull},
+		{cometBFTInternalError(`Tx too large\. Max size is`), RouterErrorChainTxTooLarge},
+		{cometBFTInternalError(`height \d+ is not available, lowest height is`), RouterErrorChainStatePruned},
+		{cometBFTInternalError(`height \d+ must be less than or equal to the current blockchain height`), RouterErrorChainBlockNotFound},
+		{cometBFTInternalError(`tx \([0-9A-Fa-f]*\) not found`), RouterErrorChainTxNotFound},
+		{cometBFTInternalError(`timed out waiting for tx to be included in a block`), RouterErrorNodeAborted},
+		// A batch is classified with its HTTP status for a code, so the -32603 row below never
+		// reaches an element. This gives an element's internal error with data the verdict that
+		// row gives it alone, and keeps the data from the message rows after it. Anchored on an
+		// element's start, so a 4xx's status pass ("HTTP 413: ...") still reaches its status row;
+		// a single reply's negative JSON-RPC code skips it (batchElementInternalError).
+		{batchElementInternalError(), RouterErrorNodeInternalError},
 		{CodeEquals(-32603), RouterErrorNodeInternalError},
 
 		// EIP-1474 server error codes

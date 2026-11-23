@@ -68,7 +68,9 @@ func ExtractNodeErrorDetails(nodeError error) (errorCode int, errorMessage strin
 	// 1. HTTP-wrapped JSON-RPC body — the richest source, check first.
 	if jsonMsg := TryRecoverNodeErrorFromClientError(nodeError); jsonMsg != nil && jsonMsg.Error != nil {
 		if jsonMsg.Error.Message != "" {
-			errorMessage = jsonMsg.Error.Message
+			// With an internal error's data, as the reply's reader reads it inside a 2xx:
+			// CometBFT answers a GET URI request's failure with HTTP 500 and the same body (MAG-5325).
+			errorMessage = common.JSONRPCErrorText(jsonMsg.Error.Code, jsonMsg.Error.Message, jsonMsg.Error.Data)
 		}
 		// When the wrapping HTTPError carries a non-2xx status, prepend it
 		// so HTTPStatusContains(N) can fire. CodeEquals matchers run before
