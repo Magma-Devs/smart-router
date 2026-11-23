@@ -69,31 +69,22 @@ linters:
       - path: _test\.go
         linters:
           - dupl
-      # dupl baseline: the production copies dupl still reports. Each rule names its copies by the file
-      # they are in, the twin's file when that is another one (text), and the line each copy starts on
-      # (source), so any other copy is reported, inside these files too. Delete a rule when its copies
-      # go; an edit that moves a copy's first line makes dupl report it again. Generated files
-      # (chainlib_mock.go) need no rule: golangci-lint skips them.
+      # dupl baseline: the production copies dupl still reports. Generated files (chainlib_mock.go)
+      # need no rule: golangci-lint skips them.
       #
       # The gRPC service glue is hand-written in protoc-gen-go-grpc's shape: every handler is the same
-      # code over its own request type.
+      # code over its own request type. The rule names the file and the line each copy starts on
+      # (source), so a copy that is not a handler is still reported; delete it when the handlers go.
       - path: types/relay/grpc_service\.go
         linters:
           - dupl
         source: '^func _\w+_Handler\('
       # The JSON-RPC and Tendermint ParseMsg batch walks share an element's requested-block block and
       # the batch's combined-api block. They stay two until the parse directive a one-element batch
-      # gets is decided; see the comment above each walk.
-      - path: protocol/chainlib/jsonRPC\.go
-        linters:
-          - dupl
-        text: 'protocol/chainlib/tendermintRPC\.go:'
-        source: '^\s+if (overwriteReqBlock == ""|idx == 0) \{$'
-      - path: protocol/chainlib/tendermintRPC\.go
-        linters:
-          - dupl
-        text: 'protocol/chainlib/jsonRPC\.go:'
-        source: '^\s+if (overwriteReqBlock == ""|idx == 0) \{$'
+      # gets is decided, and each of the four blocks carries a //nolint:dupl on its first line rather
+      # than a rule here: a rule can only anchor on a line's text, and `if idx == 0 {` would hide a
+      # new pair across the two files that starts the same way. nolintlint (allow-unused: false)
+      # reports each directive once its copies go.
       - linters:
           - gocritic
         text: "singleCaseSwitch"
