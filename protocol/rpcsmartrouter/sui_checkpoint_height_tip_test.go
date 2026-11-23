@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
@@ -18,6 +19,9 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/endpointstate"
 	"github.com/magma-Devs/smart-router/protocol/endpointtip"
+	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
+	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
@@ -315,4 +319,80 @@ func TestRelayInnerDirect_SuiStampReachesTheHarvest(t *testing.T) {
 	// What sendRelayToDirectEndpoints does with a served relay.
 	h.rpcss.harvestAndUpdateTipFromRelay(h.ep, msg, relayResult.Reply, relayResult.NodeLatestBlock, h.gen, "sui-provider")
 	require.Equal(t, int64(346725123), h.tip())
+}
+
+// The same through the router's own relay path, end to end: an object read comes in through the
+// gRPC listener and goes to a node that stamps its reply, and the harvest in
+// sendRelayToDirectEndpoints takes the stamp. The tests above call the harvest themselves, so
+// without this one the call that hands it the stamp could pass nothing and every test would pass.
+func TestSuiStampReachesTheProvidersLatestBlockThroughTheListener(t *testing.T) {
+	if !rand.Initialized() {
+		rand.InitRandomSeed()
+	}
+	endpointtip.Default().Reset()
+	t.Cleanup(endpointtip.Default().Reset)
+	node := startSuiStampingNode(t, metadata.Pairs("x-sui-checkpoint-height", "346725123"), func(string) ([]byte, error) {
+		return []byte{0x08, 0x01}, nil
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	parser := newSuiGRPCTipParser(t)
+	monitor := endpointstate.NewEndpointMonitor(ctx, endpointstate.EndpointChainTrackerConfig{
+		ChainParser:      parser,
+		ChainID:          "SUI",
+		ApiInterface:     spectypes.APIInterfaceGrpc,
+		AverageBlockTime: 222 * time.Millisecond,
+		BlocksToSave:     1,
+	})
+	t.Cleanup(monitor.Stop)
+
+	nodeUrl := common.NodeUrl{Url: "grpc://" + node, GrpcConfig: common.GrpcConfig{AllowInsecure: true, ReflectionTimeout: time.Second}}
+	connection, err := routersession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = connection.Close() })
+	rpcEndpoint := &routersession.RPCEndpoint{ChainID: "SUI", ApiInterface: spectypes.APIInterfaceGrpc}
+	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "SUI")
+	csm := routersession.NewConsumerSessionManager(rpcEndpoint, optimizer, nil, "test-router", routersession.NewActiveSubscriptionProvidersStorage())
+	provider := routersession.NewConsumerSessionWithProvider("sui-provider", []*routersession.Endpoint{{NetworkAddress: nodeUrl.Url, Enabled: true, DirectConnections: []routersession.DirectRPCConnection{connection}}}, 100000, 1, 1)
+	provider.StaticProvider = true
+	require.NoError(t, csm.UpdateAllProviders(1, map[uint64]*routersession.ConsumerSessionsWithProvider{0: provider}, map[uint64]*routersession.ConsumerSessionsWithProvider{}))
+	csm.SetConfiguredProviderNames([]string{"sui-provider"})
+	logs, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
+	require.NoError(t, err)
+	server := &RPCSmartRouterServer{
+		listenEndpoint:              rpcEndpoint,
+		chainParser:                 parser,
+		consistencyConfig:           relaycore.DefaultConsistencyValidationConfig(),
+		sessionManager:              csm,
+		rpcSmartRouterLogs:          logs,
+		endpointChainTrackerManager: monitor,
+	}
+
+	listenEndpoint := &routersession.RPCEndpoint{NetworkAddress: "127.0.0.1:0", ChainID: "SUI", ApiInterface: spectypes.APIInterfaceGrpc}
+	listener := chainlib.NewGrpcChainListener(ctx, listenEndpoint, server, healthyReporter{}, logs, parser)
+	listenerDone := make(chan struct{})
+	go func() {
+		defer close(listenerDone)
+		listener.Serve(ctx, common.ConsumerCmdFlags{})
+	}()
+	t.Cleanup(func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer shutdownCancel()
+		_ = listener.Shutdown(shutdownCtx)
+		<-listenerDone
+	})
+	require.Eventually(t, func() bool { return listener.GetListeningAddress() != "" }, 3*time.Second, 20*time.Millisecond)
+	client, err := grpc.NewClient(listener.GetListeningAddress(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = client.Close() })
+
+	callCtx, callCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer callCancel()
+	var reply []byte
+	require.NoError(t, client.Invoke(callCtx, "/"+suiGetObject, []byte{0x0a, 0x01, 0x61}, &reply, grpc.ForceCodec(stalledReflectionCodec{})))
+	require.Equal(t, []byte{0x08, 0x01}, reply)
+
+	tipKey := endpointtip.Key("SUI", spectypes.APIInterfaceGrpc, nodeUrl.Url)
+	require.Eventually(t, func() bool { return endpointtip.Default().Block(tipKey) == 346725123 }, 5*time.Second, 20*time.Millisecond,
+		"an object read served through the router moves the provider's latest block to the stamp")
 }
