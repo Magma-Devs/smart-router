@@ -72,3 +72,26 @@ func TestFormatLongString_CutsOnRuneBoundaries(t *testing.T) {
 	binary := "a" + strings.Repeat("\x80", 299)
 	require.Equal(t, binary[:134]+marker+binary[234:], utils.FormatLongString(binary, 200))
 }
+
+// CutMiddle is exported, so it cannot rely on its two callers' length checks: a msg the cut would
+// not shorten comes back whole, where the cut used to index past it and panic in a log call.
+func TestCutMiddle_KeepsAMsgTheCutWouldNotShorten(t *testing.T) {
+	for _, tc := range []struct {
+		msg        string
+		head, tail int
+		want       string
+	}{
+		{"abcdef", 2, 2, "ab~ef"},
+		{"abcdef", 0, 0, "~"},
+		{"abcdef", 3, 3, "abcdef"},
+		{"abc", 5, 5, "abc"},
+		{"abcdef", 6, 0, "abcdef"},
+		{"abcdef", 2, 7, "abcdef"},
+		{"abcdef", -1, 2, "abcdef"},
+		{"abcdef", 2, -1, "abcdef"},
+		{"", 0, 0, ""},
+	} {
+		require.NotPanics(t, func() { _ = utils.CutMiddle(tc.msg, tc.head, tc.tail, "~") }, "%q %d %d", tc.msg, tc.head, tc.tail)
+		require.Equal(t, tc.want, utils.CutMiddle(tc.msg, tc.head, tc.tail, "~"), "%q %d %d", tc.msg, tc.head, tc.tail)
+	}
+}

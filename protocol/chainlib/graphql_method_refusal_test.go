@@ -15,12 +15,12 @@ import (
 // TestGraphQLListener_AMethodOtherThanPostIsRefused is MAG-4524's GraphQL part, the GraphQL chapter's
 // method check (case T1): a GET, a PUT, a PATCH, a DELETE or a HEAD, at any path but the health
 // path, gets 405 with Allow: POST and the router's own reply, one GraphQL error with the code
-// REQUEST_REFUSED, its guid in extensions and in Lava-Guid. No provider is asked. A HEAD gets the
+// REQUEST_REFUSED, its guid in extensions and in Router-Guid. No provider is asked. A HEAD gets the
 // status and the headers, since its reply has no body.
 //
 // The router used to answer a DELETE with 204 and an empty body, before any route ran, and did
 // nothing, so a client bug read as success. A GET, a PUT and a PATCH got 405 with a body that holds
-// no errors list, no Allow and no Lava-Guid. OPTIONS keeps its 204, the health path its health
+// no errors list, no Allow and no Router-Guid. OPTIONS keeps its 204, the health path its health
 // check, and a POST is served at any path.
 func TestGraphQLListener_AMethodOtherThanPostIsRefused(t *testing.T) {
 	relay := &parsingRelay{}
@@ -40,7 +40,7 @@ func TestGraphQLListener_AMethodOtherThanPostIsRefused(t *testing.T) {
 				require.Equal(t, http.StatusMethodNotAllowed, reply.status, "body: %s", reply.body)
 				require.Equal(t, http.MethodPost, reply.header.Get(fiber.HeaderAllow), "the reply names the one method that is served")
 				guid := reply.header.Get(common.GUID_HEADER_NAME)
-				require.NotEmpty(t, guid, "the reply carries its request id in Lava-Guid")
+				require.NotEmpty(t, guid, "the reply carries its request id in Router-Guid")
 				require.Equal(t, relayed, relay.relayed, "a refused method reaches no provider")
 				if method == http.MethodHead {
 					require.Empty(t, reply.body, "a HEAD reply has no body")
@@ -49,7 +49,7 @@ func TestGraphQLListener_AMethodOtherThanPostIsRefused(t *testing.T) {
 				require.Equal(t, fiber.MIMEApplicationJSONCharsetUTF8, reply.header.Get(fiber.HeaderContentType))
 				entry := requireGraphQLErrorEntry(t, reply.body)
 				require.Equal(t, rpcInterfaceMessages.GraphQLRequestRefusedCode, entry.Extensions["code"], "body: %s", reply.body)
-				require.Equal(t, guid, entry.Extensions["guid"], "Lava-Guid equals extensions.guid")
+				require.Equal(t, guid, entry.Extensions["guid"], "Router-Guid equals extensions.guid")
 			})
 		}
 	}
