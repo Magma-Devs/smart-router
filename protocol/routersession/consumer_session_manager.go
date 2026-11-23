@@ -821,6 +821,59 @@ func (csm *ConsumerSessionManager) GetAllDirectRPCEndpoints() []*EndpointWithDir
 	return results
 }
 
+// URLLendRank ranks url the way relay selection ranks a url on its last chance (lendRankLocked):
+// 0 in rotation, 1 switched on but held by a state reason (head-stalled: the node answers, a block
+// behind), 2 switched off after repeated failures. One url can back several endpoints in the pairing
+// and the backup list (the chart writes an archive node-url twice), and the url takes the best rank
+// among them. A url with no endpoint here ranks 0: nothing is known against it.
+//
+// A websocket url never takes a relay (Endpoint.ServesDirectRelays), so nothing ever switches it off
+// or holds it head-stalled. It takes its provider's rank instead, the best rank among the provider's
+// urls that can take a relay, and so reads out of rotation exactly when the provider does
+// (ConsumerSessionsWithProvider.inRotation). A provider with no such url is judged by its own urls.
+//
+// The subscription managers pick from their own url lists and read this to place a new subscription
+// on a url in rotation while one is left (MAG-4161).
+func (csm *ConsumerSessionManager) URLLendRank(url string) int {
+	csm.lock.RLock()
+	defer csm.lock.RUnlock()
+
+	rank, found := 0, false
+	for _, providers := range []map[string]*ConsumerSessionsWithProvider{csm.pairing, csm.backupProviders} {
+		for _, cswp := range providers {
+			for _, endpoint := range cswp.Endpoints {
+				if endpoint.NetworkAddress != url {
+					continue
+				}
+				endpointRank := endpoint.lendRank()
+				if !endpoint.ServesDirectRelays() {
+					if providerRank, relayCapable := relayLendRank(cswp.Endpoints); relayCapable {
+						endpointRank = providerRank
+					}
+				}
+				if !found || endpointRank < rank {
+					rank, found = endpointRank, true
+				}
+			}
+		}
+	}
+	return rank
+}
+
+// relayLendRank is the best lend rank among the endpoints that can take a relay, and whether there is
+// one.
+func relayLendRank(endpoints []*Endpoint) (rank int, relayCapable bool) {
+	for _, endpoint := range endpoints {
+		if !endpoint.ServesDirectRelays() {
+			continue
+		}
+		if endpointRank := endpoint.lendRank(); !relayCapable || endpointRank < rank {
+			rank, relayCapable = endpointRank, true
+		}
+	}
+	return rank, relayCapable
+}
+
 func (csm *ConsumerSessionManager) RemoveAddonAddresses(addon string, extensions []string) {
 	if addon == "" && len(extensions) == 0 {
 		// purge all

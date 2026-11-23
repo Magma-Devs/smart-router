@@ -19,8 +19,8 @@ package rpcsmartrouter
 // event-shaped. Counts are derivable from events; the reverse is not.
 //
 // Recording is DEBUG-MODE ONLY. The ring is installed by enableCrossValidationEventRing, called
-// from Start alongside utils.EnableDebugLogBuffer when --debug-address is set, so a production
-// router pays one atomic nil load per dissent and stores nothing.
+// from enableDebugRecorders when --debug-address is set, so a production router pays one atomic nil
+// load per dissent and stores nothing.
 
 import (
 	"context"
@@ -113,8 +113,8 @@ type crossValidationEventRing struct {
 var crossValidationEventRecorder atomic.Pointer[crossValidationEventRing]
 
 // enableCrossValidationEventRing installs a fresh ring. Debug-mode only — called from
-// rpcsmartrouter.Start when --debug-address is set, next to utils.EnableDebugLogBuffer, so the two
-// debug-only stores are switched on by the same condition in the same place.
+// enableDebugRecorders when --debug-address is set, with the other debug-only stores, so they are
+// switched on by the same condition in the same place.
 func enableCrossValidationEventRing(capacity int) {
 	if capacity <= 0 {
 		capacity = crossValidationEventRingCapacity

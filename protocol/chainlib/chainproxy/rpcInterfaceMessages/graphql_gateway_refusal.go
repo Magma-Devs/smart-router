@@ -9,8 +9,10 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/common"
 )
 
-// graphQLGatewayRefusalStatus is the status a GraphQL reply outside 2xx classifies under. It is the
-// reply's own status, with one exception (MAG-4379): a JSON-RPC error envelope under a status the
+// graphQLGatewayRefusalStatus is the status a GraphQL write's reply outside 2xx classifies under by
+// the shared REST rows. A read no longer comes here: GraphQL's own status table files it, where a
+// 4xx it does not name is already "another provider may serve it" (MAG-5121). It is the reply's own
+// status, with one exception (MAG-4379): a JSON-RPC error envelope under a status the
 // registry files as the caller's malformed request is the gateway in front of the node refusing the
 // route, and classifies as a 405, the route-refusal row (NODE_METHOD_NOT_ALLOWED: retried on another
 // provider, the endpoint not blamed).

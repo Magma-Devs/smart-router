@@ -23,7 +23,6 @@ func newSmartRouterForURLFanoutTest() *SmartRouterMetricsManager {
 		endpointFetchLatestFails:   prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_endpoint_fetch_latest_fails"}, endpointLabels),
 		endpointFetchBlockSuccess:  prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_endpoint_fetch_block_success"}, endpointLabels),
 		endpointFetchBlockFails:    prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_endpoint_fetch_block_fails"}, endpointLabels),
-		endpointOverallHealth:      prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "t_sr_endpoint_overall_health"}, endpointLabels),
 		urlToProviderNames:         make(map[string][]string),
 	}
 }
