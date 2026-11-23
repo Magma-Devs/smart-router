@@ -935,7 +935,8 @@ func DetectConnectionError(err error) *RouterError {
 // dial disable its endpoint as `unreachable`, as a refused JSON-RPC dial does, rather than as
 // `node-error` through the registry's row for a node-sent UNAVAILABLE.
 type GRPCCallUndeliveredError struct {
-	// Err is the status grpc-go returned, kept for logs and for the text rows above.
+	// Err is the status grpc-go returned, or the error that kept the connection from being set
+	// up, kept for logs and for the text rows above.
 	Err error
 }
 

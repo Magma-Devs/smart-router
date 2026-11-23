@@ -3,6 +3,7 @@ package routersession
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"regexp"
 	"strings"
@@ -265,4 +266,52 @@ func TestSendRequest_NodeSentUnavailableIsAnswered(t *testing.T) {
 	var statusErr *GRPCStatusError
 	require.ErrorAs(t, err, &statusErr)
 	require.Equal(t, "node is overloaded", statusErr.Message)
+}
+
+// A call whose connection to the node could not be set up at all (a node that is down when the
+// first request arrives) opened no stream, so no node saw it. It is undelivered: another provider
+// is asked, the client gets the router's no-answer status, and a write it carried was not sent.
+// It used to be an error no row names, and the client got its text.
+func TestSendRequest_ConnectionThatCannotBeSetUpIsUndelivered(t *testing.T) {
+	newConn := func(t *testing.T, setUpErr error) *GRPCDirectRPCConnection {
+		t.Helper()
+		conn, err := NewDirectRPCConnection(context.Background(), common.NodeUrl{Url: "grpc://10.0.0.7:9090", GrpcConfig: common.GrpcConfig{AllowInsecure: true}}, 5, "")
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = conn.Close() })
+		grpcConn, ok := conn.(*GRPCDirectRPCConnection)
+		require.True(t, ok)
+		grpcConn.newConnector = func(context.Context, context.Context, uint, common.NodeUrl) (grpcConnectorInterface, error) {
+			return nil, setUpErr
+		}
+		return grpcConn
+	}
+	send := func(g *GRPCDirectRPCConnection) (*DirectRPCResponse, error) {
+		return g.SendRequest(context.Background(), []byte{0x08, 0x01}, map[string]string{GRPCMethodHeader: "test.v1.Node/Call"})
+	}
+
+	t.Run("a node that cannot be reached", func(t *testing.T) {
+		resp, err := send(newConn(t, errors.New("grpc failed to create the first connection ErrMsg: Reached maximum number of parallel connections attempts {address:10.0.0.7:9090}")))
+		require.Nil(t, resp)
+		var undelivered *common.GRPCCallUndeliveredError
+		require.ErrorAs(t, err, &undelivered)
+		routerErr := common.DetectConnectionError(err)
+		require.Equal(t, common.RouterErrorProviderUnavailable, routerErr)
+		require.True(t, routerErr.Retryable, "another provider is asked")
+		require.False(t, routerErr.MayHaveReachedNode, "no stream was opened, so a write it carried was not sent")
+	})
+
+	t.Run("the request's own deadline still reads as a timeout", func(t *testing.T) {
+		_, err := send(newConn(t, fmt.Errorf("grpc failed to create the first connection: %w", context.DeadlineExceeded)))
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+		require.Equal(t, common.RouterErrorContextDeadline, common.DetectConnectionError(err))
+	})
+
+	t.Run("a connection the router closed keeps its own error", func(t *testing.T) {
+		g := newConn(t, errors.New("not reached"))
+		require.NoError(t, g.Close())
+		_, err := send(g)
+		require.ErrorIs(t, err, ErrGRPCConnectionClosed)
+		var undelivered *common.GRPCCallUndeliveredError
+		require.False(t, errors.As(err, &undelivered))
+	})
 }

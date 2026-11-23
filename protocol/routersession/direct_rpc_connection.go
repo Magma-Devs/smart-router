@@ -1152,9 +1152,16 @@ func (g *GRPCDirectRPCConnection) SendRequest(
 		return nil, fmt.Errorf("gRPC method path not provided in headers (expected %s header)", GRPCMethodHeader)
 	}
 
-	// Lazy initialization on first request
+	// Lazy initialization on first request. A connection that could not be set up opened no
+	// stream, so no node saw the call: it is undelivered, as a refused dial on a pooled
+	// connection is (MAG-5130). Unwrapped it was an error no row names, so the client got its
+	// text instead of the router's no-answer status. A connection this router closed keeps its
+	// own error.
 	if err := g.ensureInitialized(ctx); err != nil {
-		return nil, err
+		if errors.Is(err, ErrGRPCConnectionClosed) {
+			return nil, err
+		}
+		return nil, &common.GRPCCallUndeliveredError{Err: err}
 	}
 
 	// Hold connMu in read mode across the whole checkout, not just the field read.
