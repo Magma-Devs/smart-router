@@ -90,3 +90,38 @@ func TestUnknownProviderTypesVariantsDecode(t *testing.T) {
 		}
 	}
 }
+
+// The finality field declaration (MAG-5339) is optional: a spec that sets it decodes with both
+// halves, a spec that does not decodes with none, and half a declaration reads as none.
+func TestSpecFinalityFieldDecode(t *testing.T) {
+	for _, tc := range []struct {
+		name, raw        string
+		path, finalValue string
+	}{
+		{"declared", `{"index":"XRP","block_distance_for_finalized_data":4,"finality_field_path":"result.validated","finality_field_final_value":"true"}`, "result.validated", "true"},
+		{"not declared", `{"index":"ETH1","block_distance_for_finalized_data":8}`, "", ""},
+		{"path only", `{"index":"X","finality_field_path":"result.validated"}`, "", ""},
+		{"value only", `{"index":"X","finality_field_final_value":"true"}`, "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var s Spec
+			if err := json.Unmarshal([]byte(tc.raw), &s); err != nil {
+				t.Fatalf("spec must decode, got: %v", err)
+			}
+			path, finalValue := s.FinalityField()
+			if path != tc.path || finalValue != tc.finalValue {
+				t.Fatalf("FinalityField() = %q, %q, want %q, %q", path, finalValue, tc.path, tc.finalValue)
+			}
+		})
+	}
+	// The value is a JSON string in the spec file. A bare boolean is a spec that does not load,
+	// which the comment on Spec.FinalityFieldFinalValue tells a spec author.
+	var bare Spec
+	if err := json.Unmarshal([]byte(`{"index":"X","finality_field_path":"result.validated","finality_field_final_value":true}`), &bare); err == nil {
+		t.Fatal("a bare boolean final value must not decode")
+	}
+	var none *Spec
+	if path, finalValue := none.FinalityField(); path != "" || finalValue != "" {
+		t.Fatalf("a nil spec declares nothing, got %q, %q", path, finalValue)
+	}
+}

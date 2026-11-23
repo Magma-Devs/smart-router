@@ -146,6 +146,9 @@ type RPCSmartRouterServer struct {
 	// headStall is the head-stalled step's state (MAG-3986): which urls hold head-stalled, read by
 	// onTipObservation on every tip vote, and which stuck endpoints never-empty is keeping.
 	headStall headStallState
+	// urlOutSeen is what the probe loop's last cycle saw of the urls out of rotation (MAG-5244,
+	// url_out_of_rotation.go). Touched only by the probe loop.
+	urlOutSeen urlOutSeen
 
 	// Cached API names of the two tip-defining spec methods (GET_BLOCKNUM / GET_BLOCK_BY_NUM), resolved
 	// once on the first relay via tipApiNamesOnce. tipBlockFromRelay runs on every successful relay;
@@ -4154,7 +4157,7 @@ func (rpcss *RPCSmartRouterServer) runProbeCycle(appender probeQoSAppender, cfg 
 	stallPaused := rpcss.headStallPaused(startedAt)
 	rpcss.publishChainIdle(startedAt)
 	scored, reEnabled, syncOmitted := runProbeCycleCore(
-		endpoints,
+		probeScoredEndpoints(endpoints, rpcss.endpointChainTrackerManager.IsUntrackedByDesign),
 		rpcss.endpointChainTrackerManager.GetObservation,
 		baseline, hasBaseline, syncRef, startedAt, cfg, probeAppenderUnlessIdle(appender, feedPaused),
 		rpcss.sessionManager.RestoreRecoveredProvider,
@@ -4164,7 +4167,43 @@ func (rpcss *RPCSmartRouterServer) runProbeCycle(appender probeQoSAppender, cfg 
 	if !stallPaused {
 		rpcss.runHeadStall(endpoints, startedAt)
 	}
+	// MAG-5244: last, so the per-url gauge shows what the re-enable pass and the head-stall step left.
+	rpcss.publishURLsOutOfRotation(endpoints)
 	rpcss.probeStats.recordCycle(startedAt, time.Since(startedAt), scored, reEnabled, syncOmitted, feedPaused, stallPaused)
+}
+
+// probeScoredEndpoints is the endpoint list the probe cycle judges: all of them except the urls
+// held as not tracked by design (MAG-5349). The probe judges a url by its block polls, and such
+// a url has none, ever, so every cycle would read it as "not alive" and feed its provider
+// availability 0 (or drag a provider that also has tracked urls down by its share). Left out, it
+// counts as neither healthy nor unhealthy — the same treatment a rate-limited url gets — and a
+// provider with no other url sends no probe sample; its score then comes from its relays alone.
+//
+// Nothing is lost on the re-enable side: the probe re-enables only on a successful poll, which
+// this url cannot have. A disabled one returns through the reconnect routine, as before.
+//
+// The head-stall step keeps the full list. It marks a url only once it has shown a block, so
+// it never marks this one, and it must still count it as a url the provider can be reached on.
+func probeScoredEndpoints(endpoints []*routersession.EndpointWithDirectConnection, untrackedByDesign func(url string) bool) []*routersession.EndpointWithDirectConnection {
+	if untrackedByDesign == nil {
+		return endpoints
+	}
+	// The common case has none: return the caller's slice untouched, no allocation per cycle.
+	firstUntracked := slices.IndexFunc(endpoints, func(ep *routersession.EndpointWithDirectConnection) bool {
+		return ep != nil && ep.Endpoint != nil && untrackedByDesign(ep.Endpoint.NetworkAddress)
+	})
+	if firstUntracked < 0 {
+		return endpoints
+	}
+	scored := make([]*routersession.EndpointWithDirectConnection, 0, len(endpoints)-1)
+	scored = append(scored, endpoints[:firstUntracked]...)
+	for _, ep := range endpoints[firstUntracked+1:] {
+		if ep != nil && ep.Endpoint != nil && untrackedByDesign(ep.Endpoint.NetworkAddress) {
+			continue
+		}
+		scored = append(scored, ep)
+	}
+	return scored
 }
 
 // qosFeedPaused is the probe loop's decision to withhold its QoS feed this cycle. Idle mode
@@ -4435,6 +4474,19 @@ func (rpcss *RPCSmartRouterServer) forgetURLLatestBlockIfUntracked(endpointURL s
 	if rpcss.endpointChainTrackerManager == nil || rpcss.smartRouterEndpointMetrics == nil || rpcss.listenEndpoint == nil {
 		return
 	}
+	// A url held as not tracked by design is still configured: it has no tracker to remove,
+	// so no removal to race, and its series (the relays it served, its tracking flag) stay.
+	//
+	// This check comes BEFORE the generation check, and the order matters. The two read under
+	// different locks, and a url can go from not tracked to tracked in between, when another
+	// provider's endpoint that can read the head claims it. That move drops the "not tracked"
+	// entry and sets the generation under one hold of the monitor's lock, so a url read here as
+	// no longer "not tracked" already has its generation by the time the next line asks. In the
+	// other order a relay could read "no generation", then "not held as not tracked", and delete
+	// the series of a url that is configured and now tracked.
+	if rpcss.endpointChainTrackerManager.IsUntrackedByDesign(endpointURL) {
+		return
+	}
 	if _, tracked := rpcss.endpointChainTrackerManager.ObservationGeneration(endpointURL); !tracked {
 		rpcss.smartRouterEndpointMetrics.ForgetEndpointURLLatestBlock(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointURL)
 	}
@@ -4633,9 +4685,12 @@ func (rpcss *RPCSmartRouterServer) ensureEndpointChainTracker(
 		return
 	}
 
-	// Check if ChainTracker already exists
+	// Check if ChainTracker already exists, or the url is held as not tracked by design
 	endpointURL := endpoint.NetworkAddress
 	if _, exists := rpcss.endpointChainTrackerManager.GetTracker(endpointURL); exists {
+		return
+	}
+	if rpcss.endpointChainTrackerManager.IsSettledUntracked(endpoint) {
 		return
 	}
 
@@ -4651,7 +4706,28 @@ func (rpcss *RPCSmartRouterServer) ensureEndpointChainTracker(
 		utils.FormatWarning("failed to create ChainTracker for endpoint", err,
 			utils.LogAttr("endpoint", endpointURL),
 		)
+		return
 	}
+	rpcss.publishBlockTracking(endpointURL)
+}
+
+// publishBlockTracking writes a url's rpc_endpoint_url_block_tracking series from the monitor's
+// decision about it: 1 for a url with a tracker, 0 for one held as not tracked by design
+// (MAG-5349). Called where that decision is made (the relay path, the reconcile pass, the
+// /debug/reset-chaintracker-rows handler), and again for every url on every reconcile pass: the
+// url's series are deleted when it leaves the pairing, and a url that comes back through a path
+// that does not write this one would otherwise have no series until the pod restarts. Never per
+// relay.
+//
+// Like every per-url write, it can land just after the url's removal deleted its series, so it
+// ends with the same check the other writers run.
+func (rpcss *RPCSmartRouterServer) publishBlockTracking(endpointURL string) {
+	if rpcss.endpointChainTrackerManager == nil || rpcss.smartRouterEndpointMetrics == nil || rpcss.listenEndpoint == nil {
+		return
+	}
+	tracked := !rpcss.endpointChainTrackerManager.IsUntrackedByDesign(endpointURL)
+	rpcss.smartRouterEndpointMetrics.SetEndpointURLBlockTracking(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointURL, tracked)
+	rpcss.forgetURLLatestBlockIfUntracked(endpointURL)
 }
 
 // chainTrackerReconcileInterval is how often initializeChainTrackers re-walks the live pairing
@@ -4773,6 +4849,15 @@ func (rpcss *RPCSmartRouterServer) reconcileChainTrackers(ctx context.Context, f
 		}
 		if _, exists := rpcss.endpointChainTrackerManager.GetTracker(ep.Endpoint.NetworkAddress); exists {
 			alreadyPresent++
+			rpcss.publishBlockTracking(ep.Endpoint.NetworkAddress)
+			continue
+		}
+		// Held as not tracked by design (MAG-5349): nothing is missing, so it is not re-tried
+		// and not reported as "had no tracker" on every pass. An endpoint that can read the
+		// head on such a url is not settled: it goes on to get the url its tracker.
+		if rpcss.endpointChainTrackerManager.IsSettledUntracked(ep.Endpoint) {
+			alreadyPresent++
+			rpcss.publishBlockTracking(ep.Endpoint.NetworkAddress)
 			continue
 		}
 		missing = append(missing, ep)
@@ -4813,6 +4898,13 @@ func (rpcss *RPCSmartRouterServer) reconcileChainTrackers(ctx context.Context, f
 				utils.LogAttr("provider", ep.ProviderAddress),
 			)
 			failed++
+			continue
+		}
+		rpcss.publishBlockTracking(ep.Endpoint.NetworkAddress)
+		// The monitor decided on this pass that the url gets no tracker by design: settled, not
+		// created, so it stays out of the "had no tracker" warning below.
+		if rpcss.endpointChainTrackerManager.IsUntrackedByDesign(ep.Endpoint.NetworkAddress) {
+			alreadyPresent++
 			continue
 		}
 		created++
@@ -5218,6 +5310,15 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 	// entry gets the chain's short lifetime, as a block-less element beside a latest read does.
 	if finalized && protocolMessage.HasBlocklessElement() {
 		finalized = false
+	}
+	// The block being far enough behind the tip says nothing about what this node answered
+	// with: a node behind the network answers a numbered read with its own copy of that block,
+	// which can still change, and says so in the reply (MAG-5339). Where the chain's spec names
+	// that field, a reply that says "not final" takes the chain's short lifetime, like a block
+	// too close to the tip. The reply itself is untouched; see replyAllowsFinal.
+	if finalized {
+		path, finalValue := rpcss.chainParser.FinalityField()
+		finalized = replyAllowsFinal(relayResult.Reply.Data, path, finalValue)
 	}
 
 	// Convert LATEST_BLOCK to the concrete block the cache key carries. This MUST be the
@@ -6131,7 +6232,8 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		//    returns and its defer cancel() cancels the parent ctx, which cancels all still-in-flight
 		//    goroutines — those see context.Canceled as a result.
 		// 2. Client disconnect: the upstream caller closed the connection before we responded.
-		// Neither case is a provider fault — classifyEndpointHealth handles the carve-out
+		// The caller's own gRPC deadline running out is read the same way (D10).
+		// None of these is a provider fault — classifyEndpointHealth handles the carve-out
 		// using common.IsClientCancellation so every endpoint-health decision site uses the
 		// same rule.
 		//
@@ -6162,8 +6264,8 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		// Needed because a budget cancel reaches here indistinguishable from a race loser, and the
 		// client-cancellation carve-out returns early before looking at anything else. That carve-out is
 		// right for a race loser (MAG-2648) but it also swallowed genuine hangs, so a single bad URL
-		// behind a provider with several was never disabled, never probed for recovery, and never moved
-		// the health metric — while the provider's own QoS availability did drop.
+		// behind a provider with several was never disabled and never probed for recovery — while the
+		// provider's own QoS availability did drop.
 		var shouldMarkUnhealthy bool
 		shouldMarkUnhealthy, _ = classifyEndpointHealth(classified, endpointCancellationIsExempt(isClientCancel, budgetExpired))
 
@@ -6183,7 +6285,6 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		// Apply health tracking based on error classification.
 		if shouldMarkUnhealthy && targetEndpoint != nil {
 			targetEndpoint.MarkUnhealthy(endpointDisableReasonFor(classified))
-			rpcss.smartRouterEndpointMetrics.SetEndpointOverallHealth(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointName, false)
 		}
 
 		return relayLatency, err
@@ -6207,8 +6308,15 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	// read is still retried, and the endpoint is still marked unhealthy and scored, through the
 	// IsNodeAtFault arm and the availability gate. result.IsNodeError is true only for a REST
 	// reply here (the JSON-RPC sender returns every 5xx as an error before this point).
+	//
+	// A reply the sender filed by its interface's own rows (a GraphQL read, MAG-5121) is excluded
+	// too, under every 5xx: its verdict was read from the body, where the rows decide before the
+	// status, so a 502 carrying the caller's BAD_USER_INPUT is served as is and not blamed, as the
+	// same body under a 500 or a 503 already was. A fault verdict still marks the endpoint
+	// unhealthy, through the IsNodeAtFault arm below. A 429 still takes this branch.
 	statusCode := result.StatusCode
-	carriesNodeReply := result.IsNodeError && rpcInterfaceMessages.ServerErrorIsNodeReply(statusCode, result.Reply.GetData())
+	carriesNodeReply := result.IsNodeError &&
+		(result.IsOwnVerdict || rpcInterfaceMessages.ServerErrorIsNodeReply(statusCode, result.Reply.GetData()))
 	if (statusCode >= 500 && statusCode != http.StatusNotImplemented && !carriesNodeReply) || statusCode == 429 {
 		// Classify the status through the registry rather than deciding from the raw code. This
 		// branch is reached when the sender returned (result, nil) with an error status — REST's
@@ -6223,7 +6331,6 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 
 		if shouldMarkUnhealthy && targetEndpoint != nil {
 			targetEndpoint.MarkUnhealthy(endpointDisableReasonFor(statusClassified))
-			rpcss.smartRouterEndpointMetrics.SetEndpointOverallHealth(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointName, false)
 			utils.FormatDebug("endpoint returned error status",
 				utils.LogAttr("status", statusCode),
 				utils.LogAttr("endpoint", singleConsumerSession.Parent.PublicAddress),
@@ -6282,7 +6389,6 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		// its own failure: that is the definition of node-error, and unreachable is unrepresentable
 		// here by construction — a stronger guarantee than the category check the other arms need.
 		targetEndpoint.MarkUnhealthy(routersession.EndpointDisableNodeError)
-		rpcss.smartRouterEndpointMetrics.SetEndpointOverallHealth(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointName, false)
 	} else if targetEndpoint != nil && relayProvesEndpointHealthy(result) {
 		// Reset only on POSITIVE proof the endpoint served — see relayProvesEndpointHealthy for why
 		// this is no longer the negation of the failure gate.
@@ -6304,8 +6410,8 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		if healthCheckOnASwitchedOffEndpoint {
 			utils.FormatDebug("health check answered on a switched-off endpoint; it stays off until a client request or the prober brings it back",
 				utils.LogAttr("endpoint", endpointName))
-		} else if targetEndpoint.ResetHealth() {
-			rpcss.smartRouterEndpointMetrics.SetEndpointOverallHealth(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointName, true)
+		} else {
+			targetEndpoint.ResetHealth()
 		}
 	}
 
@@ -7178,7 +7284,7 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 		})
 
 	// add is node error flag
-	if relayResult.IsNodeError {
+	if identifiedNodeError(protocolMessage, relayResult) {
 		metadataReply = append(metadataReply,
 			pairingtypes.Metadata{
 				Name:  common.IDENTIFIED_NODE_ERROR_HEADER,
@@ -7495,6 +7601,27 @@ func httpStatusRelayError(statusCode int, reply *pairingtypes.RelayReply) error 
 		httpErr.RetryAfter, _ = common.ParseRetryAfter(header, time.Now())
 	}
 	return httpErr
+}
+
+// identifiedNodeError reports whether a reply carries lava-identified-node-error: the header says
+// the node answered with an error, so it is set only when the reply shows that. On JSON-RPC and
+// Tendermint RPC a node always answers in JSON-RPC, so a body that is not a JSON-RPC reply (a
+// gateway's 401, 403 or 404 page, an empty body) is not the node's answer: it is forwarded as is,
+// without the header (MAG-5072, Omer 12 Nov), as a refused 429 already is (MAG-3030). An error a
+// node reports inside a JSON-RPC result (Tendermint's response code, XRPL's engine result) is
+// still its answer and keeps the header. Other interfaces are unchanged.
+func identifiedNodeError(protocolMessage chainlib.ProtocolMessage, relayResult *common.RelayResult) bool {
+	if relayResult == nil || !relayResult.IsNodeError {
+		return false
+	}
+	if protocolMessage == nil || protocolMessage.GetApiCollection() == nil {
+		return true
+	}
+	switch protocolMessage.GetApiCollection().CollectionData.ApiInterface {
+	case spectypes.APIInterfaceJsonRPC, spectypes.APIInterfaceTendermintRPC:
+		return rpcInterfaceMessages.IsJsonrpcReply(relayResult.GetReply().GetData())
+	}
+	return true
 }
 
 // redactNodeReply withholds the secrets in a node's error reply (utils.RedactSecrets). A reply
