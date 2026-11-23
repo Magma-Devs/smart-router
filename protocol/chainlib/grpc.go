@@ -382,8 +382,7 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 	apil.listeningAddress.Store(&addr)
 	apiInterface := apil.endpoint.ApiInterface
 	sendRelayCallback := func(ctx context.Context, method string, reqBody []byte) ([]byte, metadata.MD, error) {
-		guid := utils.GenerateUniqueIdentifier()
-		ctx = utils.WithUniqueIdentifier(ctx, guid)
+		guid := requestGUID(&ctx)
 		msgSeed := strconv.FormatUint(guid, 10)
 		metadataValues, _ := metadata.FromIncomingContext(ctx)
 		ctx = utils.ExtractWantedHeadersFromCachedMap(metadataValues, ctx)
@@ -507,6 +506,18 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 	}
 }
 
+// requestGUID returns the request id on *ctx, which the gRPC proxy sets on every call so that a
+// failure it answers is logged under the id the request's own lines carry. A context without one
+// (a callback called directly) gets a new id.
+func requestGUID(ctx *context.Context) uint64 {
+	if guid, found := utils.GetUniqueIdentifier(*ctx); found {
+		return guid
+	}
+	guid := utils.GenerateUniqueIdentifier()
+	*ctx = utils.WithUniqueIdentifier(*ctx, guid)
+	return guid
+}
+
 // makeStreamRelayCallback builds the gRPC listener's server-streaming entry point
 // (MAG-2643). It mirrors what ConsumerWebsocketManager does for eth_subscribe: parse
 // the request, recognise it as a subscription, start (or join) the upstream stream,
@@ -534,8 +545,7 @@ func (apil *GrpcChainListener) makeStreamRelayCallback(subscriptionManager GRPCS
 			return nil, nil
 		}
 
-		guid := utils.GenerateUniqueIdentifier()
-		ctx = utils.WithUniqueIdentifier(ctx, guid)
+		guid := requestGUID(&ctx)
 
 		// One gRPC stream is one subscriber. The WebSocket path keys clients by
 		// connection UID because a single socket multiplexes many subscriptions; here

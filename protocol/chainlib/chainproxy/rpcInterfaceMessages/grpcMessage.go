@@ -70,13 +70,27 @@ func (gm GrpcMessage) GetParams() interface{} {
 	return parsedData
 }
 
-func (gm GrpcMessage) dynamicResolve() (interface{}, error) {
+// decodeRequestBody decodes a binary request body into msg. It is a variable so a test can stand in
+// a decoder that fails in any way a decoder can.
+var decodeRequestBody = func(codec *dyncodec.Codec, body []byte, msg *dynamicpb.Message) error {
+	return codec.UnmarshalProto(body, msg)
+}
+
+// dynamicResolve decodes the request body with its method's descriptor and returns it as JSON
+// values. A body that does not decode is an error, whichever way the decoding fails, so the
+// request's block is NOT_APPLICABLE and the request goes on instead of stopping the handler.
+func (gm GrpcMessage) dynamicResolve() (parsedData interface{}, err error) {
+	defer func() {
+		if failure := recover(); failure != nil {
+			parsedData, err = nil, fmt.Errorf("the request body does not decode as %s: %v", gm.Path, failure)
+		}
+	}()
 	md, err := gm.Registry.FindDescriptorByName(protoreflect.FullName(strings.ReplaceAll(gm.Path, "/", ".")))
 	if err != nil {
 		return nil, err
 	}
 	msg := dynamicpb.NewMessage(md.(protoreflect.MethodDescriptor).Input())
-	err = gm.Codec.UnmarshalProto(gm.Msg, msg)
+	err = decodeRequestBody(gm.Codec, gm.Msg, msg)
 	if err != nil {
 		return nil, err
 	}
@@ -84,7 +98,6 @@ func (gm GrpcMessage) dynamicResolve() (interface{}, error) {
 	if err != nil {
 		return nil, err
 	}
-	var parsedData interface{}
 	err = json.Unmarshal(jsonMsg, &parsedData)
 	if err != nil {
 		return nil, err
