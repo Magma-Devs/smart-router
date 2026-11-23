@@ -456,3 +456,36 @@ func TestRetryPaired_StopsWaitingForThePassWhenItsContextEnds(t *testing.T) {
 	})
 	require.False(t, probed.Load(), "it probed nothing")
 }
+
+// TestUpdateEpoch_AResetPairingWhileThePassProbesLeavesTheWholePairing: a
+// /debug/reset-pairing that answers while the epoch pass probes stands. The pass's
+// verdicts were probed before it, so a provider the pass finds failing is not demoted
+// after the reset: when the pass held the router lock the reset waited for it and then
+// re-admitted what it demoted, and the automation resets before each test (MAG-5318).
+func TestUpdateEpoch_AResetPairingWhileThePassProbesLeavesTheWholePairing(t *testing.T) {
+	passGate := newProbeGate()
+	rig := newGatedRetryRig(t, func(ctx context.Context, p *routersession.RPCStaticProviderEndpoint) error {
+		if p.Name != "flaky" {
+			return nil
+		}
+		_ = passGate.wait(ctx)
+		return errors.New("unreachable")
+	})
+	t.Cleanup(passGate.open)
+	rig.inputs.demoteFailStreak = map[string]int{retryKey(reverifyTierStatic, "flaky"): 1} // its next failed pass demotes it
+
+	passed := rig.startPass(t)
+	waitFor(t, passGate.entered, "the epoch pass to probe flaky")
+	reset := make(chan struct{})
+	go func() {
+		defer close(reset)
+		rig.rpsr.rebuildPairingFromConfig()
+	}()
+	settle(reset)
+	passGate.open()
+	waitFor(t, passed, "the epoch pass to end")
+	waitFor(t, reset, "the reset to end")
+
+	require.True(t, rig.paired("flaky"), "the pairing is whole after the reset")
+	require.True(t, rig.paired("steady"))
+}

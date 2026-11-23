@@ -153,6 +153,10 @@ type chainReverifyInputs struct {
 	epochPasses        uint64
 	epochPassesRunning int
 	epochPassDone      chan struct{}
+	// pairingResets counts the /debug/reset-pairing rebuilds of this chain. An epoch pass
+	// that one overtook drops its verdicts, which it probed before the reset, and keeps the
+	// pairing the reset left (MAG-5318). Guarded by RPCSmartRouter.mu.
+	pairingResets uint64
 }
 
 // beginEpochPass marks an epoch pass in flight on the chain. Callers hold

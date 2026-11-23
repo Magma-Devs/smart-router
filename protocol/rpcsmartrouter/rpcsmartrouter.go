@@ -4103,8 +4103,10 @@ func (rpsr *RPCSmartRouter) updateEpoch(ctx context.Context, epoch uint64) {
 		// pass, and drops what it probed meanwhile (chainReverifyInputs.epochPasses).
 		rpsr.mu.Lock()
 		inputs := rpsr.reverifyInputs[chainKey]
+		var resets uint64
 		if inputs != nil {
 			inputs.beginEpochPass()
+			resets = inputs.pairingResets
 		}
 		rpsr.mu.Unlock()
 		var probedStatic, probedBackup []reverifyProbe
@@ -4146,8 +4148,19 @@ func (rpsr *RPCSmartRouter) updateEpoch(ctx context.Context, epoch uint64) {
 		// failed-init). Demoted sessions are collected and their direct connections
 		// closed *after* UpdateAllProviders below — closing earlier would race
 		// in-flight relays still holding pointers to the prior pairing.
+		//
+		// A /debug/reset-pairing that ran while the probes did stands: it re-admits what
+		// the re-verifier demoted, and these verdicts were probed before it, so they are
+		// dropped and the pass only freshens the pairing the reset left (MAG-5318).
+		reset := inputs != nil && inputs.pairingResets != resets
+		if reset {
+			utils.FormatInfo("re-verify: the pairing was reset while the epoch pass probed, its verdicts are dropped",
+				utils.LogAttr("epoch", epoch),
+				utils.LogAttr("chainKey", chainKeyLog),
+			)
+		}
 		var demotedSessions []*routersession.ConsumerSessionsWithProvider
-		if inputs != nil {
+		if inputs != nil && !reset {
 			var demotedStatic, demotedBackup []*routersession.ConsumerSessionsWithProvider
 			var promotedStatic, promotedBackup []string
 			freshProviderSessions, demotedStatic, promotedStatic = applyReverification(inputs, freshProviderSessions, reverifyTierStatic, epoch, probedStatic)
@@ -4927,6 +4940,9 @@ func (rpsr *RPCSmartRouter) rebuildPairingFromConfig() map[string][]string {
 		if sessionManager == nil || inputs == nil {
 			continue
 		}
+		// An epoch pass probing this chain now drops its verdicts, whether or not anything
+		// is restored: they were probed before this reset (chainReverifyInputs.pairingResets).
+		inputs.pairingResets++
 
 		mergedStatic, restoredStatic := mergeAbsentProviders(
 			rpsr.providerSessions[chainKey], inputs.configuredStatic, inputs.convertProvidersToSessions, currentEpoch)
