@@ -154,7 +154,7 @@ func NewRelayProcessor(
 		startedAt:                    time.Now(),
 		crossValidationParams:        crossValidationParams,
 		responses:                    make(chan *RelayResponse, responseBufferSize(selection, crossValidationParams)), // buffered to prevent blocking
-		ResultsManager:               NewResultsManager(guid, chainID),
+		ResultsManager:               newResultsManager(guid, chainID, selection == CrossValidation),
 		guid:                         guid,
 		debugRelay:                   relayStateMachine.GetDebugState(),
 		metricsInf:                   metricsInf,
@@ -1069,7 +1069,8 @@ func classifyStragglerResponse(response *RelayResponse, consensusHash [32]byte, 
 		return common.CrossValidationStragglerOutcomeProtocolError, [32]byte{}
 	}
 	if protocolMessage != nil {
-		if foundError, _ := protocolMessage.CheckResponseError(reply.Data, response.RelayResult.StatusCode); foundError {
+		// A not-found answer is an answer under cross-validation, as at quorum time (notFoundIsAnswer).
+		if foundError, _ := protocolMessage.CheckResponseError(reply.Data, response.RelayResult.StatusCode); foundError && !response.RelayResult.IsNotFoundAnswer {
 			return common.CrossValidationStragglerOutcomeNodeError, [32]byte{}
 		}
 	}

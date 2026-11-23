@@ -55,14 +55,24 @@ type ResultsManagerInst struct {
 	lock                   sync.RWMutex
 	guid                   uint64
 	chainID                string
+	// notFoundIsAnswer files a not-found answer (common.RelayResult.IsNotFoundAnswer, MAG-5121 P6)
+	// as a success. A read with one provider at a time files it as a node error, so that another
+	// provider is asked. A cross-validated read has already asked several, and they agree on the
+	// null as on any other answer, so cross-validation sets it.
+	notFoundIsAnswer bool
 }
 
 func NewResultsManager(guid uint64, chainID string) ResultsManager {
+	return newResultsManager(guid, chainID, false)
+}
+
+func newResultsManager(guid uint64, chainID string, notFoundIsAnswer bool) *ResultsManagerInst {
 	return &ResultsManagerInst{
 		guid:                   guid,
 		chainID:                chainID,
 		nodeResponseErrors:     RelayErrors{RelayErrors: []RelayError{}},
 		protocolResponseErrors: RelayErrors{RelayErrors: []RelayError{}, OnFailureMergeAll: true},
+		notFoundIsAnswer:       notFoundIsAnswer,
 	}
 }
 
@@ -140,6 +150,10 @@ func (rp *ResultsManagerInst) setValidResponse(response *RelayResponse, protocol
 
 	// check response error
 	foundError, errorMessage := protocolMessage.CheckResponseError(response.RelayResult.Reply.Data, response.RelayResult.StatusCode)
+	if foundError && rp.notFoundIsAnswer && response.RelayResult.IsNotFoundAnswer {
+		foundError = false
+		response.RelayResult.IsNodeError = false
+	}
 	if foundError {
 		// this is a node error, meaning we still didn't get a good response.
 		// we may choose to wait until there will be a response or timeout happens
