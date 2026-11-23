@@ -664,9 +664,13 @@ func FormatLongString(msg string, maxCharacters int) string {
 
 // CutMiddle returns msg's first head bytes and its last tail bytes joined by marker, for a log line.
 // Each cut lands on a rune boundary, so a valid UTF-8 msg stays valid UTF-8: a rune the cut would
-// split is left out, and each kept part may be up to three bytes short. head+tail must be less than
-// len(msg).
+// split is left out, and each kept part may be up to three bytes short. A msg the cut would not
+// shorten (head+tail at least len(msg)), or a negative head or tail, comes back whole: the cut
+// would index past msg and panic in the middle of a log call.
 func CutMiddle(msg string, head, tail int, marker string) string {
+	if head < 0 || tail < 0 || head+tail >= len(msg) {
+		return msg
+	}
 	return msg[:runeStartAtOrBefore(msg, head)] + marker + msg[runeStartAtOrAfter(msg, len(msg)-tail):]
 }
 
