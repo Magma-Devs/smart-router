@@ -298,6 +298,7 @@ func TestNoteAnswer_TakesOnlyAnswersWithinTheGuard(t *testing.T) {
 
 	require.False(t, cs.NoteAnswer("a", 1000), "no tip yet: SetLatestBlock takes the first block, not NoteAnswer")
 	require.False(t, cs.Initialized())
+	require.Empty(t, cs.jumpRuns, "and no run starts against a tip that does not exist yet")
 
 	cs.SetLatestBlock(1000)
 	require.True(t, cs.NoteAnswer("a", 1100), "tip+OutlierThreshold is within the guard")
@@ -311,6 +312,34 @@ func TestNoteAnswer_TakesOnlyAnswersWithinTheGuard(t *testing.T) {
 	clk.advance(9 * time.Second)
 	_, ok := cs.GetLatestBlock()
 	require.True(t, ok, "...but it refreshes the tip, like an equal SetLatestBlock")
+
+	// A stale tip is not moved down either: the stale-tip re-adoption is SetLatestBlock's, which reports
+	// the regression.
+	clk.advance(11 * time.Second)
+	_, ok = cs.GetLatestBlock()
+	require.False(t, ok, "precondition: the tip went stale")
+	require.False(t, cs.NoteAnswer("a", 1050))
+	require.Equal(t, int64(1100), cs.GetLatestBlockAllowStale(), "NoteAnswer never moves the tip down, even a stale one")
+}
+
+// TestNoteAnswer_RunEndsOnlyAfterAStalenessWindowWithoutAnswers pins where a run ends: an answer a whole
+// StalenessWindow after the run's last one still extends it, and one a moment later starts it over.
+func TestNoteAnswer_RunEndsOnlyAfterAStalenessWindowWithoutAnswers(t *testing.T) {
+	cs, clk := newSlowChainState(t)
+	const honest = int64(1_000_000)
+	cs.SetLatestBlock(honest)
+	head := honest + 10*cs.cfg.OutlierThreshold
+
+	cs.NoteAnswer("solo", head)
+	clk.advance(cs.cfg.StalenessWindow)
+	cs.SetLatestBlock(honest) // keep the tip fresh
+	cs.NoteAnswer("solo", head)
+	require.Equal(t, 2, cs.jumpRuns["solo"].answers, "an answer a StalenessWindow after the last one extends the run")
+
+	clk.advance(cs.cfg.StalenessWindow + time.Nanosecond)
+	cs.SetLatestBlock(honest)
+	cs.NoteAnswer("solo", head)
+	require.Equal(t, 1, cs.jumpRuns["solo"].answers, "one a moment later starts it over")
 }
 
 // TestReset_ForgetsTheJumpRuns: a run counted before Reset must not let a jump through after it.
