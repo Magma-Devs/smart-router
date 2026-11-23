@@ -426,6 +426,15 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 				replyMetadata.Set(common.GUID_HEADER_NAME, msgSeed)
 				return nil, replyMetadata, status.Error(codes.InvalidArgument, message)
 			}
+			if noAnswer, ok := grpcNoAnswerStatus(relayResult); ok {
+				// No provider answered: the router's own status and sentence, never the transport
+				// error, which can hold the router's and a provider's addresses (MAG-5130). The
+				// request id goes in router-guid, as on the refusal above.
+				apil.logger.LogRequestAndResponse("grpc in/out", true, method, relayBodyForLog(string(reqBody), cmdFlags.DebugRelays), "", noAnswer.Message(), msgSeed, time.Since(startTime), err)
+				replyMetadata := convertRelayMetaDataToMDMetaData(relayReply.GetMetadata())
+				replyMetadata.Set(common.GUID_HEADER_NAME, msgSeed)
+				return nil, replyMetadata, noAnswer.Err()
+			}
 			errMasking := apil.logger.GetUniqueGuidResponseForError(err, msgSeed)
 			apil.logger.LogRequestAndResponse("grpc in/out", true, method, relayBodyForLog(string(reqBody), cmdFlags.DebugRelays), "", errMasking, msgSeed, time.Since(startTime), err)
 			// Even on error the relay result may carry response metadata — notably the
