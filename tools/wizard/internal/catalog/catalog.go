@@ -1,4 +1,4 @@
-// Package catalog enumerates Lava chain specs and resolves each chain's
+// Package catalog enumerates chain specs and resolves each chain's
 // effective interfaces + addons (merged transitively across `imports`).
 //
 // Mirrors scripts/wizard/lib/specs.sh: source the magma-Devs/lava-specs repo

@@ -139,7 +139,7 @@ func TestGraphQLWrite_UnknownReplyCarriesTheDigest(t *testing.T) {
 
 // TestGraphQLWrite_SuiWriteRowsDecideTheOutcome (MAG-4909 write rows, MAG-5122 verdict per copy):
 // each of two primaries answers the write, and Sui's rows read each copy as accepted, refused or "may
-// have run". A copy that ran is the answer, with Lava-Write-Outcome: accepted. With none, a copy that
+// have run". A copy that ran is the answer, with Router-Write-Outcome: accepted. With none, a copy that
 // may have run leaves the outcome unknown, and the client gets the router's unknown reply instead of
 // an error that would make it sign again. Copies that were all refused keep the node's reply as is.
 func TestGraphQLWrite_SuiWriteRowsDecideTheOutcome(t *testing.T) {
@@ -173,13 +173,19 @@ func TestGraphQLWrite_SuiWriteRowsDecideTheOutcome(t *testing.T) {
 		{name: "a copy that ran wins over one that may have run", a: ran, b: networkNo, served: ran, header: "accepted"},
 		{name: "W1 effects inside a 429 (MAG-5122 T14)", a: ran, statusA: http.StatusTooManyRequests, b: networkNo, served: ran, header: "accepted"},
 		{name: "W1 effects inside a 503", a: ran, statusA: http.StatusServiceUnavailable, b: networkNo, served: ran, header: "accepted"},
-		{name: "aliased null effects remain unknown", query: `mutation($tx: Base64!) { ` + suiSnapshotWrite + ` { fx: effects { status } } }`,
-			a: `{"data":{"executeTransaction":{"fx":null}}}`, b: networkNo, header: "unknown"},
-		{name: "typename aliased to effects is a resolved write", query: `mutation($tx: Base64!) { ` + suiSnapshotWrite + ` { effects: __typename } }`,
-			a: `{"data":{"executeTransaction":{"effects":"ExecutionResult"}}}`, b: networkNo, served: `{"data":{"executeTransaction":{"effects":"ExecutionResult"}}}`, header: "accepted"},
+		{
+			name: "aliased null effects remain unknown", query: `mutation($tx: Base64!) { ` + suiSnapshotWrite + ` { fx: effects { status } } }`,
+			a: `{"data":{"executeTransaction":{"fx":null}}}`, b: networkNo, header: "unknown",
+		},
+		{
+			name: "typename aliased to effects is a resolved write", query: `mutation($tx: Base64!) { ` + suiSnapshotWrite + ` { effects: __typename } }`,
+			a: `{"data":{"executeTransaction":{"effects":"ExecutionResult"}}}`, b: networkNo, served: `{"data":{"executeTransaction":{"effects":"ExecutionResult"}}}`, header: "accepted",
+		},
 		{name: "typename only", query: `mutation { __typename }`, a: `{"data":{"__typename":"Mutation"}}`, b: `{"data":{"__typename":"Mutation"}}`, served: `{"data":{"__typename":"Mutation"}}`},
-		{name: "skipped transaction", query: `mutation($tx: Base64!, $skip: Boolean! = true) { ` + suiSnapshotWrite + ` @skip(if: $skip) { effects { status } } }`,
-			a: `{"data":{}}`, b: `{"data":{}}`, served: `{"data":{}}`},
+		{
+			name: "skipped transaction", query: `mutation($tx: Base64!, $skip: Boolean! = true) { ` + suiSnapshotWrite + ` @skip(if: $skip) { effects { status } } }`,
+			a: `{"data":{}}`, b: `{"data":{}}`, served: `{"data":{}}`,
+		},
 		{name: "W11 effects null may have run", a: noEffects, b: noEffects, header: "unknown"},
 		{name: "W9 the network refused it: may have run", a: networkNo, b: networkNo, header: "unknown"},
 		{name: "W10 competing transactions: may have run", a: locked, b: locked, header: "unknown"},
@@ -190,8 +196,10 @@ func TestGraphQLWrite_SuiWriteRowsDecideTheOutcome(t *testing.T) {
 		{name: "W6 every copy refused under 502", a: refusedBcs, b: refusedBcs, statusA: 502, statusB: 502, served: refusedBcs, servedStatus: 502},
 		{name: "W6 every copy refused under 504", a: refusedBcs, b: refusedBcs, statusA: 504, statusB: 504, served: refusedBcs, servedStatus: 504},
 		{name: "W6 gateway refusal beside an ambiguous copy", a: refusedBcs, statusA: 504, b: networkNo, header: "unknown"},
-		{name: "W7 input coercion refused before submission", query: `mutation { executeTransaction(transactionDataBcs: 123, signatures: []) { __typename } }`,
-			a: inputTypeRefusal, b: inputTypeRefusal, served: inputTypeRefusal},
+		{
+			name: "W7 input coercion refused before submission", query: `mutation { executeTransaction(transactionDataBcs: 123, signatures: []) { __typename } }`,
+			a: inputTypeRefusal, b: inputTypeRefusal, served: inputTypeRefusal,
+		},
 		{name: "W12 every copy stopped by the vendor's quota: the node's reply as is", a: vendorStop, b: vendorStop, served: vendorStop},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -274,7 +282,7 @@ func TestGraphQLWrite_NeverRetriedWhenEveryCopyIsRateLimited(t *testing.T) {
 	}
 }
 
-// writeOutcomeHeader reads Lava-Write-Outcome off a RelayResult's reply, or "" when absent.
+// writeOutcomeHeader reads Router-Write-Outcome off a RelayResult's reply, or "" when absent.
 func writeOutcomeHeader(t *testing.T, result *common.RelayResult) string {
 	t.Helper()
 	if result == nil || result.Reply == nil {
@@ -288,8 +296,8 @@ func writeOutcomeHeader(t *testing.T, result *common.RelayResult) string {
 	return ""
 }
 
-// MAG-3800: a write pinned to a lava-select-provider name the router does not have is refused
-// before any provider is asked. On GraphQL its reply says Lava-Write-Outcome: not_sent, as the
+// MAG-3800: a write pinned to a router-select-provider name the router does not have is refused
+// before any provider is asked. On GraphQL its reply says Router-Write-Outcome: not_sent, as the
 // listener's other refusals of a GraphQL write do (Part I R-Q, Part II Q8). The other interfaces
 // carry no write outcome yet (MAG-5232), so they get no header.
 func TestGraphQLWrite_APinToANameTheRouterDoesNotHaveIsNotSent(t *testing.T) {

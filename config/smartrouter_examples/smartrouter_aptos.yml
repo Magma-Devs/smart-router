@@ -1,5 +1,5 @@
 # Smart Router Direct RPC Configuration — Aptos (APT1)
-# Mode: Direct connections to public Aptos REST fullnodes (no Lava providers!)
+# Mode: Direct connections to public Aptos REST fullnodes (no provider-relay network — direct upstreams)
 #
 # 2 upstreams (HTTP):
 #   1. PublicNode                (aptos-rest.publicnode.com)

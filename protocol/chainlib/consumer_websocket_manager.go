@@ -112,8 +112,8 @@ const (
 	DefaultWebSocketKeepAliveInterval = 30 * time.Second
 	DefaultWebSocketWriteTimeout      = 10 * time.Second
 
-	WebSocketRateLimitHeader            = "x-lava-websocket-rate-limit"
-	WebSocketOpenConnectionsLimitHeader = "x-lava-websocket-open-connections-limit"
+	WebSocketRateLimitHeader            = "x-router-websocket-rate-limit"
+	WebSocketOpenConnectionsLimitHeader = "x-router-websocket-open-connections-limit"
 )
 
 type ConsumerWebsocketManager struct {

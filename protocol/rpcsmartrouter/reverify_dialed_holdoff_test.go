@@ -65,7 +65,7 @@ func TestReverifyHoldoff_UsesTheDialedURLs(t *testing.T) {
 		inputs, admissions := tontReverifyInputs(t, provider, holdoffs)
 		active := map[uint64]*routersession.ConsumerSessionsWithProvider{0: makeSession(provider.Name)}
 
-		applyReverification(t.Context(), inputs, active, reverifyTierStatic, 100)
+		probeAndApplyReverification(t.Context(), inputs, active, reverifyTierStatic, 100)
 		require.NotNil(t, admissions.admissionFor(provider).URLRateLimit(2), "the pass met the 429 on dialed index 2 (C/v2)")
 		require.True(t, holdoffs.HeldOff(key, c.URL+"/v2"), "the url that answered 429 is held")
 		require.False(t, holdoffs.HeldOff(key, a.srv.URL+"/v2"), "A/v2 answered")
@@ -81,7 +81,7 @@ func TestReverifyHoldoff_UsesTheDialedURLs(t *testing.T) {
 		inputs, _ := tontReverifyInputs(t, provider, holdoffs)
 		active := map[uint64]*routersession.ConsumerSessionsWithProvider{0: makeSession(provider.Name)}
 
-		applyReverification(t.Context(), inputs, active, reverifyTierStatic, 100)
+		probeAndApplyReverification(t.Context(), inputs, active, reverifyTierStatic, 100)
 		require.Zero(t, hits("/v2/getMasterchainInfo"), "the held url is not asked")
 		require.NotZero(t, a.asked("/v2/getMasterchainInfo"), "the free url is")
 	})
@@ -97,7 +97,7 @@ func TestReverifyHoldoff_UsesTheDialedURLs(t *testing.T) {
 		inputs, _ := tontReverifyInputs(t, provider, holdoffs)
 		active := map[uint64]*routersession.ConsumerSessionsWithProvider{0: makeSession(provider.Name)}
 
-		applyReverification(t.Context(), inputs, active, reverifyTierStatic, 100)
+		probeAndApplyReverification(t.Context(), inputs, active, reverifyTierStatic, 100)
 		require.Zero(t, hits("/v2/getMasterchainInfo"), "the held url B/v2 is not asked")
 		require.NotZero(t, a.asked("/v2/getMasterchainInfo"), "A/v2 is asked")
 	})

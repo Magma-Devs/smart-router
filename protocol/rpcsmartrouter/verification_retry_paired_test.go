@@ -259,7 +259,7 @@ func TestApplyReverification_RecordsWhenItsVerdictsWereProbed(t *testing.T) {
 		},
 	}
 	before := time.Now().Add(-time.Millisecond)
-	applyReverification(context.Background(), inputs, nil, reverifyTierStatic, 1)
+	probeAndApplyReverification(context.Background(), inputs, nil, reverifyTierStatic, 1)
 	require.True(t, inputs.superseded(reverifyTierStatic, "up", before))
 	require.True(t, inputs.superseded(reverifyTierStatic, "down", before))
 	require.False(t, inputs.superseded(reverifyTierStatic, "limited", before))
