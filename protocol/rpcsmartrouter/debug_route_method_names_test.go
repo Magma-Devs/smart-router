@@ -3,6 +3,7 @@ package rpcsmartrouter
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"net/http"
 	"testing"
 	"time"
@@ -93,23 +94,95 @@ func TestDebugRelayErrors_NameARequestAsRelayEndDoes(t *testing.T) {
 	}
 }
 
+// MAG-5422: a request that names its method in the body keeps that name on GET /debug/relay-errors,
+// as relay_end keeps it, on a node error and on a protocol error alike: an unlisted JSON-RPC method,
+// a batch with an unlisted member, and an unlisted method in a Tendermint JSON-RPC body. Only a name
+// the URL carries is withheld, so a site that withheld every unlisted name fails here.
+func TestDebugRelayErrors_KeepABodyNamedRequestsNameAsRelayEndDoes(t *testing.T) {
+	rand.InitRandomSeed()
+	read := captureRelayEnds(t)
+	noop := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	parsers := map[string]chainlib.ChainParser{}
+	for _, listener := range []struct{ chainID, apiInterface string }{
+		{"ETH1", spectypes.APIInterfaceJsonRPC},
+		{"COSMOSHUB", spectypes.APIInterfaceTendermintRPC},
+	} {
+		chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(context.Background(), listener.chainID, listener.apiInterface, noop, nil, "../../", nil)
+		if closeServer != nil {
+			t.Cleanup(closeServer)
+		}
+		require.NoError(t, err)
+		parsers[listener.apiInterface] = chainParser
+	}
+
+	const nodeDown = `{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"node is down"}}`
+	// connectionType is what each listener relays a POST body with: the JSON-RPC listener names the
+	// method, the Tendermint listener none.
+	for _, tc := range []struct {
+		name, chainID, apiInterface, connectionType, body, nodeReply, wantMethod string
+	}{
+		{
+			"an unlisted JSON-RPC method", "ETH1", spectypes.APIInterfaceJsonRPC, http.MethodPost,
+			`{"jsonrpc":"2.0","id":1,"method":"eth_notAMethod","params":[]}`, nodeDown, "Default-eth_notAMethod",
+		},
+		{
+			"a batch with an unlisted member", "ETH1", spectypes.APIInterfaceJsonRPC, http.MethodPost,
+			`[{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]},{"jsonrpc":"2.0","id":2,"method":"eth_notAMethod","params":[]}]`,
+			`[` + nodeDown + `,{"jsonrpc":"2.0","id":2,"error":{"code":-32603,"message":"node is down"}}]`, "eth_blockNumber&Default-eth_notAMethod",
+		},
+		{
+			"an unlisted method in a Tendermint body", "COSMOSHUB", spectypes.APIInterfaceTendermintRPC, "",
+			`{"jsonrpc":"2.0","id":1,"method":"not_a_method","params":[]}`, nodeDown, "Default-not_a_method",
+		},
+	} {
+		for _, nodeError := range []bool{true, false} {
+			kind, node := "a protocol error", relayEndNode{name: "node-a"}
+			if nodeError {
+				kind, node.handler = "a node error", relayEndReply(http.StatusOK, tc.nodeReply, 0)
+			}
+			t.Run(kind+" on "+tc.name, func(t *testing.T) {
+				server := newRelayEndServer(t, tc.chainID, tc.apiInterface, parsers[tc.apiInterface], node)
+				server.relayErrors = relaycore.NewRelayErrorTally()
+				guid := relayEndCaseGUID(t.Name())
+				ctx, cancel := context.WithTimeout(utils.WithUniqueIdentifier(context.Background(), guid), relayEndShortWait)
+				defer cancel()
+				_, _ = server.SendRelay(ctx, "", tc.body, tc.connectionType, relayEndNoCustomerID, "", nil, nil)
+
+				var event map[string]any
+				require.NoError(t, json.Unmarshal([]byte(onlyRelayEnd(t, read(), guid)), &event))
+				require.Equal(t, tc.wantMethod, event["method"], "relay_end keeps a name the body carries")
+				counts := server.relayErrors.Counts()
+				require.Len(t, counts, 1, "%+v", counts)
+				require.Equal(t, tc.wantMethod, counts[0].Method, "the row is named as relay_end names the request")
+				if nodeError {
+					require.Positive(t, counts[0].NodeErrors)
+				} else {
+					require.Positive(t, counts[0].ProtocolErrors)
+				}
+			})
+		}
+	}
+}
+
 // MAG-5422: GET /debug/cross-validation-events names a request as relay_end does, on both recording
 // paths. A dissent on an unlisted REST path is recorded as Default-REDACTED, never as the caller's
-// path; a listed path loses its leading slash.
+// path; a listed path loses its leading slash; an unlisted method named in the body keeps its name,
+// as relay_end keeps it.
 func TestCrossValidationEvents_NameARequestAsRelayEndDoes(t *testing.T) {
 	restAPI := func(name string) *spectypes.Api {
 		return &spectypes.Api{Name: name, Category: spectypes.SpecCategory{Deterministic: true}}
 	}
 	for _, tc := range []struct {
-		apiName, want string
+		apiInterface, apiName, want string
 	}{
-		{"Default-" + debugRouteUnlistedPath, "Default-REDACTED"},
-		{debugRouteListedPath, "cosmos/base/tendermint/v1beta1/blocks/latest"},
+		{spectypes.APIInterfaceRest, "Default-" + debugRouteUnlistedPath, "Default-REDACTED"},
+		{spectypes.APIInterfaceRest, debugRouteListedPath, "cosmos/base/tendermint/v1beta1/blocks/latest"},
+		{spectypes.APIInterfaceJsonRPC, "Default-eth_notAMethod", "Default-eth_notAMethod"},
 	} {
 		t.Run("reply time: "+tc.want, func(t *testing.T) {
 			useCrossValidationEventRing(t, 32)
 			srv, _ := newCrossValidationEventTestServer(t)
-			srv.listenEndpoint = &routersession.RPCEndpoint{ChainID: "COSMOSHUB", ApiInterface: spectypes.APIInterfaceRest}
+			srv.listenEndpoint = &routersession.RPCEndpoint{ChainID: "COSMOSHUB", ApiInterface: tc.apiInterface}
 			ctx := utils.WithUniqueIdentifier(context.Background(), 542201)
 
 			hashA, hashB := sha256.Sum256([]byte("A")), sha256.Sum256([]byte("B"))
@@ -141,7 +214,7 @@ func TestCrossValidationEvents_NameARequestAsRelayEndDoes(t *testing.T) {
 		t.Run("straggler: "+tc.want, func(t *testing.T) {
 			useCrossValidationEventRing(t, 32)
 			srv, chainParser := newCrossValidationEventTestServer(t)
-			srv.listenEndpoint = &routersession.RPCEndpoint{ChainID: "COSMOSHUB", ApiInterface: spectypes.APIInterfaceRest}
+			srv.listenEndpoint = &routersession.RPCEndpoint{ChainID: "COSMOSHUB", ApiInterface: tc.apiInterface}
 			ctx := utils.WithUniqueIdentifier(context.Background(), 542202)
 
 			// A cross-validation processor with two agreeing answers and p3 still in flight, the state
