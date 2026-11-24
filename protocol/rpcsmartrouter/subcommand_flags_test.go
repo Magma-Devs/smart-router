@@ -37,7 +37,7 @@ func TestTestAndHealthCommandsReadTheirOwnFlags(t *testing.T) {
 	require.NotNil(t, health.Flags().Lookup(common.GitLabTokenFlag))
 }
 
-// The command's own Example dials a router's gRPC listener (127.0.0.1:3334 LAV1 grpc), which is
+// The command's own Example dials a router's gRPC listener (127.0.0.1:3334 COSMOSHUB grpc), which is
 // plaintext unless the listen endpoint enables TLS. With no flags the test command must still reach
 // one: a --use-tls default of true would dial TLS only and never try plaintext (MAG-4278).
 func TestTestCommandDefaultFlagsReachAPlaintextGRPCListener(t *testing.T) {

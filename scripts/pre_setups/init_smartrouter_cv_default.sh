@@ -38,8 +38,6 @@
 
 __dir=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 PROJECT_ROOT=$(cd "${__dir}"/../.. && pwd)
-# command_exists used to come from scripts/useful_commands.sh, whose other helpers all drove the
-# lavad chain CLI and were removed with it.
 command_exists() {
   command -v "$1" >/dev/null 2>&1
 }

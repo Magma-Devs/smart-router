@@ -370,7 +370,7 @@ var (
 	// The only node known to send it is Sui, and only when a transaction is submitted
 	// (sui-rpc-api maps the transaction driver's Aborted category to it, plus one direct case,
 	// "already finalized but with different user signatures"). Cosmos SDK, CometBFT, ibc-go,
-	// wasmd, Lava and Concordium never send it. Sui's own definition, in sui-core's
+	// wasmd and Concordium never send it. Sui's own definition, in sui-core's
 	// transaction_driver/error.rs, is "transient failure during transaction processing that
 	// prevents the transaction from finalization. Retriable with new transaction submission",
 	// and the message a client receives starts "Transaction processing aborted (retriable with

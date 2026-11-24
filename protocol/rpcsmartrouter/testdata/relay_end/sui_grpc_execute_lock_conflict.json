@@ -1,0 +1,39 @@
+{
+  "GUID": "<minted by the listener>",
+  "api_interface": "grpc",
+  "attempts": [
+    {
+      "batch": 0,
+      "error_code": "CHAIN_DOUBLE_SPEND",
+      "grpc_status": 9,
+      "latency_ms": "<ms>",
+      "message": "{\"error_message\":\"Failed to sign transaction by a quorum of validators because of locked objects. Conflicting Transactions:\\n{}\",\"error_code\":9}",
+      "outcome": "node_error",
+      "retryable": false,
+      "returned_to_client": true,
+      "sent_ms": "<ms>",
+      "upstream": "grpc-node",
+      "write_outcome": "may_have_run"
+    }
+  ],
+  "chain": "SUI",
+  "error": "{\"error_message\":\"Failed to sign transaction by a quorum of validators because of locked objects. Conflicting Transactions:\\n{}\",\"error_code\":9}",
+  "error_code": "CHAIN_DOUBLE_SPEND",
+  "event": "relay_end",
+  "has_reply": true,
+  "is_batch": false,
+  "latency_ms": "<ms>",
+  "level": "info",
+  "message": "relay_end",
+  "method": "sui.rpc.v2.TransactionExecutionService/ExecuteTransaction",
+  "outcome": "node_error",
+  "reply_bytes": 144,
+  "request_bytes": 261,
+  "schema": 2,
+  "selection": "stateful",
+  "served_by": "grpc-node",
+  "stateful": true,
+  "status": 9,
+  "stop_reason": "Stateful",
+  "tx_hash": "gHrD7i4MD93GsSzM3ZYibg2CQpBCmZFnxGdANrXFYMP"
+}

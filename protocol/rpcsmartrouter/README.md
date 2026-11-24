@@ -23,7 +23,7 @@ The RPC Smart Router is a centralised RPC gateway that routes requests to pre-co
 
 ## Configuration
 
-Create a YAML config file (see `config/smartrouter_examples/smartrouter_lava.yml` for a full example):
+Create a YAML config file (see `config/smartrouter_examples/smartrouter_eth.yml` for a full example):
 
 ```yaml
 endpoints:
