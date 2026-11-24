@@ -619,9 +619,9 @@ func soleVote(block int64, at time.Time) []BlockObservation {
 // OutlierThreshold (32) blocks, the no-baseline guard rejected every later poll, and with one endpoint
 // no majority ever formed to pull it up, so smartrouter_latest_block froze at start+32 while the
 // endpoint climbed. A head the only endpoint keeps answering is the chain's head: once the endpoint has
-// answered above the guard soleVoterJumpAnswers times in a row over the hold (MAG-5080), the next
-// Recompute pulls the tip up to it. Each answer reaches ChainState twice, as in the router: SetLatestBlock
-// (OnTipObservation) and NoteAnswer (OnAnswer).
+// answered it twice in a row, within the most blocks the chain could have made since the tip was taken
+// (MAG-5080), the next Recompute pulls the tip up to it. Each answer reaches ChainState twice, as in the
+// router: SetLatestBlock (OnTipObservation) and NoteAnswer (OnAnswer).
 func TestRecompute_SoleVoterFollowsItsEndpointThroughABlockStorm(t *testing.T) {
 	cs, clk := newSlowChainState(t)
 	const (
@@ -639,7 +639,6 @@ func TestRecompute_SoleVoterFollowsItsEndpointThroughABlockStorm(t *testing.T) {
 	cs.NoteAnswer("solo", start+threshold)
 	require.True(t, advanced)
 	require.Equal(t, start+threshold, tip)
-	lastConfirmed := clk.now()
 
 	// The next poll sees the whole storm, more than OutlierThreshold over the fresh tip. One such
 	// answer may be a glitch, so the guard still rejects it.
@@ -648,7 +647,6 @@ func TestRecompute_SoleVoterFollowsItsEndpointThroughABlockStorm(t *testing.T) {
 	_, _, advanced = cs.SetLatestBlock(head)
 	cs.NoteAnswer("solo", head)
 	require.False(t, advanced, "a single over-threshold answer is still rejected")
-	runStart := clk.now()
 
 	// The endpoint answers its head again: the chain really is there.
 	clk.advance(slowChainPoll)
@@ -657,32 +655,12 @@ func TestRecompute_SoleVoterFollowsItsEndpointThroughABlockStorm(t *testing.T) {
 	cs.NoteAnswer("solo", head)
 	require.False(t, advanced, "SetLatestBlock alone cannot tell a storm from a glitch")
 
-	// One repeat is also what a url behind a load balancer with one bad backend gives (MAG-5080), so
-	// the consensus loop does not follow it yet.
+	// The consensus loop ticks and sees the one endpoint at a head it answered twice in a row, well within
+	// the most blocks the chain could have made since the tip was taken: the tip follows it.
 	cs.Recompute(soleVote(head, clk.now()))
 	got, ok := cs.GetLatestBlock()
 	require.True(t, ok)
-	require.Equal(t, start+threshold, got, "one repeat does not tell a storm from a balancer with a bad backend")
-
-	// The endpoint keeps answering its head once a minute and the consensus loop ticks once a block
-	// time: the tip follows at the first tick after the run is complete, well before the tip goes stale.
-	runComplete := runStart.Add(time.Duration(soleVoterJumpAnswers-1) * slowChainPoll)
-	var followedAt time.Time
-	for i := 4; followedAt.IsZero() && i <= 120; i++ {
-		clk.advance(slowChainPoll)
-		cs.SetLatestBlock(head)
-		cs.NoteAnswer("solo", head)
-		if i%10 == 0 {
-			cs.Recompute(soleVote(head, clk.now()))
-		}
-		if got, ok := cs.GetLatestBlock(); ok && got == head {
-			followedAt = clk.now()
-		}
-	}
-	require.False(t, followedAt.IsZero(), "the tip follows its only endpoint instead of freezing at start+OutlierThreshold")
-	require.False(t, followedAt.Before(runComplete), "not before soleVoterJumpAnswers answers above the guard")
-	require.LessOrEqual(t, followedAt.Sub(runComplete), slowChainBlockTime, "at the first consensus tick after the run")
-	require.Less(t, followedAt.Sub(lastConfirmed), cs.cfg.TTL, "by the pull-up, not by the tip going stale")
+	require.Equal(t, head, got, "the tip follows its only endpoint instead of freezing at start+OutlierThreshold")
 
 	// From the new tip the endpoint's ordinary advances are in-threshold again.
 	clk.advance(slowChainPoll)
@@ -696,9 +674,10 @@ func TestRecompute_SoleVoterFollowsItsEndpointThroughABlockStorm(t *testing.T) {
 // handed back the router's own tip (a relay's block is published clamped to the tip, MAG-3755), and
 // adoptSharedStateTip fed it to SetLatestBlock as an equal-block confirmation, so the frozen tip never
 // went stale and the guard kept rejecting the head. This runs the production cadence for longer than
-// a TTL with an echo arriving every poll: the tip must still reach the head within one consensus tick
-// of the endpoint's run of soleVoterJumpAnswers answers above the guard (MAG-5080). An echo is not an
-// answer, so it reaches SetLatestBlock only; the endpoint's answers also reach NoteAnswer.
+// a TTL with an echo arriving every poll: the tip must still reach the head within one consensus tick.
+// An echo is not an answer, so it reaches SetLatestBlock only; the endpoint's answers also reach
+// NoteAnswer (MAG-5080). The echoes refresh the tip but not the block it was taken at, so they do not
+// hold the bound down either.
 func TestRecompute_SoleVoterHeadIsNotHeldOutByEchoesOfTheFrozenTip(t *testing.T) {
 	cs, clk := newSlowChainState(t)
 	const frozen = int64(5_285_340) // bitcoin-testnet rest, 2026-11-04 21:21 UTC
@@ -727,8 +706,7 @@ func TestRecompute_SoleVoterHeadIsNotHeldOutByEchoesOfTheFrozenTip(t *testing.T)
 	got, ok := cs.GetLatestBlock()
 	require.True(t, ok)
 	require.Equal(t, head, got, "more than a TTL of echoes later the tip must be at the endpoint's head, not frozen")
-	require.LessOrEqual(t, followedAt.Sub(stormAt), soleVoterJumpAnswers*slowChainPoll+slowChainBlockTime,
-		"the head is taken at the first consensus tick after the endpoint's run is complete")
+	require.LessOrEqual(t, followedAt.Sub(stormAt), slowChainBlockTime, "the head is taken at the first consensus tick")
 }
 
 // TestRecompute_SoleVoterGlitchIsNotFollowed keeps the protection the no-baseline guard exists for on
@@ -806,8 +784,9 @@ func TestRecompute_SoleVoterGlitchesOnAStillChainDoNotAddUp(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, honest, got, "a single answer is not followed, however old the last rejection on this tip is")
 
-	// The same rule still follows a head the endpoint keeps answering after that fresh rejection, once it
-	// has answered it soleVoterJumpAnswers times in a row over the hold (MAG-5080).
+	// The same rule still follows a head the endpoint answers again after that fresh rejection: twice in
+	// a row is a run (MAG-5080), and the chain has been still for a TTL, so the head is well within the
+	// bound.
 	for i := 0; i < soleVoterJumpAnswers; i++ {
 		clk.advance(slowChainPoll)
 		cs.SetLatestBlock(glitch)
@@ -816,7 +795,7 @@ func TestRecompute_SoleVoterGlitchesOnAStillChainDoNotAddUp(t *testing.T) {
 	cs.Recompute(soleVote(glitch, clk.now()))
 	got, ok = cs.GetLatestBlock()
 	require.True(t, ok)
-	require.Equal(t, glitch, got, "a head the endpoint keeps answering after its first rejection is followed")
+	require.Equal(t, glitch, got, "a head answered again after its first rejection is followed")
 }
 
 // TestRecompute_TwoDisagreeingVotersDoNotFollowARepeatedHead pins that the MAG-4964 pull-up is for a

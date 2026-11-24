@@ -2,6 +2,7 @@ package chainstate
 
 import (
 	"fmt"
+	"math"
 	"math/rand"
 	"sync"
 	"testing"
@@ -11,9 +12,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// MAG-5080: Recompute follows a sole voter's jump only after its url has answered above the fresh-tip
-// guard soleVoterJumpAnswers times in a row, over at least the hold; NoteAnswer keeps that run and keeps
-// the tip fresh on the answers the url's tip store drops.
+// MAG-5080: Recompute follows a sole voter's jump only if it is within the most blocks the chain could
+// have made since the tip block was taken (jumpBoundLocked), and only once its url has answered above the
+// fresh-tip guard soleVoterJumpAnswers times in a row. NoteAnswer drops an answer past the bound, keeps
+// the run of the others, and keeps the tip fresh on the answers the url's tip store drops.
 
 // soleURL is one url as the router feeds its answers to ChainState: its endpointtip entry (the highest
 // block it answered, refreshed by an equal answer; a lower one is dropped while the entry is fresh), the
@@ -51,7 +53,8 @@ const absurdBlock = int64(1) << 50
 // single url behind a load balancer, one of whose backends answers an absurd block. Each poll goes to a
 // random backend; the good one follows the chain at one block per block time; the consensus loop ticks
 // once a block time. For a simulated day, at the cadence of a 600 s chain (a poll a minute) and of a 12 s
-// chain (two polls a block), the tip must never take the absurd block and must stay fresh throughout.
+// chain (two polls a block), the tip must never take the absurd block and must stay fresh throughout. The
+// absurd block is past the bound, so it never even starts a run.
 //
 // The last case is the control: without the OnAnswer feed the good backend's answers are stragglers below
 // the absurd block in the url's tip store, nothing keeps the tip fresh, and the absurd block is taken
@@ -118,116 +121,152 @@ func TestNoteAnswer_LoadBalancerWithOneBadBackendIsNeverFollowed(t *testing.T) {
 	})
 }
 
-// TestRecompute_SoleVoterJumpNeedsAnUnbrokenRun: one answer at the tip, between answers above the guard,
-// is the load balancer's good backend answering. It starts the count over, however many answers above the
-// guard came before it, and the jump is followed only after soleVoterJumpAnswers more in a row.
+// TestRecompute_SoleVoterJumpNeedsAnUnbrokenRun: one answer at the tip, between two answers above the
+// guard, is the load balancer's good backend answering. It ends the run, so those two answers are not a
+// repeat; the jump is followed only once the url answers above the guard twice in a row.
 func TestRecompute_SoleVoterJumpNeedsAnUnbrokenRun(t *testing.T) {
 	cs, clk := newSlowChainState(t)
 	const honest = int64(1_000_000)
 	u := newSoleURL(cs)
 	u.answer(clk.now(), honest)
 	cs.Recompute(u.vote())
-	head := honest + 10*cs.cfg.OutlierThreshold
+	head := honest + 2*cs.cfg.OutlierThreshold // past the guard, and within the bound from the first poll on
 
-	for i := 1; i < soleVoterJumpAnswers; i++ {
+	for _, block := range []int64{head, honest, head} {
 		clk.advance(slowChainPoll)
-		u.answer(clk.now(), head)
-	}
-	clk.advance(slowChainPoll)
-	u.answer(clk.now(), honest) // the one good answer
-	for i := 1; i < soleVoterJumpAnswers; i++ {
-		clk.advance(slowChainPoll)
-		u.answer(clk.now(), head)
+		u.answer(clk.now(), block)
 	}
 	cs.Recompute(u.vote())
 	got, ok := cs.GetLatestBlock()
 	require.True(t, ok)
-	require.Equal(t, honest, got, "%d answers above the guard with one at the tip between them are not a run",
-		2*(soleVoterJumpAnswers-1))
+	require.Equal(t, honest, got, "two answers above the guard with one at the tip between them are not a repeat")
 
 	clk.advance(slowChainPoll)
 	u.answer(clk.now(), head)
 	cs.Recompute(u.vote())
 	got, ok = cs.GetLatestBlock()
 	require.True(t, ok)
-	require.Equal(t, head, got, "the next answer completes a run of soleVoterJumpAnswers, and the jump is followed")
+	require.Equal(t, head, got, "the next answer above the guard is the repeat, and the jump is followed")
 }
 
-// TestRecompute_SoleVoterJumpWaitsForTheHold: a busy router gets soleVoterJumpAnswers relay answers in well
-// under a second, and a load balancer may send all of them, over one kept-alive connection, to the same
-// backend. The count alone is not enough: the run must also have lasted the hold.
-func TestRecompute_SoleVoterJumpWaitsForTheHold(t *testing.T) {
-	cs, clk := newSlowChainState(t)
-	const honest = int64(1_000_000)
-	hold := cs.cfg.StalenessWindow / soleVoterJumpHoldDivisor
-	u := newSoleURL(cs)
-	u.answer(clk.now(), honest)
-	cs.Recompute(u.vote())
-	head := honest + 10*cs.cfg.OutlierThreshold
+// TestRecompute_SoleVoterJumpNeedsARepeatNotTime: one answer above the guard is a glitch and is not followed,
+// however long ago it came; a second in a row is the repeat, and the next tick follows it, whether the two
+// came a poll or ten milliseconds apart (two relays over one kept-alive connection). There is no time hold:
+// a bad backend's absurd block is kept out by the bound, not by waiting (MAG-5080).
+func TestRecompute_SoleVoterJumpNeedsARepeatNotTime(t *testing.T) {
+	for _, gap := range []time.Duration{slowChainPoll, 10 * time.Millisecond} {
+		t.Run(gap.String(), func(t *testing.T) {
+			cs, clk := newSlowChainState(t)
+			const honest = int64(1_000_000)
+			u := newSoleURL(cs)
+			u.answer(clk.now(), honest)
+			cs.Recompute(u.vote())
+			head := honest + 2*cs.cfg.OutlierThreshold
+			clk.advance(slowChainPoll) // a poll after the tip was taken, so the head is within the bound
 
-	runStart := clk.now().Add(10 * time.Millisecond)
-	for i := 0; i < 4*soleVoterJumpAnswers; i++ {
-		clk.advance(10 * time.Millisecond)
-		u.answer(clk.now(), head)
+			u.answer(clk.now(), head)
+			clk.advance(slowChainBlockTime / 2)
+			cs.Recompute(u.vote())
+			got, _ := cs.GetLatestBlock()
+			require.Equal(t, honest, got, "one answer above the guard is not followed")
+
+			clk.advance(gap)
+			u.answer(clk.now(), head)
+			cs.Recompute(u.vote())
+			got, ok := cs.GetLatestBlock()
+			require.True(t, ok)
+			require.Equal(t, head, got, "the second answer in a row is the repeat, and the next tick follows it")
+		})
 	}
-	cs.Recompute(u.vote())
-	got, _ := cs.GetLatestBlock()
-	require.Equal(t, honest, got, "a burst of answers above the guard is not followed before the hold")
-
-	clk.t = runStart.Add(hold - time.Second)
-	u.answer(clk.now(), head)
-	cs.Recompute(u.vote())
-	got, _ = cs.GetLatestBlock()
-	require.Equal(t, honest, got, "the run is one second short of the hold")
-
-	clk.advance(time.Second)
-	u.answer(clk.now(), head)
-	cs.Recompute(u.vote())
-	got, ok := cs.GetLatestBlock()
-	require.True(t, ok)
-	require.Equal(t, head, got, "once the run has lasted the hold, the jump is followed")
 }
 
 // TestRecompute_SoleVoterJumpInAStormBehindABadBackendIsNotTheBadBlock: a block storm reaches a url behind
-// a load balancer with one bad backend. The good backend's answers are above the guard too, so they extend
-// the run instead of ending it, and the url's stored block, its vote, is the bad backend's. The pull-up must
-// take the tip to the run's lowest block, which the good backend answered, and the tip then follows the good
-// backend; it must never take the bad block.
+// a load balancer with one bad backend, and the url's stored block, its vote, is the bad backend's.
+//   - When the bad block is absurd it is past the bound, so the run is the good backend's answers alone: one
+//     source climbing. The tip follows the good backend's head at every tick once it has answered twice.
+//   - When the bad block is within the bound, the good backend's answers are above the guard too, so they
+//     extend the run instead of ending it, and the run is mixed. The pull-up takes the tip only to the run's
+//     lowest block, which the good backend answered. Here the storm outruns the guard at every poll, so every
+//     answer stays above it, and the balancer alternates, so no run is the bad backend's alone.
+//
+// The tip must never take the bad block, nor pass the good backend's head.
 func TestRecompute_SoleVoterJumpInAStormBehindABadBackendIsNotTheBadBlock(t *testing.T) {
-	for seed := int64(1); seed <= 20; seed++ {
+	t.Run("absurd bad block", func(t *testing.T) {
+		for seed := int64(1); seed <= 20; seed++ {
+			cs, clk := newSlowChainState(t)
+			const start = int64(1_000_000)
+			u := newSoleURL(cs)
+			u.answer(clk.now(), start)
+			cs.Recompute(u.vote())
+			storm := start + 2*cs.cfg.OutlierThreshold // the chain's head jumps past the guard, then climbs a block a poll
+			r := rand.New(rand.NewSource(seed))
+			var good int64   // the good backend's latest answer
+			goodAnswers := 0 // and how many it has given
+			for i := 1; i <= 240; i++ {
+				clk.advance(slowChainPoll)
+				block := storm + int64(i)
+				if r.Intn(2) == 0 {
+					block = absurdBlock
+				} else {
+					good = block
+					goodAnswers++
+				}
+				u.answer(clk.now(), block)
+				require.NotEqual(t, absurdBlock, cs.GetLatestBlockAllowStale(), "seed %d, poll %d: the tip took the bad backend's block", seed, i)
+				if i%10 != 0 {
+					continue
+				}
+				cs.Recompute(u.vote())
+				tip, fresh := cs.GetLatestBlock()
+				require.True(t, fresh, "seed %d, poll %d", seed, i)
+				require.LessOrEqual(t, tip, good, "seed %d, poll %d: never past the good backend's head", seed, i)
+				if goodAnswers >= soleVoterJumpAnswers {
+					require.Equal(t, good, tip, "seed %d, poll %d: once the good backend has answered twice, every tick takes its head", seed, i)
+				}
+			}
+		}
+	})
+
+	t.Run("bad block within the bound", func(t *testing.T) {
 		cs, clk := newSlowChainState(t)
 		const start = int64(1_000_000)
 		u := newSoleURL(cs)
 		u.answer(clk.now(), start)
 		cs.Recompute(u.vote())
-		storm := start + 2*cs.cfg.OutlierThreshold // the chain's head jumps past the guard, then climbs a block a poll
-		r := rand.New(rand.NewSource(seed))
-		var good int64 // the good backend's latest answer
+		threshold := cs.cfg.OutlierThreshold
+		head, good := start, int64(0)
+		pulled := 0
 		for i := 1; i <= 240; i++ {
 			clk.advance(slowChainPoll)
-			block := storm + int64(i)
-			if r.Intn(2) == 0 {
-				block = absurdBlock
+			head += 2 * threshold // a storm that outruns the guard at every poll
+			block := head
+			if i%2 == 0 {
+				block = head + 5*threshold // the bad backend, ahead of the storm and within the bound
 			} else {
-				good = block
+				good = head
 			}
 			u.answer(clk.now(), block)
-			if i%10 == 0 {
-				cs.Recompute(u.vote())
+			if i%10 != 0 {
+				continue
 			}
-			require.NotEqual(t, absurdBlock, cs.GetLatestBlockAllowStale(), "seed %d, poll %d: the tip took the bad backend's block", seed, i)
+			before := cs.GetLatestBlockAllowStale()
+			cs.Recompute(u.vote())
+			tip := cs.GetLatestBlockAllowStale()
+			require.LessOrEqual(t, tip, good, "poll %d: a mixed run never takes the tip past the good backend's head", i)
+			if tip > before {
+				pulled++
+			}
 		}
-		tip, fresh := cs.GetLatestBlock()
-		require.True(t, fresh, "seed %d", seed)
-		require.GreaterOrEqual(t, tip, storm, "seed %d: the tip follows the storm", seed)
-		require.LessOrEqual(t, tip, good, "seed %d: never past the good backend's head", seed)
-	}
+		require.Positive(t, pulled, "the tip follows the storm, one mixed run at a time")
+	})
 }
 
 // TestRecompute_SoleVoterFollowsAStormFromOneSourceAtEveryTick: one node in a storm that keeps outrunning
 // the guard, every answer more than OutlierThreshold over the last, and now and then an answer a block lower
-// than the one before (two relays finishing out of order). That run is not mixed, so once it is long enough
-// every consensus tick takes the tip to the node's head, and the run goes on.
+// than the one before (two relays finishing out of order). That run is not mixed, so from the first tick
+// after its second answer every consensus tick takes the tip to the node's head, and the run goes on. The
+// storm makes 640 blocks a block time, more than the bitcoin testnet storm's average, and each tick's bound
+// starts over at the tip the last tick took.
 func TestRecompute_SoleVoterFollowsAStormFromOneSourceAtEveryTick(t *testing.T) {
 	cs, clk := newSlowChainState(t)
 	const start = int64(1_000_000)
@@ -235,7 +274,8 @@ func TestRecompute_SoleVoterFollowsAStormFromOneSourceAtEveryTick(t *testing.T) 
 	u.answer(clk.now(), start)
 	cs.Recompute(u.vote())
 	head, last := start, start
-	followed := 0
+	heldAt := clk.now().Add(2 * slowChainPoll) // the run's second answer
+	followed, ticks := 0, 0
 	for i := 1; i <= 240; i++ {
 		clk.advance(slowChainPoll)
 		head += 2 * cs.cfg.OutlierThreshold
@@ -251,14 +291,16 @@ func TestRecompute_SoleVoterFollowsAStormFromOneSourceAtEveryTick(t *testing.T) 
 		cs.Recompute(u.vote())
 		tip, fresh := cs.GetLatestBlock()
 		require.True(t, fresh, "poll %d", i)
-		if i < 40 {
-			require.Equal(t, start, tip, "poll %d: not before the run is long enough", i)
+		if clk.now().Before(heldAt) {
+			require.Equal(t, start, tip, "poll %d: not before the repeat", i)
 			continue
 		}
+		ticks++
 		require.Equal(t, head, tip, "poll %d: every tick takes the tip to the node's head", i)
 		followed++
 	}
-	require.Equal(t, 21, followed)
+	require.Equal(t, 24, ticks, "the repeat comes before the first tick")
+	require.Equal(t, ticks, followed)
 }
 
 // TestRecompute_SoleVoterJumpGoesNoHigherThanTheRunsOwnAnswers: the url's vote can be another pod's
@@ -310,14 +352,10 @@ func TestRecompute_SoleVoterRunIsMixedOnlyByADipPastTheGuard(t *testing.T) {
 			u := newSoleURL(cs)
 			u.answer(clk.now(), start)
 			cs.Recompute(u.vote())
-			high := start + 10*cs.cfg.OutlierThreshold
+			high := start + 3*cs.cfg.OutlierThreshold // within the bound from the first poll on
 			low := high - tc.dip(cs.cfg.OutlierThreshold)
-			for i := 0; i < soleVoterJumpAnswers; i++ {
+			for _, block := range []int64{high, low, high} { // low after the first, so below the run's highest
 				clk.advance(slowChainPoll)
-				block := high
-				if i == 1 {
-					block = low // after the run's first answer, so it is below the run's highest
-				}
 				u.answer(clk.now(), block)
 			}
 			cs.Recompute(u.vote())
@@ -339,6 +377,7 @@ func TestNoteAnswer_RunsEndAndArePruned(t *testing.T) {
 	cs, clk := newSlowChainState(t)
 	const honest = int64(1_000_000)
 	cs.SetLatestBlock(honest)
+	clk.advance(slowChainBlockTime) // a block time after the tip was taken, so the head is within the bound
 	head := honest + 10*cs.cfg.OutlierThreshold
 
 	const urls = 1000
@@ -347,18 +386,19 @@ func TestNoteAnswer_RunsEndAndArePruned(t *testing.T) {
 	}
 	require.Len(t, cs.jumpRuns, urls)
 
-	cs.NoteAnswer("http://url-0", honest+cs.cfg.OutlierThreshold) // at the guard, not above it
-	cs.NoteAnswer("http://url-1", honest-1)                       // below the tip
+	tip := honest + cs.cfg.OutlierThreshold
+	cs.NoteAnswer("http://url-0", tip)      // at the guard, not above it: it also moves the tip there
+	cs.NoteAnswer("http://url-1", honest-1) // below the tip
 	require.NotContains(t, cs.jumpRuns, "http://url-0", "an answer at the guard ends the run")
 	require.NotContains(t, cs.jumpRuns, "http://url-1", "an answer below the tip ends the run")
 
 	clk.advance(cs.cfg.StalenessWindow / 2)
-	cs.SetLatestBlock(honest) // keep the tip fresh
+	cs.SetLatestBlock(tip) // keep the tip fresh
 	cs.NoteAnswer("http://url-2", head)
 	require.Equal(t, 2, cs.jumpRuns["http://url-2"].answers)
 
 	clk.advance(cs.cfg.StalenessWindow/2 + time.Second)
-	cs.SetLatestBlock(honest)
+	cs.SetLatestBlock(tip)
 	cs.NoteAnswer("http://url-3", head)
 	require.Equal(t, 1, cs.jumpRuns["http://url-3"].answers, "a run with no answer for a StalenessWindow starts over")
 
@@ -406,6 +446,8 @@ func TestNoteAnswer_RunEndsOnlyAfterAStalenessWindowWithoutAnswers(t *testing.T)
 	cs, clk := newSlowChainState(t)
 	const honest = int64(1_000_000)
 	cs.SetLatestBlock(honest)
+	clk.advance(slowChainBlockTime) // so the head is within the bound
+	cs.SetLatestBlock(honest)
 	head := honest + 10*cs.cfg.OutlierThreshold
 
 	cs.NoteAnswer("solo", head)
@@ -426,12 +468,12 @@ func TestReset_ForgetsTheJumpRuns(t *testing.T) {
 	const honest = int64(1_000_000)
 	u := newSoleURL(cs)
 	u.answer(clk.now(), honest)
-	head := honest + 10*cs.cfg.OutlierThreshold
+	head := honest + 2*cs.cfg.OutlierThreshold
 	for i := 0; i < soleVoterJumpAnswers; i++ {
 		clk.advance(slowChainPoll)
 		u.answer(clk.now(), head)
 	}
-	require.True(t, cs.jumpHeldLocked("solo", clk.now()), "precondition: the run is long enough before the reset")
+	require.True(t, cs.jumpHeldLocked("solo"), "precondition: the run is a repeat before the reset")
 
 	cs.Reset()
 	require.Empty(t, cs.jumpRuns)
@@ -478,4 +520,124 @@ func TestNoteAnswer_ConcurrentWithRecomputeAndReset(t *testing.T) {
 		}
 	}()
 	wg.Wait()
+}
+
+// TestRecompute_SoleVoterJumpPastTheBoundIsAnOutlier pins the bound: a url that answers more blocks over
+// the tip than the chain could have made since the tip block was taken (OutlierThreshold, plus
+// soleVoterJumpMargin for each block time since then) is an outlier, however often and however long it
+// answers. That is a url pinned to a load balancer's bad backend, which no count of answers tells from a
+// storm. Its answers never start a run. A url that answers at the bound is followed at the first tick after
+// its second answer. Both run for less than a TTL, so the tip stays fresh and only the pull-up could move it.
+func TestRecompute_SoleVoterJumpPastTheBoundIsAnOutlier(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		over     int64
+		followed bool
+	}{
+		{"at the bound", 0, true},
+		{"one block past it", 1, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cs, clk := newSlowChainState(t)
+			const honest = int64(1_000_000)
+			u := newSoleURL(cs)
+			u.answer(clk.now(), honest)
+			cs.Recompute(u.vote())
+			takenAt := clk.now()
+			// The bound while the tip is still honest, taken at takenAt.
+			bound := func() int64 {
+				return honest + cs.cfg.OutlierThreshold + soleVoterJumpMargin*int64(clk.now().Sub(takenAt))/int64(cs.cfg.AverageBlockTime)
+			}
+			heldAt := takenAt.Add(2 * slowChainPoll) // the second answer
+			for i := 1; clk.now().Sub(takenAt) < cs.cfg.TTL-slowChainBlockTime; i++ {
+				clk.advance(slowChainPoll)
+				before := cs.GetLatestBlockAllowStale()
+				if before == honest {
+					u.answer(clk.now(), bound()+tc.over)
+				} else {
+					u.answer(clk.now(), before+1) // followed: the url answers on from the new tip
+				}
+				if i%10 != 0 {
+					continue
+				}
+				cs.Recompute(u.vote())
+				tip, fresh := cs.GetLatestBlock()
+				require.True(t, fresh, "poll %d", i)
+				switch {
+				case !tc.followed:
+					require.Equal(t, honest, tip, "poll %d: an answer past the bound is never followed", i)
+					require.NotContains(t, cs.jumpRuns, "solo", "poll %d: nor does it start a run", i)
+				case clk.now().Before(heldAt):
+					require.Equal(t, honest, tip, "poll %d: not before the repeat", i)
+				case before == honest:
+					require.Greater(t, tip, honest, "poll %d: an answer at the bound is followed at the first tick after the repeat", i)
+				}
+			}
+		})
+	}
+}
+
+// TestRecompute_SoleVoterBoundCountsFromWhenTheTipBlockWasTaken: the bound grows with the time since the tip
+// BLOCK was taken, not since its last confirmation, so a still chain whose tip is confirmed at every poll
+// does not hold the bound down. Once the tip moves, the bound starts over from the new tip, and Recompute
+// reads it again: a run whose head is past the new bound waits for a later tick, and the tip is never set to
+// a block that no answer gave.
+func TestRecompute_SoleVoterBoundCountsFromWhenTheTipBlockWasTaken(t *testing.T) {
+	cs, clk := newSlowChainState(t)
+	const honest = int64(1_000_000)
+	u := newSoleURL(cs)
+	u.answer(clk.now(), honest)
+	cs.Recompute(u.vote())
+	// 3 × soleVoterJumpMargin over the tip: within the bound once the tip block is three block times old.
+	head := honest + 3*soleVoterJumpMargin
+	tip := honest
+	for i := 1; i <= 80; i++ {
+		clk.advance(slowChainPoll)
+		cs.SetLatestBlock(tip) // a peer pod's copy of the tip confirms it at every poll
+		u.answer(clk.now(), head)
+		if i == 40 {
+			tip = honest + 1 // and moves it up one block, just before the tick
+			cs.SetLatestBlock(tip)
+		}
+		if i%10 != 0 {
+			continue
+		}
+		cs.Recompute(u.vote())
+		got, ok := cs.GetLatestBlock()
+		require.True(t, ok, "poll %d", i)
+		switch {
+		case i <= 30:
+			require.Equal(t, honest, got, "poll %d: within the bound from 30 min, and one answer is not a repeat", i)
+		case i < 70:
+			require.Equal(t, tip, got, "poll %d: the tip moved, so the head is past the new bound", i)
+			require.Contains(t, cs.jumpRuns, "solo", "poll %d: the run waits for the bound", i)
+		default:
+			require.Equal(t, head, got, "poll %d: three block times after the move, the head fits again", i)
+		}
+	}
+}
+
+// TestJumpBoundLocked_IsExactAndSaturates: the bound is tip + OutlierThreshold + soleVoterJumpMargin per
+// block time since the tip block was taken, to the block, and it saturates rather than overflow when the
+// tip or the time is extreme.
+func TestJumpBoundLocked_IsExactAndSaturates(t *testing.T) {
+	cs, clk := newSlowChainState(t)
+	cs.SetLatestBlock(1_000_000)
+	require.Equal(t, int64(1_000_000)+cs.cfg.OutlierThreshold, cs.jumpBoundLocked(clk.now()), "no time, no blocks")
+	clk.advance(3 * slowChainBlockTime / 10)
+	require.Equal(t, int64(1_000_000)+cs.cfg.OutlierThreshold+3*soleVoterJumpMargin/10, cs.jumpBoundLocked(clk.now()))
+	clk.advance(slowChainBlockTime)
+	require.Equal(t, int64(1_000_000)+cs.cfg.OutlierThreshold+13*soleVoterJumpMargin/10, cs.jumpBoundLocked(clk.now()))
+	cs.SetLatestBlock(1_000_000) // a confirmation does not move the block the bound counts from
+	require.Equal(t, int64(1_000_000)+cs.cfg.OutlierThreshold+13*soleVoterJumpMargin/10, cs.jumpBoundLocked(clk.now()))
+
+	tiny := NewWithClock("TINY", Config{AverageBlockTime: time.Nanosecond, StalenessWindow: time.Hour}, clk.now)
+	tiny.SetLatestBlock(1)
+	clk.advance(100 * 365 * 24 * time.Hour)
+	require.Equal(t, int64(math.MaxInt64), tiny.jumpBoundLocked(clk.now()), "more blocks than an int64 holds")
+
+	high := NewWithClock("HIGH", Config{StalenessWindow: time.Hour}, clk.now)
+	high.SetLatestBlock(math.MaxInt64 - 10)
+	require.Equal(t, int64(math.MaxInt64), high.jumpBoundLocked(clk.now()), "a tip near the top of the range")
+	require.Equal(t, 6*time.Minute, high.cfg.AverageBlockTime, "a config without a block time takes StalenessWindow's")
 }
