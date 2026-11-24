@@ -83,8 +83,13 @@ func TestCometBFTInternalErrorRows(t *testing.T) {
 			}
 			for _, reading := range readings {
 				t.Run(family.chains+"/"+tc.name+"/"+reading.name, func(t *testing.T) {
+					want := tc.want
+					if want == RouterErrorNodeInternalError && reading.code == 200 {
+						// A batch's internal error with data no row reads keeps main's batch verdict.
+						want = RouterErrorUnknown
+					}
 					got := ClassifyError(nil, family.family, TransportJsonRPC, reading.code, reading.message)
-					require.Same(t, tc.want, got, "message %q", reading.message)
+					require.Same(t, want, got, "message %q", reading.message)
 					if tc.want != RouterErrorNodeInternalError {
 						require.False(t, got.EndpointAtFault(), "%s is not the endpoint failing", got.Name)
 					}
@@ -119,8 +124,27 @@ func TestBatchElementInternalErrorLeavesOtherCodes(t *testing.T) {
 		message := "Internal error: limit reached"
 		require.Same(t, tc.want, ClassifyError(nil, ChainFamilyUnknown, TransportJsonRPC, tc.code, message), "code %d", tc.code)
 	}
-	// The control: the same text as a batch element, classified with the batch's status.
-	require.Same(t, RouterErrorNodeInternalError, ClassifyError(nil, ChainFamilyUnknown, TransportJsonRPC, 200, "Internal error: limit reached"))
+	// The control: the same text as a batch element, classified with the batch's status, keeps main's
+	// batch verdict, and its data reaches no row after the batch row.
+	require.Same(t, RouterErrorUnknown, ClassifyError(nil, ChainFamilyUnknown, TransportJsonRPC, 200, "Internal error: limit reached"))
+}
+
+// A batch's text joins its elements' messages, and an element may echo what the caller sent, so the
+// batch row's words can come from anyone. It blames no endpoint and holds none off: a batch's
+// internal error with data no row reads is UNKNOWN_ERROR, as main reads a batch's internal error.
+func TestBatchElementInternalErrorBlamesNoEndpoint(t *testing.T) {
+	for _, family := range []ChainFamily{ChainFamilyCosmosSDK, ChainFamilyUnknown, ChainFamilyEVM} {
+		for _, text := range []string{
+			JSONRPCErrorText(-32603, "Internal error", "failed to load state at height 429"),
+			"Invalid params,-," + JSONRPCErrorText(-32603, "Internal error", "rate limit exceeded"),
+			JSONRPCErrorText(-32603, "Internal error", "all attempts exhausted") + ",-,Invalid params",
+		} {
+			got := ClassifyError(nil, family, TransportJsonRPC, 200, text)
+			require.Same(t, RouterErrorUnknown, got, "family %d, text %q", family, text)
+			require.False(t, got.EndpointAtFault(), "family %d, text %q", family, text)
+			require.False(t, got.IsRateLimited(), "family %d, text %q", family, text)
+		}
+	}
 }
 
 // The direct-RPC sender classifies a 4xx's JSON-RPC body a second time by its status, to escalate a

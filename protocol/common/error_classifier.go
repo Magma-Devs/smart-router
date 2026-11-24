@@ -231,12 +231,15 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 		{cometBFTInternalError(`tx \([0-9A-Fa-f]*\) not found`), RouterErrorChainTxNotFound},
 		{cometBFTInternalError(`timed out waiting for tx to be included in a block`), RouterErrorNodeAborted},
 		// A batch is classified with its HTTP status for a code, so the -32603 row below never
-		// reaches an element. This gives an element's internal error with data the verdict that
-		// row gives it alone, and keeps the data from the message rows after it. Anchored on an
-		// element's start, so a 4xx's status pass ("HTTP 413: ...") still reaches its status row;
-		// a single reply's own JSON-RPC code skips it, and so does a revert, which the revert row
-		// below reads first (batchElementInternalError).
-		{batchElementInternalError(), RouterErrorNodeInternalError},
+		// reaches an element, and on main a batch's internal error was UNKNOWN_ERROR: retried, and
+		// not the endpoint's fault. An element's internal error whose data no row above reads keeps
+		// that verdict, and its data reaches no message row after this one. Not NODE_INTERNAL_ERROR:
+		// a batch joins its elements' texts, and an element that echoes what the caller sent can
+		// write this row's words, so the row must not blame anyone. Anchored on an element's start,
+		// so a 4xx's status pass ("HTTP 413: ...") still reaches its status row; a single reply's
+		// own JSON-RPC code skips it, and so does a revert, which the revert row below reads first
+		// (batchElementInternalError).
+		{batchElementInternalError(), RouterErrorUnknown},
 		{CodeEquals(-32603), RouterErrorNodeInternalError},
 
 		// EIP-1474 server error codes

@@ -355,7 +355,7 @@ A gRPC status needs the wrapper because grpc-go words a connection it could not 
    | `timed out waiting for tx to be included in a block` | 2019 `NODE_ABORTED` |
    | anything else | 2003 `NODE_INTERNAL_ERROR`, as before |
 
-   `broadcast_tx_commit` prefixes a mempool refusal with `error on broadcastTxCommit: `; the rows allow it. A batch is classified with its HTTP status for a code, so a row anchored on an element's "Internal error: " gives an element's internal error the verdict it gets alone.
+   `broadcast_tx_commit` prefixes a mempool refusal with `error on broadcastTxCommit: `; the rows allow it. A batch is classified with its HTTP status for a code. A row anchored on an element's "Internal error: " gives an element's internal error with a sentence above the verdict it gets alone; with any other data it keeps main's batch verdict, `UNKNOWN_ERROR`, and the data reaches no row after it. A batch's text joins its elements' messages, which may echo the caller, so that row blames no endpoint.
 
 ### Mapping Registration
 

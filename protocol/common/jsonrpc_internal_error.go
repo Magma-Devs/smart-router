@@ -75,7 +75,8 @@ func cometBFTTextUnderAStatus(errorCode int, errorMessage string) bool {
 }
 
 // batchElementInternalError matches a batch element's internal error with data: "Internal error: "
-// at the start of an element's text (a batch joins its elements' messages with ",-,").
+// at the start of an element's text (a batch joins its elements' messages with ",-,"). An element
+// may echo the caller's text, so its row's verdict blames no endpoint (UNKNOWN_ERROR).
 //
 // A batch is classified with its HTTP status for a code, so the -32603 code row never reaches an
 // element. A single reply is classified with its own JSON-RPC code, and its code row decides it:
