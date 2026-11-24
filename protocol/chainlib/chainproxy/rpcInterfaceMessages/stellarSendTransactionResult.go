@@ -19,6 +19,11 @@ const stellarSendTransactionMethod = "sendTransaction"
 // verdict.
 const stellarTxResultCodeBadSeq = -5
 
+// stellarTxResultCodeFeeBumpInnerFailed is txFEE_BUMP_INNER_FAILED: a fee bump whose inner
+// transaction failed. The inner transaction's own code follows in the result; stellar-core reports a
+// fee bump's bad inner sequence that way (FeeBumpMutableTransactionResult::setInnermostError).
+const stellarTxResultCodeFeeBumpInnerFailed = -13
+
 // CheckStellarResponseError classifies a reply from a Stellar RPC node: the JSON-RPC envelope
 // rule, plus sendTransaction's own verdict (MAG-5448).
 //
@@ -44,8 +49,10 @@ const stellarTxResultCodeBadSeq = -5
 //     (common/error_classifier.go's generic REST row).
 //   - TRY_AGAIN_LATER: not queued — a same-account transaction is already pending, the fee is too
 //     low under load, or the hash is banned. A resend is safe: healthy but busy, like a rate limit.
-//   - ERROR: refused by the transaction engine. The verdict is read from errorResultXdr's result
-//     code; txBAD_SEQ is the one case named explicitly, everything else is a generic rejection.
+//   - ERROR: refused by the transaction engine. The verdict is read from the TransactionResult's
+//     code, in errorResultXdr, or in errorResultJson when the caller asked for xdrFormat "json"; a
+//     fee bump's failed inner transaction gives its own code. txBAD_SEQ is the one case named
+//     explicitly, everything else is a generic rejection.
 //
 // The message is common.StellarSendTransactionVerdict, which the registry's Stellar rows match
 // whole.
@@ -68,8 +75,9 @@ func (jm JsonrpcMessage) CheckStellarResponseError(data []byte, httpStatusCode i
 // CheckStellarResponseError.
 func checkStellarSendTransactionResult(resultBytes []byte) (hasError bool, errorMessage string) {
 	var result struct {
-		Status         string `json:"status"`
-		ErrorResultXdr string `json:"errorResultXdr"`
+		Status          string          `json:"status"`
+		ErrorResultXdr  string          `json:"errorResultXdr"`
+		ErrorResultJSON json.RawMessage `json:"errorResultJson"`
 	}
 	if err := json.Unmarshal(resultBytes, &result); err != nil {
 		return false, ""
@@ -78,7 +86,7 @@ func checkStellarSendTransactionResult(resultBytes []byte) (hasError bool, error
 	case "DUPLICATE", "TRY_AGAIN_LATER":
 		return true, common.StellarSendTransactionVerdict(result.Status)
 	case "ERROR":
-		if code, ok := stellarTxResultCode(result.ErrorResultXdr); ok && code == stellarTxResultCodeBadSeq {
+		if stellarErrorIsBadSeq(result.ErrorResultXdr, result.ErrorResultJSON) {
 			return true, common.StellarSendTransactionVerdict("ERROR txBAD_SEQ")
 		}
 		return true, common.StellarSendTransactionVerdict("ERROR")
@@ -89,15 +97,57 @@ func checkStellarSendTransactionResult(resultBytes []byte) (hasError bool, error
 	}
 }
 
+// stellarErrorIsBadSeq reports whether an ERROR reply's TransactionResult says txBAD_SEQ. Stellar
+// RPC writes the result as errorResultXdr, or as errorResultJson when the caller asked for
+// xdrFormat "json" (stellar-rpc methods/send_transaction.go), never both.
+func stellarErrorIsBadSeq(errorResultXdr string, errorResultJSON []byte) bool {
+	if code, ok := stellarTxResultCode(errorResultXdr); ok {
+		return code == stellarTxResultCodeBadSeq
+	}
+	return stellarJSONResultCode(errorResultJSON) == "tx_bad_seq"
+}
+
 // stellarTxResultCode reads a base64 TransactionResult's result-union discriminant without a full
 // XDR decoder: feeCharged (int64, 8 bytes) then the TransactionResultCode (int32, 4 bytes), both
-// big-endian (Stellar-transaction.x — a struct field, then a union's leading discriminant). ok is
-// false for anything that is not valid base64 or shorter than both fields; the raw XDR stays the
-// message instead of a decode failure.
+// big-endian (Stellar-transaction.x — a struct field, then a union's leading discriminant). For
+// txFEE_BUMP_INNER_FAILED it reads the inner transaction's code instead, after the inner hash (32
+// bytes) and the inner feeCharged (int64): InnerTransactionResultPair. ok is false for anything that
+// is not valid base64 or shorter than both fields; the raw XDR stays the message instead of a decode
+// failure. A fee bump's result too short for the inner code keeps the outer one.
 func stellarTxResultCode(errorResultXdr string) (code int32, ok bool) {
 	raw, err := base64.StdEncoding.DecodeString(errorResultXdr)
 	if err != nil || len(raw) < 12 {
 		return 0, false
 	}
-	return int32(binary.BigEndian.Uint32(raw[8:12])), true
+	code = int32(binary.BigEndian.Uint32(raw[8:12]))
+	if code == stellarTxResultCodeFeeBumpInnerFailed && len(raw) >= 56 {
+		code = int32(binary.BigEndian.Uint32(raw[52:56]))
+	}
+	return code, true
+}
+
+// stellarJSONResultCode is the result code's name in a TransactionResult written as JSON (stellar-xdr's
+// JSON form, which errorResultJson uses): "result" is the name itself for a code that carries nothing,
+// such as "tx_bad_seq", or an object keyed by the name. A fee bump whose inner transaction failed
+// gives the inner result's code (tx_fee_bump_inner_failed.result). Empty when it does not parse.
+func stellarJSONResultCode(transactionResult []byte) string {
+	var tr struct {
+		Result json.RawMessage `json:"result"`
+	}
+	if len(transactionResult) == 0 || json.Unmarshal(transactionResult, &tr) != nil || len(tr.Result) == 0 {
+		return ""
+	}
+	var name string
+	if json.Unmarshal(tr.Result, &name) == nil {
+		return name
+	}
+	var feeBump struct {
+		InnerFailed struct {
+			Result json.RawMessage `json:"result"`
+		} `json:"tx_fee_bump_inner_failed"`
+	}
+	if json.Unmarshal(tr.Result, &feeBump) != nil || len(feeBump.InnerFailed.Result) == 0 {
+		return ""
+	}
+	return stellarJSONResultCode(feeBump.InnerFailed.Result)
 }
