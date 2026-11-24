@@ -18,14 +18,14 @@ import (
 
 // newTestRESTRelaySender builds a DirectRPCRelaySender against an httptest server that answers
 // every request with the given status and body, and parses a REST message for path/method against
-// the LAVA mock spec (the generic REST stand-in write_outcome_rest_test.go also uses). The sender's
+// the COSMOSHUB mock spec (the generic REST stand-in write_outcome_rest_test.go also uses). The sender's
 // own isNodeError decision (direct_rpc_relay.go, MAG-5449) is chain-agnostic on a 2xx, so the mock
 // chain family does not need to be Tron for this; chainFamily is set directly on the sender for the
 // classification call, as a real router would set it from the endpoint's chain.
 func newTestRESTRelaySender(t *testing.T, ctx context.Context, method, path, body string, status int) (*DirectRPCRelaySender, chainlib.ChainMessage) {
 	t.Helper()
 	parser, _, _, closeServer, endpoint, err := chainlib.CreateChainLibMocks(
-		ctx, "LAVA", spectypes.APIInterfaceRest, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx, "COSMOSHUB", spectypes.APIInterfaceRest, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(status)
 			_, _ = w.Write([]byte(body))
