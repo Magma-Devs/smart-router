@@ -53,7 +53,7 @@ type restWriteUpstream struct {
 }
 
 // shortenWriteWindow makes chainID's write window short enough for a test that waits out a write's
-// budget. A write ignores lava-relay-timeout (MAG-5232), so the window is its own: its compute units
+// budget. A write ignores router-relay-timeout (MAG-5232), so the window is its own: its compute units
 // plus twice the block time, as it is a hanging api. A short block time keeps it under the 6 x
 // common.DefaultTimeout stateful budget the test sets.
 func shortenWriteWindow(t *testing.T, parser chainlib.ChainParser, chainID string) {
@@ -105,11 +105,11 @@ func sendRESTWriteThroughListener(t *testing.T, upstreams []restWriteUpstream) r
 	}
 
 	parser, _, _, closeServer, endpoint, err := chainlib.CreateChainLibMocks(
-		ctx, "LAVA", spectypes.APIInterfaceRest, handlerFor(upstreams[0]), nil, "../../", nil)
+		ctx, "COSMOSHUB", spectypes.APIInterfaceRest, handlerFor(upstreams[0]), nil, "../../", nil)
 	require.NoError(t, err)
 	t.Cleanup(closeServer)
 	if anyHang {
-		shortenWriteWindow(t, parser, "LAVA")
+		shortenWriteWindow(t, parser, "COSMOSHUB")
 	}
 
 	releases := []func(){}
@@ -150,7 +150,7 @@ func sendRESTWriteThroughListener(t *testing.T, upstreams []restWriteUpstream) r
 		providers[uint64(index)] = provider
 	}
 
-	sessionManager, rpcEndpoint := createTestSessionManager("LAVA", spectypes.APIInterfaceRest)
+	sessionManager, rpcEndpoint := createTestSessionManager("COSMOSHUB", spectypes.APIInterfaceRest)
 	rpcEndpoint.NetworkAddress = "127.0.0.1:0"
 	require.NoError(t, sessionManager.UpdateAllProviders(1, providers, nil))
 	logs, err := metrics.NewRPCConsumerLogs(nil, nil, nil)

@@ -524,3 +524,18 @@ func TestDecide_WriteIsNeverSentAgain(t *testing.T) {
 		})
 	}
 }
+
+// A Sui gRPC write is not sent again either (MAG-5186, decided 18 Nov): the chain's rows file every
+// RESOURCE_EXHAUSTED on a send as a throttle the client retries after. It needs no flag of its own:
+// no write is sent again, however every copy was refused (MAG-5232).
+func TestDecide_ChainListWriteHasNoRateLimitCarveOut(t *testing.T) {
+	policy := NewPolicy(PolicyConfig{MaxRetries: 10, RelayRetryLimit: 5, SendRelayAttempts: 3})
+	for name, summary := range map[string]relaycore.ResultsSummary{
+		"every copy a node's throttle": {NodeErrors: 2, OnlyRateLimited: true},
+		"every copy a transport 429":   {ProtocolErrors: 2, OnlyRateLimited: true},
+	} {
+		decision := policy.Decide(relaycore.DecisionInput{Selection: relaycore.Stateful, AttemptNumber: 1, Summary: summary})
+		require.Equal(t, relaycore.ActionStop, decision.Action, name)
+		require.Equal(t, "Stateful", decision.Reason, name)
+	}
+}

@@ -57,7 +57,7 @@ func TestRestChainProxy(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprint(w, `{"block": { "header": {"height": "244591"}}}`)
 	})
-	chainParser, chainProxy, chainFetcher, closeServer, _, err := CreateChainLibMocks(ctx, "LAVA", spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
+	chainParser, chainProxy, chainFetcher, closeServer, _, err := CreateChainLibMocks(ctx, "COSMOSHUB", spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 	require.NoError(t, err)
 	require.NotNil(t, chainParser)
 	require.NotNil(t, chainProxy)
@@ -88,7 +88,7 @@ func TestParsingRequestedBlocksHeadersRest(t *testing.T) {
 			fmt.Fprint(w, `{"block": { "header": {"height": "244591"}}}`)
 		}
 	})
-	chainParser, chainRouter, _, closeServer, _, err := CreateChainLibMocks(ctx, "LAVA", spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
+	chainParser, chainRouter, _, closeServer, _, err := CreateChainLibMocks(ctx, "COSMOSHUB", spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 	require.NoError(t, err)
 	defer func() {
 		if closeServer != nil {
@@ -158,7 +158,7 @@ func TestSettingRequestedBlocksHeadersRest(t *testing.T) {
 		}
 		fmt.Fprint(w, `{"block": { "header": {"height": "244591"}}}`)
 	})
-	chainParser, chainRouter, _, closeServer, _, err := CreateChainLibMocks(ctx, "LAVA", spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
+	chainParser, chainRouter, _, closeServer, _, err := CreateChainLibMocks(ctx, "COSMOSHUB", spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 	require.NoError(t, err)
 	defer func() {
 		if closeServer != nil {
@@ -216,7 +216,7 @@ func TestSettingRequestedBlocksHeadersRest(t *testing.T) {
 }
 
 func TestRegexParsing(t *testing.T) {
-	chainParser, _, _, closeServer, _, err := CreateChainLibMocks(context.Background(), "LAVA", spectypes.APIInterfaceRest, nil, nil, "../../", nil)
+	chainParser, _, _, closeServer, _, err := CreateChainLibMocks(context.Background(), "COSMOSHUB", spectypes.APIInterfaceRest, nil, nil, "../../", nil)
 	require.NoError(t, err)
 	defer func() {
 		if closeServer != nil {
@@ -225,8 +225,8 @@ func TestRegexParsing(t *testing.T) {
 	}()
 	for _, api := range []string{
 		"/cosmos/staking/v1beta1/delegations/",
-		"/lavanet/lava/pairing/provider/lava@1e9ma89h83azrfnqqy0u255zqxq0xluza6ydf9n/",
-		"/lavanet/lava/pairing/provider/lava@1e9ma89h83azrfnqqy0u255zqxq0xluza6ydf9n/ETH1",
+		"/cosmos/distribution/v1beta1/delegators/cosmos1e9ma89h83azrfnqqy0u255zqxq0xluza6ydf9n/rewards/",
+		"/cosmos/distribution/v1beta1/delegators/cosmos1e9ma89h83azrfnqqy0u255zqxq0xluza6ydf9n/rewards/cosmosvaloper1e9ma89h83azrfnqqy0u255zqxq0xluzaq8wk3d",
 	} {
 		_, err := chainParser.ParseMsg(api, nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 		require.NoError(t, err)
@@ -234,8 +234,8 @@ func TestRegexParsing(t *testing.T) {
 	// A trailing slash is optional: the spec names this api without one, and the request
 	// resolves to it rather than falling through to the synthetic Default- api.
 	for api, expectedApiName := range map[string]string{
-		"/cosmos/staking/v1beta1/delegations/lava@17ym998u666u8w2qgjd5m7w7ydjqmu3mlgl7ua2":  "/cosmos/staking/v1beta1/delegations/{delegator_addr}",
-		"/cosmos/staking/v1beta1/delegations/lava@17ym998u666u8w2qgjd5m7w7ydjqmu3mlgl7ua2/": "/cosmos/staking/v1beta1/delegations/{delegator_addr}",
+		"/cosmos/staking/v1beta1/delegations/cosmos17ym998u666u8w2qgjd5m7w7ydjqmu3mlgl7ua2":  "/cosmos/staking/v1beta1/delegations/{delegator_addr}",
+		"/cosmos/staking/v1beta1/delegations/cosmos17ym998u666u8w2qgjd5m7w7ydjqmu3mlgl7ua2/": "/cosmos/staking/v1beta1/delegations/{delegator_addr}",
 	} {
 		chainMessage, err := chainParser.ParseMsg(api, nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 		require.NoError(t, err)
@@ -275,8 +275,8 @@ func TestRegexParsing(t *testing.T) {
 	// Only the slash is relaxed — a path the spec genuinely does not describe still falls
 	// through, which is what keeps Default-* a usable spec-gap signal.
 	for _, api := range []string{
-		"/not/a/real/lava/path",
-		"/not/a/real/lava/path/",
+		"/not/a/real/chain/path",
+		"/not/a/real/chain/path/",
 	} {
 		chainMessage, err := chainParser.ParseMsg(api, nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 		if err == nil {
@@ -343,7 +343,7 @@ func TestRestChainListener_HealthPathNeverReachesTheRelay(t *testing.T) {
 			require.NoError(t, err)
 			endpoint := &routersession.RPCEndpoint{
 				NetworkAddress:  "127.0.0.1:0",
-				ChainID:         "LAV1",
+				ChainID:         "COSMOSHUB",
 				ApiInterface:    "rest",
 				HealthCheckPath: healthPath,
 			}
@@ -434,7 +434,7 @@ func TestRestChainListener_RelaysTheBodyOfMethodsThatCarryOne(t *testing.T) {
 	require.NoError(t, err)
 	endpoint := &routersession.RPCEndpoint{
 		NetworkAddress:  "127.0.0.1:0",
-		ChainID:         "LAV1",
+		ChainID:         "COSMOSHUB",
 		ApiInterface:    "rest",
 		HealthCheckPath: common.DEFAULT_HEALTH_PATH,
 	}
@@ -499,7 +499,7 @@ func TestRestListener_UndeclaredVerbIs501OnEveryHandler(t *testing.T) {
 	require.NoError(t, err)
 	listener := NewRestChainListener(ctx, &routersession.RPCEndpoint{
 		NetworkAddress:  "127.0.0.1:0",
-		ChainID:         "LAV1",
+		ChainID:         "COSMOSHUB",
 		ApiInterface:    "rest",
 		HealthCheckPath: common.DEFAULT_HEALTH_PATH,
 	}, &restRefusingRelayStub{}, alwaysHealthyReporter{}, logger)

@@ -8,7 +8,7 @@ import (
 // Helpers shared by the reply-header tests of this package. The filter's own tests live
 // with it in protocol/common (reply_headers_test.go); direct_rpc_reply_headers_test.go
 // drives it through the relay senders against a real upstream, and
-// rest_integration_test.go through the real LAVA and APT1 specs.
+// rest_integration_test.go through the real COSMOSHUB and APT1 specs.
 
 func metadataNames(md []pairingtypes.Metadata) []string {
 	names := make([]string, 0, len(md))

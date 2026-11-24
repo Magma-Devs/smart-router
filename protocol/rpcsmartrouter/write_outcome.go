@@ -42,10 +42,10 @@ import (
 //
 // A copy that answered with a 2xx JSON-RPC reply ("nonce too low", "already known", "insufficient
 // funds") is out of this until the chain's write rows ship: its reply is forwarded as today with no
-// Lava-Write-Outcome, and beside a copy that may have run main's handling stays
+// Router-Write-Outcome, and beside a copy that may have run main's handling stays
 // (unclearWriteOutcomeFor).
 
-// The Lava-Write-Outcome values (Part I R-L point 4: accepted > unknown > rejected > not_sent).
+// The Router-Write-Outcome values (Part I R-L point 4: accepted > unknown > rejected > not_sent).
 const (
 	writeOutcomeAccepted = "accepted"
 	writeOutcomeUnknown  = "unknown"
@@ -224,7 +224,7 @@ func notSentWriteReply(cause error, dispatched int) (chainlib.RouterReplyCode, s
 //
 // base is the result the reply is built on, nil for none: its reply headers are kept, except the
 // node-error flag, which a router-made reply does not carry. base is not changed: it can alias a
-// stored result. The caller adds Lava-Write-Outcome and Lava-Tx-Hash (stampWriteOutcome, with the
+// stored result. The caller adds Router-Write-Outcome and Router-Tx-Hash (stampWriteOutcome, with the
 // txHash returned here) once the request's own headers are on: a result with no reply is how
 // appendHeadersToRelayResult knows no upstream answered.
 func (rpcss *RPCSmartRouterServer) writeOutcomeReply(guid string, protocolMessage chainlib.ProtocolMessage, base *common.RelayResult, verdict writeVerdict, cause error, dispatched int) (reply *common.RelayResult, txHash string) {
@@ -265,8 +265,8 @@ func (rpcss *RPCSmartRouterServer) writeOutcomeReply(guid string, protocolMessag
 	return &stamped, txHash
 }
 
-// stampWriteOutcome adds Lava-Write-Outcome and, when the router computed it, Lava-Tx-Hash to
-// result's reply (MAG-5232 Expected 6). Lava-Guid is on every reply already.
+// stampWriteOutcome adds Router-Write-Outcome and, when the router computed it, Router-Tx-Hash to
+// result's reply (MAG-5232 Expected 6). Router-Guid is on every reply already.
 func stampWriteOutcome(result *common.RelayResult, outcome, txHash string) {
 	if result == nil {
 		return
@@ -283,7 +283,7 @@ func stampWriteOutcome(result *common.RelayResult, outcome, txHash string) {
 	result.Reply.Metadata = append(result.Reply.Metadata, pairingtypes.Metadata{Name: common.TX_HASH_HEADER_NAME, Value: txHash})
 }
 
-// requestGUID is the request's guid as Lava-Guid carries it, "" when ctx has none.
+// requestGUID is the request's guid as Router-Guid carries it, "" when ctx has none.
 func requestGUID(ctx context.Context) string {
 	if guid, found := utils.GetUniqueIdentifier(ctx); found && guid != 0 {
 		return strconv.FormatUint(guid, 10)

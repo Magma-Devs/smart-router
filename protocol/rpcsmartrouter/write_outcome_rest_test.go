@@ -80,7 +80,7 @@ func TestRESTListener_WriteOutcome(t *testing.T) {
 			}
 			var requests atomic.Int32
 			parser, _, _, closeServer, endpoint, err := chainlib.CreateChainLibMocks(
-				ctx, "LAVA", spectypes.APIInterfaceRest, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				ctx, "COSMOSHUB", spectypes.APIInterfaceRest, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					requests.Add(1)
 					assert.Equal(t, tc.method, r.Method)
 					assert.Equal(t, path, r.URL.Path)
@@ -98,7 +98,7 @@ func TestRESTListener_WriteOutcome(t *testing.T) {
 			require.NoError(t, err)
 			defer closeServer()
 			if tc.hang {
-				shortenWriteWindow(t, parser, "LAVA")
+				shortenWriteWindow(t, parser, "COSMOSHUB")
 			}
 			chainMessage, err := parser.ParseMsg(path, data, tc.method, nil, extensionslib.ExtensionInfo{})
 			require.NoError(t, err)
@@ -143,7 +143,7 @@ func TestRESTListener_WriteOutcome(t *testing.T) {
 			}
 			provider := routersession.NewConsumerSessionWithProvider("rest-upstream", []*routersession.Endpoint{providerEndpoint}, 100000, 1, 1)
 			provider.StaticProvider = true
-			sessionManager, rpcEndpoint := createTestSessionManager("LAVA", spectypes.APIInterfaceRest)
+			sessionManager, rpcEndpoint := createTestSessionManager("COSMOSHUB", spectypes.APIInterfaceRest)
 			rpcEndpoint.NetworkAddress = "127.0.0.1:0"
 			require.NoError(t, sessionManager.UpdateAllProviders(1,
 				map[uint64]*routersession.ConsumerSessionsWithProvider{0: provider}, nil))

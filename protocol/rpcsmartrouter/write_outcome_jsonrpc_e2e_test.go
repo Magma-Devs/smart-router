@@ -23,7 +23,7 @@ import (
 
 // MAG-5232 end to end: a write goes through a real JSON-RPC or Tendermint RPC listener, the real
 // router and the real direct sender to httptest upstreams, and the test asserts what the client
-// reads: the HTTP status, the body, Lava-Write-Outcome, Lava-Tx-Hash and Lava-Guid.
+// reads: the HTTP status, the body, Router-Write-Outcome, Router-Tx-Hash and Router-Guid.
 
 // evmRawTx is the signed transaction eth_sendRawTransaction sends here. Its hash is keccak-256 of
 // its bytes, whatever they hold.
@@ -58,9 +58,9 @@ func writeIface(name, chainID, apiInterface, method, path, body string) failedRe
 var (
 	evmWrite = writeIface("jsonrpc", "ETH1", spectypes.APIInterfaceJsonRPC, http.MethodPost, "/",
 		`{"jsonrpc":"2.0","id":77,"method":"eth_sendRawTransaction","params":["`+evmRawTx+`"]}`)
-	tendermintPostWrite = writeIface("tendermintrpc POST", "LAVA", spectypes.APIInterfaceTendermintRPC, http.MethodPost, "/",
+	tendermintPostWrite = writeIface("tendermintrpc POST", "COSMOSHUB", spectypes.APIInterfaceTendermintRPC, http.MethodPost, "/",
 		`{"jsonrpc":"2.0","id":77,"method":"broadcast_tx_sync","params":{"tx":"dHg="}}`)
-	tendermintGetWrite = writeIface("tendermintrpc GET", "LAVA", spectypes.APIInterfaceTendermintRPC, http.MethodGet, "/broadcast_tx_sync?tx=0x1234", "")
+	tendermintGetWrite = writeIface("tendermintrpc GET", "COSMOSHUB", spectypes.APIInterfaceTendermintRPC, http.MethodGet, "/broadcast_tx_sync?tx=0x1234", "")
 	bitcoinWrite       = writeIface("bitcoin", "BTC", spectypes.APIInterfaceJsonRPC, http.MethodPost, "/",
 		`{"jsonrpc":"1.0","id":77,"method":"sendrawtransaction","params":["0200000001"]}`)
 )
@@ -78,7 +78,7 @@ type routerWriteReply struct {
 
 // requireRouterWriteReply asserts the router's own reply to a write (MAG-5232 Expected 4 to 6): HTTP
 // 200, a JSON-RPC error object with code's code, the id, router_error, write_outcome, tx_hash when
-// there is one, the guid Lava-Guid carries, and the outcome and hash headers. It returns the reply.
+// there is one, the guid Router-Guid carries, and the outcome and hash headers. It returns the reply.
 func requireRouterWriteReply(t *testing.T, read failedReplyClientRead, code chainlib.RouterReplyCode, outcome, id, txHash string) routerWriteReply {
 	t.Helper()
 	require.Equal(t, http.StatusOK, read.status, "a router reply to a write is HTTP 200: a 5xx gets the write sent again. body=%s", read.body)
@@ -90,7 +90,7 @@ func requireRouterWriteReply(t *testing.T, read failedReplyClientRead, code chai
 	require.Equal(t, code.Name, reply.Error.Data["router_error"])
 	require.Equal(t, outcome, reply.Error.Data["write_outcome"])
 	require.NotEmpty(t, read.guid)
-	require.Equal(t, read.guid, reply.Error.Data["guid"], "the body's guid is Lava-Guid")
+	require.Equal(t, read.guid, reply.Error.Data["guid"], "the body's guid is Router-Guid")
 	require.Equal(t, outcome, read.header.Get(common.WRITE_OUTCOME_HEADER_NAME))
 	require.Equal(t, txHash, read.header.Get(common.TX_HASH_HEADER_NAME))
 	require.Equal(t, txHash, reply.Error.Data["tx_hash"])
@@ -180,7 +180,7 @@ func TestJSONRPCWrite_MaskedModeKeepsTheUnknownReply(t *testing.T) {
 }
 
 // Every copy refused by status, 401, 402, 403 or 429: the client gets the best-ranked node reply as
-// it came, with Lava-Write-Outcome: rejected and the hash (MAG-5232 Expected 2, tests 6 and 7).
+// it came, with Router-Write-Outcome: rejected and the hash (MAG-5232 Expected 2, tests 6 and 7).
 func TestJSONRPCWrite_RejectedByStatusIsTheNodesReply(t *testing.T) {
 	if !rand.Initialized() {
 		rand.InitRandomSeed()
@@ -228,7 +228,7 @@ func TestJSONRPCWrite_NotSentWhenEveryPortRefused(t *testing.T) {
 }
 
 // The hash is computed with the chain's formula (MAG-5232 Expected 7, test 9): Solana's is the
-// transaction's first signature. A chain with no formula here, Bitcoin, gets no Lava-Tx-Hash and the
+// transaction's first signature. A chain with no formula here, Bitcoin, gets no Router-Tx-Hash and the
 // sentence that tells the client how to find the hash.
 func TestJSONRPCWrite_TxHashByChainFormula(t *testing.T) {
 	if !rand.Initialized() {
@@ -298,7 +298,7 @@ func TestTendermintWrite_UnknownOutcomeIsTheRoutersReply(t *testing.T) {
 }
 
 // What the ticket leaves as it is (MAG-5232 tests 10 and 11). A node's 2xx JSON-RPC reply is
-// forwarded as today with no Lava-Write-Outcome until the chain's write rows ship, and beside a 503
+// forwarded as today with no Router-Write-Outcome until the chain's write rows ship, and beside a 503
 // main's handling stays: the client gets "nonce too low" as the node sent it. A plain success is the
 // node's reply with no outcome header.
 func TestJSONRPCWrite_ANodesJSONRPCReplyIsForwardedAsToday(t *testing.T) {

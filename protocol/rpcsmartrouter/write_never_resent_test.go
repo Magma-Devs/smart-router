@@ -105,11 +105,11 @@ func TestWrite_BatchHoldingAWriteIsNeverResent(t *testing.T) {
 	}
 }
 
-// A write ignores lava-relay-timeout (MAG-5232 Expected 9, test 14; Part I): the write's window is
+// A write ignores router-relay-timeout (MAG-5232 Expected 9, test 14; Part I): the write's window is
 // its own, whatever the caller asks. A shorter value can only cut off a copy that may already have
 // broadcast, turning a write that landed into an "unknown", and a longer one (under
 // --max-caller-relay-timeout) held the request past the write's budget. On main the header set the
-// window both ways, and Lava-Relay-Timeout-Applied reported the caller's value.
+// window both ways, and Router-Relay-Timeout-Applied reported the caller's value.
 func TestWrite_IgnoresTheCallersRelayTimeout(t *testing.T) {
 	rand.InitRandomSeed()
 	tc := writeInterfaceCases[0]
@@ -131,7 +131,7 @@ func TestWrite_IgnoresTheCallersRelayTimeout(t *testing.T) {
 	common.MaxCallerRelayTimeout = 10 * time.Minute
 	for _, override := range []time.Duration{time.Second, 5 * time.Minute} {
 		require.Equal(t, ownWindow, chainlib.GetRelayTimeout(parse(t, override), averageBlockTime),
-			"a write's window is its own with lava-relay-timeout: %s", override)
+			"a write's window is its own with router-relay-timeout: %s", override)
 	}
 
 	// End to end: a copy slower than the caller's 1 s is answered, and the reply names the window
@@ -150,7 +150,7 @@ func TestWrite_IgnoresTheCallersRelayTimeout(t *testing.T) {
 	require.Equal(t, ownWindow.String(), applied, "the reply names the window the write used, not the caller's")
 }
 
-// The caller's lava-relay-timeout still sets a read's window.
+// The caller's router-relay-timeout still sets a read's window.
 func TestRead_KeepsTheCallersRelayTimeout(t *testing.T) {
 	tc := writeInterfaceCases[0]
 	chainParser := tc.parser(t)

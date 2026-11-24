@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// lava-identified-node-error says the node answered with an error, so on JSON-RPC and Tendermint RPC
+// router-identified-node-error says the node answered with an error, so on JSON-RPC and Tendermint RPC
 // it is set only when the forwarded body is a JSON-RPC reply (MAG-5072, Omer 12 Nov). A gateway's
 // 401, 403 or 404 page, an empty body, or JSON that is not JSON-RPC is not the node's answer: the
 // client gets it as is, without the header. A node's own JSON-RPC error keeps it, on any status.

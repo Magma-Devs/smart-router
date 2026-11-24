@@ -24,7 +24,7 @@ func enumMarshal(name string) []byte {
 // to the zero value without an error.
 //
 // It stays lenient, unlike a strict decode that would refuse the whole spec over one name. Specs are
-// released apart from the router, and these tables already lack names the upstream Lava spec schema
+// released apart from the router, and these tables already lack names the upstream spec schema
 // has (FUNCTION_TAG SET_LATEST_IN_BODY, PARSER_TYPE EXTENSION_ARG and IDENTIFIER), so a spec naming
 // one must still load. ParseValue_VerificationSeverity reads an unknown name the same way and also
 // reports it. Whether these four should refuse or report an unknown name instead is an owner call:

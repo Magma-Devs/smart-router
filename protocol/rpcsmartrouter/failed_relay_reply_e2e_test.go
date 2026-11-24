@@ -44,7 +44,7 @@ type failedReplyInterface struct {
 	// jsonRpcShape: the router's own error is a JSON-RPC error object; otherwise {"error": "..."}.
 	jsonRpcShape bool
 	// graphQLShape: the router's own error is a GraphQL error with the code NO_PROVIDER_ANSWER, its
-	// guid equal to Lava-Guid, and a sentence that names no provider (MAG-5119).
+	// guid equal to Router-Guid, and a sentence that names no provider (MAG-5119).
 	graphQLShape bool
 	// headers are request headers sent on top of the ones every request here sends.
 	headers map[string]string
@@ -75,11 +75,11 @@ func failedReplyInterfaces() []failedReplyInterface {
 			method: http.MethodPost, path: "/", body: `{"jsonrpc":"2.0","id":77,"method":"eth_blockNumber","params":[]}`, jsonRpcShape: true,
 		},
 		{
-			name: "rest", chainID: "LAVA", apiInterface: spectypes.APIInterfaceRest, parser: mockParser("LAVA", spectypes.APIInterfaceRest),
+			name: "rest", chainID: "COSMOSHUB", apiInterface: spectypes.APIInterfaceRest, parser: mockParser("COSMOSHUB", spectypes.APIInterfaceRest),
 			method: http.MethodGet, path: "/cosmos/base/tendermint/v1beta1/blocks/17",
 		},
 		{
-			name: "tendermintrpc", chainID: "LAVA", apiInterface: spectypes.APIInterfaceTendermintRPC, parser: mockParser("LAVA", spectypes.APIInterfaceTendermintRPC),
+			name: "tendermintrpc", chainID: "COSMOSHUB", apiInterface: spectypes.APIInterfaceTendermintRPC, parser: mockParser("COSMOSHUB", spectypes.APIInterfaceTendermintRPC),
 			method: http.MethodPost, path: "/", body: `{"jsonrpc":"2.0","id":77,"method":"status","params":[]}`, jsonRpcShape: true,
 		},
 		{
@@ -95,11 +95,11 @@ type failedReplyClientRead struct {
 	body        string
 	contentType string
 	guid        string
-	nodeError   string // lava-identified-node-error
+	nodeError   string // router-identified-node-error
 	header      http.Header
 }
 
-// failedReplyRelayTimeout is the attempt window every request here asks for in lava-relay-timeout.
+// failedReplyRelayTimeout is the attempt window every request here asks for in router-relay-timeout.
 const failedReplyRelayTimeout = 300 * time.Millisecond
 
 // startFailedReplyRouter serves iface through a real listener and router whose providers are
@@ -326,7 +326,7 @@ func TestFailedRelayReply_EndToEnd_MAG4481(t *testing.T) {
 					require.Equal(t, "no provider answered the request", message)
 					require.NotContains(t, read.body, "connection refused")
 					require.NotContains(t, read.body, "127.0.0.1")
-					require.Contains(t, read.body, `"guid":"`+read.guid+`"`, "Lava-Guid equals extensions.guid")
+					require.Contains(t, read.body, `"guid":"`+read.guid+`"`, "Router-Guid equals extensions.guid")
 					return
 				}
 				require.True(t, strings.HasPrefix(message, "no answer from upstream: "), message)
@@ -339,7 +339,7 @@ func TestFailedRelayReply_EndToEnd_MAG4481(t *testing.T) {
 				message := routerErrorMessage(t, iface, read.body)
 				if iface.graphQLShape {
 					require.True(t, strings.HasPrefix(message, "no provider answered within "), message)
-					require.Contains(t, read.body, `"guid":"`+read.guid+`"`, "Lava-Guid equals extensions.guid")
+					require.Contains(t, read.body, `"guid":"`+read.guid+`"`, "Router-Guid equals extensions.guid")
 				} else {
 					require.True(t, strings.HasPrefix(message, "no answer from upstream within "), message)
 				}
@@ -347,7 +347,7 @@ func TestFailedRelayReply_EndToEnd_MAG4481(t *testing.T) {
 				// MAG-3980: the router's own 504 carries the request's headers, as a reply an
 				// upstream produced does: the GUID, and the upstream it asked. One attempt went out,
 				// so there is no retry to report.
-				require.NotEmpty(t, read.guid, "the router's 504 carries no Lava-Guid")
+				require.NotEmpty(t, read.guid, "the router's 504 carries no Router-Guid")
 				require.Equal(t, "upstream-1", read.header.Get(common.PROVIDER_ADDRESS_HEADER_NAME))
 				require.Empty(t, read.header.Get(common.RETRY_COUNT_HEADER_NAME))
 			})
@@ -376,8 +376,8 @@ func TestFailedRelayReply_EndToEnd_MAG4481(t *testing.T) {
 
 // MAG-3980: a request whose budget runs out while every upstream is quiet is answered by the
 // router itself, and that reply carries the request's headers like any other failed reply. It used
-// to return before they were built, so the client had no Lava-Guid to quote for the failure that
-// is hardest to diagnose, and no Lava-Retries or Lava-Provider-Address to say what was tried.
+// to return before they were built, so the client had no Router-Guid to quote for the failure that
+// is hardest to diagnose, and no Router-Retries or Router-Provider-Address to say what was tried.
 func TestFailedRelayReply_BudgetExpiryKeepsTheRequestHeaders_MAG3980(t *testing.T) {
 	if !rand.Initialized() {
 		rand.InitRandomSeed()
@@ -396,7 +396,7 @@ func TestFailedRelayReply_BudgetExpiryKeepsTheRequestHeaders_MAG3980(t *testing.
 	require.Equal(t, http.StatusGatewayTimeout, read.status, read.body)
 	require.EqualValues(t, 2, arrivals.Load(), "setup: the ticker must have hedged to the other upstream, or this measures a single attempt")
 
-	require.NotEmpty(t, read.guid, "the reply carries no Lava-Guid")
+	require.NotEmpty(t, read.guid, "the reply carries no Router-Guid")
 	require.Contains(t, read.body, read.guid, "the header names the request the body names")
 	require.Equal(t, "1", read.header.Get(common.RETRY_COUNT_HEADER_NAME), "two attempts went out")
 	require.ElementsMatch(t, []string{"upstream-1", "upstream-2"},
@@ -406,8 +406,8 @@ func TestFailedRelayReply_BudgetExpiryKeepsTheRequestHeaders_MAG3980(t *testing.
 }
 
 // MAG-5076: a request the router ends before asking any provider, a pin on a provider it cannot use
-// or a router with no provider at all, still carries the request's headers: Lava-Guid, the guid the
-// body names, lava-user-request-type, and Lava-Relay-Timeout-Applied for the lava-relay-timeout
+// or a router with no provider at all, still carries the request's headers: Router-Guid, the guid the
+// body names, router-user-request-type, and Router-Relay-Timeout-Applied for the router-relay-timeout
 // every request here sends. It used to carry none, so the guid was only in the body. No attempt went
 // out, so it names no provider and no retry. The status and the body are unchanged.
 func TestFailedRelayReply_ARequestRefusedBeforeDispatchKeepsTheRequestHeaders_MAG5076(t *testing.T) {
@@ -438,9 +438,9 @@ func TestFailedRelayReply_ARequestRefusedBeforeDispatchKeepsTheRequestHeaders_MA
 				require.Equal(t, http.StatusInternalServerError, read.status, read.body)
 				require.Zero(t, arrivals.Load(), "setup: the request must end before any provider is asked")
 
-				require.NotEmpty(t, read.guid, "the reply carries no Lava-Guid")
+				require.NotEmpty(t, read.guid, "the reply carries no Router-Guid")
 				require.Contains(t, read.body, read.guid, "the header names the request the body names")
-				require.NotEmpty(t, read.header.Get(common.USER_REQUEST_TYPE), "the reply carries no lava-user-request-type")
+				require.NotEmpty(t, read.header.Get(common.USER_REQUEST_TYPE), "the reply carries no router-user-request-type")
 				require.Equal(t, failedReplyRelayTimeout.String(), read.header.Get(common.RELAY_TIMEOUT_APPLIED_HEADER_NAME))
 				require.Empty(t, read.header.Get(common.PROVIDER_ADDRESS_HEADER_NAME), "no provider was asked")
 				require.Empty(t, read.header.Get(common.RETRY_COUNT_HEADER_NAME), "no attempt went out")
@@ -452,7 +452,7 @@ func TestFailedRelayReply_ARequestRefusedBeforeDispatchKeepsTheRequestHeaders_MA
 // MAG-5076: a strict pin on an upstream too far behind the chain tip is turned away by the
 // consistency gate, after selection picked it and before anything is sent. The refusal carries the
 // request's headers as the other refusals do. A write had the upstream on record as a target, but
-// the upstream never received it, so lava-fast-tx-participants must not name it.
+// the upstream never received it, so router-fast-tx-participants must not name it.
 func TestFailedRelayReply_AStrictPinTheConsistencyGateTurnsAwayKeepsTheRequestHeaders_MAG5076(t *testing.T) {
 	if !rand.Initialized() {
 		rand.InitRandomSeed()
@@ -485,7 +485,7 @@ func TestFailedRelayReply_AStrictPinTheConsistencyGateTurnsAwayKeepsTheRequestHe
 			}
 			require.Zero(t, arrivals.Load(), "setup: the pinned upstream must not be asked")
 
-			require.NotEmpty(t, read.guid, "the reply carries no Lava-Guid")
+			require.NotEmpty(t, read.guid, "the reply carries no Router-Guid")
 			require.Contains(t, read.body, read.guid)
 			require.Equal(t, tc.method, read.header.Get(common.USER_REQUEST_TYPE))
 			require.Empty(t, read.header.Values(common.PROVIDER_ADDRESS_HEADER_NAME), "no provider was asked")
@@ -581,7 +581,7 @@ func TestFailedRelayReply_BudgetExpiryOfACrossValidatedRequestNamesItsReason_MAG
 
 	read := startFailedReplyRouter(t, jsonRPC, hangingUpstream(t, nil), hangingUpstream(t, nil), hangingUpstream(t, nil))()
 	require.Equal(t, http.StatusGatewayTimeout, read.status, read.body)
-	require.NotEmpty(t, read.guid, "the reply carries no Lava-Guid")
+	require.NotEmpty(t, read.guid, "the reply carries no Router-Guid")
 	require.Equal(t, "failed", read.header.Get(common.CROSS_VALIDATION_STATUS_HEADER_NAME))
 	queried := read.header.Get(common.CROSS_VALIDATION_ALL_PROVIDERS_HEADER_NAME)
 	require.NotEmpty(t, queried)

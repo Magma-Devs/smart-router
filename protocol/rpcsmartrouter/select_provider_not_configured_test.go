@@ -19,7 +19,7 @@ import (
 )
 
 // MAG-3800, through the whole router: a JSON-RPC request pinned to a provider name the router does
-// not have is refused with HTTP 400, the fixed sentence and the request's Lava-Guid, and the reply
+// not have is refused with HTTP 400, the fixed sentence and the request's Router-Guid, and the reply
 // names none of the router's providers. Before, it was the 500 that says the server failed, with
 // every valid provider name in the body.
 func TestSelectProvider_ANameTheRouterDoesNotHaveIsRefusedWith400(t *testing.T) {
