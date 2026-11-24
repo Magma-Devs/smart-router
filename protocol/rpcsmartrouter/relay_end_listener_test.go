@@ -159,10 +159,42 @@ func TestRelayEnd_GRPCListener(t *testing.T) {
 	}
 }
 
+// MAG-5076 on gRPC: a call pinned to a name the router does not have, or to a configured provider it
+// cannot use, is refused before any provider is asked, and its trailers carry the request's headers.
+func TestGRPCListener_ARefusedPinCarriesTheRequestHeaders_MAG5076(t *testing.T) {
+	client := startRelayEndGRPCRouter(t, `{"name": "`+relayEndGRPCMethod+`", "enabled": true, "compute_units": 10, "category": {"deterministic": false, "stateful": 0}}`, startStalledReflectionNode(t))
+	for _, tc := range []struct {
+		pin  string
+		code codes.Code
+	}{
+		{"node-z", codes.InvalidArgument}, // a name the router does not have (MAG-3800)
+		{"node-y", codes.Unknown},         // configured, in no pool
+	} {
+		t.Run(tc.pin, func(t *testing.T) {
+			callCtx, callCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer callCancel()
+			callCtx = metadata.AppendToOutgoingContext(callCtx, common.SELECT_PROVIDER_HEADER_NAME, tc.pin)
+			var trailer metadata.MD
+			err := client.Invoke(callCtx, "/"+relayEndGRPCMethod, wrapperspb.Int64(5), &wrapperspb.Int64Value{}, grpc.Trailer(&trailer))
+			require.Equal(t, tc.code, status.Code(err), "%v", err)
+			require.NotEmpty(t, trailer.Get(common.GUID_HEADER_NAME), "the refusal carries no router-guid")
+			require.Equal(t, []string{relayEndGRPCMethod}, trailer.Get(common.USER_REQUEST_TYPE))
+			require.Empty(t, trailer.Get(common.PROVIDER_ADDRESS_HEADER_NAME), "no provider was asked")
+		})
+	}
+}
+
 // startRelayEndGRPCRouter starts a router whose gRPC listener serves chain GRPCTEST, with the given
 // apis (the spec's JSON entries, comma-separated), over one upstream, grpc-node, at nodeAddr. It
 // returns a client of the listener.
 func startRelayEndGRPCRouter(t *testing.T, apis, nodeAddr string) *grpc.ClientConn {
+	t.Helper()
+	return startRelayEndGRPCRouterFor(t, "GRPCTEST", apis, nodeAddr)
+}
+
+// startRelayEndGRPCRouterFor is startRelayEndGRPCRouter for the chain chainID, whose error-registry
+// family reads the replies: SUI gets Sui's rows.
+func startRelayEndGRPCRouterFor(t *testing.T, chainID, apis, nodeAddr string) *grpc.ClientConn {
 	t.Helper()
 	if !rand.Initialized() {
 		rand.InitRandomSeed()
@@ -172,7 +204,7 @@ func startRelayEndGRPCRouter(t *testing.T, apis, nodeAddr string) *grpc.ClientCo
 
 	var spec spectypes.Spec
 	require.NoError(t, json.Unmarshal([]byte(`{
-      "index": "GRPCTEST", "name": "gRPC test", "enabled": true, "average_block_time": 1000,
+      "index": "`+chainID+`", "name": "gRPC test", "enabled": true, "average_block_time": 1000,
       "api_collections": [{
         "enabled": true,
         "collection_data": {"api_interface": "grpc", "internal_path": "", "type": "", "add_on": ""},
@@ -187,13 +219,15 @@ func startRelayEndGRPCRouter(t *testing.T, apis, nodeAddr string) *grpc.ClientCo
 	connection, err := routersession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = connection.Close() })
-	rpcEndpoint := &routersession.RPCEndpoint{ChainID: "GRPCTEST", ApiInterface: spectypes.APIInterfaceGrpc}
-	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "GRPCTEST")
+	rpcEndpoint := &routersession.RPCEndpoint{ChainID: chainID, ApiInterface: spectypes.APIInterfaceGrpc}
+	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, chainID)
 	csm := routersession.NewConsumerSessionManager(rpcEndpoint, optimizer, nil, "test-router", routersession.NewActiveSubscriptionProvidersStorage())
 	provider := routersession.NewConsumerSessionWithProvider("grpc-node", []*routersession.Endpoint{{NetworkAddress: nodeUrl.Url, Enabled: true, DirectConnections: []routersession.DirectRPCConnection{connection}}}, 100000, 1, 1)
 	provider.StaticProvider = true
 	require.NoError(t, csm.UpdateAllProviders(1, map[uint64]*routersession.ConsumerSessionsWithProvider{0: provider}, map[uint64]*routersession.ConsumerSessionsWithProvider{}))
-	csm.SetConfiguredProviderNames([]string{"grpc-node"})
+	// node-y is configured but in no pool, so a pin on it is the provider-unavailable reply, not a
+	// refused name (MAG-3800).
+	csm.SetConfiguredProviderNames([]string{"grpc-node", "node-y"})
 	logs, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
 	require.NoError(t, err)
 	server := &RPCSmartRouterServer{
@@ -204,7 +238,7 @@ func startRelayEndGRPCRouter(t *testing.T, apis, nodeAddr string) *grpc.ClientCo
 		rpcSmartRouterLogs: logs,
 	}
 
-	listenEndpoint := &routersession.RPCEndpoint{NetworkAddress: "127.0.0.1:0", ChainID: "GRPCTEST", ApiInterface: spectypes.APIInterfaceGrpc}
+	listenEndpoint := &routersession.RPCEndpoint{NetworkAddress: "127.0.0.1:0", ChainID: chainID, ApiInterface: spectypes.APIInterfaceGrpc}
 	listener := chainlib.NewGrpcChainListener(ctx, listenEndpoint, server, healthyReporter{}, logs, parser)
 	listenerDone := make(chan struct{})
 	go func() {
