@@ -150,7 +150,7 @@ func TestParseResponseByEncoding(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, result0, result1)
 	}
-	// returned from lava blockchain rest vs tendermintrpc
+	// returned from a cosmos chain's rest vs tendermintrpc
 	testData := []data{{bytes: []byte("9291EDC036AE254F9A6E0237F0EF13C452E7F08722E8DBD68B2F34CC8132C91D"), encoding: spectypes.EncodingHex}, {bytes: []byte("kpHtwDauJU+abgI38O8TxFLn8Ici6NvWiy80zIEyyR0="), encoding: spectypes.EncodingBase64}}
 	testInputs(testData)
 	// returned form evmos evm-jsonrpc vs rest

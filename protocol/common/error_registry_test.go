@@ -344,7 +344,7 @@ func TestClassifyError_ChainExecutionMatchers(t *testing.T) {
 	})
 
 	t.Run("account not found (Cosmos Tier-2)", func(t *testing.T) {
-		result := ClassifyError(nil, ChainFamilyCosmosSDK, TransportJsonRPC, 0, "account not found: lava1abc")
+		result := ClassifyError(nil, ChainFamilyCosmosSDK, TransportJsonRPC, 0, "account not found: cosmos1abc")
 		assert.Equal(t, RouterErrorChainAccountNotFound, result)
 	})
 
@@ -427,7 +427,7 @@ func TestClassifyError_ChainMatchers(t *testing.T) {
 		expected *RouterError
 	}{
 		{"account sequence mismatch", "account sequence mismatch, expected 7, got 5", RouterErrorChainInvalidSequence},
-		{"insufficient fees (plural)", "insufficient fees; got: 100ulava required: 200ulava", RouterErrorChainInsufficientFee},
+		{"insufficient fees (plural)", "insufficient fees; got: 100uatom required: 200uatom", RouterErrorChainInsufficientFee},
 		{"insufficient fee (singular)", "insufficient fee for tx", RouterErrorChainInsufficientFee},
 	}
 	for _, tt := range cosmosCases {
@@ -795,7 +795,7 @@ func TestDetectConnectionError_NeverProducesUnknown(t *testing.T) {
 		{"string: context deadline exceeded", fmt.Errorf("http request failed: context deadline exceeded: Context deadline exceeded")},
 		{"string: context canceled", fmt.Errorf("operation failed: context canceled")},
 		{"net.Error timeout", &timeoutNetError{}},
-		{"http2 GOAWAY PROTOCOL_ERROR", fmt.Errorf(`http request failed: Post "https://base.lava.build:443/": http2: server sent GOAWAY and closed the connection; LastStreamID=1857, ErrCode=PROTOCOL_ERROR, debug=""`)},
+		{"http2 GOAWAY PROTOCOL_ERROR", fmt.Errorf(`http request failed: Post "https://base.example.com:443/": http2: server sent GOAWAY and closed the connection; LastStreamID=1857, ErrCode=PROTOCOL_ERROR, debug=""`)},
 		{"http2 GOAWAY INTERNAL_ERROR", fmt.Errorf(`http2: server sent GOAWAY and closed the connection; ErrCode=INTERNAL_ERROR, debug=""`)},
 		{"http2 RST_STREAM INTERNAL_ERROR", fmt.Errorf(`failed reading response: stream error: stream ID 77; INTERNAL_ERROR; received from peer`)},
 		{"503 envoy connection refused", fmt.Errorf(`503 Service Unavailable: {"error":{"code":503,"message":"upstream connect error or disconnect/reset before headers. retried and the latest reset reason: remote connection failure, transport failure reason: delayed connect error: Connection refused","status":"UNAVAILABLE"}}`)},

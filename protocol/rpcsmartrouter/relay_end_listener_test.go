@@ -177,7 +177,7 @@ func TestGRPCListener_ARefusedPinCarriesTheRequestHeaders_MAG5076(t *testing.T) 
 			var trailer metadata.MD
 			err := client.Invoke(callCtx, "/"+relayEndGRPCMethod, wrapperspb.Int64(5), &wrapperspb.Int64Value{}, grpc.Trailer(&trailer))
 			require.Equal(t, tc.code, status.Code(err), "%v", err)
-			require.NotEmpty(t, trailer.Get(common.GUID_HEADER_NAME), "the refusal carries no lava-guid")
+			require.NotEmpty(t, trailer.Get(common.GUID_HEADER_NAME), "the refusal carries no router-guid")
 			require.Equal(t, []string{relayEndGRPCMethod}, trailer.Get(common.USER_REQUEST_TYPE))
 			require.Empty(t, trailer.Get(common.PROVIDER_ADDRESS_HEADER_NAME), "no provider was asked")
 		})
@@ -189,6 +189,13 @@ func TestGRPCListener_ARefusedPinCarriesTheRequestHeaders_MAG5076(t *testing.T) 
 // returns a client of the listener.
 func startRelayEndGRPCRouter(t *testing.T, apis, nodeAddr string) *grpc.ClientConn {
 	t.Helper()
+	return startRelayEndGRPCRouterFor(t, "GRPCTEST", apis, nodeAddr)
+}
+
+// startRelayEndGRPCRouterFor is startRelayEndGRPCRouter for the chain chainID, whose error-registry
+// family reads the replies: SUI gets Sui's rows.
+func startRelayEndGRPCRouterFor(t *testing.T, chainID, apis, nodeAddr string) *grpc.ClientConn {
+	t.Helper()
 	if !rand.Initialized() {
 		rand.InitRandomSeed()
 	}
@@ -197,7 +204,7 @@ func startRelayEndGRPCRouter(t *testing.T, apis, nodeAddr string) *grpc.ClientCo
 
 	var spec spectypes.Spec
 	require.NoError(t, json.Unmarshal([]byte(`{
-      "index": "GRPCTEST", "name": "gRPC test", "enabled": true, "average_block_time": 1000,
+      "index": "`+chainID+`", "name": "gRPC test", "enabled": true, "average_block_time": 1000,
       "api_collections": [{
         "enabled": true,
         "collection_data": {"api_interface": "grpc", "internal_path": "", "type": "", "add_on": ""},
@@ -212,8 +219,8 @@ func startRelayEndGRPCRouter(t *testing.T, apis, nodeAddr string) *grpc.ClientCo
 	connection, err := routersession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = connection.Close() })
-	rpcEndpoint := &routersession.RPCEndpoint{ChainID: "GRPCTEST", ApiInterface: spectypes.APIInterfaceGrpc}
-	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "GRPCTEST")
+	rpcEndpoint := &routersession.RPCEndpoint{ChainID: chainID, ApiInterface: spectypes.APIInterfaceGrpc}
+	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, chainID)
 	csm := routersession.NewConsumerSessionManager(rpcEndpoint, optimizer, nil, "test-router", routersession.NewActiveSubscriptionProvidersStorage())
 	provider := routersession.NewConsumerSessionWithProvider("grpc-node", []*routersession.Endpoint{{NetworkAddress: nodeUrl.Url, Enabled: true, DirectConnections: []routersession.DirectRPCConnection{connection}}}, 100000, 1, 1)
 	provider.StaticProvider = true
@@ -231,7 +238,7 @@ func startRelayEndGRPCRouter(t *testing.T, apis, nodeAddr string) *grpc.ClientCo
 		rpcSmartRouterLogs: logs,
 	}
 
-	listenEndpoint := &routersession.RPCEndpoint{NetworkAddress: "127.0.0.1:0", ChainID: "GRPCTEST", ApiInterface: spectypes.APIInterfaceGrpc}
+	listenEndpoint := &routersession.RPCEndpoint{NetworkAddress: "127.0.0.1:0", ChainID: chainID, ApiInterface: spectypes.APIInterfaceGrpc}
 	listener := chainlib.NewGrpcChainListener(ctx, listenEndpoint, server, healthyReporter{}, logs, parser)
 	listenerDone := make(chan struct{})
 	go func() {

@@ -64,10 +64,10 @@ func eth1WriteParser(t *testing.T) chainlib.ChainParser {
 	return chainParser
 }
 
-func lavaRESTWriteParser(t *testing.T) chainlib.ChainParser {
+func restWriteParser(t *testing.T) chainlib.ChainParser {
 	t.Helper()
 	noop := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
-	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(context.Background(), "LAVA", spectypes.APIInterfaceRest, noop, nil, "../../", nil)
+	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(context.Background(), "COSMOSHUB", spectypes.APIInterfaceRest, noop, nil, "../../", nil)
 	if closeServer != nil {
 		t.Cleanup(closeServer)
 	}
@@ -115,7 +115,7 @@ var writeInterfaceCases = []writeInterfaceCase{
 		success: `{"jsonrpc":"2.0","id":1,"result":"0xabc"}`,
 	},
 	{
-		name: "rest", chainID: "LAVA", apiInterface: spectypes.APIInterfaceRest, parser: lavaRESTWriteParser,
+		name: "rest", chainID: "COSMOSHUB", apiInterface: spectypes.APIInterfaceRest, parser: restWriteParser,
 		method: http.MethodPost, path: "/cosmos/tx/v1beta1/txs", body: `{"tx_bytes":"dHg=","mode":"BROADCAST_MODE_SYNC"}`,
 		success: `{"tx_response":{"code":0,"txhash":"ABC"}}`,
 	},
@@ -209,8 +209,8 @@ func sendWrite(t *testing.T, tc writeInterfaceCase, chainParser chainlib.ChainPa
 	return sendWriteWithDirectives(t, tc, chainParser, server, nil)
 }
 
-// sendWriteWithDirectives is sendWrite with the request's lava-* directive headers, such as a
-// lava-select-provider pin.
+// sendWriteWithDirectives is sendWrite with the request's router-* directive headers, such as a
+// router-select-provider pin.
 func sendWriteWithDirectives(t *testing.T, tc writeInterfaceCase, chainParser chainlib.ChainParser, server *RPCSmartRouterServer, directives map[string]string) (*common.RelayResult, error) {
 	t.Helper()
 	ctx := context.Background()
