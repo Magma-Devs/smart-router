@@ -325,6 +325,9 @@ func DetectConnectionError(err error) *RouterError {
     // net.Error timeout check
     // String fallback for non-%w wrapped errors ("context deadline exceeded", "context canceled")
     // ECONNREFUSED via net.OpError
+    // GRPCReplyLostError: a gRPC call whose connection or stream ended after the stream to the
+    // node opened and before the node's status arrived; read before the string rows, which may
+    // name it only with a code that says the request may have reached the node (1005), else 1006
     // GRPCCallUndeliveredError: a gRPC call the router's own client failed before any stream
     // to the node was open; its text is read by the layers above first, and what no row
     // names lands on PROTOCOL_PROVIDER_UNAVAILABLE (1012)
@@ -334,6 +337,8 @@ func DetectConnectionError(err error) *RouterError {
 `ClassifyError` Step 0 returns `connectionError` immediately if non-nil — so a detected connection error **always** takes precedence and can never produce `UNKNOWN_ERROR`.
 
 A gRPC status needs the wrapper because grpc-go words a connection it could not use as `UNAVAILABLE`, the code a node also sends when it is shutting down; the code alone cannot tell the two apart. `routersession.GRPCDirectRPCConnection` reads the stream instead (`grpc.Peer` is set only once a stream to the node is open) and wraps the status in `GRPCCallUndeliveredError` when there was none, so a refused gRPC dial disables its endpoint as `unreachable`, as a refused JSON-RPC dial does. A node's own `UNAVAILABLE` arrives on an open stream and stays `NODE_SERVICE_UNAVAILABLE` (2006).
+
+An open stream is not enough on its own: grpc-go also writes `UNAVAILABLE` when the connection breaks during the call ("error reading from server: ... connection reset by peer"). The connection's stats handler records whether the node's status frame arrived (`common.GRPCStatusFrame`). When it did not, a status grpc-go writes for a broken call (`UNAVAILABLE`, a stream reset, a stream closed without a status) is wrapped in `GRPCReplyLostError`: no reply, `PROTOCOL_CONNECTION_RESET` (1005) or `PROTOCOL_CONNECTION_CLOSED` (1006), so another provider is asked, the endpoint is counted, and a write it carried may have run (MAG-5130). A status that names `ENHANCE_YOUR_CALM` is not wrapped: a server asking the router to slow down, by a stream reset or by a GOAWAY before it closed the connection, stays a rate limit, and the endpoint is held off, not counted. The wrapper's text has the socket's addresses replaced. A gateway's non-gRPC HTTP reply stays a reply. When no provider answered, the gRPC listener replies `UNAVAILABLE` (`DEADLINE_EXCEEDED` when a provider timed out and none answered) with "no provider answered the request" and the guid in `router-guid`, never the transport error.
 
 ### Matching Rules
 
