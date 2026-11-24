@@ -149,10 +149,10 @@ type DecisionInput struct {
 	// IsDefaultApi is true when the request names a method the spec does not list: the parser
 	// forwarded it as a Default- API only because the spec cannot rule it out.
 	IsDefaultApi bool
-	// Pinned is true when the request is a strict pin (PinnedByDirectives): lava-stickiness, or
-	// lava-select-provider with lava-select-provider-strict: true. A pinned request is answered by
+	// Pinned is true when the request is a strict pin (PinnedByDirectives): router-stickiness, or
+	// router-select-provider with router-select-provider-strict: true. A pinned request is answered by
 	// that upstream or not at all: Decide never retries or hedges it on another one (MAG-2280,
-	// MAG-4123). A plain lava-select-provider is not Pinned and keeps its failover (MAG-4826).
+	// MAG-4123). A plain router-select-provider is not Pinned and keeps its failover (MAG-4826).
 	Pinned bool
 	// IsGraphQLWrite is true when the request is a GraphQL mutation (MAG-5122). It turns off the
 	// Stateful rate-limit carve-out below: a GraphQL write is never re-sent, including when every
@@ -160,6 +160,10 @@ type DecisionInput struct {
 	// send risks the double-spend this subtask exists to prevent. Every other interface keeps the
 	// carve-out until MAG-5061 decides whether to remove it there too.
 	IsGraphQLWrite bool
+	// IsChainListWrite is true when the request is the chain's gRPC write on a chain whose list reads
+	// each copy (MAG-5186, Sui). That list files a throttle as a rate limit the client retries after,
+	// and the router never re-sends the write, so the carve-out is off for it as for a GraphQL write.
+	IsChainListWrite bool
 }
 
 // RelayPolicyInf is the interface that the policy engine must implement.

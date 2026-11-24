@@ -1480,7 +1480,7 @@ func TestRestApiKeyCollapsesNamesWithTheSameShape(t *testing.T) {
 	require.Len(t, serverApis, 1)
 
 	for i := 0; i < 32; i++ {
-		api, ok := matchSpecApiByName("/cosmos/auth/v1beta1/bech32/lava@1abc/", "GET", serverApis)
+		api, ok := matchSpecApiByName("/cosmos/auth/v1beta1/bech32/cosmos1abc/", "GET", serverApis)
 		require.True(t, ok)
 		require.Equal(t, "/cosmos/auth/v1beta1/bech32/{address_bytes}", api.api.Name)
 	}

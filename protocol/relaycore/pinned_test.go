@@ -10,9 +10,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Which requests are strict pins (MAG-4826): lava-stickiness always (D1), whatever else is sent
-// (D4); lava-select-provider only with lava-select-provider-strict: true (D3); a plain
-// lava-select-provider keeps its failover and is not pinned in this sense (D2).
+// Which requests are strict pins (MAG-4826): router-stickiness always (D1), whatever else is sent
+// (D4); router-select-provider only with router-select-provider-strict: true (D3); a plain
+// router-select-provider keeps its failover and is not pinned in this sense (D2).
 func TestPinnedByDirectives(t *testing.T) {
 	const (
 		sel    = common.SELECT_PROVIDER_HEADER_NAME
@@ -31,9 +31,9 @@ func TestPinnedByDirectives(t *testing.T) {
 		"D4 sticky with select-provider is strict":      {map[string]string{sticky: "ingest-42", sel: "upstream-a"}, true},
 		"D4 sticky stays strict even with strict false": {map[string]string{sticky: "ingest-42", sel: "upstream-a", strict: "false"}, true},
 		"D4 sticky with strict and select-provider":     {map[string]string{sticky: "ingest-42", sel: "upstream-a", strict: "true"}, true},
-		"D6 unpinned":   {map[string]string{"lava-force-cache-refresh": "true"}, false},
+		"D6 unpinned":   {map[string]string{"router-force-cache-refresh": "true"}, false},
 		"D6 no headers": {nil, false},
-		"the removed lava-pin-allow-retry does not loosen sticky": {map[string]string{sticky: "ingest-42", "lava-pin-allow-retry": "true"}, true},
+		"the removed router-pin-allow-retry does not loosen sticky": {map[string]string{sticky: "ingest-42", "router-pin-allow-retry": "true"}, true},
 	} {
 		require.Equal(t, tc.pinned, PinnedByDirectives(tc.headers), name)
 	}

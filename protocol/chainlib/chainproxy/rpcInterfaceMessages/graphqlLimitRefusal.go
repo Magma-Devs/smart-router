@@ -29,7 +29,7 @@ import (
 //   - A write of a shape the router does not send (MAG-5120, check Q8): a mutation that selects
 //     more than one root field (refuseMultiRootMutation). The write path answers one write per
 //     request, one copy per provider and one verdict, so a second root field would share the
-//     first's verdict. Its reply, and the mixed document's, says Lava-Write-Outcome: not_sent.
+//     first's verdict. Its reply, and the mixed document's, says Router-Write-Outcome: not_sent.
 //
 // Every refusal carries an extensions.code: GRAPHQL_PARSE_FAILED for a query that does not parse,
 // REQUEST_REFUSED for every other one (MAG-5120).
@@ -52,7 +52,7 @@ const (
 	GraphQLRequestRefusedCode = "REQUEST_REFUSED"
 )
 
-// GraphQLWriteOutcomeNotSent is the Lava-Write-Outcome a refusal of a write's shape answers with
+// GraphQLWriteOutcomeNotSent is the Router-Write-Outcome a refusal of a write's shape answers with
 // (MAG-5120, check Q8): the router refused the write before any provider was asked, so the caller
 // knows for certain that nothing ran and can fix the request and send it again. It is the
 // "not_sent" of the write verdicts MAG-5122 answers with.
@@ -73,7 +73,7 @@ type GraphQLRefusal struct {
 	// refusals were answered without one until the GraphQL chapter gave every refusal a code.
 	code string
 	// writeNotSent marks the refusal of a write's shape (check Q8): its reply says
-	// Lava-Write-Outcome: not_sent.
+	// Router-Write-Outcome: not_sent.
 	writeNotSent bool
 }
 
@@ -120,7 +120,7 @@ func (r *GraphQLRefusal) ClientMessage() string { return r.message }
 // Code is the refusal's GraphQL error code for extensions.code.
 func (r *GraphQLRefusal) Code() string { return r.code }
 
-// WriteOutcome is the Lava-Write-Outcome the refusal's reply carries: GraphQLWriteOutcomeNotSent
+// WriteOutcome is the Router-Write-Outcome the refusal's reply carries: GraphQLWriteOutcomeNotSent
 // on the refusal of a write's shape, "" on every other refusal, which says nothing about a write.
 func (r *GraphQLRefusal) WriteOutcome() string {
 	if r.writeNotSent {

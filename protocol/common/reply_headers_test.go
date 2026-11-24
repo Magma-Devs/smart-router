@@ -13,7 +13,7 @@ import (
 // The upstream's response headers reach the reply only through the allow-list (MAG-3104).
 // These pin the filter on its own; rpcsmartrouter's direct_rpc_reply_headers_test.go drives
 // it through the relay senders against a real upstream, rest_integration_test.go through the
-// real LAVA and APT1 specs, and cached_reply_headers_test.go through both cache tiers.
+// real COSMOSHUB and APT1 specs, and cached_reply_headers_test.go through both cache tiers.
 
 func metadataNames(md []pairingtypes.Metadata) []string {
 	names := make([]string, 0, len(md))
@@ -98,12 +98,12 @@ func TestFilterUpstreamReplyMetadataDropsRouterOwnedNamesWhateverTheUpstreamClai
 	h := http.Header{}
 	h.Set("Content-Type", "application/json")
 	h.Set(PROVIDER_ADDRESS_HEADER_NAME, "somebody-else")
-	h.Set("lava-cross-validation-status", "success")
+	h.Set("router-cross-validation-status", "success")
 	h.Set(PROVIDER_LATEST_BLOCK_HEADER_NAME, "999999999")
 	h.Set(SMART_ROUTER_VERSION_HEADER_NAME, "0.0.0")
 	h.Set(RETRY_COUNT_HEADER_NAME, "0")
 	h.Set(IDENTIFIED_NODE_ERROR_HEADER, "true")
-	h.Set("LAVA-GUID", "deadbeef")
+	h.Set("ROUTER-GUID", "deadbeef")
 	h.Set(StatusCodeMetadataKey, "200")
 
 	got := FilterUpstreamReplyMetadata(upstreamMetadata(h))
@@ -188,9 +188,9 @@ func TestFilterUpstreamReplyMetadataUnionsTheInterfacesDirectivesWithTheCollecti
 
 func TestFilterUpstreamReplyMetadataSpecCannotAuthoriseARouterOwnedName(t *testing.T) {
 	directives := []*spectypes.Header{
-		{Name: "lava-provider-address", Kind: spectypes.Header_pass_reply},
+		{Name: "router-provider-address", Kind: spectypes.Header_pass_reply},
 		{Name: "provider-latest-block", Kind: spectypes.Header_pass_both},
-		{Name: "smart-router-version", Kind: spectypes.Header_pass_reply},
+		{Name: "router-version", Kind: spectypes.Header_pass_reply},
 		{Name: StatusCodeMetadataKey, Kind: spectypes.Header_pass_ignore},
 		{Name: "x-aptos-ledger-version", Kind: spectypes.Header_pass_reply},
 	}
@@ -254,11 +254,11 @@ func TestUpstreamReplyHeaderAllowlistNamesNothingTheRouterOwns(t *testing.T) {
 
 func TestIsRouterOwnedHeader(t *testing.T) {
 	owned := []string{
-		PROVIDER_ADDRESS_HEADER_NAME, "lava-provider-address", "LAVA-GUID",
-		"lava-cross-validation-status", RETRY_COUNT_HEADER_NAME,
+		PROVIDER_ADDRESS_HEADER_NAME, "router-provider-address", "ROUTER-GUID",
+		"router-cross-validation-status", RETRY_COUNT_HEADER_NAME,
 		IDENTIFIED_NODE_ERROR_HEADER, CACHE_TIER_HEADER_NAME,
 		PROVIDER_LATEST_BLOCK_HEADER_NAME, "provider-latest-block",
-		SMART_ROUTER_VERSION_HEADER_NAME, "SMART-ROUTER-VERSION",
+		SMART_ROUTER_VERSION_HEADER_NAME, "ROUTER-VERSION",
 		StatusCodeMetadataKey, "Status-Code",
 	}
 	for _, name := range owned {
@@ -266,7 +266,7 @@ func TestIsRouterOwnedHeader(t *testing.T) {
 	}
 	notOwned := []string{
 		"Content-Type", "Retry-After", "x-cosmos-block-height", "X-Aptos-Ledger-Version",
-		"lavatory", "lava", "Provider-Latest-Blocks", "Server", "status",
+		"routerish", "router", "Provider-Latest-Blocks", "Server", "status",
 	}
 	for _, name := range notOwned {
 		require.Falsef(t, IsRouterOwnedHeader(name), "%q should not be router-owned", name)

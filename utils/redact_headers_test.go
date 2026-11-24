@@ -18,7 +18,7 @@ func TestIsSensitiveHeader_FailsClosed(t *testing.T) {
 	// Credential-bearing names, and — the point of failing closed — the
 	// operator-configured ones no deny-list could enumerate.
 	for _, name := range []string{
-		"Authorization", "authorization", "X-Api-Key", "x-lava-key", "Cookie",
+		"Authorization", "authorization", "X-Api-Key", "x-router-key", "Cookie",
 		"Proxy-Authorization", "X-Auth-Token",
 		"X-Vendor-Specific-Secret", "Some-Custom-Thing",
 	} {

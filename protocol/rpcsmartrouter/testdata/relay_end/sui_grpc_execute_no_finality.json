@@ -1,0 +1,39 @@
+{
+  "GUID": "<minted by the listener>",
+  "api_interface": "grpc",
+  "attempts": [
+    {
+      "batch": 0,
+      "error_code": "NODE_SERVICE_UNAVAILABLE",
+      "grpc_status": 14,
+      "latency_ms": "<ms>",
+      "message": "{\"error_message\":\"timed-out before finality could be reached\",\"error_code\":14}",
+      "outcome": "node_error",
+      "retryable": true,
+      "returned_to_client": true,
+      "sent_ms": "<ms>",
+      "upstream": "grpc-node",
+      "write_outcome": "may_have_run"
+    }
+  ],
+  "chain": "SUI",
+  "error": "{\"error_message\":\"timed-out before finality could be reached\",\"error_code\":14}",
+  "error_code": "NODE_SERVICE_UNAVAILABLE",
+  "event": "relay_end",
+  "has_reply": true,
+  "is_batch": false,
+  "latency_ms": "<ms>",
+  "level": "info",
+  "message": "relay_end",
+  "method": "sui.rpc.v2.TransactionExecutionService/ExecuteTransaction",
+  "outcome": "node_error",
+  "reply_bytes": 78,
+  "request_bytes": 261,
+  "schema": 2,
+  "selection": "stateful",
+  "served_by": "grpc-node",
+  "stateful": true,
+  "status": 14,
+  "stop_reason": "Stateful",
+  "tx_hash": "gHrD7i4MD93GsSzM3ZYibg2CQpBCmZFnxGdANrXFYMP"
+}

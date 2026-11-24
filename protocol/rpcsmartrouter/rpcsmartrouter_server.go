@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -1193,7 +1194,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayWithRetries(ctx context.Context, ret
 		// where nothing reads it. The state machine and its used providers stay shared, so each try
 		// still goes to an endpoint the earlier ones did not use.
 		//
-		// Direct RPC flow: pass nil for availabilityDegrader since there are no Lava protocol sessions.
+		// Direct RPC flow: pass nil for availabilityDegrader since there are no provider-relay sessions.
 		// QoS punishment for node errors is handled by the optimizer via AppendRelayFailure in OnSessionFailure.
 		relayProcessor := relaycore.NewRelayProcessor(
 			tryCtx,
@@ -1404,7 +1405,7 @@ func (rpcss *RPCSmartRouterServer) ParseRelay(
 	ctx, span := tracing.StartInternalSpan(ctx, tracing.SpanParseRelay)
 	defer span.End()
 
-	// remove lava directive headers
+	// remove directive headers
 	metadata, directiveHeaders := rpcss.DirectiveHeaders(metadata)
 	extensions := rpcss.getExtensionsFromDirectiveHeaders(directiveHeaders)
 	utils.FormatTrace("[Archive Debug] ParseRelay extensions",
@@ -1657,7 +1658,7 @@ func unclearWriteReason(answered, dispatched int, cutOffs writeCutOffs) *unclear
 	}
 }
 
-// graphQLWriteOutcomeAccepted and graphQLWriteOutcomeUnknown are the Lava-Write-Outcome values this
+// graphQLWriteOutcomeAccepted and graphQLWriteOutcomeUnknown are the Router-Write-Outcome values this
 // router can state for a GraphQL write today (MAG-5122, Part I R-L point 4: accepted > unknown >
 // rejected > not_sent). accepted is the chain's success row only (appendGraphQLWriteAcceptedHeader),
 // unknown comes from each copy's status and transport (unclearWriteOutcomeFor). rejected and
@@ -1671,7 +1672,7 @@ const (
 )
 
 // isGraphQLWrite reports whether protocolMessage is a GraphQL write. MAG-5122 scopes its write-
-// outcome behaviour — the HTTP 200 unclear-write reply, the Lava-Write-Outcome header, the
+// outcome behaviour — the HTTP 200 unclear-write reply, the Router-Write-Outcome header, the
 // rate-limit retry carve-out removal (relaypolicy.Policy.Decide) — to this interface only; every
 // other interface's write behaviour is MAG-5061's to change.
 func isGraphQLWrite(protocolMessage chainlib.ProtocolMessage) bool {
@@ -1682,7 +1683,7 @@ func isGraphQLWrite(protocolMessage chainlib.ProtocolMessage) bool {
 	return collection != nil && collection.CollectionData.ApiInterface == spectypes.APIInterfaceGraphQL
 }
 
-// ensureWriteOutcomeHeader adds Lava-Write-Outcome to result's reply, unless it is already there:
+// ensureWriteOutcomeHeader adds Router-Write-Outcome to result's reply, unless it is already there:
 // a client reading a repeated header as a list would see the same verdict twice.
 func ensureWriteOutcomeHeader(result *common.RelayResult, outcome string) {
 	if result.Reply == nil {
@@ -1699,7 +1700,7 @@ func ensureWriteOutcomeHeader(result *common.RelayResult, outcome string) {
 	})
 }
 
-// appendGraphQLWriteOutcomeHeader adds Lava-Write-Outcome: unknown (MAG-5122) to the reply of a
+// appendGraphQLWriteOutcomeHeader adds Router-Write-Outcome: unknown (MAG-5122) to the reply of a
 // GraphQL write whose outcome unclearWriteOutcomeFor could not settle.
 func (rpcss *RPCSmartRouterServer) appendGraphQLWriteOutcomeHeader(result *common.RelayResult, protocolMessage chainlib.ProtocolMessage, unclear *unclearWriteError) {
 	if result == nil || unclear == nil || !isGraphQLWrite(protocolMessage) {
@@ -1708,7 +1709,7 @@ func (rpcss *RPCSmartRouterServer) appendGraphQLWriteOutcomeHeader(result *commo
 	ensureWriteOutcomeHeader(result, graphQLWriteOutcomeUnknown)
 }
 
-// appendGraphQLWriteAcceptedHeader adds Lava-Write-Outcome: accepted (MAG-5122) to a served GraphQL
+// appendGraphQLWriteAcceptedHeader adds Router-Write-Outcome: accepted (MAG-5122) to a served GraphQL
 // write whose reply is the chain's success row: Sui's executeTransaction field carries effects with
 // a status, SUCCESS or FAILURE (a transaction that ran and paid gas counts as accepted, MAG-4742).
 // relay_end reads the same fields for tx_status, with suiGraphQLExecution. No other reply gets the
@@ -1741,7 +1742,7 @@ const graphQLUnknownWriteMessage = "Status unknown - this transaction may have b
 // GraphQL interface chapter section 5, changed 15 Nov in the chapter's change log): a GraphQL
 // client's retry link re-sends a mutation on a 5xx, which would double-send exactly the write this
 // subtask exists to protect. result may be nil (the early no-results branch in SendParsedRelay has
-// none to copy); the Lava-Write-Outcome header is appendGraphQLWriteOutcomeHeader's job at the call
+// none to copy); the Router-Write-Outcome header is appendGraphQLWriteOutcomeHeader's job at the call
 // site, not this function's.
 //
 // extensions.tx_hash is left out: computing a Sui digest from the request's transaction bytes needs
@@ -1890,9 +1891,9 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 		// The two replies below are the router's own, made when the budget ran out before any
 		// attempt it dispatched came back. They carry this request's headers all the same, as a
 		// reply some upstream produced does (MAG-3980). Returning before appendHeadersToRelayResult
-		// sent them with no lava-* header at all: no Lava-Guid for the customer to quote on the
-		// failure hardest to diagnose, a silent upstream, and no Lava-Retries or
-		// Lava-Provider-Address to say what was tried. unknownWrite is true only for a processor
+		// sent them with no Router-* header at all: no Router-Guid for the customer to quote on the
+		// failure hardest to diagnose, a silent upstream, and no Router-Retries or
+		// Router-Provider-Address to say what was tried. unknownWrite is true only for a processor
 		// that dispatched, so the processor is never nil there.
 		if unclear := unknownWrite(); unclear != nil {
 			var unclearResult *common.RelayResult
@@ -1933,19 +1934,19 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 
 		// A request that ended before any provider was asked: a pin on a provider the router cannot
 		// use, no provider to ask, a deadline before the first dispatch. The listener writes the
-		// router's error, and this reply carries the request's own headers on it, Lava-Guid and
-		// lava-user-request-type among them, as every other failed reply does (MAG-5076; Part I §1:
-		// Lava-Guid on every reply). Returning nil sent the error with none. No attempt went out, so
+		// router's error, and this reply carries the request's own headers on it, Router-Guid and
+		// router-user-request-type among them, as every other failed reply does (MAG-5076; Part I §1:
+		// Router-Guid on every reply). Returning nil sent the error with none. No attempt went out, so
 		// the reply names no provider and no retry. A cross-validated request is left out: the header
 		// builder would count a round that never ran.
 		if relayProcessor != nil && relayProcessor.GetSelection() != relaycore.CrossValidation && relayProcessor.GetUsedProviders().SessionsDispatched() == 0 {
 			// A write's targets are recorded when selection picks them. The consistency gate can then
 			// turn every one away, as it does a strict pin on a node too far behind the chain tip. No
-			// node received this write, so lava-fast-tx-participants must name none.
+			// node received this write, so router-fast-tx-participants must name none.
 			relayProcessor.SetStatefulRelayTargets(nil)
 			refused := &common.RelayResult{}
 			rpcss.appendHeadersToRelayResult(ctx, refused, relayProcessor.ProtocolErrors(), relayProcessor, protocolMessage, protocolMessage.GetApi().GetName(), analytics, false)
-			// A GraphQL write pinned to a lava-select-provider name the router does not have is
+			// A GraphQL write pinned to a router-select-provider name the router does not have is
 			// refused, so its reply says the write was never sent, as the listener's other refusals
 			// of a GraphQL write do (MAG-3800; Part I R-Q, Part II Q8). Only this function knows the
 			// request is a write.
@@ -2237,7 +2238,7 @@ func (rpcss *RPCSmartRouterServer) ProcessRelaySend(ctx context.Context, protoco
 		return relayProcessor, err
 	}
 
-	// Direct RPC flow: pass nil for availabilityDegrader since there are no Lava protocol sessions.
+	// Direct RPC flow: pass nil for availabilityDegrader since there are no provider-relay sessions.
 	// QoS punishment for node errors is handled by the optimizer via AppendRelayFailure in OnSessionFailure.
 	relayProcessor := relaycore.NewRelayProcessor(
 		ctx,
@@ -2367,7 +2368,7 @@ func resolveCachedEntryKind(ctx context.Context, cacheReply *pairingtypes.CacheR
 // CheckResponseError, the verdict a live answer gets, classifies a well-formed error body
 // as the node error it is. A writer whose build predates the label writes none, and its
 // error body used to reach the caller as a success without the
-// lava-identified-node-error header the documentation promises (MAG-3597). That is as
+// router-identified-node-error header the documentation promises (MAG-3597). That is as
 // true of a primary shared by a fleet mid-rollout as of another zone's cache, so both
 // tiers run this one step and which cache answered makes no difference to the label.
 // CheckResponseError reads the envelope on JSON-RPC and Tendermint; on REST and gRPC it
@@ -2441,7 +2442,7 @@ func primaryLookupVerdict(cacheError error, cacheReply *pairingtypes.CacheRelayR
 
 // cachedRelayResult is the relay result a cache hit of either tier is served as.
 // isNodeError serves the entry truthfully, so a cached node error carries the
-// lava-identified-node-error header exactly like a live one. The provider address
+// router-identified-node-error header exactly like a live one. The provider address
 // is empty, which renders as "Cached".
 func cachedRelayResult(reply *pairingtypes.RelayReply, relayData *pairingtypes.RelayPrivateData, statusCode int, isNodeError bool, cacheLookup common.CacheLookupReport) common.RelayResult {
 	return common.RelayResult{
@@ -2980,7 +2981,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 	// The helper releases each session under the key it was taken with, not one derived from the
 	// request's extensions: a request that degrades to a regular provider takes its sessions under
 	// the plain key, and a release under the request's key would leave the provider in the dispatch
-	// history that Lava-Retries (MAG-3762) and writeOutcomeIsUnknown read.
+	// history that Router-Retries (MAG-3762) and writeOutcomeIsUnknown read.
 	usedProviders := relayProcessor.GetUsedProviders()
 	if len(failedSessions) > 0 {
 		utils.FormatDebug("discarding stale sessions before relay dispatch",
@@ -2995,7 +2996,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 	if filterErr != nil {
 		// Unless the request is pinned: then there is no different provider it may go to, and the
 		// retry this error starts used to drop the pin and serve the request from a fresher node
-		// with Lava-Retries 0, silently (MAG-4123). The request fails instead, naming the lag.
+		// with Router-Retries 0, silently (MAG-4123). The request fails instead, naming the lag.
 		// Cross-validation overrides pins, so it keeps the retry.
 		if relayProcessor.GetSelection() != relaycore.CrossValidation && relaycore.PinnedByDirectives(protocolMessage.GetDirectiveHeaders()) {
 			return pinnedConsistencyRejection(ctx, failedSessions, lags)
@@ -3293,6 +3294,9 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 			// broadcast it is derived from a WithoutCancel parent, so a detached relay is correctly
 			// NOT seen as cancelled.
 			isClientCancel := err != nil && common.IsClientCancellation(err, goroutineCtx)
+			// A gRPC call type the router does not serve, found in this attempt (MAG-5133): the
+			// call's, not the endpoint's, so the endpoint is released with no score, as a cancel is.
+			unservedCall := err != nil && errors.Is(err, common.UnservedGRPCCallError)
 
 			if rpcss.smartRouterEndpointMetrics != nil {
 				// analytics is read-only here (classification flags set once pre-launch, Success set
@@ -3304,7 +3308,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 					// Silent when the budget ran out. Cancelled would keep it out of the error and
 					// latency series, which is right for a race loser and wrong for a hang.
 					outcome = metrics.RelayOutcomeError
-				case isClientCancel:
+				case isClientCancel, unservedCall:
 					outcome = metrics.RelayOutcomeCancelled
 				case err != nil:
 					outcome = metrics.RelayOutcomeError
@@ -3391,6 +3395,12 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 				)
 				if errSession := rpcss.sessionManager.OnSessionUnresponsive(singleConsumerSession, err); errSession != nil {
 					utils.FormatWarning("OnSessionUnresponsive failed for direct RPC", errSession,
+						utils.LogAttr("GUID", goroutineCtx),
+					)
+				}
+			} else if unservedCall {
+				if errSession := rpcss.sessionManager.OnSessionCancelled(singleConsumerSession, err); errSession != nil {
+					utils.FormatWarning("OnSessionCancelled failed for direct RPC", errSession,
 						utils.LogAttr("GUID", goroutineCtx),
 					)
 				}
@@ -5058,8 +5068,9 @@ func (rpcss *RPCSmartRouterServer) adoptSharedStateTip(ctx context.Context, peer
 //
 // GraphQL adds a third: a root field whose answer differs from provider to provider because
 // each runs its own server version, such as introspection or Sui's serviceConfig
-// (graphQLNeverCacheRootFields, MAG-5123). It is read on both gates too, so an entry an
-// older router wrote for such a field is not served either.
+// (graphQLNeverCacheRootFields, MAG-5123), and gRPC a method of the same kind, such as Sui's
+// SimulateTransaction (grpcNeverCacheMethods, MAG-5186). They are read on both gates too, so an
+// entry an older router wrote for such a request is not served either.
 func cacheExclusionReason(protocolMessage chainlib.ProtocolMessage) string {
 	if chainlib.GetStateful(protocolMessage) == common.CONSISTENCY_SELECT_ALL_PROVIDERS {
 		return "stateful"
@@ -5067,20 +5078,23 @@ func cacheExclusionReason(protocolMessage chainlib.ProtocolMessage) string {
 	if nodeBoundReason(protocolMessage.GetApi().Name) != "" {
 		return "node-bound"
 	}
-	if graphQLNeverCacheReason(protocolMessage) != "" {
+	if graphQLNeverCacheReason(protocolMessage) != "" || grpcNeverCacheReason(protocolMessage) != "" {
 		return "never-cache"
 	}
 	return ""
 }
 
 // cacheExclusionWhy is the detail behind cacheExclusionReason for the log: which method is
-// node-bound or which GraphQL field is never cached, and why. "" for a stateful request,
-// whose reason says it all.
+// node-bound, or which GraphQL field or gRPC method is never cached, and why. "" for a stateful
+// request, whose reason says it all.
 func cacheExclusionWhy(protocolMessage chainlib.ProtocolMessage) string {
 	if why := nodeBoundReason(protocolMessage.GetApi().Name); why != "" {
 		return why
 	}
-	return graphQLNeverCacheReason(protocolMessage)
+	if why := graphQLNeverCacheReason(protocolMessage); why != "" {
+		return why
+	}
+	return grpcNeverCacheReason(protocolMessage)
 }
 
 // cacheAnsweredEarlierAttempt reports whether the cache answered an earlier attempt of this relay.
@@ -5101,9 +5115,9 @@ func cacheAnsweredEarlierAttempt(relayProcessor *relaycore.RelayProcessor) bool 
 
 // skipCacheWriteAfterDegrade reports whether the request's reply must stay out of the cache
 // because an attempt went out without an extension the caller asked for, and logs the skip
-// (MAG-4729). The entry would sit under a key that names the caller's lava-extension, so every
+// (MAG-4729). The entry would sit under a key that names the caller's router-extension, so every
 // repeat request would be answered from it: data from a node without the extension, with no
-// Lava-Extension-Unavailable, since a cache hit never reaches the degrade path that records it,
+// Router-Extension-Unavailable, since a cache hit never reaches the degrade path that records it,
 // and still after a node serving the extension is back. Not caching costs only the hits the
 // request would have had while degraded.
 func skipCacheWriteAfterDegrade(ctx context.Context, relayProcessor *relaycore.RelayProcessor) bool {
@@ -5269,7 +5283,7 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 	}
 
 	// Compute cache key via the protocol message so the SET key matches the GET key,
-	// including any explicit lava-extension directive folded in by HashCacheRequest.
+	// including any explicit router-extension directive folded in by HashCacheRequest.
 	hashKey, _, hashErr := protocolMessage.HashCacheRequest(chainId)
 	if hashErr != nil {
 		utils.FormatDebug("cache write skipped: hash computation failed",
@@ -5533,26 +5547,26 @@ func (rpcss *RPCSmartRouterServer) cachedReplyDirectives(protocolMessage chainli
 	return rpcss.replyHeaderDirectives(), collectionDirectives
 }
 
-// resolvePinDirectives returns the lava-select-provider and lava-stickiness directives for one
+// resolvePinDirectives returns the router-select-provider and router-stickiness directives for one
 // attempt.
 //
-// A strict pin (relaycore.PinnedByDirectives: lava-stickiness, or lava-select-provider with
-// lava-select-provider-strict: true) is honoured on every attempt. Such a request is answered by
+// A strict pin (relaycore.PinnedByDirectives: router-stickiness, or router-select-provider with
+// router-select-provider-strict: true) is honoured on every attempt. Such a request is answered by
 // the pinned upstream or fails with that upstream's error: the retry policy never retries or
 // hedges it (Policy.Decide, "Pinned"), so a second batch cannot normally exist. Should one ever be
 // sent, the pin still applies and selection refuses the already-tried upstream loudly
 // (SelectedProviderAlreadyFailedError) rather than quietly serving the request elsewhere.
 //
-// A plain lava-select-provider pins the first attempt only, its documented behaviour (MAG-2228):
+// A plain router-select-provider pins the first attempt only, its documented behaviour (MAG-2228):
 // once a batch has been dispatched (firstAttempt false) no pin is read, so a retry or hedge may
 // reach the rest of the pool instead of re-pinning the upstream that just failed. firstAttempt
 // stays true while nothing has been dispatched, so a resend after a selection failure keeps it.
 //
-// MAG-2228 used to apply the first-attempt rule to lava-stickiness too. That made a sticky session
+// MAG-2228 used to apply the first-attempt rule to router-stickiness too. That made a sticky session
 // straddle two nodes mid-sequence: for the head-then-fetch pattern the header exists for, the
 // exact false gap it was meant to prevent, since the peer is not checked to have reached the
 // block. MAG-2280 made sticky strict, MAG-4123 is the same rule for the router's own consistency
-// gate, and MAG-4826 keeps lava-select-provider's failover with strict selection as an opt-in.
+// gate, and MAG-4826 keeps router-select-provider's failover with strict selection as an opt-in.
 func resolvePinDirectives(ctx context.Context, directiveHeaders map[string]string, firstAttempt bool) (selectedProvider, stickiness string) {
 	if !firstAttempt && !relaycore.PinnedByDirectives(directiveHeaders) {
 		return "", ""
@@ -5589,7 +5603,7 @@ func pinnedConsistencyRejection(ctx context.Context, failed routersession.Consum
 // crossValidationOverridesPin reports whether cross-validation displaces the caller's
 // single-provider directives.
 //
-// lava-select-provider and a sticky claim each pin selection to exactly ONE provider, while a
+// router-select-provider and a sticky claim each pin selection to exactly ONE provider, while a
 // cross-validation relay needs several providers to have anything to compare. The two cannot both
 // be honoured, so the cross-validation wins. An operator policy outranks the caller anyway (UC-1:
 // stricter validation regardless of what the caller asked). A caller who switched cross-validation
@@ -5910,9 +5924,9 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 	usedProviders := relayProcessor.GetUsedProviders()
 	directiveHeaders := protocolMessage.GetDirectiveHeaders()
 
-	// A strict pin (lava-stickiness, or lava-select-provider with lava-select-provider-strict: true)
+	// A strict pin (router-stickiness, or router-select-provider with router-select-provider-strict: true)
 	// applies to every attempt and is never served by another provider (MAG-2280, MAG-4123); a plain
-	// lava-select-provider pins the first attempt only (MAG-4826). See resolvePinDirectives.
+	// router-select-provider pins the first attempt only (MAG-4826). See resolvePinDirectives.
 	selectedProvider, stickiness := resolvePinDirectives(ctx, directiveHeaders, usedProviders.BatchNumber() == 0)
 
 	// Dropped here rather than inside routersession so the rest of this call stays coherent: the
@@ -6155,6 +6169,11 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	// message and then fails the response-must-be-single check, so the caller gets a
 	// truncated stream after waiting out the (typically generous, hanging_api) timeout.
 	// A refusal is a worse-looking but far more honest answer.
+	//
+	// The listener's gate refuses both before any provider is picked whenever the router
+	// already holds the method's definition (MAG-5133). What reaches here is a definition
+	// this attempt's own lookup found. The refusal is common.UnservedGRPCCallError: the
+	// call type's, not the endpoint's, so it is never retried and blames no one.
 	if directConnection.GetProtocol() == routersession.DirectRPCProtocolGRPC {
 		methodPath := chainMessage.GetApi().Name
 
@@ -6169,7 +6188,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 				utils.LogAttr("endpoint", singleConsumerSession.Parent.PublicAddress),
 				utils.LogAttr("GUID", ctx),
 			)
-			return 0, fmt.Errorf("gRPC streaming method %q must be served through the streaming listener, not as a unary relay", methodPath)
+			return 0, fmt.Errorf("%w: gRPC streaming method %q must be served through the streaming listener, not as a unary relay", common.UnservedGRPCCallError, methodPath)
 		}
 
 		// Second line of defence for methods the spec does not declare as
@@ -6183,7 +6202,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 					utils.LogAttr("endpoint", singleConsumerSession.Parent.PublicAddress),
 					utils.LogAttr("GUID", ctx),
 				)
-				return 0, fmt.Errorf("gRPC method %q is server-streaming upstream but the %s spec gives it no SUBSCRIBE parse directive; refusing to invoke it as a unary call", methodPath, rpcss.listenEndpoint.ChainID)
+				return 0, fmt.Errorf("%w: gRPC method %q is server-streaming upstream but the %s spec gives it no SUBSCRIBE parse directive; refusing to invoke it as a unary call", common.UnservedGRPCCallError, methodPath, rpcss.listenEndpoint.ChainID)
 			}
 		}
 	}
@@ -6223,6 +6242,13 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 			utils.LogAttr("latency", relayLatency),
 			utils.LogAttr("GUID", ctx),
 		)
+
+		// The node streamed its replies to a call the router made as a single-reply call: the
+		// router's mistake about the call type, not the endpoint's failure (MAG-5133). Nothing
+		// below applies to it.
+		if errors.Is(err, common.UnservedGRPCCallError) {
+			return relayLatency, err
+		}
 
 		// Classify error using the error registry and decide on health tracking. A status error
 		// is judged by its body here, while the verdict it carries decides retry (healthVerdict).
@@ -6420,7 +6446,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	// A node's error goes back to the caller as the reply, so it is redacted like every error the
 	// router writes itself, before it is returned, cached or compared: a node that repeats the
 	// url it was called on, or the key, must not hand the operator's key to the caller (MAG-4863).
-	if result.IsNodeError {
+	if result.IsNodeError && !isProtobufNodeReply(directConnection, result.Reply) {
 		redactNodeReply(result.Reply)
 	}
 
@@ -6506,7 +6532,7 @@ func (rpcss *RPCSmartRouterServer) getExtensionsFromDirectiveHeaders(directiveHe
 	return extensionslib.ExtensionInfo{LatestBlock: rpcss.getLatestBlockAllowStale()}
 }
 
-// callerRequestedExtensions returns the names among extensions that the request's lava-extension
+// callerRequestedExtensions returns the names among extensions that the request's router-extension
 // directive asked for, read as ParseRelay reads it. The router also adds extensions on its own,
 // such as archive for an eth_call deep behind the head, and never reports those back (MAG-3935),
 // so they are left out. The names returned are the spec's, not the header's, so the warn-once
@@ -6529,16 +6555,16 @@ func (rpcss *RPCSmartRouterServer) HandleDirectiveHeadersForMessage(chainMessage
 		// process (MAG-3600). A positive one is stored as sent and bounded where it is used
 		// (chainlib.GetRelayTimeout), so a message rebuilt from this one (preserveRelayTimeout) is
 		// bounded against its own budget. The caller learns what applied from the
-		// Lava-Relay-Timeout-Applied reply header. Debug level on purpose: the value is the
+		// Router-Relay-Timeout-Applied reply header. Debug level on purpose: the value is the
 		// caller's, and anything louder would let any caller write to the log at will.
 		timeout, err := time.ParseDuration(timeoutStr)
 		switch {
 		case err != nil:
-			utils.FormatDebug("lava-relay-timeout ignored: not a duration", utils.LogAttr("timeout", timeoutStr))
+			utils.FormatDebug("router-relay-timeout ignored: not a duration", utils.LogAttr("timeout", timeoutStr))
 		case timeout <= 0:
-			utils.FormatDebug("lava-relay-timeout ignored: not positive", utils.LogAttr("timeout", timeoutStr))
+			utils.FormatDebug("router-relay-timeout ignored: not positive", utils.LogAttr("timeout", timeoutStr))
 		default:
-			utils.FormatDebug("lava-relay-timeout set by the caller", utils.LogAttr("timeout", timeoutStr))
+			utils.FormatDebug("router-relay-timeout set by the caller", utils.LogAttr("timeout", timeoutStr))
 			chainMessage.TimeoutOverride(timeout)
 		}
 	}
@@ -6559,7 +6585,7 @@ func (rpcss *RPCSmartRouterServer) warnUnavailableExtensions(ctx context.Context
 		if rpcss.listenEndpoint != nil {
 			chainID, apiInterface = rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface
 		}
-		utils.FormatWarning("a caller's lava-extension names an extension no node offers, serving without it", nil,
+		utils.FormatWarning("a caller's router-extension names an extension no node offers, serving without it", nil,
 			utils.LogAttr("extension", extension),
 			utils.LogAttr("chainID", chainID),
 			utils.LogAttr("apiInterface", apiInterface),
@@ -7047,7 +7073,7 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 		// it was misreported. No recorded tier means no header rather than a guess.
 		//
 		// Note the gate: --debug-relays, the operator flag, NOT the client-settable
-		// lava-debug-relay directive the cache-tier headers below use. The tier name is
+		// router-debug-relay directive the cache-tier headers below use. The tier name is
 		// a fact about routing; this is an infrastructure address, and a client must not
 		// be able to ask for one.
 		if providerAddress == "Cached" && rpcss.debugRelays {
@@ -7075,7 +7101,7 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 		// built, and a hedge's loser is not among them (MAG-3762). An attempt outlives the window
 		// that dispatches the hedge, so the loser is still running when the hedge wins. The router
 		// then cancels it, and the loser posts its result to a channel that nothing reads again.
-		// Counting results alone reported a two-attempt hedge race as zero retries. Lava-Retries
+		// Counting results alone reported a two-attempt hedge race as zero retries. Router-Retries
 		// counts every attempt the router sent (MAG-1818), so the attempts still out count too.
 		dispatched := relayProcessor.GetUsedProviders().DispatchedProviders()
 		unfinished := attemptsWithoutResult(dispatched, successResults, nodeErrorResults, protocolErrorResults)
@@ -7091,7 +7117,7 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 		// Stateful selection fans out to all top providers in a single batch and
 		// never retries (relaypolicy.Decide returns Stop for Stateful). Failures
 		// inside that fan-out are expected — only one provider needs to win —
-		// so they must not inflate Lava-Retries. Without this absorption,
+		// so they must not inflate Router-Retries. Without this absorption,
 		// healthy stateful traffic shows non-zero retry rates whenever any
 		// parallel attempt loses the race or returns an error.
 		totalRetries := uint64(0)
@@ -7115,7 +7141,7 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 		if totalRetries > 0 || nothingAnswered {
 			// When there are retries, show every attempted provider in the order
 			// the router asked them, the resolver last. "Cached" stays in the
-			// list so the entry count matches Lava-Retries — without it,
+			// list so the entry count matches Router-Retries — without it,
 			// retries=N and a single provider name disagree on how many actors
 			// participated (MAG-1653 Bug #2).
 			//
@@ -7295,10 +7321,10 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 	}
 
 	// MAG-1818: signal that the hedge ticker dispatched at least one speculative
-	// batch on this request. Independent of Lava-Retries, which inclusively counts
+	// batch on this request. Independent of Router-Retries, which inclusively counts
 	// canceled hedge primaries — tests need this orthogonal flag to distinguish
 	// "hedge fired" from "classical retry." Omit-when-false convention (no "false"
-	// emitted), mirroring lava-identified-node-error above.
+	// emitted), mirroring router-identified-node-error above.
 	if analytics != nil && analytics.HedgeCount > 0 {
 		metadataReply = append(metadataReply,
 			pairingtypes.Metadata{
@@ -7307,7 +7333,7 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 			})
 	}
 
-	// MAG-3600: a caller who sent lava-relay-timeout is told the window the router actually used —
+	// MAG-3600: a caller who sent router-relay-timeout is told the window the router actually used —
 	// the value as sent, the bound it was held to, or the router's own window when the value was
 	// ignored (not a duration, or not positive). Read through GetRelayTimeout, the function the
 	// relay itself used, so the two cannot disagree. Emitted whenever the directive was sent, so an
@@ -7340,13 +7366,10 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 		// caller and needs no deploy change. It is safe to gate on a client-settable
 		// header precisely because these two values name nothing internal.
 		//
-		// lava-debug-relay is also the only directive that can carry this without
-		// breaking it: hashCacheRequest marshals the whole RelayPrivateData, metadata
-		// included, into the cache key, so a newly minted request header would put the
-		// flagged request in its own cache lane — it would never hit, and a test would
-		// assert against a miss having measured nothing. lava-debug-relay is registered
-		// in common.SPECIAL_DIRECTIVE_HEADERS and stripped by DirectiveHeaders
-		// before ParseMsg, so it never reaches the key.
+		// router-debug-relay stays out of the cache key: it is registered in
+		// common.SPECIAL_DIRECTIVE_HEADERS and stripped by DirectiveHeaders before ParseMsg.
+		// The key hashes only the metadata HandleHeaders keeps, which is the headers the
+		// spec declares plus a REST body's Content-Type, so the flag leaves the lane as is.
 		//
 		// Both are emitted unconditionally under the directive, including "none" and
 		// the not-consulted outcomes: an absent header must be able to mean only
@@ -7453,7 +7476,7 @@ func (rpcss *RPCSmartRouterServer) updateProtocolMessageIfNeededWithNewEarliestD
 		relayState.SetIsEarliestUsed()
 		relayRequestData := protocolMessage.RelayPrivateData()
 		userData := protocolMessage.GetUserData()
-		// Preserve the client's directive headers (e.g. lava-extension, force-cache-refresh) across
+		// Preserve the client's directive headers (e.g. router-extension, force-cache-refresh) across
 		// the re-parse. Passing nil drops them, which on the archive/earliest-block path would make
 		// the rebuilt message's cache key disagree with the original message's key (and silently
 		// discards the directive the client sent).
@@ -7605,7 +7628,7 @@ func httpStatusRelayError(statusCode int, reply *pairingtypes.RelayReply) error 
 	return httpErr
 }
 
-// identifiedNodeError reports whether a reply carries lava-identified-node-error: the header says
+// identifiedNodeError reports whether a reply carries router-identified-node-error: the header says
 // the node answered with an error, so it is set only when the reply shows that. On JSON-RPC and
 // Tendermint RPC a node always answers in JSON-RPC, so a body that is not a JSON-RPC reply (a
 // gateway's 401, 403 or 404 page, an empty body) is not the node's answer: it is forwarded as is,
@@ -7632,4 +7655,13 @@ func redactNodeReply(reply *pairingtypes.RelayReply) {
 	if reply != nil {
 		reply.Data = utils.RedactSecretsBytes(reply.Data)
 	}
+}
+
+// isProtobufNodeReply reports whether a node error's reply is a gRPC node's own protobuf message: a
+// BroadcastTx refusing the transaction under gRPC OK (MAG-5323). It is not redacted. Its strings
+// are framed by their lengths, so rewriting one breaks the message and the client cannot read the
+// refusal at all. A failed gRPC status's reply is the router's JSON, which is.
+func isProtobufNodeReply(connection routersession.DirectRPCConnection, reply *pairingtypes.RelayReply) bool {
+	return connection != nil && connection.GetProtocol() == routersession.DirectRPCProtocolGRPC &&
+		reply != nil && !json.Valid(reply.Data)
 }
