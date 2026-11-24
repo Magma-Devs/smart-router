@@ -156,7 +156,7 @@ func TestAwaitWakeUnlessInternalProbe(t *testing.T) {
 func TestDirectiveHeaders_StripTheInternalProbeMark(t *testing.T) {
 	rpcss := &RPCSmartRouterServer{}
 	in := []pairingtypes.Metadata{
-		{Name: "Smartrouter-Internal-Probe", Value: "true"},
+		{Name: "Router-Internal-Probe", Value: "true"},
 		{Name: "content-type", Value: "application/json"},
 	}
 	forwarded, directives := rpcss.DirectiveHeaders(in)

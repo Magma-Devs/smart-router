@@ -59,7 +59,7 @@ type RelayAnswer struct {
 
 	ChainID      string
 	ApiInterface string
-	// RequestID is the request's guid in decimal: the value of the Lava-Guid reply header.
+	// RequestID is the request's guid in decimal: the value of the Router-Guid reply header.
 	RequestID string
 	// Method is the request's api as the ring's RelayAnswerMethod names it. A router installs
 	// relay_end's naming, so it is what relay_end writes as method.

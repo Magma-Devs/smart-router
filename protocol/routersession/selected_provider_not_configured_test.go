@@ -27,7 +27,7 @@ func configureFromPairing(csm *ConsumerSessionManager) {
 	csm.SetConfiguredProviderNames(names)
 }
 
-// MAG-3800. A lava-select-provider name that none of the router's configured providers carries is
+// MAG-3800. A router-select-provider name that none of the router's configured providers carries is
 // the caller's mistake, and GetSessions marks it so the listeners can answer it as a refused
 // request. The mark rides on top of SelectedProviderUnavailableError, so every place that already
 // stops on a pinned refusal (the relay policy, the relay_end code, the sticky-claim cleanup) still

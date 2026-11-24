@@ -1,0 +1,39 @@
+{
+  "GUID": "<minted by the listener>",
+  "api_interface": "grpc",
+  "attempts": [
+    {
+      "batch": 0,
+      "error_code": "NODE_RATE_LIMITED",
+      "grpc_status": 8,
+      "latency_ms": "<ms>",
+      "message": "{\"error_message\":\"Validators overloaded\",\"error_code\":8}",
+      "outcome": "rate_limited",
+      "retryable": true,
+      "returned_to_client": true,
+      "sent_ms": "<ms>",
+      "upstream": "grpc-node",
+      "write_outcome": "may_have_run"
+    }
+  ],
+  "chain": "SUI",
+  "error": "{\"error_message\":\"Validators overloaded\",\"error_code\":8}",
+  "error_code": "NODE_RATE_LIMITED",
+  "event": "relay_end",
+  "has_reply": true,
+  "is_batch": false,
+  "latency_ms": "<ms>",
+  "level": "info",
+  "message": "relay_end",
+  "method": "sui.rpc.v2.TransactionExecutionService/ExecuteTransaction",
+  "outcome": "node_error",
+  "reply_bytes": 56,
+  "request_bytes": 261,
+  "schema": 2,
+  "selection": "stateful",
+  "served_by": "grpc-node",
+  "stateful": true,
+  "status": 8,
+  "stop_reason": "Stateful",
+  "tx_hash": "gHrD7i4MD93GsSzM3ZYibg2CQpBCmZFnxGdANrXFYMP"
+}

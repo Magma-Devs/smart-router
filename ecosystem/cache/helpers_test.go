@@ -37,7 +37,7 @@ func setRelayForTest(t *testing.T, srv *RelayerCacheServer, hash []byte, block i
 	t.Helper()
 	_, err := srv.SetRelay(context.Background(), &relaytypes.RelayCacheSet{
 		RequestHash:      hash,
-		ChainId:          "LAV1",
+		ChainId:          "COSMOSHUB",
 		RequestedBlock:   block,
 		SeenBlock:        block,
 		Response:         &relaytypes.RelayReply{Data: []byte(data), LatestBlock: block},
@@ -53,7 +53,7 @@ func setRelayForTest(t *testing.T, srv *RelayerCacheServer, hash []byte, block i
 func getRelayForTest(srv *RelayerCacheServer, hash []byte, block int64) (*relaytypes.CacheRelayReply, error) {
 	return srv.GetRelay(context.Background(), &relaytypes.RelayCacheGet{
 		RequestHash:    hash,
-		ChainId:        "LAV1",
+		ChainId:        "COSMOSHUB",
 		RequestedBlock: block,
 		SeenBlock:      block,
 		Finalized:      false, // the router always looks up with false; the server searches both stores

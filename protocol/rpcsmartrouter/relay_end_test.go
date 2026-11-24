@@ -589,24 +589,25 @@ func TestRelayEnd_CosmosTxOutcome(t *testing.T) {
 }
 
 // A Cosmos node refuses a transaction with a normal reply that carries the refusal's code, which the
-// event reads, so a refused transaction is told from an accepted one.
+// event reads, so a refused transaction is told from an accepted one. The client still gets the
+// node's reply; the attempt is a node error (MAG-5323), named by the code.
 func TestRelayEnd_TendermintTxRefused(t *testing.T) {
 	rand.InitRandomSeed()
 	noop := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
-	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(context.Background(), "LAVA", spectypes.APIInterfaceTendermintRPC, noop, nil, "../../", nil)
+	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(context.Background(), "COSMOSHUB", spectypes.APIInterfaceTendermintRPC, noop, nil, "../../", nil)
 	if closeServer != nil {
 		t.Cleanup(closeServer)
 	}
 	require.NoError(t, err)
 
 	read := captureRelayEnds(t)
-	const refused = `{"jsonrpc":"2.0","id":1,"result":{"code":5,"data":"","log":"insufficient funds: 10ulava is smaller than 20ulava","codespace":"sdk","hash":"5C504ED4"}}`
-	server := newRelayEndServer(t, "LAVA", spectypes.APIInterfaceTendermintRPC, chainParser, relayEndNode{"node-a", relayEndReply(200, refused, 0)})
+	const refused = `{"jsonrpc":"2.0","id":1,"result":{"code":5,"data":"","log":"insufficient funds: 10uatom is smaller than 20uatom","codespace":"sdk","hash":"5C504ED4"}}`
+	server := newRelayEndServer(t, "COSMOSHUB", spectypes.APIInterfaceTendermintRPC, chainParser, relayEndNode{"node-a", relayEndReply(200, refused, 0)})
 	guid := relayEndCaseGUID("tendermint_tx_refused")
 	ctx, cancel := context.WithTimeout(utils.WithUniqueIdentifier(context.Background(), guid), relayEndShortWait)
 	defer cancel()
 	_, err = server.SendRelay(ctx, "", `{"jsonrpc":"2.0","method":"broadcast_tx_sync","params":{"tx":"CpIBCo8B"},"id":1}`, "", relayEndNoCustomerID, "", nil, nil)
-	require.NoError(t, err, "the client gets the node's normal reply")
+	require.NoError(t, err, "the client gets the node's reply")
 	requireRelayEndGolden(t, "tendermint_tx_refused", normalizeRelayEnd(t, onlyRelayEnd(t, read(), guid), false))
 }
 
@@ -899,14 +900,14 @@ func TestRelayEnd_NamedByURL(t *testing.T) {
 func TestRelayEnd_TendermintUnlistedMethod(t *testing.T) {
 	rand.InitRandomSeed()
 	noop := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
-	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(context.Background(), "LAVA", spectypes.APIInterfaceTendermintRPC, noop, nil, "../../", nil)
+	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(context.Background(), "COSMOSHUB", spectypes.APIInterfaceTendermintRPC, noop, nil, "../../", nil)
 	if closeServer != nil {
 		t.Cleanup(closeServer)
 	}
 	require.NoError(t, err)
 
 	read := captureRelayEnds(t)
-	server := newRelayEndServer(t, "LAVA", spectypes.APIInterfaceTendermintRPC, chainParser,
+	server := newRelayEndServer(t, "COSMOSHUB", spectypes.APIInterfaceTendermintRPC, chainParser,
 		relayEndNode{"node-a", relayEndReply(200, `{"jsonrpc":"2.0","id":1,"result":{}}`, 0)})
 
 	for _, tc := range []struct {

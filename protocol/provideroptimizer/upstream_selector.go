@@ -117,7 +117,7 @@ type UpstreamScoreDetails struct {
 	RawAvailability float64 // Availability EWMA (0-1)
 	RawLatency      float64 // Latency EWMA (seconds)
 	RawSync         float64 // Sync lag EWMA (seconds)
-	RawStake        int64   // Stake as configured (raw amount, e.g. ulava)
+	RawStake        int64   // Stake as configured (raw amount)
 }
 
 // UpstreamSelectorConfig holds configuration options for creating a UpstreamSelector
@@ -252,7 +252,7 @@ func (ws *UpstreamSelector) SetDeterministicSeed(seed int64) {
 }
 
 // CalculateScore computes a composite score for a provider based on QoS metrics and stake.
-// stake and totalStake are raw stake amounts (e.g. in ulava).
+// stake and totalStake are raw stake amounts.
 // Returns a normalized score between 0 and 1, where higher is better
 func (ws *UpstreamSelector) CalculateScore(
 	qos *pairingtypes.QualityOfServiceReport,
