@@ -118,6 +118,9 @@ func TestDecide_ErrorTolerance(t *testing.T) {
 		expectedAction  relaycore.Action
 		expectedReason  string
 	}{
+		// The rows use a limit of 3, the shipped default: three errors still retry,
+		// so with three primaries the fourth attempt can reach a backup. The fourth
+		// error stops the request.
 		{
 			name:            "under limit retries",
 			relayRetryLimit: 3,
@@ -127,15 +130,15 @@ func TestDecide_ErrorTolerance(t *testing.T) {
 		},
 		{
 			name:            "over limit stops",
-			relayRetryLimit: 2,
-			nodeErrors:      3,
+			relayRetryLimit: 3,
+			nodeErrors:      4,
 			expectedAction:  relaycore.ActionStop,
 			expectedReason:  "ErrorToleranceExceeded",
 		},
 		{
 			name:            "at exact limit retries",
-			relayRetryLimit: 2,
-			nodeErrors:      2,
+			relayRetryLimit: 3,
+			nodeErrors:      3,
 			expectedAction:  relaycore.ActionRetry,
 			expectedReason:  "Default",
 		},
@@ -512,4 +515,25 @@ func TestDecide_StatefulBatchRateLimitCarveOutNeedsATransportRefusal(t *testing.
 
 	single := policy.Decide(relaycore.DecisionInput{Selection: relaycore.Stateful, AttemptNumber: 1, Summary: relaycore.ResultsSummary{NodeErrors: 1, OnlyRateLimited: true}})
 	require.Equal(t, relaycore.ActionRetry, single.Action, "a single stateful relay keeps the carve-out it has on main")
+}
+
+// A GraphQL write has no rate-limit carve-out at all (MAG-5122, Part I R-L point 2): never
+// re-sent, including when every copy's failure was a transport-level rate limit — the one case
+// every other interface's write still retries on.
+func TestDecide_GraphQLWriteHasNoRateLimitCarveOut(t *testing.T) {
+	policy := NewPolicy(PolicyConfig{MaxRetries: 10, RelayRetryLimit: 5, SendRelayAttempts: 3})
+
+	graphQLWrite := policy.Decide(relaycore.DecisionInput{
+		Selection: relaycore.Stateful, AttemptNumber: 1, IsGraphQLWrite: true,
+		Summary: relaycore.ResultsSummary{ProtocolErrors: 1, OnlyRateLimited: true},
+	})
+	require.Equal(t, relaycore.ActionStop, graphQLWrite.Action)
+	require.Equal(t, "Stateful", graphQLWrite.Reason)
+
+	nonGraphQLWrite := policy.Decide(relaycore.DecisionInput{
+		Selection: relaycore.Stateful, AttemptNumber: 1,
+		Summary: relaycore.ResultsSummary{ProtocolErrors: 1, OnlyRateLimited: true},
+	})
+	require.Equal(t, relaycore.ActionRetry, nonGraphQLWrite.Action,
+		"every other interface keeps the carve-out until MAG-5061 decides whether to remove it there too")
 }

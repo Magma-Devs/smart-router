@@ -54,6 +54,32 @@ func TestRateLimitFromGRPC(t *testing.T) {
 		require.True(t, limited)
 		require.Equal(t, MaxRetryAfter, d)
 	})
+	t.Run("pushback too large for a Duration still clamps", func(t *testing.T) {
+		// Past about 292 years in milliseconds, converting to a Duration overflows int64. The
+		// wrapped wait was negative or tiny, so RESOURCE_EXHAUSTED with it was not a rate limit
+		// at all and was scored against the endpoint, or was held off for the default only.
+		for _, raw := range []string{"9223372036855", "10000000000000", "18446744073710", "9223372036854775807"} {
+			md := map[string][]string{"grpc-retry-pushback-ms": {raw}}
+			d, limited := RateLimitFromGRPC(8, "resource exhausted", md)
+			require.True(t, limited, raw)
+			require.Equal(t, MaxRetryAfter, d, raw)
+		}
+	})
+	t.Run("an unusable first value does not hide a valid one after it", func(t *testing.T) {
+		// The request path joins the header block and the trailer, header first. A malformed or
+		// non-positive wait in the header used to end the read, so the trailer's valid wait was
+		// never seen and RESOURCE_EXHAUSTED was not a rate limit.
+		for _, header := range []string{"abc", "-1", "0"} {
+			md := map[string][]string{"grpc-retry-pushback-ms": {header, "60000"}}
+			d, limited := RateLimitFromGRPC(8, "resource exhausted", md)
+			require.True(t, limited, header)
+			require.Equal(t, time.Minute, d, header)
+		}
+		md := map[string][]string{"retry-after": {"soon", "60"}}
+		d, limited := RateLimitFromGRPC(8, "resource exhausted", md)
+		require.True(t, limited)
+		require.Equal(t, time.Minute, d)
+	})
 }
 
 func TestRateLimitedConstructor(t *testing.T) {

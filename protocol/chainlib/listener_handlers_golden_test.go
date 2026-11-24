@@ -19,8 +19,8 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils/rand"
@@ -118,9 +118,11 @@ func TestListenerHandlers_Golden(t *testing.T) {
 	}{
 		{"jsonrpc POST", spectypes.APIInterfaceJsonRPC, http.MethodPost, "/sub/path?q=1", jsonBody},
 		{"jsonrpc GET", spectypes.APIInterfaceJsonRPC, http.MethodGet, "/", ""},
+		{"jsonrpc DELETE", spectypes.APIInterfaceJsonRPC, http.MethodDelete, "/sub/path", `{"ignored":1}`},
 		{"tendermintrpc POST", spectypes.APIInterfaceTendermintRPC, http.MethodPost, "/sub/path?q=1", jsonBody},
 		{"tendermintrpc GET", spectypes.APIInterfaceTendermintRPC, http.MethodGet, "/status?height=7", ""},
 		{"tendermintrpc GET with body", spectypes.APIInterfaceTendermintRPC, http.MethodGet, "/status", jsonBody},
+		{"tendermintrpc DELETE", spectypes.APIInterfaceTendermintRPC, http.MethodDelete, "/status", `{"ignored":1}`},
 		{"rest POST", spectypes.APIInterfaceRest, http.MethodPost, "/cosmos/tx/v1beta1/simulate?x=1", `{"tx":1}`},
 		{"rest GET", spectypes.APIInterfaceRest, http.MethodGet, "/cosmos/base/v1beta1/blocks/latest?x=1", ""},
 		{"rest PUT", spectypes.APIInterfaceRest, http.MethodPut, "/v1/thing", `{"put":1}`},
@@ -163,7 +165,8 @@ func TestListenerHandlers_Golden(t *testing.T) {
 				if name == "Date" || name == "Content-Length" {
 					continue
 				}
-				headerLines = append(headerLines, name+": "+strings.Join(values, ", "))
+				// Router-Guid carries the per-request GUID too, so it is masked like the body's.
+				headerLines = append(headerLines, name+": "+guidPattern.ReplaceAllString(strings.Join(values, ", "), "<GUID>"))
 			}
 			sort.Strings(headerLines)
 			relay.mu.Lock()
@@ -192,7 +195,7 @@ func serveGoldenListener(t *testing.T, ctx context.Context, apiInterface string,
 	t.Helper()
 	logger, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
 	require.NoError(t, err)
-	endpoint := &lavasession.RPCEndpoint{NetworkAddress: "127.0.0.1:0", ChainID: "LAV1", ApiInterface: apiInterface, HealthCheckPath: common.DEFAULT_HEALTH_PATH}
+	endpoint := &routersession.RPCEndpoint{NetworkAddress: "127.0.0.1:0", ChainID: "LAV1", ApiInterface: apiInterface, HealthCheckPath: common.DEFAULT_HEALTH_PATH}
 	var listener ChainListener
 	switch apiInterface {
 	case spectypes.APIInterfaceJsonRPC:

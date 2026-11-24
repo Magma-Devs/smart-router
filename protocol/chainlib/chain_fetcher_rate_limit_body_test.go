@@ -5,9 +5,10 @@ import (
 	"testing"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
+	"github.com/magma-Devs/smart-router/utils"
 	specutils "github.com/magma-Devs/smart-router/utils/keeper"
 	"github.com/stretchr/testify/require"
 )
@@ -33,7 +34,7 @@ func newEthChainFetcherWithReply(t *testing.T, body string) *ChainFetcher {
 	require.NoError(t, err)
 	cp.SetSpec(spec)
 	return &ChainFetcher{
-		endpoint:    &lavasession.RPCProviderEndpoint{ChainID: "ETH1", ApiInterface: spectypes.APIInterfaceJsonRPC},
+		endpoint:    &routersession.RPCProviderEndpoint{ChainID: "ETH1", ApiInterface: spectypes.APIInterfaceJsonRPC},
 		chainRouter: replyingChainRouter{body: body},
 		chainParser: cp,
 	}
@@ -70,4 +71,25 @@ func TestChainFetcher_FetchLatestBlockNum_OtherErrorBodyIsNotRateLimited(t *test
 	_, err := cf.FetchLatestBlockNum(context.Background())
 	require.Error(t, err)
 	require.NotErrorIs(t, err, common.StatusCodeError429)
+}
+
+// A reply the head fetch cannot read a block from fails with the reply in the error, and with no
+// "error" field: nothing failed but the parse, and the field used to carry the previous step's
+// nil error.
+func TestChainFetcher_FetchLatestBlockNum_UnparsableReplyNamesNoStaleError(t *testing.T) {
+	utils.SetGlobalLoggingLevel("debug") // the attributes reach the error text at debug only
+	cf := newEthChainFetcherWithReply(t, `{"jsonrpc":"2.0","id":1,"result":"not-a-block"}`)
+
+	_, err := cf.FetchLatestBlockNum(context.Background())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "Failed to parse Response")
+	require.Contains(t, err.Error(), "Response:")
+	require.NotContains(t, err.Error(), "error:")
+}
+
+// An empty reply is refused before any parse, so there is no error to name either.
+func TestFormatResponseForParsing_EmptyReplyNamesNoStaleError(t *testing.T) {
+	utils.SetGlobalLoggingLevel("debug") // the attributes reach the error text at debug only
+	_, err := FormatResponseForParsing(&pairingtypes.RelayReply{}, nil)
+	require.EqualError(t, err, "result (reply.Data) is empty, can't be formatted for parsing")
 }

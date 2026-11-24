@@ -19,8 +19,8 @@ import (
 	"github.com/gofiber/websocket/v2"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	common "github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
@@ -36,8 +36,8 @@ const (
 	CustomerIDHeader           = "customer-id"
 	RetryListeningInterval     = 10 // seconds
 	relayMsgLogMaxChars        = 200
-	RPCProviderNodeAddressHash = "Lava-Provider-Node-Address-Hash"
-	RPCProviderNodeExtension   = "Lava-Provider-Node-Extension"
+	RPCProviderNodeAddressHash = "Router-Provider-Node-Address-Hash"
+	RPCProviderNodeExtension   = "Router-Provider-Node-Extension"
 	WebSocketExtension         = "websocket"
 )
 
@@ -120,9 +120,9 @@ func traceAttrs(ctx context.Context, attrs ...utils.Attribute) []utils.Attribute
 
 // requireNodeUrl refuses a provider endpoint configured with no node url; every chain proxy
 // talks to its endpoint's first one.
-func requireNodeUrl(rpcProviderEndpoint lavasession.RPCProviderEndpoint) error {
+func requireNodeUrl(rpcProviderEndpoint routersession.RPCProviderEndpoint) error {
 	if len(rpcProviderEndpoint.NodeUrls) == 0 {
-		return utils.LavaFormatError("rpcProviderEndpoint.NodeUrl list is empty missing node url", nil, utils.Attribute{Key: "chainID", Value: rpcProviderEndpoint.ChainID}, utils.Attribute{Key: "ApiInterface", Value: rpcProviderEndpoint.ApiInterface})
+		return utils.FormatError("rpcProviderEndpoint.NodeUrl list is empty missing node url", nil, utils.Attribute{Key: "chainID", Value: rpcProviderEndpoint.ChainID}, utils.Attribute{Key: "ApiInterface", Value: rpcProviderEndpoint.ApiInterface})
 	}
 	return nil
 }
@@ -200,19 +200,17 @@ func constructFiberCallbackWithHeaderAndParameterExtraction(callbackToBeCalled f
 }
 
 // drainHTTPThenWS performs the graceful shutdown sequence shared by every
-// chain listener: drain in-flight HTTP via app.ShutdownWithContext, then wait
-// for the per-listener websocket WaitGroup to reach zero. The HTTP shutdown
-// runs first so that (a) the listener stops accepting new /ws upgrades and
-// (b) any in-flight upgrade handler — which performs wsWG.Add(1) synchronously
-// in the upgrade middleware — has been observed before wsWG.Wait runs. If the
-// caller's context expires before wsWG drains, we log a warning and return;
-// the listener is already closed and remaining WS conns will tear down when
-// the process exits. name is used to disambiguate the warning across listeners.
-func drainHTTPThenWS(ctx context.Context, app *fiber.App, wg *sync.WaitGroup, name string) error {
-	if app == nil {
-		return nil
-	}
-	httpErr := app.ShutdownWithContext(ctx)
+// chain listener that serves websockets: close the serve gate, which drains
+// in-flight HTTP, then wait for the per-listener websocket WaitGroup to reach
+// zero. The HTTP shutdown runs first so that (a) the listener stops accepting
+// new /ws upgrades and (b) any in-flight upgrade handler — which performs
+// wsWG.Add(1) synchronously in the upgrade middleware — has been observed
+// before wsWG.Wait runs. If the caller's context expires before wsWG drains,
+// we log a warning and return; the listener is already closed and remaining WS
+// conns will tear down when the process exits. name is used to disambiguate
+// the warning across listeners.
+func drainHTTPThenWS(ctx context.Context, gate *serveGate, wg *sync.WaitGroup, name string) error {
+	httpErr := gate.close(ctx)
 
 	done := make(chan struct{})
 	go func() {
@@ -222,41 +220,30 @@ func drainHTTPThenWS(ctx context.Context, app *fiber.App, wg *sync.WaitGroup, na
 	select {
 	case <-done:
 	case <-ctx.Done():
-		utils.LavaFormatWarning(name+": WS goroutines did not finish within shutdown grace period", nil)
+		utils.FormatWarning(name+": WS goroutines did not finish within shutdown grace period", nil)
 	}
 	return httpErr
 }
 
-// utxoFamilyChainIDs is the set of chain ids whose reply bodies need the JSON-RPC 1.0
-// fixup below. Membership is not a judgement call: it is exactly "the chain's spec
-// transitively imports BTC", which is what makes the node a Bitcoin Core derivative
-// speaking JSON-RPC 1.0. Resolved against the lava-specs catalog (255 specs), 14 enabled
-// specs reach BTC through their imports chain, and all 14 are listed here.
+// isUTXOFamily reports whether chainID's reply bodies need the JSON-RPC 1.0 fixup below.
+// Membership is not a judgement call: it is exactly "the chain's spec is BTC or imports it",
+// which is what makes the node a Bitcoin Core derivative speaking JSON-RPC 1.0, and it is what
+// puts a chain in the Bitcoin family: the router gives a spec its family from its imports when it
+// loads the catalog (common.RegisterChainFamilies). A new BTC-derived spec takes this path with no
+// list to update.
 //
-// MAG-3077: six of them — BTCT4, BTCS, DASH, DASHT, ZCASH, ZCASHT — were missing, so
-// those chains took the non-UTXO path and returned bodies with "jsonrpc":"2.0" injected
-// and a null "error" stripped. That is precisely the mangling checkUTXOResponseAndFixReply
-// exists to undo, and it breaks Bitcoin-derived clients that read resp["error"]
-// unconditionally.
+// A hand-kept list did not: MAG-3077 found BTCT4, BTCS, DASH, DASHT, ZCASH and ZCASHT missing, and
+// PEP, PEPT, QTUM and QTUMT were missing again (MAG-5246). Those chains took the non-UTXO path and
+// returned bodies with "jsonrpc":"2.0" injected and a null "error" stripped. That is precisely the
+// mangling checkUTXOResponseAndFixReply exists to undo, and it breaks Bitcoin-derived clients that
+// read resp["error"] unconditionally.
 //
-// MONERO/MONEROT are deliberately absent and are not an oversight: monero.json declares no
-// imports and monerod speaks JSON-RPC 2.0, so it needs no 1.0 fixup. Lookup is
-// case-sensitive because spec indexes are upper-case by construction.
-//
-// A new BTC-derived spec must be added here. TestIsUTXOFamily pins the membership so that
-// stays a deliberate edit rather than silent drift.
-var utxoFamilyChainIDs = map[string]struct{}{
-	"BTC": {}, "BTCT": {}, "BTCT4": {}, "BTCS": {}, // btc.json
-	"LTC": {}, "LTCT": {}, // litecoin.json -> BTC
-	"DOGE": {}, "DOGET": {}, // doge.json     -> BTC
-	"BCH": {}, "BCHT": {}, // bch.json      -> BTC
-	"DASH": {}, "DASHT": {}, // dash.json     -> BTC
-	"ZCASH": {}, "ZCASHT": {}, // zcash.json    -> BTC
-}
-
+// MONERO/MONEROT are deliberately not Bitcoin: monero.json declares no imports and monerod speaks
+// JSON-RPC 2.0, so it needs no 1.0 fixup. Lookup is case-sensitive because spec indexes are
+// upper-case by construction.
 func isUTXOFamily(chainID string) bool {
-	_, ok := utxoFamilyChainIDs[chainID]
-	return ok
+	family, ok := common.GetChainFamily(chainID)
+	return ok && family == common.ChainFamilyBitcoin
 }
 
 // checkUTXOResponseAndFixReply returns the reply body for UTXO-family chains after
@@ -361,8 +348,10 @@ func convertToJsonError(errorMsg string) []byte {
 	return jsonResponse
 }
 
-// graphQLRefusalStatus is the HTTP status the GraphQL listener answers a request it refuses by one
-// of its own limits with (MAG-4577).
+// graphQLRefusalStatus is the HTTP status the GraphQL listener answers a request it refuses with:
+// one past the router's own limits (MAG-4577), one the router and the node would read differently
+// (MAG-4908), and one the router cannot read (MAG-4351, whose owner decided 400 on 2026-11-09; the
+// GraphQL-over-HTTP draft answers a parse failure with 400 too).
 //
 // 400, for three reasons. The request itself is the reason and no retry of it can succeed, which is
 // the 4xx half of the status line and the whole point of the change: a 500 told every alert rule and
@@ -374,13 +363,18 @@ func convertToJsonError(errorMsg string) []byte {
 // length, which is not what these limits measure: a query with 301 root fields can be a few hundred
 // bytes.
 //
-// ONE constant for the three limits, so the owner's answer is one edit. The router owner was asked
-// to confirm 400 against 413 and 422 on MAG-4577; the ticket records the choice as theirs.
+// ONE constant for every refusal, so the owner's answer is one edit. The router owner was asked to
+// confirm 400 against 413 and 422 on MAG-4577; the ticket records the choice as theirs.
 const graphQLRefusalStatus = fiber.StatusBadRequest
 
 // convertToGraphQLError returns a GraphQL response carrying one error, which is what a GraphQL
-// client reads: a JSON object with a null `data` and an `errors` list whose entries have a
-// `message` (GraphQL specification, Response Format).
+// client reads: a JSON object with an `errors` list whose entries have a `message` (GraphQL
+// specification, Response Format).
+//
+// It has no `data` key. A refusal is a request error: the router declines before anything runs,
+// and for an error raised before execution begins the specification leaves `data` out. A `data`
+// entry, even `null`, tells the client the operation ran, which the 4xx status contradicts
+// (MAG-4577).
 //
 // The router's generic error body (convertToJsonError above) is `{"error": "<json text>"}` — a JSON
 // document inside a JSON string, with no errors list at all. A standard GraphQL client looks for
@@ -390,25 +384,64 @@ const graphQLRefusalStatus = fiber.StatusBadRequest
 // guid goes in `extensions`, which the specification reserves for exactly this. It is the id the
 // router's own log line carries, so support can still join a complaint to the request, which the
 // old body gave up only because it was unreadable.
-func convertToGraphQLError(message, guid string) []byte {
+//
+// code goes in `extensions` too, where GraphQL servers put an error's code: GRAPHQL_PARSE_FAILED
+// for a query that does not parse, REQUEST_REFUSED for any other request the router cannot read
+// (MAG-4351). Empty leaves it out, which is the limits' and MAG-4908's reply as decided (MAG-4577).
+// The router's own error field (`router_error` in the rulebook) is not written yet: its name waits
+// on one naming decision for every interface, and GraphQL follows it in MAG-4911.
+func convertToGraphQLError(message, code, guid string) []byte {
+	extensions := map[string]string{}
+	if code != "" {
+		extensions["code"] = code
+	}
+	if guid != "" {
+		extensions["guid"] = guid
+	}
+	return graphQLErrorDocument(message, extensions)
+}
+
+// ConvertToGraphQLWriteOutcomeError returns the router's own GraphQL error document for a write
+// whose outcome it answers as unknown (MAG-5122): the same shape convertToGraphQLError uses — no
+// `data` key (subtask 1's router reply shape) — with write_outcome, and tx_hash when the digest is
+// known, added to `extensions` beside guid. A client reads the verdict from the field GraphQL
+// reserves for structured error metadata rather than parsing the message text.
+//
+// Exported: the GraphQL wire shape belongs to this package, and rpcsmartrouter builds this body
+// for the one write-outcome case it answers with a client-error-free status (MAG-5122).
+func ConvertToGraphQLWriteOutcomeError(message, guid, writeOutcome, txHash string) []byte {
+	extensions := map[string]string{"write_outcome": writeOutcome}
+	if guid != "" {
+		extensions["guid"] = guid
+	}
+	if txHash != "" {
+		extensions["tx_hash"] = txHash
+	}
+	return graphQLErrorDocument(message, extensions)
+}
+
+// graphQLErrorDocument is the one-error GraphQL response body convertToGraphQLError and
+// ConvertToGraphQLWriteOutcomeError share: no `data` key, one entry in `errors`, extensions
+// omitted when empty.
+func graphQLErrorDocument(message string, extensions map[string]string) []byte {
 	type graphQLErrorEntry struct {
 		Message    string            `json:"message"`
 		Extensions map[string]string `json:"extensions,omitempty"`
 	}
+	entry := graphQLErrorEntry{Message: message}
+	if len(extensions) > 0 {
+		entry.Extensions = extensions
+	}
 	body := struct {
-		Data   interface{}         `json:"data"`
 		Errors []graphQLErrorEntry `json:"errors"`
 	}{
-		Errors: []graphQLErrorEntry{{Message: message}},
-	}
-	if guid != "" {
-		body.Errors[0].Extensions = map[string]string{"guid": guid}
+		Errors: []graphQLErrorEntry{entry},
 	}
 	jsonResponse, err := json.Marshal(body)
 	if err != nil {
 		// Unreachable: every field is a string. Still a GraphQL error document, so a client
 		// that reaches it reads it the same way.
-		return []byte(`{"data":null,"errors":[{"message":"failed to marshal error response to json"}]}`)
+		return []byte(`{"errors":[{"message":"failed to marshal error response to json"}]}`)
 	}
 	return jsonResponse
 }
@@ -483,7 +516,7 @@ func convertToJsonRpcError(rawErrorMsg string, requestBody []byte) []byte {
 	if guid != "" {
 		data["guid"] = guid
 	}
-	// The inner error message from LavaFormatError already embeds provider
+	// The inner error message from FormatError already embeds provider
 	// context (selectedProvider, validProviders, addon, extensions, GUID) in
 	// its appended attribute block. Surface it under data.error so the full
 	// context is preserved for debugging without brittle substring parsing.
@@ -517,23 +550,30 @@ func validateEndpoints(endpoints []common.NodeUrl, apiInterface string) {
 	}
 }
 
-func ListenWithRetry(ctx context.Context, app *fiber.App, address string, chosenAddrCh *common.SafeChannelSender[string]) {
+// listenWithRetry binds address and serves app on it, binding again after a failure, until
+// ctx ends or gate is closed. A socket bound after the gate closed is closed unserved.
+func listenWithRetry(ctx context.Context, app *fiber.App, address string, chosenAddrCh *common.SafeChannelSender[string], gate *serveGate) {
 	for {
 		ln, err := net.Listen("tcp", address)
 		if err != nil {
-			utils.LavaFormatError("net.Listen(tcp, address)", err, utils.LogAttr("address", address))
+			utils.FormatError("net.Listen(tcp, address)", err, utils.LogAttr("address", address))
 		} else {
+			if !gate.open(app, ln) {
+				return
+			}
 			chosenAddrCh.Send(ln.Addr().String())
 
 			err = app.Listener(ln)
 			if err != nil {
-				utils.LavaFormatError("app.Listen(listenAddr)", err)
+				utils.FormatError("app.Listen(listenAddr)", err)
 			}
 		}
 
-		// Stop retrying when the caller cancels (graceful shutdown). Without this,
-		// after app.ShutdownWithContext returns from app.Listener, the loop would
-		// sleep and rebind the port, undoing the shutdown.
+		// Stop retrying on shutdown. Without this, after app.Listener returns the
+		// loop would sleep and rebind the port, undoing the shutdown.
+		if gate.isClosed() {
+			return
+		}
 		select {
 		case <-ctx.Done():
 			return
@@ -548,9 +588,9 @@ func GetListenerWithRetryGrpc(protocol, addr string) net.Listener {
 		if err == nil {
 			return lis
 		}
-		utils.LavaFormatError("failure setting up listener, net.Listen(protocol, addr)", err, utils.Attribute{Key: "listenAddr", Value: addr})
+		utils.FormatError("failure setting up listener, net.Listen(protocol, addr)", err, utils.Attribute{Key: "listenAddr", Value: addr})
 		time.Sleep(RetryListeningInterval * time.Second)
-		utils.LavaFormatWarning("Attempting connection retry", nil)
+		utils.FormatWarning("Attempting connection retry", nil)
 	}
 }
 
@@ -707,7 +747,7 @@ func CombineEarliestRequestedBlock(currentEarliest, parsedBlock int64) int64 {
 // It is NOT how long an attempt may live — that is the processing budget, see
 // GetTimeoutForProcessing and sendRelayToDirectEndpoints.
 //
-// A caller's lava-relay-timeout replaces the computed window only once it has been bounded
+// A caller's router-relay-timeout replaces the computed window only once it has been bounded
 // (common.BoundCallerRelayTimeout), and a bounded value is always positive. The window feeds
 // time.NewTicker, and the processing budget is never shorter than it, so this is the one place both
 // hazards of an unchecked header are closed for every consumer of the window (MAG-3600).
@@ -759,7 +799,7 @@ func applyResponseCompression(app *fiber.App, mode string) {
 		app.Use(compress.New(compress.Config{Level: compress.LevelBestSpeed}))
 	default: // "gzip", "", or anything else
 		if normalized != common.ResponseCompressionGzip && normalized != "" {
-			utils.LavaFormatWarning("unknown response-compression mode, falling back to gzip",
+			utils.FormatWarning("unknown response-compression mode, falling back to gzip",
 				nil, utils.LogAttr("mode", mode))
 		}
 		app.Use(stripBrotliAcceptEncoding)
@@ -807,11 +847,59 @@ func stripBrotliAcceptEncoding(c *fiber.Ctx) error {
 // chainListenerBase holds what every chain listener is built with, and the address it
 // listens on once Serve has bound it.
 type chainListenerBase struct {
-	endpoint         *lavasession.RPCEndpoint
+	endpoint         *routersession.RPCEndpoint
 	relaySender      RelaySender
 	healthReporter   HealthReporter
 	logger           *metrics.RPCConsumerLogs
 	listeningAddress atomic.Pointer[string]
+	gate             serveGate
+}
+
+// serveGate orders a listener's Shutdown against its serve loop, whichever runs first.
+// fasthttp's Shutdown closes only the listeners its Serve has already taken, and returns at
+// once when there are none, so a Shutdown that ran before Serve took the socket left the server
+// to serve it afterwards. Shutdown closes the gate instead: a socket bound but not yet served is
+// closed under it, and one the loop binds afterwards is closed before Serve sees it.
+type serveGate struct {
+	mu     sync.Mutex
+	closed bool
+	app    *fiber.App
+	ln     net.Listener
+}
+
+// open records app and the listener it is about to serve. Once the gate is closed it closes
+// ln instead and reports false.
+func (g *serveGate) open(app *fiber.App, ln net.Listener) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.closed {
+		_ = ln.Close()
+		return false
+	}
+	g.app, g.ln = app, ln
+	return true
+}
+
+func (g *serveGate) isClosed() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.closed
+}
+
+// close shuts the gate, drains the in-flight requests of the app it let through, and closes
+// that app's listener, which Serve may not have taken yet.
+func (g *serveGate) close(ctx context.Context) error {
+	g.mu.Lock()
+	g.closed = true
+	app, ln := g.app, g.ln
+	g.mu.Unlock()
+	if app == nil {
+		return nil
+	}
+	err := app.ShutdownWithContext(ctx)
+	// Already closed when Serve had taken it.
+	_ = ln.Close()
+	return err
 }
 
 func (apil *chainListenerBase) GetListeningAddress() string {
@@ -827,7 +915,12 @@ func (apil *chainListenerBase) GetListeningAddress() string {
 // websocket upgrade. Only those listeners may hand an upgrade on the health path
 // past the health handler; see the health route below for why the distinction has
 // to be explicit rather than inferred.
-func createAndSetupBaseAppListener(cmdFlags common.ConsumerCmdFlags, healthCheckPath string, healthReporter HealthReporter, servesWebSocketUpgrades bool) *fiber.App {
+// routesDelete is true for a listener that answers a DELETE itself, so the shared 204 below must not
+// (MAG-4524): GraphQL refuses it with 405 and Allow: POST like every method it does not serve,
+// JSON-RPC the same way it refuses a GET without an upgrade (405, Allow: POST), and Tendermint RPC
+// through fiber, as it refuses a PUT. REST still gets the shared 204, before any route runs, until
+// its own refusal is built (405 with the path's verbs in Allow and REQUEST_REFUSED, MAG-5255).
+func createAndSetupBaseAppListener(cmdFlags common.ConsumerCmdFlags, healthCheckPath string, healthReporter HealthReporter, servesWebSocketUpgrades, routesDelete bool) *fiber.App {
 	app := fiber.New(fiber.Config{
 		JSONEncoder: json.Marshal,
 		JSONDecoder: json.Unmarshal,
@@ -840,11 +933,17 @@ func createAndSetupBaseAppListener(cmdFlags common.ConsumerCmdFlags, healthCheck
 	app.Use(favicon.New())
 	applyResponseCompression(app, cmdFlags.ResponseCompression)
 	app.Use(func(c *fiber.Ctx) error {
-		// we set up wild card by default.
-		c.Set("Access-Control-Allow-Origin", cmdFlags.OriginFlag)
+		// "*" by default; a --cors-origin list answers with the caller's own origin when listed.
+		origin, send, vary := common.CORSAllowOrigin(cmdFlags.OriginFlag, c.Get(fiber.HeaderOrigin))
+		if send {
+			c.Set("Access-Control-Allow-Origin", origin)
+		}
+		if vary {
+			c.Vary(fiber.HeaderOrigin)
+		}
 		// Expose selected response headers to browser JS. Access-Control-Expose-
 		// Headers must be present on the ACTUAL response (not just the preflight)
-		// for fetch() to read a non-simple header like Lava-Provider-Address.
+		// for fetch() to read a non-simple header like Router-Provider-Address.
 		// Empty flag => header omitted (only simple response headers readable).
 		if cmdFlags.ExposeHeadersFlag != "" {
 			c.Set("Access-Control-Expose-Headers", cmdFlags.ExposeHeadersFlag)
@@ -869,7 +968,7 @@ func createAndSetupBaseAppListener(cmdFlags common.ConsumerCmdFlags, healthCheck
 			c.Set("Access-Control-Max-Age", cmdFlags.CDNCacheDuration)
 			return c.SendStatus(fiber.StatusNoContent)
 		}
-		if c.Method() == "DELETE" {
+		if c.Method() == "DELETE" && !routesDelete {
 			return c.SendStatus(fiber.StatusNoContent)
 		}
 		return c.Next()

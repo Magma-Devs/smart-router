@@ -174,14 +174,14 @@ func BenchmarkIsUnsupportedMethodError(b *testing.B) {
 // classifies as the code its wording names. Neither reads as a router-terminal unsupported method.
 func TestIsUnsupportedMethodError_SmartContractErrors(t *testing.T) {
 	refusalCodes := map[uint32]bool{
-		common.LavaErrorNodeMethodNotFound.Code:   true,
-		common.LavaErrorNodeUnimplemented.Code:    true,
-		common.LavaErrorNodeEndpointNotFound.Code: true,
-		common.LavaErrorNodeMethodNotAllowed.Code: true,
+		common.RouterErrorNodeMethodNotFound.Code:   true,
+		common.RouterErrorNodeUnimplemented.Code:    true,
+		common.RouterErrorNodeEndpointNotFound.Code: true,
+		common.RouterErrorNodeMethodNotAllowed.Code: true,
 	}
 	// The transports IsUnsupportedMethodError consults, in its order.
-	classifyAll := func(err error) []*common.LavaError {
-		var out []*common.LavaError
+	classifyAll := func(err error) []*common.RouterError {
+		var out []*common.RouterError
 		for _, transport := range []common.TransportType{common.TransportJsonRPC, common.TransportREST, common.TransportGRPC} {
 			if classified := ClassifyNodeError(err, -1, transport); classified != nil {
 				out = append(out, classified)
@@ -193,7 +193,7 @@ func TestIsUnsupportedMethodError_SmartContractErrors(t *testing.T) {
 	tests := []struct {
 		name    string
 		message string
-		refusal *common.LavaError // the node refusal the message names, nil for a revert
+		refusal *common.RouterError // the node refusal the message names, nil for a revert
 	}{
 		// CRITICAL: Smart contract errors must not read as a node refusal
 		{"Smart contract NFT not found", "execution reverted: NFT not found", nil},
@@ -205,9 +205,9 @@ func TestIsUnsupportedMethodError_SmartContractErrors(t *testing.T) {
 		{"Generic not found without execution reverted", "user not found", nil},
 		{"Item not found", "item not found", nil},
 		// Real refusals still classify as the code their wording names
-		{"Actual method not found", "method not found", common.LavaErrorNodeMethodNotFound},
-		{"Actual endpoint not found", "endpoint not found", common.LavaErrorNodeEndpointNotFound},
-		{"Actual route not found", "route not found", common.LavaErrorNodeEndpointNotFound},
+		{"Actual method not found", "method not found", common.RouterErrorNodeMethodNotFound},
+		{"Actual endpoint not found", "endpoint not found", common.RouterErrorNodeEndpointNotFound},
+		{"Actual route not found", "route not found", common.RouterErrorNodeEndpointNotFound},
 	}
 
 	for _, tt := range tests {

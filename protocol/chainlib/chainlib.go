@@ -8,8 +8,8 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 )
@@ -32,7 +32,7 @@ func NewChainParser(apiInterface string) (chainParser ChainParser, err error) {
 
 func NewChainListener(
 	ctx context.Context,
-	listenEndpoint *lavasession.RPCEndpoint,
+	listenEndpoint *routersession.RPCEndpoint,
 	relaySender RelaySender,
 	healthReporter HealthReporter,
 	rpcConsumerLogs *metrics.RPCConsumerLogs,
@@ -59,6 +59,9 @@ type ChainParser interface {
 	ParseMsg(url string, data []byte, connectionType string, metadata []pairingtypes.Metadata, extensionInfo extensionslib.ExtensionInfo) (ChainMessage, error)
 	SetSpec(spec spectypes.Spec)
 	ChainBlockStats() (allowedBlockLagForQosSync int64, averageBlockTime time.Duration, blockDistanceForFinalizedData, blocksInFinalizationProof uint32)
+	// FinalityField is the reply field by which the chain's nodes say whether an answer is
+	// final, and the raw JSON value that means final; both empty when the spec names none.
+	FinalityField() (path, finalValue string)
 	GetParsingByTag(tag spectypes.FUNCTION_TAG) (parsing *spectypes.ParseDirective, apiCollection *spectypes.ApiCollection, existed bool)
 	GetParsingByTagForCollection(tag spectypes.FUNCTION_TAG, addons []string, internalPath string, allowBaseFallback bool) (parsing *spectypes.ParseDirective, apiCollection *spectypes.ApiCollection, existed bool)
 	IsTagInCollection(tag spectypes.FUNCTION_TAG, collectionKey CollectionKey) bool
@@ -112,6 +115,11 @@ type ChainMessage interface {
 	UpdateEarliestInMessage(incomingEarliest int64) bool
 	SetExtension(extension *spectypes.Extension)
 	GetUsedDefaultValue() bool
+	// HasBlocklessElement reports whether an element of the request names no block and so took
+	// no part in its requested block: a gas price batched with a read of block N asks for block
+	// N, but N being final says nothing about the gas price. The cache never writes such a request
+	// as final (MAG-4650).
+	HasBlocklessElement() bool
 	// IsBatch returns true if this is a batch request (e.g., JSON-RPC batch)
 	IsBatch() bool
 
@@ -240,7 +248,7 @@ type ChainProxy interface {
 	SendNodeMsg(ctx context.Context, chainMessage ChainMessageForSend) (relayReply *RelayReplyWrapper, err error) // has to be thread safe, reuse code within ParseMsg as common functionality
 }
 
-func GetChainRouter(ctx context.Context, nConns uint, rpcProviderEndpoint *lavasession.RPCProviderEndpoint, chainParser ChainParser) (ChainRouter, error) {
+func GetChainRouter(ctx context.Context, nConns uint, rpcProviderEndpoint *routersession.RPCProviderEndpoint, chainParser ChainParser) (ChainRouter, error) {
 	proxyConstructor, err := chainProxyConstructor(rpcProviderEndpoint.ApiInterface)
 	if err != nil {
 		return nil, err

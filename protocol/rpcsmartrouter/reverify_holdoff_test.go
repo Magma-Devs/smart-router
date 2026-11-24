@@ -9,7 +9,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/holdoff"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/stretchr/testify/require"
 )
 
@@ -17,22 +17,22 @@ import (
 // cycles inside the hold-off window must reach the same inconclusive verdict without
 // spending a request.
 func TestReverify_HoldoffSkipsProbeWhileHeld(t *testing.T) {
-	rpc := &lavasession.RPCEndpoint{ChainID: "TEST", ApiInterface: "jsonrpc"}
+	rpc := &routersession.RPCEndpoint{ChainID: "TEST", ApiInterface: "jsonrpc"}
 	now := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
 
 	probes := 0
 	inputs := &chainReverifyInputs{
 		rpcEndpoint:                rpc,
 		convertProvidersToSessions: fakeConvert,
-		configuredStatic:           []*lavasession.RPCStaticProviderEndpoint{makeProvider("tatum")},
+		configuredStatic:           []*routersession.RPCStaticProviderEndpoint{makeProvider("tatum")},
 		rateLimitHoldoff:           holdoff.NewRegistryWithClock(func() time.Time { return now }),
-		validateFn: func(_ context.Context, _ *lavasession.RPCStaticProviderEndpoint) error {
+		validateFn: func(_ context.Context, _ *routersession.RPCStaticProviderEndpoint) error {
 			probes++
 			return common.StatusCodeError429
 		},
 	}
 
-	active := map[uint64]*lavasession.ConsumerSessionsWithProvider{0: makeSession("tatum")}
+	active := map[uint64]*routersession.ConsumerSessionsWithProvider{0: makeSession("tatum")}
 	got := runCycles(t, inputs, active, 5)
 
 	require.Equal(t, 1, probes, "held-off cycles must not spend a probe")
@@ -43,7 +43,7 @@ func TestReverify_HoldoffSkipsProbeWhileHeld(t *testing.T) {
 // Once the hold-off expires the provider is probed again, and an answer — any answer —
 // clears the strikes, so a later 429 starts from the initial penalty.
 func TestReverify_AnswerAfterHoldoffClears(t *testing.T) {
-	rpc := &lavasession.RPCEndpoint{ChainID: "TEST", ApiInterface: "jsonrpc"}
+	rpc := &routersession.RPCEndpoint{ChainID: "TEST", ApiInterface: "jsonrpc"}
 	start := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
 	now := start
 	reg := holdoff.NewRegistryWithClock(func() time.Time { return now })
@@ -53,31 +53,31 @@ func TestReverify_AnswerAfterHoldoffClears(t *testing.T) {
 	inputs := &chainReverifyInputs{
 		rpcEndpoint:                rpc,
 		convertProvidersToSessions: fakeConvert,
-		configuredStatic:           []*lavasession.RPCStaticProviderEndpoint{makeProvider("tatum")},
+		configuredStatic:           []*routersession.RPCStaticProviderEndpoint{makeProvider("tatum")},
 		rateLimitHoldoff:           reg,
-		validateFn: func(_ context.Context, _ *lavasession.RPCStaticProviderEndpoint) error {
+		validateFn: func(_ context.Context, _ *routersession.RPCStaticProviderEndpoint) error {
 			err := script[probes]
 			probes++
 			return err
 		},
 	}
-	active := map[uint64]*lavasession.ConsumerSessionsWithProvider{0: makeSession("tatum")}
+	active := map[uint64]*routersession.ConsumerSessionsWithProvider{0: makeSession("tatum")}
 
 	// Cycle 1: 429 → held off for the initial penalty.
-	active, _, _ = applyReverification(context.Background(), inputs, active, reverifyTierStatic, 100)
+	active, _, _ = probeAndApplyReverification(context.Background(), inputs, active, reverifyTierStatic, 100)
 	require.Equal(t, 1, probes)
-	require.True(t, reg.HeldOff("tatum", "tatum"))
+	require.True(t, reg.HeldOff(holdoff.ProviderKey("TEST", "jsonrpc", "tatum"), "tatum"))
 
 	// Cycle 2, past expiry: probed again, answers cleanly → hold-off and strikes cleared.
 	now = start.Add(holdoff.InitialHoldoff + time.Second)
-	active, _, _ = applyReverification(context.Background(), inputs, active, reverifyTierStatic, 101)
+	active, _, _ = probeAndApplyReverification(context.Background(), inputs, active, reverifyTierStatic, 101)
 	require.Equal(t, 2, probes)
-	require.False(t, reg.HeldOff("tatum", "tatum"))
+	require.False(t, reg.HeldOff(holdoff.ProviderKey("TEST", "jsonrpc", "tatum"), "tatum"))
 
 	// Cycle 3: a fresh 429 starts from the initial penalty again, proving the reset.
-	active, _, _ = applyReverification(context.Background(), inputs, active, reverifyTierStatic, 102)
+	active, _, _ = probeAndApplyReverification(context.Background(), inputs, active, reverifyTierStatic, 102)
 	require.Equal(t, 3, probes)
-	require.Equal(t, now.Add(holdoff.InitialHoldoff), reg.ReadyAt("tatum", "tatum"))
+	require.Equal(t, now.Add(holdoff.InitialHoldoff), reg.ReadyAt(holdoff.ProviderKey("TEST", "jsonrpc", "tatum"), "tatum"))
 
 	require.Contains(t, collectNames(active), "tatum", "rate-limited cycles never demoted")
 }
@@ -85,29 +85,29 @@ func TestReverify_AnswerAfterHoldoffClears(t *testing.T) {
 // The upstream's Retry-After floors the hold-off: a vendor asking for five minutes is
 // not re-probed after the default thirty seconds.
 func TestReverify_RetryAfterFloorsTheHoldoff(t *testing.T) {
-	rpc := &lavasession.RPCEndpoint{ChainID: "TEST", ApiInterface: "jsonrpc"}
+	rpc := &routersession.RPCEndpoint{ChainID: "TEST", ApiInterface: "jsonrpc"}
 	now := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
 	reg := holdoff.NewRegistryWithClock(func() time.Time { return now })
 
 	inputs := &chainReverifyInputs{
 		rpcEndpoint:                rpc,
 		convertProvidersToSessions: fakeConvert,
-		configuredStatic:           []*lavasession.RPCStaticProviderEndpoint{makeProvider("tatum")},
+		configuredStatic:           []*routersession.RPCStaticProviderEndpoint{makeProvider("tatum")},
 		rateLimitHoldoff:           reg,
-		validateFn: func(_ context.Context, _ *lavasession.RPCStaticProviderEndpoint) error {
+		validateFn: func(_ context.Context, _ *routersession.RPCStaticProviderEndpoint) error {
 			return &common.RateLimitedError{RetryAfter: 5 * time.Minute}
 		},
 	}
 
-	runCycles(t, inputs, map[uint64]*lavasession.ConsumerSessionsWithProvider{0: makeSession("tatum")}, 1)
-	require.Equal(t, now.Add(5*time.Minute), reg.ReadyAt("tatum", "tatum"))
+	runCycles(t, inputs, map[uint64]*routersession.ConsumerSessionsWithProvider{0: makeSession("tatum")}, 1)
+	require.Equal(t, now.Add(5*time.Minute), reg.ReadyAt(holdoff.ProviderKey("TEST", "jsonrpc", "tatum"), "tatum"))
 }
 
 // A probe that got no answer is not an answer (MAG-4165). A gateway enforcing a ban often drops
 // the connection, and the url's entries are shared: clearing here wiped the per-url chain tracker's
 // hold-off and strikes too, sending its poll straight back into the ban at first-strike timing.
 func TestReverify_NoAnswerKeepsTheStrikes(t *testing.T) {
-	rpc := &lavasession.RPCEndpoint{ChainID: "TEST", ApiInterface: "jsonrpc"}
+	rpc := &routersession.RPCEndpoint{ChainID: "TEST", ApiInterface: "jsonrpc"}
 	start := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
 	now := start
 	reg := holdoff.NewRegistryWithClock(func() time.Time { return now })
@@ -117,28 +117,28 @@ func TestReverify_NoAnswerKeepsTheStrikes(t *testing.T) {
 	inputs := &chainReverifyInputs{
 		rpcEndpoint:                rpc,
 		convertProvidersToSessions: fakeConvert,
-		configuredStatic:           []*lavasession.RPCStaticProviderEndpoint{makeProvider("tatum")},
+		configuredStatic:           []*routersession.RPCStaticProviderEndpoint{makeProvider("tatum")},
 		rateLimitHoldoff:           reg,
-		validateFn: func(_ context.Context, _ *lavasession.RPCStaticProviderEndpoint) error {
+		validateFn: func(_ context.Context, _ *routersession.RPCStaticProviderEndpoint) error {
 			err := script[probes]
 			probes++
 			return err
 		},
 	}
-	active := map[uint64]*lavasession.ConsumerSessionsWithProvider{0: makeSession("tatum")}
+	active := map[uint64]*routersession.ConsumerSessionsWithProvider{0: makeSession("tatum")}
 
-	active, _, _ = applyReverification(context.Background(), inputs, active, reverifyTierStatic, 100)
-	require.True(t, reg.HeldOff("tatum", "tatum"))
+	active, _, _ = probeAndApplyReverification(context.Background(), inputs, active, reverifyTierStatic, 100)
+	require.True(t, reg.HeldOff(holdoff.ProviderKey("TEST", "jsonrpc", "tatum"), "tatum"))
 
 	// Past expiry the probe goes out and the connection drops: no answer, so the strike stands.
 	now = start.Add(holdoff.InitialHoldoff + time.Second)
-	active, _, _ = applyReverification(context.Background(), inputs, active, reverifyTierStatic, 101)
+	active, _, _ = probeAndApplyReverification(context.Background(), inputs, active, reverifyTierStatic, 101)
 	require.Equal(t, 2, probes)
 
 	// The next refusal is a second strike — twice the initial penalty — not a fresh first one.
-	_, _, _ = applyReverification(context.Background(), inputs, active, reverifyTierStatic, 102)
+	_, _, _ = probeAndApplyReverification(context.Background(), inputs, active, reverifyTierStatic, 102)
 	require.Equal(t, 3, probes)
-	require.Equal(t, now.Add(2*holdoff.InitialHoldoff), reg.ReadyAt("tatum", "tatum"))
+	require.Equal(t, now.Add(2*holdoff.InitialHoldoff), reg.ReadyAt(holdoff.ProviderKey("TEST", "jsonrpc", "tatum"), "tatum"))
 }
 
 // The same holds for the url the hold-off is keyed by when the provider passes on its others. Each
@@ -159,16 +159,16 @@ func TestReverify_ProviderPassingOnItsOtherUrlKeepsTheDeadUrlsStrikes(t *testing
 	start := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
 	now := start
 	reg := holdoff.NewRegistryWithClock(func() time.Time { return now })
-	urlKey := holdoffURLKey(provider)
+	urlKey := holdoffURLKeys(provider, nil)[0]
 	require.Equal(t, refusing, urlKey, "the hold-off is keyed by the refusing url")
-	reg.RecordRateLimit(provider.Name, urlKey, 0)
+	reg.RecordRateLimit(holdoff.ProviderKey("ETH1", "jsonrpc", provider.Name), urlKey, 0)
 
 	admissions := newAdmissionRegistry()
 	inputs := &chainReverifyInputs{
 		chainParser:                liveParser(t, "ETH1", true),
-		rpcEndpoint:                &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		rpcEndpoint:                &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 		convertProvidersToSessions: fakeConvert,
-		configuredStatic:           []*lavasession.RPCStaticProviderEndpoint{provider},
+		configuredStatic:           []*routersession.RPCStaticProviderEndpoint{provider},
 		recordAdmission:            admissions.record,
 		recordReverifiedAdmission:  admissions.recordReverified,
 		admissionFor:               admissions.admissionFor,
@@ -178,10 +178,10 @@ func TestReverify_ProviderPassingOnItsOtherUrlKeepsTheDeadUrlsStrikes(t *testing
 	// Past the hold-off the provider is probed: the second url carries it, and the first fails
 	// (it keeps its place for this one pass, the grace a url gets at an epoch).
 	now = start.Add(holdoff.InitialHoldoff + time.Second)
-	next, _, _ := applyReverification(t.Context(), inputs, map[uint64]*lavasession.ConsumerSessionsWithProvider{0: makeSession(provider.Name)}, reverifyTierStatic, 100)
+	next, _, _ := probeAndApplyReverification(t.Context(), inputs, map[uint64]*routersession.ConsumerSessionsWithProvider{0: makeSession(provider.Name)}, reverifyTierStatic, 100)
 	require.Contains(t, collectNames(next), provider.Name, "the provider serves from its second url")
 
 	// The first url's next refusal is a second strike, not a fresh first one.
-	reg.RecordRateLimit(provider.Name, urlKey, 0)
-	require.Equal(t, now.Add(2*holdoff.InitialHoldoff), reg.ReadyAt(provider.Name, urlKey))
+	reg.RecordRateLimit(holdoff.ProviderKey("ETH1", "jsonrpc", provider.Name), urlKey, 0)
+	require.Equal(t, now.Add(2*holdoff.InitialHoldoff), reg.ReadyAt(holdoff.ProviderKey("ETH1", "jsonrpc", provider.Name), urlKey))
 }

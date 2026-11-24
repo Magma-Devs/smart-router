@@ -15,9 +15,9 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/parser"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
@@ -96,14 +96,14 @@ func (apip *JsonRPCChainParser) ParseMsg(url string, data []byte, connectionType
 	}
 	// Check batch size limit
 	if MaxBatchRequestSize > 0 && len(msgs) > MaxBatchRequestSize {
-		return nil, utils.LavaFormatWarning("batch request size exceeded", ErrBatchRequestSizeExceeded,
+		return nil, utils.FormatWarning("batch request size exceeded", ErrBatchRequestSizeExceeded,
 			utils.LogAttr("batchSize", len(msgs)),
 			utils.LogAttr("maxAllowed", MaxBatchRequestSize),
 		)
 	}
 	if isBatch {
 		if err := rpcInterfaceMessages.CheckJsonrpcBatch(apip.chainFamily(), msgs); err != nil {
-			return nil, utils.LavaFormatWarning("JSON-RPC batch refused", err, utils.LogAttr("batchSize", len(msgs)))
+			return nil, utils.FormatWarning("JSON-RPC batch refused", err, utils.LogAttr("batchSize", len(msgs)))
 		}
 	}
 	var api *spectypes.Api
@@ -111,6 +111,10 @@ func (apip *JsonRPCChainParser) ParseMsg(url string, data []byte, connectionType
 	var blockFold requestedBlockFold
 	blockHashes := []string{}
 	parsedDefault := true
+	// This batch walk and TendermintChainParser.ParseMsg's share two blocks, an element's requested
+	// block and the batch's combined api, and stay two walks until an owner question is answered: a
+	// one-element batch gets its api's parse directive on Tendermint and none here (each parser's
+	// newBatchChainMessage). One walk would have to pick an answer.
 	for idx, msg := range msgs {
 		parsedInput := parser.NewParsedInput()
 		internalPath := ""
@@ -120,7 +124,7 @@ func (apip *JsonRPCChainParser) ParseMsg(url string, data []byte, connectionType
 		// Check api is supported and save it in nodeMsg
 		apiCont, err := apip.getSupportedApi(msg.Method, connectionType, internalPath)
 		if err != nil {
-			utils.LavaFormatError("getSupportedApi jsonrpc failed",
+			utils.FormatError("getSupportedApi jsonrpc failed",
 				err,
 				utils.LogAttr("method", msg.Method),
 				utils.LogAttr("connectionType", connectionType),
@@ -144,7 +148,7 @@ func (apip *JsonRPCChainParser) ParseMsg(url string, data []byte, connectionType
 		msgs[idx].BaseMessage = jsonrpcBaseMessage(metadata, settingHeaderDirective)
 		msg.BaseMessage = msgs[idx].BaseMessage
 
-		if overwriteReqBlock == "" {
+		if overwriteReqBlock == "" { //nolint:dupl // kept twin of the Tendermint batch walk; see the comment above the walk
 			// Fetch requested block, it is used for data reliability
 			parsedInput = parser.ParseBlockFromParams(msg, apiCont.api.BlockParsing, apiCont.api.Parsers)
 			if hashes, err := parsedInput.GetBlockHashes(); err == nil {
@@ -157,7 +161,7 @@ func (apip *JsonRPCChainParser) ParseMsg(url string, data []byte, connectionType
 			parsedBlock, err := msg.ParseBlock(overwriteReqBlock)
 			parsedInput.SetBlock(parsedBlock)
 			if err != nil {
-				utils.LavaFormatError("failed parsing block from an overwrite header", err,
+				utils.FormatError("failed parsing block from an overwrite header", err,
 					utils.LogAttr("chain", apip.spec.Name),
 					utils.LogAttr("overwriteReqBlock", overwriteReqBlock),
 				)
@@ -177,7 +181,7 @@ func (apip *JsonRPCChainParser) ParseMsg(url string, data []byte, connectionType
 		if msg.Method == "eth_call" && parsedBlock >= 0 &&
 			extensionInfo.LatestBlock > ethCallArchiveBlockDepth &&
 			uint64(parsedBlock) < extensionInfo.LatestBlock-ethCallArchiveBlockDepth {
-			utils.LavaFormatInfo("adding extension requirement to archive since block is 127 before lastest block")
+			utils.FormatInfo("adding extension requirement to archive since block is 127 before lastest block")
 			// change to archive. The router asks for it, not the caller, so a fleet without an
 			// archive node serves the call without it and does not report it back (MAG-3935).
 			extensionInfo.RouterExtensions = append(extensionInfo.RouterExtensions, extensionslib.ArchiveExtension)
@@ -200,14 +204,14 @@ func (apip *JsonRPCChainParser) ParseMsg(url string, data []byte, connectionType
 		// not decide the batch's block at all; see requestedBlockFold (MAG-4381).
 		blockFold.add(parsedBlock, elementEarliest, parsedInput, overwriteReqBlock == "" && apiNamesNoBlock(apiCont.api))
 
-		if idx == 0 {
+		if idx == 0 { //nolint:dupl // kept twin of the Tendermint batch walk; see the comment above the walk
 			// on the first entry store them.
 			api = apiCont.api
 			apiCollection = apiCollectionForMessage
 		} else {
 			// on next entries we need to compare to existing data
 			if api == nil {
-				utils.LavaFormatFatal("invalid parsing, api is nil", nil)
+				utils.FormatFatal("invalid parsing, api is nil", nil)
 			}
 			// on a batch request we need to do the following:
 			// 1. create a new api object, since it's not a single one
@@ -219,7 +223,7 @@ func (apip *JsonRPCChainParser) ParseMsg(url string, data []byte, connectionType
 			category = category.Combine(apiCont.api.GetCategory())
 			if apiCollectionForMessage.CollectionData.AddOn != "" && apiCollectionForMessage.CollectionData.AddOn != apiCollection.CollectionData.AddOn {
 				if apiCollection.CollectionData.AddOn != "" {
-					return nil, utils.LavaFormatError("unable to parse batch request with api from multiple addons", nil,
+					return nil, utils.FormatError("unable to parse batch request with api from multiple addons", nil,
 						utils.Attribute{Key: "first addon", Value: apiCollection.CollectionData.AddOn},
 						utils.Attribute{Key: "second addon", Value: apiCollectionForMessage.CollectionData.AddOn})
 				}
@@ -255,6 +259,8 @@ func (apip *JsonRPCChainParser) ParseMsg(url string, data []byte, connectionType
 			return nil, err
 		}
 	}
+	// The cache never writes the request as final when the fold left an element out (MAG-4650).
+	nodeMsg.blocklessElement = blockFold.skippedBlocklessElement()
 	apip.BaseChainParser.ExtensionParsing(apiCollection.CollectionData.AddOn, nodeMsg, extensionInfo)
 	return nodeMsg, nil
 }
@@ -343,11 +349,10 @@ func (apip *JsonRPCChainParser) ChainBlockStats() (allowedBlockLagForQosSync int
 type JsonRPCChainListener struct {
 	chainListenerBase
 	wsListenerBase
-	app *fiber.App // captured during Serve so Shutdown can drain HTTP
 }
 
 // NewJrpcChainListener creates a new instance of JsonRPCChainListener
-func NewJrpcChainListener(ctx context.Context, listenEndpoint *lavasession.RPCEndpoint,
+func NewJrpcChainListener(ctx context.Context, listenEndpoint *routersession.RPCEndpoint,
 	relaySender RelaySender, healthReporter HealthReporter,
 	rpcConsumerLogs *metrics.RPCConsumerLogs,
 	refererData *RefererData,
@@ -373,8 +378,9 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 	// Setup HTTP Server
 	// true: this listener registers a GET catch-all that upgrades, so the health
 	// route may hand an upgrade on its own path past the health handler.
-	app := createAndSetupBaseAppListener(cmdFlags, apil.endpoint.HealthCheckPath, apil.healthReporter, true)
-	apil.app = app
+	// true: a DELETE goes on to this listener's own refusal below, instead of the shared 204
+	// that told the caller it was done (MAG-4524).
+	app := createAndSetupBaseAppListener(cmdFlags, apil.endpoint.HealthCheckPath, apil.healthReporter, true, true)
 
 	// ConnectionType POST: ParseMsg needs it to find the subscription method in the spec.
 	wsUpgradeMiddleware, websocketCallbackWithDappID := apil.websocketRoutes(ctx, app, &apil.chainListenerBase, cmdFlags, "jsonrpc", fiber.MethodPost)
@@ -391,7 +397,7 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 			}
 		},
 		logReceived: func(ctx context.Context, guid uint64, msgSeed, dappID string, req httpRelayRequest, headers []pairingtypes.Metadata) {
-			utils.LavaFormatInfo("Consumer received a new JSON-RPC request", receivedAttrs(ctx, guid,
+			utils.FormatInfo("Consumer received a new JSON-RPC request", receivedAttrs(ctx, guid,
 				utils.LogAttr("path", req.path),
 				utils.LogAttr("seed", msgSeed),
 				utils.LogAttr("body", req.loggedBody),
@@ -444,6 +450,20 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 		}
 		return fiberCtx.Next()
 	}, wsUpgradeMiddleware, websocketCallbackWithDappID)
+	// A DELETE, a PUT and a PATCH are refused the way a GET without an upgrade is: 405 and
+	// Allow: POST, the only method this listener serves outside the upgrade, at any path (MAG-4524;
+	// rulebook Part IV, section 1). Left to fiber, a PUT and a PATCH got an Allow of every method
+	// with a route (GET, HEAD, POST), and a GET is served only as an upgrade. It is a Use handler,
+	// not routes for these methods: fiber builds a 405's Allow from the routes of the other methods,
+	// so such routes would show up in each other's Allow, and Use handlers are left out of it.
+	app.Use("/*", func(fiberCtx *fiber.Ctx) error {
+		switch fiberCtx.Method() {
+		case fiber.MethodDelete, fiber.MethodPut, fiber.MethodPatch:
+			fiberCtx.Set(fiber.HeaderAllow, fiber.MethodPost)
+			return fiber.ErrMethodNotAllowed
+		}
+		return fiberCtx.Next()
+	})
 
 	apil.listen(ctx, app)
 }
@@ -453,7 +473,7 @@ type JrpcChainProxy struct {
 	conn *chainproxy.Connector
 }
 
-func NewJrpcChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint lavasession.RPCProviderEndpoint, chainParser ChainParser) (ChainProxy, error) {
+func NewJrpcChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint routersession.RPCProviderEndpoint, chainParser ChainParser) (ChainProxy, error) {
 	if err := requireNodeUrl(rpcProviderEndpoint); err != nil {
 		return nil, err
 	}
@@ -484,7 +504,7 @@ func (cp *JrpcChainProxy) start(ctx context.Context, nConns uint, nodeUrl common
 		if parseErr == nil && isWs {
 			newUrl := strings.TrimSuffix(nodeUrl.Url, "/") + "/ws"
 			originalUrl := nodeUrl.Url
-			utils.LavaFormatWarning("Failed creating connector for ws, trying to create with /ws path", err, utils.LogAttr("url", nodeUrl.UrlStr()), utils.LogAttr("newUrl", newUrl))
+			utils.FormatWarning("Failed creating connector for ws, trying to create with /ws path", err, utils.LogAttr("url", nodeUrl.UrlStr()), utils.LogAttr("newUrl", newUrl))
 			nodeUrl.Url = newUrl
 			conn, newConnErr := chainproxy.NewConnector(ctx, nConns, nodeUrl)
 			if newConnErr == nil {
@@ -567,7 +587,7 @@ func (cp *JrpcChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMes
 		// this could be a batch message
 		batchMessage, ok := rpcInputMessage.(*rpcInterfaceMessages.JsonrpcBatchMessage)
 		if !ok {
-			return nil, utils.LavaFormatError("invalid message type in jsonrpc failed to cast JsonrpcMessage or JsonrpcBatchMessage from chainMessage", nil, traceAttrs(ctx, utils.Attribute{Key: "rpcMessage", Value: rpcInputMessage})...)
+			return nil, utils.FormatError("invalid message type in jsonrpc failed to cast JsonrpcMessage or JsonrpcBatchMessage from chainMessage", nil, traceAttrs(ctx, utils.Attribute{Key: "rpcMessage", Value: rpcInputMessage})...)
 		}
 		return cp.sendBatchMessage(ctx, batchMessage, chainMessage)
 	}
@@ -581,7 +601,7 @@ func (cp *JrpcChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMes
 	var replyMsg *rpcInterfaceMessages.JsonrpcMessage
 	replyMsg, err = rpcInterfaceMessages.ConvertJsonRPCMsg(rpcMessage)
 	if err != nil {
-		return nil, utils.LavaFormatError("jsonRPC error", err, traceAttrs(ctx)...)
+		return nil, utils.FormatError("jsonRPC error", err, traceAttrs(ctx)...)
 	}
 
 	err = cp.ValidateRequestAndResponseIds(nodeMessage.ID, replyMsg.ID)
@@ -592,7 +612,7 @@ func (cp *JrpcChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMes
 		if replyMsg.Error != nil {
 			responseError = replyMsg.Error.Message
 		}
-		return nil, utils.LavaFormatError("jsonRPC ID mismatch error", err, traceAttrs(ctx,
+		return nil, utils.FormatError("jsonRPC ID mismatch error", err, traceAttrs(ctx,
 			utils.Attribute{Key: "nodeMessageRequestId", Value: nodeMessage.ID},
 			utils.Attribute{Key: "responseId", Value: rpcMessage.ID},
 			utils.Attribute{Key: "responseError", Value: responseError},
@@ -630,5 +650,5 @@ func (apil *JsonRPCChainListener) Shutdown(ctx context.Context) error {
 	if apil == nil {
 		return nil
 	}
-	return drainHTTPThenWS(ctx, apil.app, &apil.wsWG, "JSONRPC")
+	return drainHTTPThenWS(ctx, &apil.gate, &apil.wsWG, "JSONRPC")
 }

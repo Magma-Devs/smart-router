@@ -15,10 +15,13 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
+	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/endpointtip"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
+	"github.com/magma-Devs/smart-router/protocol/relayprotocol"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils/rand"
 	"github.com/stretchr/testify/require"
@@ -40,11 +43,17 @@ type failedReplyInterface struct {
 	body         string
 	// jsonRpcShape: the router's own error is a JSON-RPC error object; otherwise {"error": "..."}.
 	jsonRpcShape bool
+	// graphQLShape: the router's own error is a GraphQL error with the code NO_PROVIDER_ANSWER, its
+	// guid equal to Router-Guid, and a sentence that names no provider (MAG-5119).
+	graphQLShape bool
 	// headers are request headers sent on top of the ones every request here sends.
 	headers map[string]string
 	// upstreamTimeout is the node-url timeout of every upstream, which lengthens each attempt's
 	// own budget past the request's (NodeUrl.LowerContextTimeoutWithDuration).
 	upstreamTimeout time.Duration
+	// staleUpstreams: every upstream reports a head far behind the chain tip, so the consistency
+	// gate turns it away.
+	staleUpstreams bool
 }
 
 func failedReplyInterfaces() []failedReplyInterface {
@@ -75,7 +84,7 @@ func failedReplyInterfaces() []failedReplyInterface {
 		},
 		{
 			name: "graphql", chainID: "SUI", apiInterface: spectypes.APIInterfaceGraphQL, parser: newGatewayTestGraphQLParser,
-			method: http.MethodPost, path: "/", body: gatewayTestQuery,
+			method: http.MethodPost, path: "/", body: gatewayTestQuery, graphQLShape: true,
 		},
 	}
 }
@@ -86,11 +95,11 @@ type failedReplyClientRead struct {
 	body        string
 	contentType string
 	guid        string
-	nodeError   string // lava-identified-node-error
+	nodeError   string // router-identified-node-error
 	header      http.Header
 }
 
-// failedReplyRelayTimeout is the attempt window every request here asks for in lava-relay-timeout.
+// failedReplyRelayTimeout is the attempt window every request here asks for in router-relay-timeout.
 const failedReplyRelayTimeout = 300 * time.Millisecond
 
 // startFailedReplyRouter serves iface through a real listener and router whose providers are
@@ -102,13 +111,13 @@ func startFailedReplyRouter(t *testing.T, iface failedReplyInterface, upstreamUR
 	t.Cleanup(cancel)
 
 	parser := iface.parser(t)
-	providers := map[uint64]*lavasession.ConsumerSessionsWithProvider{}
+	providers := map[uint64]*routersession.ConsumerSessionsWithProvider{}
 	for i, upstreamURL := range upstreamURLs {
-		connection, err := lavasession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: upstreamURL, Timeout: iface.upstreamTimeout}, 5, iface.apiInterface)
+		connection, err := routersession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: upstreamURL, Timeout: iface.upstreamTimeout}, 5, iface.apiInterface)
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = connection.Close() })
-		provider := lavasession.NewConsumerSessionWithProvider(fmt.Sprintf("upstream-%d", i+1), []*lavasession.Endpoint{{
-			NetworkAddress: upstreamURL, Enabled: true, DirectConnections: []lavasession.DirectRPCConnection{connection},
+		provider := routersession.NewConsumerSessionWithProvider(fmt.Sprintf("upstream-%d", i+1), []*routersession.Endpoint{{
+			NetworkAddress: upstreamURL, Enabled: true, DirectConnections: []routersession.DirectRPCConnection{connection},
 		}}, 100000, 1, 1)
 		provider.StaticProvider = true
 		providers[uint64(i)] = provider
@@ -123,6 +132,14 @@ func startFailedReplyRouter(t *testing.T, iface failedReplyInterface, upstreamUR
 		chainParser: parser, sessionManager: sessionManager, listenEndpoint: rpcEndpoint,
 		rpcSmartRouterLogs: logs,
 		consistencyConfig:  relaycore.DefaultConsistencyValidationConfig(),
+	}
+	if iface.staleUpstreams {
+		server.chainState = seedChainTip(200)
+		for _, upstreamURL := range upstreamURLs {
+			seedEndpointTip(iface.chainID, iface.apiInterface, upstreamURL, 50)
+			key := endpointtip.Key(iface.chainID, iface.apiInterface, upstreamURL)
+			t.Cleanup(func() { endpointtip.Default().Remove(key) })
+		}
 	}
 	listener, err := chainlib.NewChainListener(ctx, rpcEndpoint, server, nil, logs, parser, nil, NewNoOpWSSubscriptionManager(iface.chainID, iface.apiInterface))
 	require.NoError(t, err)
@@ -157,7 +174,7 @@ func startFailedReplyRouter(t *testing.T, iface failedReplyInterface, upstreamUR
 			body:        string(read),
 			contentType: response.Header.Get("Content-Type"),
 			guid:        response.Header.Get(common.GUID_HEADER_NAME),
-			nodeError:   response.Header.Get(common.LAVA_IDENTIFIED_NODE_ERROR_HEADER),
+			nodeError:   response.Header.Get(common.IDENTIFIED_NODE_ERROR_HEADER),
 			header:      response.Header,
 		}
 	}
@@ -208,6 +225,22 @@ func hangingUpstream(t *testing.T, arrivals *atomic.Int32) string {
 // routerErrorMessage reads the sentence from the router's own error body in the listener's shape.
 func routerErrorMessage(t *testing.T, iface failedReplyInterface, body string) string {
 	t.Helper()
+	if iface.graphQLShape {
+		var fields map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal([]byte(body), &fields), body)
+		require.NotContains(t, fields, "data", "the router's own GraphQL reply has no data key")
+		var reply struct {
+			Errors []struct {
+				Message    string            `json:"message"`
+				Extensions map[string]string `json:"extensions"`
+			} `json:"errors"`
+		}
+		require.NoError(t, json.Unmarshal([]byte(body), &reply), body)
+		require.Len(t, reply.Errors, 1, body)
+		require.Equal(t, "NO_PROVIDER_ANSWER", reply.Errors[0].Extensions["code"], body)
+		require.NotEmpty(t, reply.Errors[0].Extensions["guid"], body)
+		return reply.Errors[0].Message
+	}
 	if iface.jsonRpcShape {
 		var envelope struct {
 			JSONRPC string          `json:"jsonrpc"`
@@ -287,6 +320,15 @@ func TestFailedRelayReply_EndToEnd_MAG4481(t *testing.T) {
 				read := startFailedReplyRouter(t, iface, refusingUpstream(t))()
 				require.Equal(t, http.StatusBadGateway, read.status)
 				message := routerErrorMessage(t, iface, read.body)
+				if iface.graphQLShape {
+					// The router's own sentence names no provider, address or transport error: the
+					// cause stays in its log line (MAG-5119).
+					require.Equal(t, "no provider answered the request", message)
+					require.NotContains(t, read.body, "connection refused")
+					require.NotContains(t, read.body, "127.0.0.1")
+					require.Contains(t, read.body, `"guid":"`+read.guid+`"`, "Router-Guid equals extensions.guid")
+					return
+				}
 				require.True(t, strings.HasPrefix(message, "no answer from upstream: "), message)
 				require.Contains(t, message, "connection refused")
 			})
@@ -295,12 +337,17 @@ func TestFailedRelayReply_EndToEnd_MAG4481(t *testing.T) {
 				read := startFailedReplyRouter(t, iface, hangingUpstream(t, nil))()
 				require.Equal(t, http.StatusGatewayTimeout, read.status, read.body)
 				message := routerErrorMessage(t, iface, read.body)
-				require.True(t, strings.HasPrefix(message, "no answer from upstream within "), message)
+				if iface.graphQLShape {
+					require.True(t, strings.HasPrefix(message, "no provider answered within "), message)
+					require.Contains(t, read.body, `"guid":"`+read.guid+`"`, "Router-Guid equals extensions.guid")
+				} else {
+					require.True(t, strings.HasPrefix(message, "no answer from upstream within "), message)
+				}
 				require.NotContains(t, message, "context deadline exceeded")
 				// MAG-3980: the router's own 504 carries the request's headers, as a reply an
 				// upstream produced does: the GUID, and the upstream it asked. One attempt went out,
 				// so there is no retry to report.
-				require.NotEmpty(t, read.guid, "the router's 504 carries no Lava-Guid")
+				require.NotEmpty(t, read.guid, "the router's 504 carries no Router-Guid")
 				require.Equal(t, "upstream-1", read.header.Get(common.PROVIDER_ADDRESS_HEADER_NAME))
 				require.Empty(t, read.header.Get(common.RETRY_COUNT_HEADER_NAME))
 			})
@@ -329,8 +376,8 @@ func TestFailedRelayReply_EndToEnd_MAG4481(t *testing.T) {
 
 // MAG-3980: a request whose budget runs out while every upstream is quiet is answered by the
 // router itself, and that reply carries the request's headers like any other failed reply. It used
-// to return before they were built, so the client had no Lava-Guid to quote for the failure that
-// is hardest to diagnose, and no Lava-Retries or Lava-Provider-Address to say what was tried.
+// to return before they were built, so the client had no Router-Guid to quote for the failure that
+// is hardest to diagnose, and no Router-Retries or Router-Provider-Address to say what was tried.
 func TestFailedRelayReply_BudgetExpiryKeepsTheRequestHeaders_MAG3980(t *testing.T) {
 	if !rand.Initialized() {
 		rand.InitRandomSeed()
@@ -349,13 +396,156 @@ func TestFailedRelayReply_BudgetExpiryKeepsTheRequestHeaders_MAG3980(t *testing.
 	require.Equal(t, http.StatusGatewayTimeout, read.status, read.body)
 	require.EqualValues(t, 2, arrivals.Load(), "setup: the ticker must have hedged to the other upstream, or this measures a single attempt")
 
-	require.NotEmpty(t, read.guid, "the reply carries no Lava-Guid")
+	require.NotEmpty(t, read.guid, "the reply carries no Router-Guid")
 	require.Contains(t, read.body, read.guid, "the header names the request the body names")
 	require.Equal(t, "1", read.header.Get(common.RETRY_COUNT_HEADER_NAME), "two attempts went out")
 	require.ElementsMatch(t, []string{"upstream-1", "upstream-2"},
 		strings.Split(read.header.Get(common.PROVIDER_ADDRESS_HEADER_NAME), ","),
 		"both upstreams were asked; nothing answered, so nothing follows them")
-	require.Equal(t, "true", read.header.Get(common.LAVA_HEDGE_TRIGGERED_HEADER))
+	require.Equal(t, "true", read.header.Get(common.HEDGE_TRIGGERED_HEADER))
+}
+
+// MAG-5076: a request the router ends before asking any provider, a pin on a provider it cannot use
+// or a router with no provider at all, still carries the request's headers: Router-Guid, the guid the
+// body names, router-user-request-type, and Router-Relay-Timeout-Applied for the router-relay-timeout
+// every request here sends. It used to carry none, so the guid was only in the body. No attempt went
+// out, so it names no provider and no retry. The status and the body are unchanged.
+func TestFailedRelayReply_ARequestRefusedBeforeDispatchKeepsTheRequestHeaders_MAG5076(t *testing.T) {
+	if !rand.Initialized() {
+		rand.InitRandomSeed()
+	}
+	// upstream-9 is in no pool. The router keeps no list of configured names here, so the pin is
+	// not the caller's mistake (MAG-3800): it is the provider-unavailable 500.
+	cases := []struct {
+		name      string
+		headers   map[string]string
+		upstreams int
+	}{
+		{"pin", map[string]string{common.SELECT_PROVIDER_HEADER_NAME: "upstream-9"}, 1},
+		{"strict pin", map[string]string{common.SELECT_PROVIDER_HEADER_NAME: "upstream-9", common.SELECT_PROVIDER_STRICT_HEADER_NAME: "true"}, 1},
+		{"no provider", nil, 0},
+	}
+	for _, iface := range failedReplyInterfaces() {
+		for _, tc := range cases {
+			t.Run(iface.name+"/"+tc.name, func(t *testing.T) {
+				iface.headers = tc.headers
+				var arrivals atomic.Int32
+				upstreams := make([]string, tc.upstreams)
+				for i := range upstreams {
+					upstreams[i] = hangingUpstream(t, &arrivals)
+				}
+				read := startFailedReplyRouter(t, iface, upstreams...)()
+				require.Equal(t, http.StatusInternalServerError, read.status, read.body)
+				require.Zero(t, arrivals.Load(), "setup: the request must end before any provider is asked")
+
+				require.NotEmpty(t, read.guid, "the reply carries no Router-Guid")
+				require.Contains(t, read.body, read.guid, "the header names the request the body names")
+				require.NotEmpty(t, read.header.Get(common.USER_REQUEST_TYPE), "the reply carries no router-user-request-type")
+				require.Equal(t, failedReplyRelayTimeout.String(), read.header.Get(common.RELAY_TIMEOUT_APPLIED_HEADER_NAME))
+				require.Empty(t, read.header.Get(common.PROVIDER_ADDRESS_HEADER_NAME), "no provider was asked")
+				require.Empty(t, read.header.Get(common.RETRY_COUNT_HEADER_NAME), "no attempt went out")
+			})
+		}
+	}
+}
+
+// MAG-5076: a strict pin on an upstream too far behind the chain tip is turned away by the
+// consistency gate, after selection picked it and before anything is sent. The refusal carries the
+// request's headers as the other refusals do. A write had the upstream on record as a target, but
+// the upstream never received it, so router-fast-tx-participants must not name it.
+func TestFailedRelayReply_AStrictPinTheConsistencyGateTurnsAwayKeepsTheRequestHeaders_MAG5076(t *testing.T) {
+	if !rand.Initialized() {
+		rand.InitRandomSeed()
+	}
+	iface := failedReplyInterfaces()[0]
+	require.Equal(t, "jsonrpc", iface.name)
+	iface.staleUpstreams = true
+	iface.headers = map[string]string{common.SELECT_PROVIDER_HEADER_NAME: "upstream-1", common.SELECT_PROVIDER_STRICT_HEADER_NAME: "true"}
+	for _, tc := range []struct {
+		name   string
+		body   string
+		method string
+		write  bool
+	}{
+		{"read", iface.body, "eth_blockNumber", false},
+		{"write", `{"jsonrpc":"2.0","id":77,"method":"eth_sendRawTransaction","params":["0xf86c"]}`, "eth_sendRawTransaction", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			iface.body = tc.body
+			var arrivals atomic.Int32
+			read := startFailedReplyRouter(t, iface, hangingUpstream(t, &arrivals))()
+			require.Equal(t, http.StatusInternalServerError, read.status, read.body)
+			require.Contains(t, read.body, "too far behind the chain tip", "setup: the consistency gate must be what refused the pin")
+			require.Zero(t, arrivals.Load(), "setup: the pinned upstream must not be asked")
+
+			require.NotEmpty(t, read.guid, "the reply carries no Router-Guid")
+			require.Contains(t, read.body, read.guid)
+			require.Equal(t, tc.method, read.header.Get(common.USER_REQUEST_TYPE))
+			require.Empty(t, read.header.Values(common.PROVIDER_ADDRESS_HEADER_NAME), "no provider was asked")
+			require.Empty(t, read.header.Values(common.RETRY_COUNT_HEADER_NAME), "no attempt went out")
+			require.Empty(t, read.header.Values(common.STATEFUL_ALL_PROVIDERS_HEADER_NAME), "no node received the request")
+			if tc.write {
+				require.Equal(t, "true", read.header.Get(common.STATEFUL_API_HEADER), "setup: the request must be a write")
+			}
+		})
+	}
+}
+
+// MAG-5076 leaves a cross-validated request out. One that ends before any attempt goes out ran no
+// round, so its reply carries no cross-validation verdict and the router writes no compliance record
+// for it. The header builder would have filed it as a failed round.
+func TestSendParsedRelay_ACrossValidatedRequestThatEndsBeforeDispatchHasNoVerdict_MAG5076(t *testing.T) {
+	if !rand.Initialized() {
+		rand.InitRandomSeed()
+	}
+	records := observeCrossValidationRecords(t)
+	ctx := context.Background()
+	logs, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
+	require.NoError(t, err)
+	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, "ETH1", spectypes.APIInterfaceJsonRPC,
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }), nil, "../../", nil)
+	if closeServer != nil {
+		t.Cleanup(closeServer)
+	}
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		name    string
+		callCtx func() (context.Context, context.CancelFunc)
+		err     error
+	}{
+		{"the caller left", func() (context.Context, context.CancelFunc) {
+			callCtx, cancel := context.WithCancel(ctx)
+			cancel()
+			return callCtx, cancel
+		}, context.Canceled},
+		{"the deadline passed", func() (context.Context, context.CancelFunc) {
+			return context.WithDeadline(ctx, time.Now().Add(-time.Second))
+		}, context.DeadlineExceeded},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hits, server := newPinOverrideServer(t, chainParser, logs, false)
+			body := []byte(`{"jsonrpc":"2.0","method":"eth_getBalance","params":["0x0000000000000000000000000000000000000001","latest"],"id":1}`)
+			chainMessage, err := chainParser.ParseMsg("", body, http.MethodPost, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
+			require.NoError(t, err)
+			relayData := relayprotocol.NewRelayData(ctx, http.MethodPost, "", body, 0, spectypes.LATEST_BLOCK, spectypes.APIInterfaceJsonRPC,
+				chainMessage.GetRPCMessage().GetHeaders(), chainlib.GetAddon(chainMessage), common.GetExtensionNames(chainMessage.GetExtensions()))
+			protocolMessage := chainlib.NewProtocolMessage(chainMessage, map[string]string{
+				common.CROSS_VALIDATION_HEADER_MAX_PARTICIPANTS:    "3",
+				common.CROSS_VALIDATION_HEADER_AGREEMENT_THRESHOLD: "2",
+			}, relayData, "dapp", "1.2.3.4")
+
+			callCtx, cancel := tc.callCtx()
+			defer cancel()
+			result, err := server.SendParsedRelay(callCtx, nil, protocolMessage)
+			require.ErrorIs(t, err, tc.err)
+			require.Equal(t, []int64{0, 0, 0}, loadPinOverrideHits(hits), "setup: no upstream may be asked")
+			for _, metadata := range result.GetReply().GetMetadata() {
+				require.NotEqual(t, common.CROSS_VALIDATION_STATUS_HEADER_NAME, metadata.Name, "a round that never ran has no verdict")
+			}
+			require.Empty(t, records(), "a round that never ran has no compliance record")
+		})
+	}
 }
 
 // MAG-3980: a cross-validated request whose budget runs out while every upstream is quiet fails as
@@ -384,7 +574,7 @@ func TestFailedRelayReply_BudgetExpiryOfACrossValidatedRequestNamesItsReason_MAG
 
 	read := startFailedReplyRouter(t, jsonRPC, hangingUpstream(t, nil), hangingUpstream(t, nil), hangingUpstream(t, nil))()
 	require.Equal(t, http.StatusGatewayTimeout, read.status, read.body)
-	require.NotEmpty(t, read.guid, "the reply carries no Lava-Guid")
+	require.NotEmpty(t, read.guid, "the reply carries no Router-Guid")
 	require.Equal(t, "failed", read.header.Get(common.CROSS_VALIDATION_STATUS_HEADER_NAME))
 	queried := read.header.Get(common.CROSS_VALIDATION_ALL_PROVIDERS_HEADER_NAME)
 	require.NotEmpty(t, queried)

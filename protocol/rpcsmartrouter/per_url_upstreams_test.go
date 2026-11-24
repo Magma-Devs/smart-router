@@ -15,7 +15,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	commonlib "github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/magma-Devs/smart-router/protocol/statetracker"
 	"github.com/stretchr/testify/require"
 )
@@ -34,6 +34,13 @@ const (
 	upSolana    = "sol"       // Solana node without the token-owner index
 	upTraceRate = "tracerate" // full ETH1 node whose trace_ methods answer 429: a premium method's own limit
 	upDebug     = "debug"     // full ETH1 node that serves the debug add-on too
+	upPolygon   = "polygon"   // ETH1-shaped node of another chain: eth_chainId answers 0x89
+	// pruned ETH1 node that serves the debug add-on: fails only the archive check
+	upPrunedDebug = "pruneddebug"
+	// ETH1 node that answers another chain's id: fails chain-id
+	upWrongChain = "wrongchain"
+	// pruned ETH1 node that answers another chain's id: fails chain-id and archive
+	upPrunedWrongChain = "prunedwrongchain"
 )
 
 const upLatest = 0x1400000
@@ -80,6 +87,8 @@ type fakeUpstreams struct {
 	ws   *httptest.Server
 	mu   sync.Mutex
 	seen map[string][]string // "<transport> <path>" → methods, in arrival order
+	// overrides holds the personality become gave a path.
+	overrides map[string]string
 }
 
 func newFakeUpstreams(t *testing.T) *fakeUpstreams {
@@ -116,6 +125,28 @@ func (u *fakeUpstreams) wsURL(path string) string {
 	return "ws" + strings.TrimPrefix(u.ws.URL, "http") + path
 }
 
+// become makes the url at path answer as personality from now on, whatever its last
+// segment says, so a test can flip a node between passes.
+func (u *fakeUpstreams) become(path, personality string) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.overrides == nil {
+		u.overrides = map[string]string{}
+	}
+	u.overrides[path] = personality
+}
+
+// personalityOf is how the url at path answers: its last segment, unless become said
+// otherwise.
+func (u *fakeUpstreams) personalityOf(path string) string {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if p, ok := u.overrides[path]; ok {
+		return p
+	}
+	return personality(path)
+}
+
 // methods returns what one url received, over one transport.
 func (u *fakeUpstreams) methods(transport, path string) []string {
 	u.mu.Lock()
@@ -125,7 +156,7 @@ func (u *fakeUpstreams) methods(transport, path string) []string {
 
 func (u *fakeUpstreams) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	raw, _ := io.ReadAll(r.Body)
-	switch personality(r.URL.Path) {
+	switch u.personalityOf(r.URL.Path) {
 	case upHang:
 		u.record("http", r.URL.Path, raw)
 		select {
@@ -183,7 +214,7 @@ func (u *fakeUpstreams) answer(transport, path string, raw []byte) []byte {
 	requests := u.record(transport, path, raw)
 	replies := make([]map[string]any, 0, len(requests))
 	for _, request := range requests {
-		replies = append(replies, reply(personality(path), request))
+		replies = append(replies, reply(u.personalityOf(path), request))
 	}
 	var out []byte
 	if strings.HasPrefix(strings.TrimSpace(string(raw)), "[") {
@@ -220,7 +251,7 @@ func reply(p string, request map[string]any) map[string]any {
 	if p == upSubOnly && method != "eth_subscribe" {
 		return failure(-32601, "Method not found")
 	}
-	if p == upDebug && method == "debug_getRawHeader" {
+	if (p == upDebug || p == upPrunedDebug) && method == "debug_getRawHeader" {
 		return result("0xf90211")
 	}
 	switch method {
@@ -229,6 +260,9 @@ func reply(p string, request map[string]any) map[string]any {
 	case "eth_chainId":
 		if p == upSlowChain {
 			time.Sleep(10 * time.Second)
+		}
+		if p == upPolygon || p == upWrongChain || p == upPrunedWrongChain {
+			return result("0x89")
 		}
 		return result("0x1")
 	case "eth_blockNumber":
@@ -240,7 +274,7 @@ func reply(p string, request map[string]any) map[string]any {
 		block := upLatest
 		if len(params) > 0 && params[0] == "earliest" {
 			block = 0
-			if p == upPruned {
+			if p == upPruned || p == upPrunedDebug || p == upPrunedWrongChain {
 				block = upLatest - 1000
 			}
 		}
@@ -258,11 +292,11 @@ func liveParser(t *testing.T, chainID string, skipWebsocket bool) chainlib.Chain
 	parser, err := chainlib.NewChainParser("jsonrpc")
 	require.NoError(t, err)
 	parser.SetSkipWebsocketVerification(skipWebsocket)
-	endpoint := lavasession.RPCEndpoint{ChainID: chainID, ApiInterface: "jsonrpc"}
+	endpoint := routersession.RPCEndpoint{ChainID: chainID, ApiInterface: "jsonrpc"}
 	require.NoError(t, statetracker.RegisterForSpecUpdatesOrSetStaticSpecsWithToken(t.Context(), parser, []string{"../../specs/"}, endpoint, "", ""))
 	return parser
 }
 
-func staticProvider(chainID string, urls ...commonlib.NodeUrl) *lavasession.RPCStaticProviderEndpoint {
-	return &lavasession.RPCStaticProviderEndpoint{Name: "p", ChainID: chainID, ApiInterface: "jsonrpc", NodeUrls: urls}
+func staticProvider(chainID string, urls ...commonlib.NodeUrl) *routersession.RPCStaticProviderEndpoint {
+	return &routersession.RPCStaticProviderEndpoint{Name: "p", ChainID: chainID, ApiInterface: "jsonrpc", NodeUrls: urls}
 }

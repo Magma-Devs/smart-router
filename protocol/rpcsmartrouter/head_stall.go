@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/endpointstate"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/magma-Devs/smart-router/utils"
 )
 
@@ -22,18 +22,19 @@ import (
 // Its repeated block also stops voting on the chain tip (onTipObservation), which is what kept a wrong
 // tip alive in the Plasma incident.
 //
-// Rules, from agent_docs/bug-reports/stuck-provider-not-detected/plan.md:
-//   - add at the first cycle that sees SameBlockCycles >= N (D11), N = StallCycleThreshold (D20), and
-//     only while another url of the chain has shown a higher block — a quiet chain marks nothing;
+// Rules, from the MAG-3986 plan:
+//   - add at the first cycle that sees all three (MAG-5243, which revises D3):
+//     the url answered SameBlockCycles >= N times without moving (D11), N = StallCycleThreshold (D20);
+//     its highest block has stood still for the grace, StallGrace = 6 block times, at least 30 s;
+//     and another url of the chain has shown a higher block — a quiet chain marks nothing.
+//     The cycles prove the url kept answering, so it is never judged on silence. The grace is the
+//     clock: cycles alone are 5 minutes on Bitcoin, where every healthy url sits on one block for
+//     10, so the first url to report a new block had all the others marked;
 //   - remove only when the endpoint's highest block goes ABOVE the one it was stuck on (D9, H2) — never because
 //     the counter restarted, which also happens when a tracker is recreated;
 //   - never take out the last usable endpoint of this chain and interface, across both tiers (D13);
 //     re-checked every cycle, releasing the stuck endpoint on the highest block when nothing else is
-//     usable (D22, D26);
-//   - the provider health gauge reads 0 while any of its endpoints holds head-stalled (D24). This step
-//     is the only code that writes the gauge for head-stall: it re-asserts 0 every cycle, so an epoch
-//     reset or a relay success on a sibling url that sets it back to 1 is corrected within one cycle,
-//     and it sets 1 when the last stalled url of a provider comes back with every url usable.
+//     usable (D22, D26).
 
 // headStallState is the router-side state of the head-stall step. The stalled url set is read on the
 // hot path (every tip observation) and written by the probe loop; kept is touched only by the probe
@@ -105,19 +106,18 @@ type headStallResult struct {
 // and a fake observation getter. endpoints is the same slice the probe cycle scored: both tiers,
 // possibly listing one *Endpoint twice when a provider sits in both pools.
 func runHeadStallStep(
-	endpoints []*lavasession.EndpointWithDirectConnection,
+	endpoints []*routersession.EndpointWithDirectConnection,
 	getObservation func(url string) (endpointstate.EndpointObservation, bool),
 	n int,
+	grace time.Duration,
 	now time.Time,
 	onRecover func(provider string),
-	setProviderHealth func(provider string, healthy bool),
 	state *headStallState,
 	logAttrs []utils.Attribute,
 ) (res headStallResult) {
-	// One entry per *Endpoint, and each provider's endpoints for the gauge rule.
-	unique := make([]*lavasession.EndpointWithDirectConnection, 0, len(endpoints))
-	seen := make(map[*lavasession.Endpoint]struct{}, len(endpoints))
-	byProvider := make(map[string][]*lavasession.Endpoint)
+	// One entry per *Endpoint.
+	unique := make([]*routersession.EndpointWithDirectConnection, 0, len(endpoints))
+	seen := make(map[*routersession.Endpoint]struct{}, len(endpoints))
 	for _, ep := range endpoints {
 		if ep == nil || ep.Endpoint == nil {
 			continue
@@ -126,11 +126,12 @@ func runHeadStallStep(
 			continue
 		}
 		seen[ep.Endpoint] = struct{}{}
-		byProvider[ep.ProviderAddress] = append(byProvider[ep.ProviderAddress], ep.Endpoint)
 		// Only endpoints that can answer a relay take part: a ws/wss url is never selected for a
 		// relay (Endpoint.ServesDirectRelays), so counting it as "usable" would let never-empty
 		// keep a websocket url while taking out the provider's only https url — leaving nothing
-		// that can serve. Subscriptions on a stuck wss url are out of scope (MAG-4161).
+		// that can serve. So a wss url is never marked here. New subscriptions judge it by its
+		// provider's relay urls instead (ConsumerSessionManager.URLLendRank, MAG-4161), which
+		// leaves out a wss url that is stuck while its https sibling still moves.
 		if ep.Endpoint.ServesDirectRelays() {
 			unique = append(unique, ep)
 		}
@@ -143,7 +144,7 @@ func runHeadStallStep(
 	// nothing to go to (MAG-4025 shape).
 	type urlGroup struct {
 		url string
-		eps []*lavasession.EndpointWithDirectConnection
+		eps []*routersession.EndpointWithDirectConnection
 	}
 	var groups []*urlGroup
 	groupOf := make(map[string]*urlGroup)
@@ -157,7 +158,7 @@ func runHeadStallStep(
 		g.eps = append(g.eps, ep)
 	}
 	// groupAny reports whether any endpoint of the url satisfies pred.
-	groupAny := func(g *urlGroup, pred func(*lavasession.Endpoint) bool) bool {
+	groupAny := func(g *urlGroup, pred func(*routersession.Endpoint) bool) bool {
 		for _, ep := range g.eps {
 			if pred(ep.Endpoint) {
 				return true
@@ -165,8 +166,8 @@ func runHeadStallStep(
 		}
 		return false
 	}
-	isUsable := func(e *lavasession.Endpoint) bool { return e.IsUsable() }
-	isEnabled := func(e *lavasession.Endpoint) bool { return e.IsEnabled() }
+	isUsable := func(e *routersession.Endpoint) bool { return e.IsUsable() }
+	isEnabled := func(e *routersession.Endpoint) bool { return e.IsEnabled() }
 	groupUsable := func(g *urlGroup) bool { return groupAny(g, isUsable) }
 	countUsableURLs := func() int {
 		n := 0
@@ -178,44 +179,32 @@ func runHeadStallStep(
 		return n
 	}
 
-	// providerAllUsable: every url of the provider can be routed to — the only state in which this
-	// step sets the provider's gauge back to 1.
-	providerAllUsable := func(provider string) bool {
-		for _, e := range byProvider[provider] {
-			if !e.IsUsable() {
-				return false
-			}
-		}
-		return true
-	}
-
 	// stuckRecord returns the head-stalled record of the url, if any of its endpoints holds one.
-	stuckRecord := func(g *urlGroup) (lavasession.StateReasonRecord, bool) {
+	stuckRecord := func(g *urlGroup) (routersession.StateReasonRecord, bool) {
 		for _, ep := range g.eps {
-			if rec, held := ep.Endpoint.StateReason(lavasession.EndpointDisableHeadStalled); held {
+			if rec, held := ep.Endpoint.StateReason(routersession.EndpointDisableHeadStalled); held {
 				return rec, true
 			}
 		}
-		return lavasession.StateReasonRecord{}, false
+		return routersession.StateReasonRecord{}, false
 	}
 
 	// holdsStall reports whether one endpoint holds head-stalled.
-	holdsStall := func(e *lavasession.Endpoint) bool {
-		_, held := e.StateReason(lavasession.EndpointDisableHeadStalled)
+	holdsStall := func(e *routersession.Endpoint) bool {
+		_, held := e.StateReason(routersession.EndpointDisableHeadStalled)
 		return held
 	}
 
 	// release takes head-stalled off every endpoint of the url and, for each that becomes usable,
-	// returns its provider to the valid list (H1) and its gauge to 1 when every url of the provider
-	// is usable (D24). It reports whether anything was released.
+	// returns its provider to the valid list (H1). It reports whether anything was released.
 	release := func(g *urlGroup, why string) bool {
 		rec, held := stuckRecord(g)
 		if !held {
 			return false
 		}
-		var released []*lavasession.EndpointWithDirectConnection
+		var released []*routersession.EndpointWithDirectConnection
 		for _, ep := range g.eps {
-			if ep.Endpoint.RemoveStateReason(lavasession.EndpointDisableHeadStalled) {
+			if ep.Endpoint.RemoveStateReason(routersession.EndpointDisableHeadStalled) {
 				released = append(released, ep)
 			}
 		}
@@ -224,7 +213,7 @@ func runHeadStallStep(
 		}
 		state.clearKept(g.url)
 		first := released[0]
-		utils.LavaFormatInfo("head-stalled "+why, append([]utils.Attribute{
+		utils.FormatInfo("head-stalled "+why, append([]utils.Attribute{
 			utils.LogAttr("endpoint", g.url),
 			utils.LogAttr("provider", first.ProviderAddress),
 			utils.LogAttr("backup", first.Backup),
@@ -238,9 +227,6 @@ func runHeadStallStep(
 			}
 			if onRecover != nil {
 				onRecover(ep.ProviderAddress)
-			}
-			if setProviderHealth != nil && providerAllUsable(ep.ProviderAddress) {
-				setProviderHealth(ep.ProviderAddress, true)
 			}
 		}
 		return true
@@ -264,8 +250,7 @@ func runHeadStallStep(
 	// chainHigh is the highest block any url of this chain and interface has shown. A url is only
 	// stalled when another one has gone above it: if nothing is ahead, the chain itself is quiet
 	// (a testnet with no traffic, a halt), every url answers the same block, and none of them is
-	// at fault. Marking them would hold every provider's health gauge at 0, and the production
-	// EndpointHealthDegraded alert pages critical after 15 minutes of that.
+	// at fault. Marking them would take every url out of rotation for nothing.
 	// Every url counts as evidence the chain moved, including ws/wss urls that never serve a relay.
 	var chainHigh int64
 	for e := range seen {
@@ -274,10 +259,10 @@ func runHeadStallStep(
 		}
 	}
 
-	// 2. Add: N cycles in a row without moving while another url is ahead, unless it is the last
-	// usable url. Every endpoint of the url goes out together, or none does.
+	// 2. Add: N cycles in a row without moving, for at least the grace, while another url is ahead,
+	// unless it is the last usable url. Every endpoint of the url goes out together, or none does.
 	for _, g := range groups {
-		var pending []*lavasession.EndpointWithDirectConnection
+		var pending []*routersession.EndpointWithDirectConnection
 		for _, ep := range g.eps {
 			if !holdsStall(ep.Endpoint) {
 				pending = append(pending, ep)
@@ -287,7 +272,14 @@ func runHeadStallStep(
 			continue
 		}
 		obs, _ := getObservation(g.url)
-		if obs.SameBlockCycles < n || obs.HighestBlockSeen <= 0 || obs.HighestBlockSeen >= chainHigh {
+		// How long the highest block has stood still. A url with no stamp has not answered yet, and
+		// is not judged.
+		var sameBlockFor time.Duration
+		if !obs.HighestBlockSince.IsZero() {
+			sameBlockFor = now.Sub(obs.HighestBlockSince)
+		}
+		if obs.SameBlockCycles < n || sameBlockFor < grace || obs.HighestBlockSince.IsZero() ||
+			obs.HighestBlockSeen <= 0 || obs.HighestBlockSeen >= chainHigh {
 			state.clearKept(g.url)
 			continue
 		}
@@ -295,19 +287,20 @@ func runHeadStallStep(
 		if wasUsable && usable <= 1 {
 			if state.markKept(g.url) {
 				res.kept++
-				utils.LavaFormatInfo("head-stalled kept by never-empty", append([]utils.Attribute{
+				utils.FormatInfo("head-stalled kept by never-empty", append([]utils.Attribute{
 					utils.LogAttr("endpoint", g.url),
 					utils.LogAttr("provider", pending[0].ProviderAddress),
 					utils.LogAttr("backup", pending[0].Backup),
 					utils.LogAttr("block", obs.HighestBlockSeen),
 					utils.LogAttr("same_block_cycles", obs.SameBlockCycles),
+					utils.LogAttr("same_block_for", sameBlockFor.String()),
 				}, logAttrs...)...)
 			}
 			continue
 		}
 		added := false
 		for _, ep := range pending {
-			if ep.Endpoint.AddStateReason(lavasession.EndpointDisableHeadStalled, now, obs.HighestBlockSeen) {
+			if ep.Endpoint.AddStateReason(routersession.EndpointDisableHeadStalled, now, obs.HighestBlockSeen) {
 				added = true
 			}
 		}
@@ -319,7 +312,7 @@ func runHeadStallStep(
 			usable--
 		}
 		res.added++
-		utils.LavaFormatInfo("head-stalled added", append([]utils.Attribute{
+		utils.FormatInfo("head-stalled added", append([]utils.Attribute{
 			utils.LogAttr("endpoint", g.url),
 			utils.LogAttr("provider", pending[0].ProviderAddress),
 			utils.LogAttr("backup", pending[0].Backup),
@@ -328,6 +321,8 @@ func runHeadStallStep(
 			utils.LogAttr("chain_high", chainHigh),
 			utils.LogAttr("same_block_cycles", obs.SameBlockCycles),
 			utils.LogAttr("threshold", n),
+			utils.LogAttr("same_block_for", sameBlockFor.String()),
+			utils.LogAttr("grace", grace.String()),
 		}, logAttrs...)...)
 	}
 
@@ -337,7 +332,7 @@ func runHeadStallStep(
 	// slot is on can actually serve, so only those are candidates.
 	if countUsableURLs() == 0 {
 		var pick *urlGroup
-		var pickRec lavasession.StateReasonRecord
+		var pickRec routersession.StateReasonRecord
 		for _, g := range groups {
 			rec, held := stuckRecord(g)
 			if !held {
@@ -356,42 +351,29 @@ func runHeadStallStep(
 		}
 	}
 
-	// Publish this cycle's stalled set, and hold the gauge of every provider with a stalled url at 0.
+	// Publish this cycle's stalled set.
 	stalledURLs := make(map[string]struct{})
-	stalledProviders := make(map[string]struct{})
 	liveURLs := make(map[string]struct{}, len(groups))
 	for _, g := range groups {
 		liveURLs[g.url] = struct{}{}
 		for _, ep := range g.eps {
 			if holdsStall(ep.Endpoint) {
 				stalledURLs[g.url] = struct{}{}
-				stalledProviders[ep.ProviderAddress] = struct{}{}
 			}
 		}
 	}
 	state.sync(stalledURLs, liveURLs)
-	if setProviderHealth != nil {
-		for provider := range stalledProviders {
-			setProviderHealth(provider, false)
-		}
-	}
 	return res
 }
 
 // runHeadStall wires runHeadStallStep to this server's live dependencies.
-func (rpcss *RPCSmartRouterServer) runHeadStall(endpoints []*lavasession.EndpointWithDirectConnection, now time.Time) {
+func (rpcss *RPCSmartRouterServer) runHeadStall(endpoints []*routersession.EndpointWithDirectConnection, now time.Time) {
 	if rpcss.endpointChainTrackerManager == nil {
 		return
 	}
 	var chainID, apiInterface string
 	if rpcss.listenEndpoint != nil {
 		chainID, apiInterface = rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface
-	}
-	var setHealth func(string, bool)
-	if rpcss.smartRouterEndpointMetrics != nil {
-		setHealth = func(provider string, healthy bool) {
-			rpcss.smartRouterEndpointMetrics.SetEndpointOverallHealth(chainID, apiInterface, provider, healthy)
-		}
 	}
 	var onRecover func(string)
 	if rpcss.sessionManager != nil {
@@ -401,7 +383,8 @@ func (rpcss *RPCSmartRouterServer) runHeadStall(endpoints []*lavasession.Endpoin
 		endpoints,
 		rpcss.endpointChainTrackerManager.GetObservation,
 		rpcss.endpointChainTrackerManager.StallCycleThreshold(),
-		now, onRecover, setHealth, &rpcss.headStall,
+		rpcss.endpointChainTrackerManager.StallGrace(),
+		now, onRecover, &rpcss.headStall,
 		[]utils.Attribute{utils.LogAttr("chainID", chainID), utils.LogAttr("apiInterface", apiInterface)},
 	)
 	rpcss.probeStats.recordHeadStall(res)

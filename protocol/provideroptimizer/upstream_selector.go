@@ -156,7 +156,7 @@ func NewUpstreamSelector(config UpstreamSelectorConfig) *UpstreamSelector {
 	// other user choices (Strategy / SelectionMode / MinSelectionChance) intact.
 	validateWeight := func(name string, w float64) bool {
 		if math.IsNaN(w) || math.IsInf(w, 0) || w < 0 {
-			utils.LavaFormatWarning("invalid endpoint selector weight, must be finite and >= 0",
+			utils.FormatWarning("invalid endpoint selector weight, must be finite and >= 0",
 				nil,
 				utils.LogAttr("weightName", name),
 				utils.LogAttr("weight", w),
@@ -173,7 +173,7 @@ func NewUpstreamSelector(config UpstreamSelectorConfig) *UpstreamSelector {
 
 	totalWeight := config.AvailabilityWeight + config.LatencyWeight + config.SyncWeight + config.StakeWeight
 	if !weightsValid || math.IsNaN(totalWeight) || math.IsInf(totalWeight, 0) || totalWeight <= 0 {
-		utils.LavaFormatWarning("endpoint selector weights sum to zero/negative or contain invalid values, using default weights", nil,
+		utils.FormatWarning("endpoint selector weights sum to zero/negative or contain invalid values, using default weights", nil,
 			utils.LogAttr("totalWeight", totalWeight),
 			utils.LogAttr("availabilityWeight", config.AvailabilityWeight),
 			utils.LogAttr("latencyWeight", config.LatencyWeight),
@@ -204,7 +204,7 @@ func NewUpstreamSelector(config UpstreamSelectorConfig) *UpstreamSelector {
 	if math.IsNaN(config.MinSelectionChance) || math.IsInf(config.MinSelectionChance, 0) ||
 		config.MinSelectionChance < 0 || config.MinSelectionChance > 1 {
 		defaultChance := DefaultUpstreamSelectorConfig().MinSelectionChance
-		utils.LavaFormatWarning("invalid min selection chance, must be finite and within [0, 1], using default", nil,
+		utils.FormatWarning("invalid min selection chance, must be finite and within [0, 1], using default", nil,
 			utils.LogAttr("minSelectionChance", config.MinSelectionChance),
 			utils.LogAttr("usingInstead", defaultChance),
 		)
@@ -212,7 +212,7 @@ func NewUpstreamSelector(config UpstreamSelectorConfig) *UpstreamSelector {
 	}
 
 	if math.Abs(totalWeight-1.0) > 0.001 {
-		utils.LavaFormatWarning("endpoint selector weights do not sum to 1.0, normalizing",
+		utils.FormatWarning("endpoint selector weights do not sum to 1.0, normalizing",
 			nil,
 			utils.LogAttr("totalWeight", totalWeight),
 			utils.LogAttr("availabilityWeight", config.AvailabilityWeight),
@@ -319,7 +319,7 @@ func (ws *UpstreamSelector) CalculateScore(
 	// At debug the pick's one "Provider selection completed" record carries every candidate's
 	// scores and raw inputs, and the weights, from which the rest of this line follows
 	// (buildSelectionResult).
-	utils.LavaFormatTrace("Provider score calculation breakdown",
+	utils.FormatTrace("Provider score calculation breakdown",
 		utils.LogAttr("provider", providerAddress),
 		utils.LogAttr("raw_availability", availability),
 		utils.LogAttr("raw_latency_sec", latency),
@@ -376,7 +376,7 @@ func (ws *UpstreamSelector) normalizeAvailability(availability float64) float64 
 	// Below minimum threshold = score of 0. Logged at trace, as is every line here: this runs
 	// for every candidate of every pick, twice (MAG-3152, see CalculateScore).
 	if availability < minAcceptable {
-		utils.LavaFormatTrace("availability below minimum threshold",
+		utils.FormatTrace("availability below minimum threshold",
 			utils.LogAttr("raw_availability", availability),
 			utils.LogAttr("min_acceptable", minAcceptable),
 			utils.LogAttr("normalized_score", 0.0),
@@ -397,7 +397,7 @@ func (ws *UpstreamSelector) normalizeAvailability(availability float64) float64 
 		normalized = 0.0
 	}
 
-	utils.LavaFormatTrace("normalized availability (Phase 1 rescaling)",
+	utils.FormatTrace("normalized availability (Phase 1 rescaling)",
 		utils.LogAttr("raw_availability", availability),
 		utils.LogAttr("min_acceptable", minAcceptable),
 		utils.LogAttr("rescale_range", maxAvailability-minAcceptable),
@@ -487,7 +487,7 @@ func normalizeInverted(value float64, adaptive bool, bounds func() (p10, p90 flo
 
 		if math.IsNaN(p10) || math.IsNaN(p90) || math.IsInf(p10, 0) || math.IsInf(p90, 0) || p10 <= 0 || p90 <= 0 || p90 <= p10 {
 			// Bounds that cannot describe a range: fall back to the fixed maximum.
-			utils.LavaFormatWarning(n.invalidBoundsMsg,
+			utils.FormatWarning(n.invalidBoundsMsg,
 				nil,
 				utils.LogAttr("p10", p10),
 				utils.LogAttr("p90", p90),
@@ -517,7 +517,7 @@ func normalizeInverted(value float64, adaptive bool, bounds func() (p10, p90 flo
 				normalized = 1.0
 			}
 
-			utils.LavaFormatTrace(n.adaptiveAppliedMsg,
+			utils.FormatTrace(n.adaptiveAppliedMsg,
 				utils.LogAttr(n.rawKey, value),
 				utils.LogAttr(n.clampedKey, clamped),
 				utils.LogAttr("p10", p10),
@@ -533,7 +533,7 @@ func normalizeInverted(value float64, adaptive bool, bounds func() (p10, p90 flo
 	}
 
 	if value <= 0 {
-		utils.LavaFormatTrace(n.perfectMsg,
+		utils.FormatTrace(n.perfectMsg,
 			utils.LogAttr(n.valueKey, value),
 			utils.LogAttr("normalized_score", 1.0),
 		)
@@ -546,7 +546,7 @@ func normalizeInverted(value float64, adaptive bool, bounds func() (p10, p90 flo
 		normalized = 0
 	}
 
-	utils.LavaFormatTrace(n.fixedAppliedMsg,
+	utils.FormatTrace(n.fixedAppliedMsg,
 		utils.LogAttr(n.rawKey, value),
 		n.maxAttr,
 		utils.LogAttr("normalized_score", normalized),
@@ -584,7 +584,7 @@ func (ws *UpstreamSelector) normalizeStake(stake float64, totalStake float64) fl
 	normalized := math.Sqrt(stakeRatio)
 
 	// Trace: runs for every candidate of every pick, twice (MAG-3152, see CalculateScore)
-	utils.LavaFormatTrace("normalized stake (square root scaling)",
+	utils.FormatTrace("normalized stake (square root scaling)",
 		utils.LogAttr("stake", stakeFloat),
 		utils.LogAttr("total_stake", totalStakeFloat),
 		utils.LogAttr("stake_ratio", stakeRatio),
@@ -683,7 +683,7 @@ func (ws *UpstreamSelector) SelectUpstreamWithStats(
 		if ws.selectionMode != SelectionModeBest {
 			selectedIndex = ws.rng.Intn(len(providerScores))
 		}
-		utils.LavaFormatWarning("all provider scores are zero, falling back to a flat pick", nil,
+		utils.FormatWarning("all provider scores are zero, falling back to a flat pick", nil,
 			utils.LogAttr("selectionMode", ws.selectionMode.String()),
 			utils.LogAttr("numCandidates", len(providerScores)),
 			utils.LogAttr("hint", "every upstream scored zero — reachable only with --qos-min-selection-chance 0"),
@@ -721,7 +721,7 @@ func (ws *UpstreamSelector) pickWeightedIndex(providerScores []UpstreamScore, to
 	}
 
 	// Fallback to last provider (should rarely happen due to floating point precision)
-	utils.LavaFormatWarning("weighted selection fallback to last provider", nil,
+	utils.FormatWarning("weighted selection fallback to last provider", nil,
 		utils.LogAttr("totalScore", totalScore),
 		utils.LogAttr("randomValue", randomValue),
 	)
@@ -839,7 +839,7 @@ func (ws *UpstreamSelector) buildSelectionResult(
 			}
 		}
 
-		utils.LavaFormatDebug("Provider selection completed", logAttrs...)
+		utils.FormatDebug("Provider selection completed", logAttrs...)
 	}
 
 	return selected.Address, &SelectionStats{
@@ -880,7 +880,7 @@ func (ws *UpstreamSelector) CalculateUpstreamScores(
 
 		qos, _, found := providerDataGetter(providerAddress)
 		if !found || qos == nil {
-			utils.LavaFormatWarning("[UpstreamSelector] could not get QoS for provider",
+			utils.FormatWarning("[UpstreamSelector] could not get QoS for provider",
 				nil,
 				utils.LogAttr("provider", providerAddress),
 			)
@@ -945,7 +945,7 @@ func (ws *UpstreamSelector) CalculateUpstreamScores(
 			StakeContribution:        stakeScore * ws.stakeWeight,
 		}
 
-		utils.LavaFormatTrace("[UpstreamSelector] calculated provider score",
+		utils.FormatTrace("[UpstreamSelector] calculated provider score",
 			utils.LogAttr("provider", providerAddress),
 			utils.LogAttr("compositeScore", compositeScore),
 			utils.LogAttr("availability", availability),

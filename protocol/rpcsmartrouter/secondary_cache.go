@@ -127,7 +127,7 @@ func (rpcss *RPCSmartRouterServer) trySecondaryCacheLookup(
 	if hit {
 		copyReply = &pairingtypes.RelayReply{}
 		if copyErr := protocopy.DeepCopyProtoObject(cacheReply.GetReply(), copyReply); copyErr != nil {
-			utils.LavaFormatWarning("secondary cache hit dropped: failed to copy reply", copyErr,
+			utils.FormatWarning("secondary cache hit dropped: failed to copy reply", copyErr,
 				utils.LogAttr("GUID", ctx),
 			)
 			hit = false
@@ -144,7 +144,7 @@ func (rpcss *RPCSmartRouterServer) trySecondaryCacheLookup(
 	// as a node error would put the retry loop through the same entry again.
 	unusable := false
 	if hit && !usableCachedReply(apiInterface, copyReply.Data) {
-		utils.LavaFormatWarning("secondary cache hit dropped: the entry is not a usable reply", nil,
+		utils.FormatWarning("secondary cache hit dropped: the entry is not a usable reply", nil,
 			utils.LogAttr("GUID", ctx),
 			utils.LogAttr("apiInterface", apiInterface),
 			utils.LogAttr("size", len(copyReply.Data)),
@@ -171,7 +171,7 @@ func (rpcss *RPCSmartRouterServer) trySecondaryCacheLookup(
 		// miss, error, and timeout all degrade to a miss; nothing from the reply is
 		// carried forward, so the request proceeds exactly as it would with no
 		// secondary configured
-		utils.LavaFormatDebug("secondary cache lookup produced no hit",
+		utils.FormatDebug("secondary cache lookup produced no hit",
 			utils.LogAttr("GUID", ctx),
 			utils.LogAttr("requestedBlockForCache", requestedBlockForCache),
 			utils.LogAttr("cacheError", cacheError),
@@ -219,7 +219,7 @@ func (rpcss *RPCSmartRouterServer) trySecondaryCacheLookup(
 	// The cache lookup report is what distinguishes this reply from a primary hit for
 	// the caller: both carry the same locally minted header set and the same bytes, so
 	// before MAG-3540 nothing in the response named the tier. It also picks which
-	// backend the debug-gated Lava-Cache-Backend header reports.
+	// backend the debug-gated Router-Cache-Backend header reports.
 	relayResult := cachedRelayResult(copyReply, localRelayData, cacheReply.GetStatusCode(), isNodeError, cacheReport.ServedBy(common.CacheTierSecondary))
 	// A cached node error is retried, or not, exactly like a live one.
 	rpcss.classifyCachedNodeError(protocolMessage, &relayResult, cacheReply.GetStatusCode())
@@ -245,7 +245,7 @@ func (rpcss *RPCSmartRouterServer) trySecondaryCacheLookup(
 	// serveCacheHit keeps LatestBlock out of tip state.
 	rpcss.serveCacheHit(relayProcessor, relayResult, analytics, protocolMessage)
 
-	utils.LavaFormatDebug("secondary cache hit",
+	utils.FormatDebug("secondary cache hit",
 		utils.LogAttr("chainId", chainId),
 		utils.LogAttr("requestedBlock", requestedBlockForCache),
 		utils.LogAttr("isNodeError", isNodeError),

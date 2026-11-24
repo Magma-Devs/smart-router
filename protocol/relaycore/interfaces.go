@@ -6,8 +6,8 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 )
 
 // RelayStateMachine interface for managing relay state
@@ -18,7 +18,7 @@ type RelayStateMachine interface {
 	UpdateBatch(err error)
 	GetSelection() Selection
 	GetCrossValidationParams() *common.CrossValidationParams // nil for Stateless/Stateful, non-nil for CrossValidation
-	GetUsedProviders() *lavasession.UsedProviders
+	GetUsedProviders() *routersession.UsedProviders
 	SetResultsChecker(resultsChecker ResultsCheckerInf)
 }
 
@@ -36,11 +36,21 @@ type ResultsCheckerInf interface {
 // MetricsInterface for relay processor metrics
 type MetricsInterface interface {
 	SetRelayNodeErrorMetric(chainId string, apiInterface string, providerAddress string, method string)
+	// SetRelayNodeResultMetric counts a client read the provider answered with a result: the
+	// answers handleResponse does not meter as node errors, less the ones that are not reads.
+	SetRelayNodeResultMetric(chainId string, apiInterface string, providerAddress string, method string)
 }
 
 // ChainIdAndApiInterfaceGetter interface
 type ChainIdAndApiInterfaceGetter interface {
 	GetChainIdAndApiInterface() (string, string)
+}
+
+// NodeErrorRecorder is implemented by a ChainIdAndApiInterfaceGetter that keeps the router's own
+// count of node errors (RelayErrorTally, MAG-4718). handleResponse records each node error it
+// meters through it, beside the metric rather than inside it.
+type NodeErrorRecorder interface {
+	RecordNodeError(chainID, apiInterface, providerAddress, method string)
 }
 
 // RelayStateSendInstructions struct for relay instructions
@@ -138,11 +148,17 @@ type DecisionInput struct {
 	// IsDefaultApi is true when the request names a method the spec does not list: the parser
 	// forwarded it as a Default- API only because the spec cannot rule it out.
 	IsDefaultApi bool
-	// Pinned is true when the request is a strict pin (PinnedByDirectives): lava-stickiness, or
-	// lava-select-provider with lava-select-provider-strict: true. A pinned request is answered by
+	// Pinned is true when the request is a strict pin (PinnedByDirectives): router-stickiness, or
+	// router-select-provider with router-select-provider-strict: true. A pinned request is answered by
 	// that upstream or not at all: Decide never retries or hedges it on another one (MAG-2280,
-	// MAG-4123). A plain lava-select-provider is not Pinned and keeps its failover (MAG-4826).
+	// MAG-4123). A plain router-select-provider is not Pinned and keeps its failover (MAG-4826).
 	Pinned bool
+	// IsGraphQLWrite is true when the request is a GraphQL mutation (MAG-5122). It turns off the
+	// Stateful rate-limit carve-out below: a GraphQL write is never re-sent, including when every
+	// copy answered 429, because the interface's own clients treat one send as final and a second
+	// send risks the double-spend this subtask exists to prevent. Every other interface keeps the
+	// carve-out until MAG-5061 decides whether to remove it there too.
+	IsGraphQLWrite bool
 }
 
 // RelayPolicyInf is the interface that the policy engine must implement.

@@ -11,7 +11,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 )
 
 // ---------------------------------------------------------------------------
@@ -52,18 +52,18 @@ func (m *grpcStatusChainMessage) CheckResponseError(data []byte, httpStatusCode 
 func grpcStatusRelay(t *testing.T, code codes.Code, nodeMessage string) *common.RelayResult {
 	t.Helper()
 
-	body, err := json.Marshal(lavasession.GRPCNodeErrorResponse{
+	body, err := json.Marshal(routersession.GRPCNodeErrorResponse{
 		ErrorMessage: nodeMessage,
 		ErrorCode:    uint32(code),
 	})
 	require.NoError(t, err)
 
 	conn := &fakeDirectConn{
-		resp: &lavasession.DirectRPCResponse{
+		resp: &routersession.DirectRPCResponse{
 			Data:       body,
 			StatusCode: int(code),
 		},
-		err: &lavasession.GRPCStatusError{
+		err: &routersession.GRPCStatusError{
 			Code:    uint32(code),
 			Message: nodeMessage,
 		},
@@ -124,6 +124,7 @@ func TestSendGRPCRelay_StatusErrorClassification(t *testing.T) {
 		wantUnsupportedMethod bool
 		wantDataScope         bool
 		wantScored            bool // shouldFailSessionForResult — demotes the endpoint
+		wantAtFault           bool // IsNodeAtFault — counts toward --bench-after (MAG-3564)
 		why                   string
 	}{
 		{
@@ -166,13 +167,49 @@ func TestSendGRPCRelay_StatusErrorClassification(t *testing.T) {
 				"not a fault — identical fault axis to NotFound",
 		},
 		{
-			name:        "DeadlineExceeded stays scoreable — this endpoint really was slow",
+			name:        "DeadlineExceeded the node sent is its fault — this endpoint really was slow",
 			code:        codes.DeadlineExceeded,
 			nodeMessage: "context deadline exceeded",
 			wantScored:  true,
+			wantAtFault: true,
 			why: "the counterweight to the two rows above: carving out data-scope codes must not " +
 				"drag the rest of the sub-13 range out of the availability signal with them. A " +
-				"deadline is about THIS endpoint's latency and another may well be faster",
+				"deadline the node sent before the router's is about THIS endpoint's latency, and " +
+				"the rulebook calls it a provider fault (MAG-3564)",
+		},
+		{
+			name:        "Canceled the node sent is its fault",
+			code:        codes.Canceled,
+			nodeMessage: "the server gave up on the call",
+			wantScored:  true,
+			wantAtFault: true,
+			why: "the router's own cancel never reaches the classifier (handleGRPCError); one the node " +
+				"sent is a provider fault in the rulebook's status table (MAG-3564)",
+		},
+		{
+			name:        "Internal is the endpoint's fault and counts toward --bench-after",
+			code:        codes.Internal,
+			nodeMessage: "panic in query handler",
+			wantScored:  true,
+			wantAtFault: true,
+			why: "MAG-3564: unclassified, INTERNAL never moved the counter, so a node answering it to " +
+				"every request stayed in rotation",
+		},
+		{
+			name:        "Internal made by grpc-go for a gateway's HTTP 400 is not the node's",
+			code:        codes.Internal,
+			nodeMessage: `unexpected HTTP status code received from server: 400 (Bad Request); transport: received unexpected content-type "text/html"`,
+			wantScored:  true,
+			why: "no node answered: the gateway did, and grpc-go turned its 400 into INTERNAL. The " +
+				"rulebook reads it by the HTTP status (D12), so the INTERNAL row must not count it; " +
+				"it keeps the uncatalogued default",
+		},
+		{
+			name:        "Unknown stays unregistered and scored",
+			code:        codes.Unknown,
+			nodeMessage: "something went wrong",
+			wantScored:  true,
+			why:         "the rulebook's Unknown: no rule recognises it, so it is not evidence against the endpoint",
 		},
 		{
 			name:                  "Unimplemented is a capability gap, not a failure",
@@ -195,17 +232,20 @@ func TestSendGRPCRelay_StatusErrorClassification(t *testing.T) {
 				"answered; scoring it charged every endpoint the write was broadcast to for a verdict none of them made",
 		},
 		{
-			name:        "DataLoss stays unregistered and scored",
+			name:        "DataLoss is the endpoint's fault",
 			code:        codes.DataLoss,
 			nodeMessage: "unrecoverable data loss",
 			wantScored:  true,
-			why:         "MAG-3995: no node we route to sends it, so it keeps the uncatalogued default",
+			wantAtFault: true,
+			why: "MAG-3564: the rulebook's status table calls it a provider fault, though no node we " +
+				"route to is known to send it (MAG-3995)",
 		},
 		{
 			name:        "Unavailable is the endpoint's fault and stays scoreable",
 			code:        codes.Unavailable,
 			nodeMessage: "upstream connect error",
 			wantScored:  true,
+			wantAtFault: true,
 			why: "the collateral guard — carving out caller-fault codes must not accidentally exempt " +
 				"a genuinely broken endpoint from the availability signal",
 		},
@@ -226,6 +266,7 @@ func TestSendGRPCRelay_StatusErrorClassification(t *testing.T) {
 			require.Equal(t, tc.wantRateLimited, result.IsRateLimited, tc.why)
 			require.Equal(t, tc.wantUnsupportedMethod, result.IsUnsupportedMethod, tc.why)
 			require.Equal(t, tc.wantDataScope, result.IsDataScope, tc.why)
+			require.Equal(t, tc.wantAtFault, result.IsNodeAtFault, "--bench-after: %s", tc.why)
 
 			require.Equal(t, tc.wantScored, shouldFailSessionForResult(nil, result),
 				"availability gate: %s", tc.why)
@@ -358,10 +399,10 @@ func TestHealthResetRequiresPositiveProof(t *testing.T) {
 
 // MAG-3995: gRPC ABORTED used to classify as UNKNOWN_ERROR, which scored it against every endpoint a
 // Sui transaction was broadcast to. It is the validators' answer to the write, relayed by the
-// fullnode, so it is now non-retryable and neither scored nor counted toward benching. DataLoss is
+// fullnode, so it is now non-retryable and neither scored nor counted toward benching. Unknown is
 // the unregistered control.
 func TestSendGRPCRelay_AbortedIsNotTheEndpointsFault(t *testing.T) {
-	require.Equal(t, common.LavaErrorNodeAborted,
+	require.Equal(t, common.RouterErrorNodeAborted,
 		common.ClassifyError(nil, common.ChainFamilySui, common.TransportGRPC, int(codes.Aborted), "rejected by consensus"))
 
 	aborted := grpcStatusRelay(t, codes.Aborted, "rejected by consensus")
@@ -371,10 +412,10 @@ func TestSendGRPCRelay_AbortedIsNotTheEndpointsFault(t *testing.T) {
 	require.False(t, shouldFailSessionForResult(nil, aborted), "nor lower the endpoint's availability score")
 	require.False(t, relayProvesEndpointHealthy(aborted), "and it is not proof of health either")
 
-	dataLoss := grpcStatusRelay(t, codes.DataLoss, "unrecoverable data loss")
-	require.Equal(t, common.LavaErrorUnknown,
-		common.ClassifyError(nil, common.ChainFamilySui, common.TransportGRPC, int(codes.DataLoss), "unrecoverable data loss"),
-		"DataLoss has no row")
-	require.False(t, dataLoss.IsNodeAtFault, "an unclassified answer is never evidence against the endpoint")
-	require.True(t, shouldFailSessionForResult(nil, dataLoss), "but it keeps the uncatalogued default: scored")
+	unknown := grpcStatusRelay(t, codes.Unknown, "something went wrong")
+	require.Equal(t, common.RouterErrorUnknown,
+		common.ClassifyError(nil, common.ChainFamilySui, common.TransportGRPC, int(codes.Unknown), "something went wrong"),
+		"Unknown has no row")
+	require.False(t, unknown.IsNodeAtFault, "an unclassified answer is never evidence against the endpoint")
+	require.True(t, shouldFailSessionForResult(nil, unknown), "but it keeps the uncatalogued default: scored")
 }

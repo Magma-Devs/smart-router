@@ -20,87 +20,93 @@ const (
 	URL_QUERY_PARAMETERS_SEPARATOR_FROM_PATH        = "?"
 	URL_QUERY_PARAMETERS_SEPARATOR_OTHER_PARAMETERS = "&"
 	IP_FORWARDING_HEADER_NAME                       = "X-Forwarded-For"
-	PROVIDER_ADDRESS_HEADER_NAME                    = "Lava-Provider-Address"
-	RETRY_COUNT_HEADER_NAME                         = "Lava-Retries"
+	PROVIDER_ADDRESS_HEADER_NAME                    = "Router-Provider-Address"
+	RETRY_COUNT_HEADER_NAME                         = "Router-Retries"
 	PROVIDER_LATEST_BLOCK_HEADER_NAME               = "Provider-Latest-Block"
-	GUID_HEADER_NAME                                = "Lava-Guid"
-	ERRORED_PROVIDERS_HEADER_NAME                   = "Lava-Errored-Providers"
-	NODE_ERRORS_PROVIDERS_HEADER_NAME               = "Lava-Node-Errors-providers"
-	REPORTED_PROVIDERS_HEADER_NAME                  = "Lava-Reported-Providers"
-	LAVA_RELAY_PROTOCOL_HEADER_NAME                 = "Lava-Relay-Protocol"
-	USER_REQUEST_TYPE                               = "lava-user-request-type"
-	STATEFUL_API_HEADER                             = "lava-stateful-api"
-	STATEFUL_ALL_PROVIDERS_HEADER_NAME              = "lava-fast-tx-participants"
-	REQUESTED_BLOCK_HEADER_NAME                     = "lava-parsed-requested-block"
-	LAVA_IDENTIFIED_NODE_ERROR_HEADER               = "lava-identified-node-error"
-	LAVA_HEDGE_TRIGGERED_HEADER                     = "lava-hedge-triggered"
-	SMART_ROUTER_VERSION_HEADER_NAME                = "Smart-Router-Version"
+	GUID_HEADER_NAME                                = "Router-Guid"
+	ERRORED_PROVIDERS_HEADER_NAME                   = "Router-Errored-Providers"
+	NODE_ERRORS_PROVIDERS_HEADER_NAME               = "Router-Node-Errors-Providers"
+	REPORTED_PROVIDERS_HEADER_NAME                  = "Router-Reported-Providers"
+	RELAY_PROTOCOL_HEADER_NAME                      = "Router-Relay-Protocol"
+	USER_REQUEST_TYPE                               = "router-user-request-type"
+	STATEFUL_API_HEADER                             = "router-stateful-api"
+	STATEFUL_ALL_PROVIDERS_HEADER_NAME              = "router-fast-tx-participants"
+	REQUESTED_BLOCK_HEADER_NAME                     = "router-parsed-requested-block"
+	// WRITE_OUTCOME_HEADER_NAME names a GraphQL write's verdict across the copies it was sent to
+	// (MAG-5122): "accepted" on the chain's success row (Sui: effects with SUCCESS or FAILURE) or
+	// "unknown" today; "rejected" and "not_sent" need the chain's refusal rows (MAG-4909, MAG-5121),
+	// and any other reply carries no header. Absent on a read and on every other interface's
+	// write, which this ticket does not change.
+	WRITE_OUTCOME_HEADER_NAME        = "Router-Write-Outcome"
+	IDENTIFIED_NODE_ERROR_HEADER     = "router-identified-node-error"
+	HEDGE_TRIGGERED_HEADER           = "router-hedge-triggered"
+	SMART_ROUTER_VERSION_HEADER_NAME = "Router-Version"
 	// EXTENSION_UNAVAILABLE_HEADER_NAME lists, comma-separated, the extensions the caller asked for
-	// with lava-extension that no node on this router offers. The request was served WITHOUT them
+	// with router-extension that no node on this router offers. The request was served WITHOUT them
 	// — e.g. from a non-archive node — so a caller that needs the extension must not trust the
 	// answer (MAG-3935). An extension the router adds on its own, such as archive for an eth_call
 	// deep behind the head, is never listed: the caller did not ask for it.
-	EXTENSION_UNAVAILABLE_HEADER_NAME = "Lava-Extension-Unavailable"
-	// RELAY_TIMEOUT_APPLIED_HEADER_NAME answers a request that carried lava-relay-timeout with the
+	EXTENSION_UNAVAILABLE_HEADER_NAME = "Router-Extension-Unavailable"
+	// RELAY_TIMEOUT_APPLIED_HEADER_NAME answers a request that carried router-relay-timeout with the
 	// attempt window the router actually used, as a Go duration (MAG-3600). See
 	// appendHeadersToRelayResult.
-	RELAY_TIMEOUT_APPLIED_HEADER_NAME = "Lava-Relay-Timeout-Applied"
+	RELAY_TIMEOUT_APPLIED_HEADER_NAME = "Router-Relay-Timeout-Applied"
 	// CACHE_BACKEND_HEADER_NAME names the cache backend that served a hit — the
 	// cache-be address, or the RESP node actually dialled (the current master
 	// under sentinel, the touched shard under cluster). Debug-only: it exposes
 	// internal infrastructure addresses, so it is emitted ONLY under
 	// --debug-relays, never to ordinary clients.
-	CACHE_BACKEND_HEADER_NAME = "Lava-Cache-Backend"
+	CACHE_BACKEND_HEADER_NAME = "Router-Cache-Backend"
 	// CACHE_TIER_HEADER_NAME names the cache tier that served the response
 	// ("primary" | "secondary" | "none"), and CACHE_OUTCOME_HEADER_NAME gives what
 	// each tier did ("primary=miss,secondary=error"). Both are emitted together
-	// whenever the request carried the lava-debug-relay directive — see
+	// whenever the request carried the router-debug-relay directive — see
 	// CacheLookupReport for why a header rather than the cache_tier counter, and note
 	// that unlike CACHE_BACKEND_HEADER_NAME above these values name no infrastructure,
 	// which is what makes a client-settable directive an acceptable gate for them.
-	CACHE_TIER_HEADER_NAME    = "Lava-Cache-Tier"
-	CACHE_OUTCOME_HEADER_NAME = "Lava-Cache-Outcome"
+	CACHE_TIER_HEADER_NAME    = "Router-Cache-Tier"
+	CACHE_OUTCOME_HEADER_NAME = "Router-Cache-Outcome"
 	// these headers need to be lowercase
-	BLOCK_PROVIDERS_ADDRESSES_HEADER_NAME = "lava-providers-block"
-	RELAY_TIMEOUT_HEADER_NAME             = "lava-relay-timeout"
-	EXTENSION_OVERRIDE_HEADER_NAME        = "lava-extension"
-	FORCE_CACHE_REFRESH_HEADER_NAME       = "lava-force-cache-refresh"
-	LAVA_DEBUG_RELAY                      = "lava-debug-relay"
-	LAVA_LB_UNIQUE_ID_HEADER              = "lava-lb-unique-id"
-	SELECTION_STATS_HEADER_NAME           = "lava-selection-stats"
-	STICKINESS_HEADER_NAME                = "lava-stickiness"
-	SELECT_PROVIDER_HEADER_NAME           = "lava-select-provider"
-	// SELECT_PROVIDER_STRICT_HEADER_NAME, set to "true" next to lava-select-provider, makes the
+	BLOCK_PROVIDERS_ADDRESSES_HEADER_NAME = "router-providers-block"
+	RELAY_TIMEOUT_HEADER_NAME             = "router-relay-timeout"
+	EXTENSION_OVERRIDE_HEADER_NAME        = "router-extension"
+	FORCE_CACHE_REFRESH_HEADER_NAME       = "router-force-cache-refresh"
+	DEBUG_RELAY                           = "router-debug-relay"
+	LB_UNIQUE_ID_HEADER                   = "router-lb-unique-id"
+	SELECTION_STATS_HEADER_NAME           = "router-selection-stats"
+	STICKINESS_HEADER_NAME                = "router-stickiness"
+	SELECT_PROVIDER_HEADER_NAME           = "router-select-provider"
+	// SELECT_PROVIDER_STRICT_HEADER_NAME, set to "true" next to router-select-provider, makes the
 	// selection a strict pin: the named provider answers or the request fails, with no retry, hedge
-	// or consistency-gate reroute on another provider. Without it lava-select-provider pins the first
-	// attempt only. lava-stickiness is always strict and needs no such header (MAG-4826).
-	SELECT_PROVIDER_STRICT_HEADER_NAME            = "lava-select-provider-strict"
-	CROSS_VALIDATION_HEADER_MAX_PARTICIPANTS      = "lava-cross-validation-max-participants"
-	CROSS_VALIDATION_HEADER_AGREEMENT_THRESHOLD   = "lava-cross-validation-agreement-threshold"
-	CROSS_VALIDATION_ALL_PROVIDERS_HEADER_NAME    = "lava-cross-validation-all-providers"
-	CROSS_VALIDATION_STATUS_HEADER_NAME           = "lava-cross-validation-status"
-	CROSS_VALIDATION_AGREEING_PROVIDERS_HEADER    = "lava-cross-validation-agreeing-providers"
-	CROSS_VALIDATION_DISAGREEING_PROVIDERS_HEADER = "lava-cross-validation-disagreeing-providers"
+	// or consistency-gate reroute on another provider. Without it router-select-provider pins the first
+	// attempt only. router-stickiness is always strict and needs no such header (MAG-4826).
+	SELECT_PROVIDER_STRICT_HEADER_NAME            = "router-select-provider-strict"
+	CROSS_VALIDATION_HEADER_MAX_PARTICIPANTS      = "router-cross-validation-max-participants"
+	CROSS_VALIDATION_HEADER_AGREEMENT_THRESHOLD   = "router-cross-validation-agreement-threshold"
+	CROSS_VALIDATION_ALL_PROVIDERS_HEADER_NAME    = "router-cross-validation-all-providers"
+	CROSS_VALIDATION_STATUS_HEADER_NAME           = "router-cross-validation-status"
+	CROSS_VALIDATION_AGREEING_PROVIDERS_HEADER    = "router-cross-validation-agreeing-providers"
+	CROSS_VALIDATION_DISAGREEING_PROVIDERS_HEADER = "router-cross-validation-disagreeing-providers"
 	// Providers that were queried but whose response had not arrived when the quorum early-exit built the
 	// reply (MAG-2187). Disagreeing-providers lists only dissent the router actually received; an empty
 	// disagreeing header must mean "everyone we heard from agreed", never "we didn't hear everyone" — this
 	// header carries the "didn't hear" part explicitly. Their late responses are compared against the
 	// consensus asynchronously (straggler watcher) and recorded via log + metric.
-	CROSS_VALIDATION_PENDING_PROVIDERS_HEADER = "lava-cross-validation-pending-providers"
-	CROSS_VALIDATION_FAILURE_REASON_HEADER    = "lava-cross-validation-failure-reason"
+	CROSS_VALIDATION_PENDING_PROVIDERS_HEADER = "router-cross-validation-pending-providers"
+	CROSS_VALIDATION_FAILURE_REASON_HEADER    = "router-cross-validation-failure-reason"
 	// On a failed quorum, the largest set of providers that returned the same response, and its size
 	// (MAG-2192). Additive to disagreeing-providers, which keeps listing every successful provider: a
 	// plurality below the client's agreement threshold is NOT a consensus, so it must not turn the
 	// minority into the accused. These say who formed the plurality without claiming it is right.
 	// plurality-providers is empty on a tie, which has no plurality.
-	CROSS_VALIDATION_PLURALITY_SIZE_HEADER      = "lava-cross-validation-plurality-size"
-	CROSS_VALIDATION_PLURALITY_PROVIDERS_HEADER = "lava-cross-validation-plurality-providers"
-	// send http request to /lava/health to see if the process is up - (ret code 200)
-	DEFAULT_HEALTH_PATH                                       = "/lava/health"
+	CROSS_VALIDATION_PLURALITY_SIZE_HEADER      = "router-cross-validation-plurality-size"
+	CROSS_VALIDATION_PLURALITY_PROVIDERS_HEADER = "router-cross-validation-plurality-providers"
+	// send http request to /router/health to see if the process is up - (ret code 200)
+	DEFAULT_HEALTH_PATH                                       = "/router/health"
 	MAXIMUM_ALLOWED_TIMEOUT_EXTEND_MULTIPLIER_BY_THE_CONSUMER = 4
 )
 
-// Legacy cached node-error marker. Upstream-lava cache writers embed this exact JSON
+// Legacy cached node-error marker. Cache writers from the upstream lineage embed this exact JSON
 // fragment as the Error_GUID value when storing a node-error payload; on a cache hit
 // the router substitutes the current request's GUID for the placeholder before
 // serving. No producer exists in this repository — the constants preserve byte-exact
@@ -150,16 +156,14 @@ const (
 // routed and answered like any other, but it does not count as activity for idle mode, so a probed
 // chain can still go idle (MAG-4797). It is a directive header: stripped before the request is
 // forwarded upstream and before the cache key is built.
-// Named smartrouter-*, after Smart-Router-Version: a header minted here does not take the lava-
-// prefix of the older directives.
-const INTERNAL_PROBE_HEADER_NAME = "smartrouter-internal-probe"
+const INTERNAL_PROBE_HEADER_NAME = "router-internal-probe"
 
-var SPECIAL_LAVA_DIRECTIVE_HEADERS = map[string]struct{}{
+var SPECIAL_DIRECTIVE_HEADERS = map[string]struct{}{
 	BLOCK_PROVIDERS_ADDRESSES_HEADER_NAME:       {},
 	RELAY_TIMEOUT_HEADER_NAME:                   {},
 	EXTENSION_OVERRIDE_HEADER_NAME:              {},
 	FORCE_CACHE_REFRESH_HEADER_NAME:             {},
-	LAVA_DEBUG_RELAY:                            {},
+	DEBUG_RELAY:                                 {},
 	STICKINESS_HEADER_NAME:                      {},
 	SELECT_PROVIDER_HEADER_NAME:                 {},
 	SELECT_PROVIDER_STRICT_HEADER_NAME:          {},
@@ -474,14 +478,14 @@ func (gc *GrpcConfig) Validate() error {
 	case GrpcDescriptorSourceReflection, GrpcDescriptorSourceFile, GrpcDescriptorSourceHybrid, "":
 		// Valid
 	default:
-		return utils.LavaFormatError("invalid gRPC descriptor source", nil,
+		return utils.FormatError("invalid gRPC descriptor source", nil,
 			utils.LogAttr("source", source),
 			utils.LogAttr("valid_options", "reflection, file, hybrid"))
 	}
 
 	// Validate descriptor path is provided when needed
 	if gc.NeedsDescriptorFile() && gc.DescriptorSetPath == "" {
-		return utils.LavaFormatError("descriptor-set-path is required when descriptor-source is file or hybrid", nil,
+		return utils.FormatError("descriptor-set-path is required when descriptor-source is file or hybrid", nil,
 			utils.LogAttr("descriptor_source", source))
 	}
 
@@ -512,12 +516,12 @@ func (gc *GrpcConfig) ValidateReflectionTimeout() error {
 	}
 
 	if gc.ReflectionTimeout < 100*time.Millisecond {
-		return utils.LavaFormatError("reflection-timeout too short", nil,
+		return utils.FormatError("reflection-timeout too short", nil,
 			utils.LogAttr("timeout", gc.ReflectionTimeout),
 			utils.LogAttr("min", "100ms"))
 	}
 	if gc.ReflectionTimeout > 30*time.Second {
-		return utils.LavaFormatError("reflection-timeout too long", nil,
+		return utils.FormatError("reflection-timeout too long", nil,
 			utils.LogAttr("timeout", gc.ReflectionTimeout),
 			utils.LogAttr("max", "30s"))
 	}
@@ -530,7 +534,7 @@ func ValidateEndpoint(endpoint, apiInterface string) error {
 	case spectypes.APIInterfaceRest, spectypes.APIInterfaceGraphQL:
 		parsedUrl, err := url.Parse(endpoint)
 		if err != nil {
-			return utils.LavaFormatError("could not parse node url", err,
+			return utils.FormatError("could not parse node url", err,
 				utils.LogAttr("url", endpoint),
 				utils.LogAttr("apiInterface", apiInterface),
 			)
@@ -540,7 +544,7 @@ func ValidateEndpoint(endpoint, apiInterface string) error {
 		case "http", "https":
 			return nil
 		default:
-			return utils.LavaFormatError("URL scheme should be (http/https), got: "+parsedUrl.Scheme, nil,
+			return utils.FormatError("URL scheme should be (http/https), got: "+parsedUrl.Scheme, nil,
 				utils.LogAttr("url", endpoint),
 				utils.LogAttr("apiInterface", apiInterface),
 			)
@@ -548,7 +552,7 @@ func ValidateEndpoint(endpoint, apiInterface string) error {
 	case spectypes.APIInterfaceJsonRPC, spectypes.APIInterfaceTendermintRPC:
 		parsedUrl, err := url.Parse(endpoint)
 		if err != nil {
-			return utils.LavaFormatError("could not parse node url", err,
+			return utils.FormatError("could not parse node url", err,
 				utils.LogAttr("url", endpoint),
 				utils.LogAttr("apiInterface", apiInterface),
 			)
@@ -560,20 +564,20 @@ func ValidateEndpoint(endpoint, apiInterface string) error {
 		case "ws", "wss":
 			return nil
 		default:
-			return utils.LavaFormatError("URL scheme should be websocket (ws/wss) or (http/https), got: "+parsedUrl.Scheme, nil,
+			return utils.FormatError("URL scheme should be websocket (ws/wss) or (http/https), got: "+parsedUrl.Scheme, nil,
 				utils.LogAttr("url", endpoint),
 				utils.LogAttr("apiInterface", apiInterface),
 			)
 		}
 	case spectypes.APIInterfaceGrpc:
 		if endpoint == "" {
-			return utils.LavaFormatError("invalid grpc URL, empty", nil)
+			return utils.FormatError("invalid grpc URL, empty", nil)
 		}
 		parsedUrl, err := url.Parse(endpoint)
 		if err == nil {
 			// user provided a valid url with a scheme
 			if parsedUrl.Scheme != "" && strings.Contains(endpoint, "/") {
-				return utils.LavaFormatError("grpc URL scheme should be empty and it is not, endpoint definition example: 127.0.0.1:9090 -or- my-node.com/grpc", nil, utils.Attribute{Key: "apiInterface", Value: apiInterface}, utils.Attribute{Key: "scheme", Value: parsedUrl.Scheme})
+				return utils.FormatError("grpc URL scheme should be empty and it is not, endpoint definition example: 127.0.0.1:9090 -or- my-node.com/grpc", nil, utils.Attribute{Key: "apiInterface", Value: apiInterface}, utils.Attribute{Key: "scheme", Value: parsedUrl.Scheme})
 			}
 			return nil
 		} else {
@@ -582,10 +586,10 @@ func ValidateEndpoint(endpoint, apiInterface string) error {
 			if err == nil {
 				return nil
 			}
-			return utils.LavaFormatError("invalid grpc URL, usage example: 127.0.0.1:9090 or my-node.com/grpc", nil, utils.Attribute{Key: "apiInterface", Value: apiInterface}, utils.Attribute{Key: "url", Value: endpoint})
+			return utils.FormatError("invalid grpc URL, usage example: 127.0.0.1:9090 or my-node.com/grpc", nil, utils.Attribute{Key: "apiInterface", Value: apiInterface}, utils.Attribute{Key: "url", Value: endpoint})
 		}
 	default:
-		return utils.LavaFormatError("unsupported apiInterface", nil, utils.Attribute{Key: "apiInterface", Value: apiInterface})
+		return utils.FormatError("unsupported apiInterface", nil, utils.Attribute{Key: "apiInterface", Value: apiInterface})
 	}
 }
 
@@ -616,10 +620,10 @@ type RelayResult struct {
 	ResponseHash        [32]byte // cached SHA256 hash of Reply.Data for cross-validation comparison, zero-value if not computed
 	IsUnsupportedMethod bool     // Indicates this node error is an unsupported method (zero CU, cached)
 	// CrossValidationFailureReason distinguishes WHY cross-validation failed, surfaced to the client via
-	// the lava-cross-validation-failure-reason header. One of CrossValidationReason* ("" on success).
+	// the router-cross-validation-failure-reason header. One of CrossValidationReason* ("" on success).
 	CrossValidationFailureReason string
 	// IsNonRetryable is the umbrella flag the retry state machine consults:
-	// it's true whenever the matched registry LavaError has Retryable=false,
+	// it's true whenever the matched registry RouterError has Retryable=false,
 	// which covers execution reverted, out of gas, invalid signature, double
 	// spend, caller mistakes, etc. Retrying on another provider would just
 	// reproduce the same deterministic failure. A node's refusal of its own
@@ -633,6 +637,11 @@ type RelayResult struct {
 	// Orthogonal to IsNonRetryable — NODE_RATE_LIMITED (2005) is retryable,
 	// NODE_LIMIT_EXCEEDED (2011) is not, and both set this flag.
 	IsRateLimited bool
+	// RetryAfter is the wait a rate-limiting upstream asked for, 0 when it asked for none. Only a
+	// refusal that completes the relay sets it — a gRPC status, which returns no error — since a
+	// refusal that fails the relay carries its wait on the error (common.RetryAfterFrom). The
+	// hold-off reads whichever it got (MAG-4914).
+	RetryAfter time.Duration
 	// IsDataScope is true when the node error carries SubCategoryDataScope: the
 	// endpoint answered truthfully that it does not hold the requested data
 	// (pruned height, object that never existed). Retryable — an archive node may
@@ -647,14 +656,18 @@ type RelayResult struct {
 	IsNodeCapability bool
 	// IsNodeAtFault — positive evidence the endpoint itself is broken or unable to serve, as
 	// opposed to answering truthfully about a request it cannot satisfy. This is what the
-	// endpoint-health counter reads; see LavaError.EndpointAtFault for why it is not Retryable.
+	// endpoint-health counter reads; see RouterError.EndpointAtFault for why it is not Retryable.
 	IsNodeAtFault bool
+	// IsOwnVerdict — the sender filed this reply by its interface's own rows (a GraphQL read,
+	// MAG-5121): the flags above are that verdict, read from the body, so a status-only step must
+	// not decide the reply again by its status (sendRelayToDirectEndpoints).
+	IsOwnVerdict bool
 	// ClientFacing is what the listener shows the caller when the relay ends in a protocol error:
 	// the upstream's own answer when it gave one, else the leaf cause (MAG-4218).
 	ClientFacing *ClientFacingError
 	// CacheLookup is what each cache tier did on the attempt that produced this result,
-	// surfaced to the caller as Lava-Cache-Tier / Lava-Cache-Outcome when the request
-	// carried lava-debug-relay. Same shape as the per-request serving facts above that
+	// surfaced to the caller as Router-Cache-Tier / Router-Cache-Outcome when the request
+	// carried router-debug-relay. Same shape as the per-request serving facts above that
 	// headers already read (IsNodeError, StatusCode, CrossValidationFailureReason);
 	// see CacheLookupReport for why the cache_tier counter could not answer this.
 	CacheLookup CacheLookupReport
@@ -677,10 +690,10 @@ func (rr *RelayResult) ApplyNodeErrorClassification(family ChainFamily, transpor
 	rr.applyClassification(ClassifyNodeErrorForRetry(family, transport, errorCode, message))
 }
 
-// ApplyLavaErrorClassification sets the same flags from a verdict the caller already holds, for a
+// ApplyRouterErrorClassification sets the same flags from a verdict the caller already holds, for a
 // signal the registry cannot see in a code and a message (a gRPC rate limit only its metadata
 // carries).
-func (rr *RelayResult) ApplyLavaErrorClassification(classified *LavaError) {
+func (rr *RelayResult) ApplyRouterErrorClassification(classified *RouterError) {
 	if rr == nil {
 		return
 	}

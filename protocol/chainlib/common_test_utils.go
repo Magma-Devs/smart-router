@@ -23,7 +23,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chaintracker"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 	specutils "github.com/magma-Devs/smart-router/utils/keeper"
@@ -34,25 +34,25 @@ import (
 // ---------------------------------------------------------------------------
 //
 // The test gRPC spec (specs/grpctest.json) references
-// lavatest.v1.BlockService/GetLatestBlock. For gRPC reflection to resolve
+// routertest.v1.BlockService/GetLatestBlock. For gRPC reflection to resolve
 // this service, we register a FileDescriptorProto in the global proto
 // registry at init time. The mock handler uses dynamicpb messages so that
 // proto marshal/unmarshal works end-to-end.
 
-// testBlockServiceFD holds the registered file descriptor for lavatest.v1.
+// testBlockServiceFD holds the registered file descriptor for routertest.v1.
 var testBlockServiceFD protoreflect.FileDescriptor
 
 func init() {
 	syntax := "proto3"
-	fileName := "lavatest/v1/block_service.proto"
-	pkgName := "lavatest.v1"
+	fileName := "routertest/v1/block_service.proto"
+	pkgName := "routertest.v1"
 	reqName := "GetLatestBlockRequest"
 	respName := "GetLatestBlockResponse"
 	svcName := "BlockService"
 	methodName := "GetLatestBlock"
 	heightField := "height"
-	inputType := ".lavatest.v1.GetLatestBlockRequest"
-	outputType := ".lavatest.v1.GetLatestBlockResponse"
+	inputType := ".routertest.v1.GetLatestBlockRequest"
+	outputType := ".routertest.v1.GetLatestBlockResponse"
 	fieldNum := int32(1)
 	fieldType := descriptorpb.FieldDescriptorProto_TYPE_INT64
 	fieldLabel := descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL
@@ -121,7 +121,7 @@ func (mrw mockResponseWriter) WriteHeader(statusCode int) {
 
 // mockGRPCServiceDesc is the gRPC service descriptor for the test block service.
 var mockGRPCServiceDesc = grpc.ServiceDesc{
-	ServiceName: "lavatest.v1.BlockService",
+	ServiceName: "routertest.v1.BlockService",
 	HandlerType: (*mockBlockServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
@@ -242,8 +242,13 @@ func CreateMockSpec() spectypes.Spec {
 // CreateMockXRPLSpec returns the part of an XRP Ledger spec a transaction submission needs: one
 // JSON-RPC collection holding submit and submit_multisigned, stateful and hanging as in the
 // catalog's ripple.json, beside one read (account_info). The router's bundled specs carry no XRPL
-// chain.
+// chain, so it registers ripple.json's families itself, as loading the catalog would: XRPT takes
+// the XRP family from its import of XRP.
 func CreateMockXRPLSpec(index string) spectypes.Spec {
+	common.RegisterChainFamilies(map[string]spectypes.Spec{
+		"XRP":  {Index: "XRP"},
+		"XRPT": {Index: "XRPT", Imports: []string{"XRP"}},
+	})
 	api := func(name string, category spectypes.SpecCategory) *spectypes.Api {
 		return &spectypes.Api{
 			Name:         name,
@@ -282,7 +287,7 @@ func CreateChainLibMocks(
 	wsServerCallback http.HandlerFunc,
 	getToTopMostPath string,
 	services []string,
-) (cpar ChainParser, crout ChainRouter, cfetc chaintracker.ChainFetcher, closeServer func(), endpointRet *lavasession.RPCProviderEndpoint, errRet error) {
+) (cpar ChainParser, crout ChainRouter, cfetc chaintracker.ChainFetcher, closeServer func(), endpointRet *routersession.RPCProviderEndpoint, errRet error) {
 	// The mocks log at debug. The level is process-wide, so it is set once for the whole binary.
 	UseMockLogLevel()
 	// Create a cancellable context for the connector to prevent leaks
@@ -300,6 +305,14 @@ func CreateChainLibMocks(
 		cancelConnector()
 		return nil, nil, nil, nil, nil, err
 	}
+	// As the router does when it loads a catalog: a chain such as ARBITRUM takes its family from
+	// its imports, and the parser reads it in SetSpec.
+	catalog, err := specutils.GetAllSpecsFromLocalDir(getToTopMostPath + "specs/")
+	if err != nil {
+		cancelConnector()
+		return nil, nil, nil, nil, nil, err
+	}
+	common.RegisterChainFamilies(catalog)
 	index, err := strconv.Atoi(apiInterface)
 	if err == nil && index < len(spec.ApiCollections) {
 		apiInterface = spec.ApiCollections[index].CollectionData.ApiInterface
@@ -311,8 +324,8 @@ func CreateChainLibMocks(
 	}
 	var chainRouter ChainRouter
 	chainParser.SetSpec(spec)
-	endpoint := &lavasession.RPCProviderEndpoint{
-		NetworkAddress: lavasession.NetworkAddressData{},
+	endpoint := &routersession.RPCProviderEndpoint{
+		NetworkAddress: routersession.NetworkAddressData{},
 		ChainID:        specIndex,
 		ApiInterface:   apiInterface,
 		NodeUrls:       []common.NodeUrl{},

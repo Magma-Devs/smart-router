@@ -12,7 +12,7 @@
 # Smart Router
 
 [![Build and Test](https://github.com/Magma-Devs/smart-router/actions/workflows/smartrouter.yml/badge.svg?branch=main)](https://github.com/Magma-Devs/smart-router/actions/workflows/smartrouter.yml)
-[![Release](https://img.shields.io/badge/release-v1.5.10-brightgreen)](https://github.com/Magma-Devs/smart-router/releases/latest)
+[![Release](https://img.shields.io/badge/release-v1.6.8-brightgreen)](https://github.com/Magma-Devs/smart-router/releases/latest)
 [![Go](https://img.shields.io/badge/go-1.26%2B-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![License](https://img.shields.io/badge/license-source--available-orange.svg)](LICENSE.md)
 
@@ -58,7 +58,7 @@ After running, you get:
 
 - An RPC endpoint per chain interface (ports from the YAML config; conventional default `:3360`).
 - Prometheus metrics on `:7779` — see [docs/METRICS.md](docs/METRICS.md) for the full reference.
-- A health endpoint at `/lava/health`.
+- A health endpoint at `/router/health`.
 - Provider rotation, RPC-aware retry, response caching, and metrics — all driven by the YAML config.
 
 ### Config wizard
@@ -123,7 +123,7 @@ is printed first.
       "ok": false,
       "verifications": [
         { "name": "chain-id", "addon": "", "extension": "",        "severity": "Fail", "ok": true },
-        { "name": "pruning",  "addon": "", "extension": "archive", "severity": "Fail", "ok": false, "error": "block not found" }
+        { "name": "pruning",  "addon": "", "extension": "archive", "severity": "PartialFail", "ok": false, "error": "block not found" }
       ],
       "router": { "verdict": "admitted", "refusedServices": ["archive"] }
     }
@@ -134,19 +134,29 @@ is printed first.
 There is **one row per node URL**, and every field in it is that URL's own: its checks ran over its
 own connection, and `latestBlock` is its own height — `0` when the spec gives it no height request,
 `-1` when the request failed (`latestBlockError` says why). A row's `ok` is `true` only when the spec
-loaded (`specValid`), the URL was reached, and every verification passed, whatever its `severity`.
+loaded (`specValid`), the URL was reached, every add-on it names is one the spec defines, and every
+verification passed, whatever its `severity`.
 Top-level `ok` is the AND of all rows.
 
 `router` is what a router started with the same flags does with that URL:
 
 | `verdict` | Meaning |
 | --- | --- |
-| `admitted` | Served, minus any `refusedServices` — the add-ons and extensions whose own checks failed |
-| `refused` | Dropped: it failed a check no single service owns, or could not be dialed. The provider serves from its other URLs |
+| `admitted` | Served, minus any `refusedServices` — the add-ons and extensions whose own checks failed, or that the spec does not define |
+| `refused` | Dropped: it failed a `Fail` check (a basic check, or an add-on check the spec makes mandatory), or could not be dialed. The provider serves from its other URLs |
 | `excluded` | The whole provider is dropped: a path it serves has no URL left, or its node URLs are a list the router cannot serve from (`reason` says which) |
 | `unknown` | The probe could not decide — its spec did not load, it timed out, or the URL's checks were only rate-limited |
 
+`severity` is what a failure of that check costs: `Fail` takes the URL out, `PartialFail` only the
+add-on or extension it covers, `Warning` nothing. A spec value that sets none takes the default for
+where its check sits: `Fail` for a basic check, `PartialFail` for an add-on or extension check.
+
 A failed `Warning` check fails the row but never the verdict: the router logs it and serves.
+
+A name in a URL's `addons` that the spec does not define fails the row, with an `error` naming it,
+but not the verdict: the router ignores the name and serves the rest, and the verdict lists it in
+`refusedServices`, with `reason` saying it is not defined by the spec. Only a `standalone-addons` URL
+that names no add-on the spec defines is refused, since it serves nothing.
 
 When a URL's latest-block call fails, its row reports `latestBlock: -1` and the cause in
 `latestBlockError`. Checks that measure a distance from the head are then reported failed with
@@ -255,7 +265,7 @@ The hot path for a single request:
 2. **Cache lookup** — for cacheable methods (historical block data, immutable receipts, etc.), the cache layer (`ecosystem/cache`) checks for a recent response. Hits return immediately. Methods the chain spec marks stateful (writes) and the node-bound family (filters, subscriptions, one node's keys, mempool and status; `protocol/rpcsmartrouter/node_bound_methods.go`) are never cached: their answers belong to the node that produced them.
 3. **Upstream selection** — on cache miss, the upstream optimiser (`protocol/provideroptimizer`) picks an upstream from the configured pool using QoS-weighted scoring. Healthy/fast upstreams are preferred; flaky ones get backed off automatically.
 4. **Relay + failover** — the request is sent to the chosen upstream. On failure (timeout, malformed response, certain status codes), the retry state machine picks an alternate upstream and retries within a configurable budget.
-5. **Response** — returned to the client with metadata headers (`Smart-Router-Version`, `Lava-Provider-Address`, retry counts, etc.) annotating which upstream served the response. Prometheus metrics are emitted in parallel. The upstream's own response headers are not passed through: apart from the transport headers (`Content-Type`, `Content-Encoding`, and `Retry-After` with the upstream's `Date`, read for a 429's wait) and the headers the chain spec declares in the reply direction for the API interface (today the Cosmos block-height header and Aptos's eight ledger-state headers, pagination cursor included), every header the client sees is the router's.
+5. **Response** — returned to the client with metadata headers (`Router-Version`, `Router-Provider-Address`, retry counts, etc.) annotating which upstream served the response. Prometheus metrics are emitted in parallel. The upstream's own response headers are not passed through: apart from the transport headers (`Content-Type`, `Content-Encoding`, and `Retry-After` with the upstream's `Date`, read for a 429's wait) and the headers the chain spec declares in the reply direction for the API interface (today the Cosmos block-height header and Aptos's eight ledger-state headers, pagination cursor included), every header the client sees is the router's.
 
 **Cross-validation (optional).** For read methods that warrant extra assurance, the relay step can instead fan out to several upstreams in parallel and only return an answer once a quorum agree on an identical response — optionally requiring the quorum to span multiple distinct upstream groups (or each group to reach its own quorum). It defends against a single upstream returning a wrong-but-well-formed answer, and surfaces dissent via response headers and a bounded mismatch metric. See [`docs/CROSS-VALIDATION.md`](docs/CROSS-VALIDATION.md) for an operator setup guide with runnable example configs, or [`protocol/rpcsmartrouter/README.md`](protocol/rpcsmartrouter/README.md#cross-validation) for the full knob/header reference.
 
@@ -421,7 +431,7 @@ cmd/smartrouter/    — Standalone Smart Router binary
 protocol/           — Core protocol implementation
   chainlib/         — Chain-specific parsers and proxies
   rpcsmartrouter/   — Smart router server and relay logic
-  lavasession/      — Session and connection management
+  routersession/    — Session and connection management
   provideroptimizer/ — QoS-based upstream selection
   relaycore/        — Relay processing pipeline
   metrics/          — Prometheus metrics
@@ -435,7 +445,7 @@ When started with `--debug-address <addr>` (and `devMode.enabled=true`), the rou
 
 The reset tests rely on is **`POST /debug/reset-all`**, which drains the router's internal state stores (optimizer scores, Ristretto, seen-block caches, session-manager state) and — so a single call returns the router to a serving state after an all-providers-down stress burst — also **re-enables endpoint health and cold-rebuilds pairing**.
 
-Why that matters: an endpoint that hits `MaxConsecutiveConnectionAttempts` consecutive connection failures is disabled (`Endpoint.Enabled=false`), and the only paths back are a successful relay or the ~15-minute epoch tick. After a stress test drives every provider down, those endpoints stay disabled and contaminate later tests until a pod restart. `reset-all` now re-enables them (mirroring the reset onto the Prometheus health gauge) and re-admits demoted providers via a cold `rebuildPairingFromConfig` (no re-probing). Every existing `reset-all` caller inherits this — no test migration.
+Why that matters: an endpoint that hits `MaxConsecutiveConnectionAttempts` consecutive connection failures is disabled (`Endpoint.Enabled=false`), and the only paths back are a successful relay or the ~15-minute epoch tick. After a stress test drives every provider down, those endpoints stay disabled and contaminate later tests until a pod restart. `reset-all` now re-enables them and re-admits demoted providers via a cold `rebuildPairingFromConfig` (no re-probing). Every existing `reset-all` caller inherits this — no test migration.
 
 For tests that only need the endpoint-health reset, **`POST /debug/reset-endpoint-health`** does exactly that and nothing else; its name mirrors `Endpoint.ResetHealth()` in the source. Response (any method other than `POST` returns 405):
 
@@ -444,6 +454,10 @@ For tests that only need the endpoint-health reset, **`POST /debug/reset-endpoin
 ```
 
 `/debug/reset-pairing` and `/debug/reset-scores` remain available for targeted cleanup.
+
+For tests that only need a clean response cache, **`POST /debug/reset-cache`** runs `reset-all`'s cache flush and nothing else. It answers `{"reset": true, "cleared": ["cache-be"]}` after a flush, `"cleared": []` when there was nothing it could flush (no cache backend, a disconnected `--cache-be` pod, or a pod without the flush call), and 500 when the flush fails. What a flush empties, shared-state entries included, is in [docs/RESP-CACHE.md](docs/RESP-CACHE.md#flush-semantics).
+
+**`GET /debug/verification`** shows, per chain and configured provider, what it is failing (`scope`, `service`, `check`, `severity`, and `since`, the start `smartrouter_provider_verification_failed` publishes), whether it is in the pairing, and when each check it is failing is next retried (`retries`, one entry per check, earliest due first: `check`, `addon`, `extension`, or `wholePass` for a provider whose pass gave no verdicts to read, with `attempts`, `pendingSince` and `nextRetryAt`; a url that could not be dialed, or that a pass did not ask because it is held off after a rate limit, has the entry `check: connect`, and its retry dials that url alone), with the retry delays in force (MAG-3950). A test can shorten those with `--verification-retry-delay` and `--verification-retry-max-delay` instead of waiting 30s to 15m between retries.
 
 ## Releases
 
@@ -484,6 +498,17 @@ Customers should pin to `:vX.Y.Z`. `:latest` is for non-production "just give me
 
 The version string is injected at build time from the git tag — `smartrouter version` prints the tag verbatim, including the `v` prefix. Builds from non-tagged commits carry `git describe` output (e.g. `v1.2.0-3-gabc1234`), so a dev binary cannot masquerade as a release.
 
+#### Identifying a build
+
+`smartrouter version` prints two lines: the version, then `commit <sha>`. The router also logs both at startup (`smart-router Binary Version: ... commit ...`), so `kubectl logs` on a running pod names the build it is serving.
+
+- A **release or CI build** carries the version and commit the `-ldflags -X` flags stamped in.
+- A **plain `go build ./cmd/smartrouter` from a git checkout** carries no stamp, but the Go toolchain still records the checkout's revision in the binary. The router reads that record and reports it: the commit is the checkout's HEAD, the version is the toolchain-derived pseudo-version, `+dirty` when the tree had uncommitted changes. Read a pseudo-version as "after the nearest tag": `v1.6.8-0.20261108131709-22176166ebdc` is commit `22176166` somewhere after `v1.6.7`, not a 1.6.8 build.
+- A build with **neither** (`-buildvcs=false`, or a source tree without `.git`, such as a Docker build context) reports `dev` / `commit none`. Nothing in such a binary says which commit it is; the only fix is to pass the `-X` flags at build time.
+- A plain `go build` from a **`git worktree`** gets the record wrong or not at all. A worktree's `.git` is a file, and the toolchain only takes a `.git` directory for a checkout. Outside any other checkout, the binary gets no record and reports `dev` / `commit none`. Inside another checkout, such as `.claude/worktrees/<name>`, it gets the enclosing checkout's record and reports that checkout's commit, not the one it was built from. In a worktree, build with `make build`, which stamps the worktree's own commit with `-X`.
+
+`go version -m <binary>` prints the same toolchain record (`vcs.revision`, `vcs.time`, `vcs.modified`) without running the binary. Searching the file for a bare 40-hex commit (`strings <binary> | grep -E '^[0-9a-f]{40}$'`) only finds an `-ldflags`-stamped commit, because the toolchain record stores the revision as `vcs.revision=<sha>`, not on a line of its own.
+
 #### Pulling the image
 
 Smart Router Docker images are published to GHCR:
@@ -496,7 +521,7 @@ docker pull ghcr.io/magma-devs/smart-router:vX.Y.Z
 
 - Trigger pattern: `v[0-9]+.[0-9]+.[0-9]+*`. A tag like `1.2.0` (without the leading `v`) does _not_ fire the workflow.
 - Follow [semver](https://semver.org/) `MAJOR.MINOR.PATCH`. For smart-router specifically:
-  - **MAJOR** — breaking change to the wire surface customers integrate with: HTTP metadata headers (e.g. `Smart-Router-Version`, `Lava-Provider-Address`), JSON-RPC envelope shape, removed/renamed CLI flags, removed/renamed config fields.
+  - **MAJOR** — breaking change to the wire surface customers integrate with: HTTP metadata headers (e.g. `Router-Version`, `Router-Provider-Address`), JSON-RPC envelope shape, removed/renamed CLI flags, removed/renamed config fields.
   - **MINOR** — new capabilities: additional supported chains in `specs/`, new CLI flags, new metrics, new config fields with safe defaults, new HTTP metadata headers.
   - **PATCH** — internal-only changes: bug fixes, performance improvements, refactors, dependency bumps, docs.
 

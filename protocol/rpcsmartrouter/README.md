@@ -62,8 +62,8 @@ returning a wrong-but-well-formed answer. It is intended for **read** methods.
 Cross-validation can be turned on two ways, which compose via `clamp(caller, floor, cap)`:
 
 - **Per-request headers** (the caller opts in per call):
-  - `lava-cross-validation-max-participants: N` — fan out to N providers.
-  - `lava-cross-validation-agreement-threshold: M` — require M identical responses.
+  - `router-cross-validation-max-participants: N` — fan out to N providers.
+  - `router-cross-validation-agreement-threshold: M` — require M identical responses.
 - **Per-method operator policy** (config-driven, below). An operator policy can *mandate*
   cross-validation even with no caller headers (`enabled: true`), set a **floor** the caller
   may exceed, a **cap** that overrides a stricter caller, or *forbid* caller-driven
@@ -87,7 +87,7 @@ Cross-validation can be turned on two ways, which compose via `clamp(caller, flo
 > **Write / stateful methods.** Both paths are guarded. An **operator policy** that enables
 > cross-validation on a stateful (write) method is **rejected at startup**. The
 > **caller-header** path is ignored on such a method: the request routes by its stateful
-> category and the `lava-cross-validation-*` headers have no effect, whatever they contain
+> category and the `router-cross-validation-*` headers have no effect, whatever they contain
 > (MAG-3603 — cross-validating a broadcast only one node can accept cannot reach any agreement
 > threshold, so the router used to answer HTTP 500 after submitting the transaction). No policy
 > is needed for this; `forbid-caller-cv: true` is what an operator reaches for on a **stateless**
@@ -169,7 +169,7 @@ cross-validation:
 | --- | --- |
 | `enabled` | `true` mandates CV for this method even with no caller headers. |
 | `forbid-caller-cv` | `true` disables CV for this method: the caller's CV headers are ignored and the method routes by its normal category. Mutually exclusive with `enabled` (rejected at startup if both set); the other knobs are ignored when set. Redundant on a stateful method, which ignores the headers on its own (MAG-3603); such an entry still loads and is harmless. |
-| `max-participants` | How many providers to fan out to. |
+| `max-participants` | How many providers to fan out to — a number, or `primary` (every configured `direct-rpc` upstream) / `all` (also `backup-direct-rpc`); see [CROSS-VALIDATION.md](../../docs/CROSS-VALIDATION.md#max-participants-every-configured-upstream). |
 | `agreement-threshold` | How many identical responses form a quorum (in per-group mode, *within each group*). |
 | `min-groups` | Distinct provider groups the quorum must span (`1` = no diversity requirement). |
 | `per-group-quorum` | Upgrade `min-groups` to per-group quorum (operator-only; requires `min-groups > 1`). |
@@ -196,7 +196,10 @@ groups than its `min-groups`, or fewer providers than its `max-participants`), i
 `ATTENTION` line naming the missing providers and refuses only the requests that policy governs
 until the background retry re-admits them. Two shortfalls are warned about rather than refused:
 a `max-participants` larger than the configured primaries, and an endpoint configured with
-backup providers only, which cross-validation never draws on. The startup line counts every
+backup providers only. Cross-validation never draws on backups for a numeric or `primary`
+`max-participants` — only `max-participants: all` does, topping up a primary-only shortfall
+from the backup tier (MAG-2783); a backup-only endpoint still cannot meet a `primary`-valued
+or numeric policy. The startup line counts every
 verified primary; a request that needs an addon or extension draws only on the primaries serving
 it and can be refused with fewer.
 
@@ -208,18 +211,18 @@ without debug mode:
 
 | Header | Value |
 | --- | --- |
-| `lava-cross-validation-status` | `success` or `failed`. |
-| `lava-cross-validation-all-providers` | All providers queried (comma-separated). |
-| `lava-cross-validation-agreeing-providers` | Providers whose response matched the consensus. |
-| `lava-cross-validation-disagreeing-providers` | Providers whose **received** response dissented (node/protocol errors and hash-divergent responses; on a quorum failure, every successful provider, since there is no consensus to agree with). Empty means "everyone we heard from agreed" — a provider the router did not hear from is listed as *pending*, never silently dropped (MAG-2187). |
-| `lava-cross-validation-pending-providers` | Providers queried but whose response had not arrived when the reply was built (the quorum early-exit does not wait for stragglers). Their late responses are still compared against the consensus asynchronously — see [Straggler behavior](#straggler-behavior). |
-| `lava-cross-validation-failure-reason` | On failure only — a stable enum (below). |
-| `lava-cross-validation-plurality-size` | On failure only — how many providers returned the most common response (`0` when no non-empty response arrived). Nil/empty replies never count. Says who came closest, not who was right: a plurality below the agreement threshold is not a consensus, which is why `disagreeing-providers` still lists every successful provider (MAG-2192). |
-| `lava-cross-validation-plurality-providers` | On failure only — those providers (comma-separated, sorted). Empty on a tie, since a tie has no plurality. Drawn only from received responses, so a pending provider never appears. |
+| `router-cross-validation-status` | `success` or `failed`. |
+| `router-cross-validation-all-providers` | All providers queried (comma-separated). |
+| `router-cross-validation-agreeing-providers` | Providers whose response matched the consensus. |
+| `router-cross-validation-disagreeing-providers` | Providers whose **received** response dissented (node/protocol errors and hash-divergent responses; on a quorum failure, every successful provider, since there is no consensus to agree with). Empty means "everyone we heard from agreed" — a provider the router did not hear from is listed as *pending*, never silently dropped (MAG-2187). |
+| `router-cross-validation-pending-providers` | Providers queried but whose response had not arrived when the reply was built (the quorum early-exit does not wait for stragglers). Their late responses are still compared against the consensus asynchronously — see [Straggler behavior](#straggler-behavior). |
+| `router-cross-validation-failure-reason` | On failure only — a stable enum (below). |
+| `router-cross-validation-plurality-size` | On failure only — how many providers returned the most common response (`0` when no non-empty response arrived). Nil/empty replies never count. Says who came closest, not who was right: a plurality below the agreement threshold is not a consensus, which is why `disagreeing-providers` still lists every successful provider (MAG-2192). |
+| `router-cross-validation-plurality-providers` | On failure only — those providers (comma-separated, sorted). Empty on a tie, since a tie has no plurality. Drawn only from received responses, so a pending provider never appears. |
 
 A **request-time structural fail-fast** (a capacity/diversity check that aborts *before any
 upstream relay runs* — the `insufficient-capacity` / `insufficient-groups` reasons below) carries
-**only** `lava-cross-validation-status: failed` and `lava-cross-validation-failure-reason`. The
+**only** `router-cross-validation-status: failed` and `router-cross-validation-failure-reason`. The
 provider-list headers are omitted because no providers were queried; `failure-reason` is the
 discriminator the client needs. (The request still increments
 `cross_validation_requests_total` / `cross_validation_failed_total`.)
@@ -232,7 +235,7 @@ on the gRPC interface (an errored gRPC call returns a trailers-only response, so
 
 ### Failure reasons
 
-`lava-cross-validation-failure-reason` is one of a small closed enum. **Quorum-time** reasons
+`router-cross-validation-failure-reason` is one of a small closed enum. **Quorum-time** reasons
 mean responses came back but didn't agree — a retry against a different set *may* help:
 
 - `no-agreement` — enough responses, but none agreed up to the threshold.
@@ -240,11 +243,11 @@ mean responses came back but didn't agree — a retry against a different set *m
 - `diversity-unmet` — a quorum agreed but did not span `min-groups` groups.
 - `group-quorum-unmet` — (per-group mode) too few groups reached their own internal quorum, or the per-group winners disagreed.
 
-**Request-time (structural)** reasons mean the candidate set could not even be assembled — a
-retry against the same router will *not* help (the fleet structurally lacks the
-providers/groups), so the client should fall back:
+**Request-time (structural)** reasons mean the candidate set could not even be assembled, so the
+client should fall back. A retry against the same router helps only once the set can be assembled:
+a blocked provider is re-admitted, or a provider reaches the block the request names:
 
-- `insufficient-capacity` — too few candidate providers/sessions for `max-participants` or the threshold.
+- `insufficient-capacity` — too few candidate providers/sessions for `max-participants` or the threshold. A blocked provider is never a candidate, and for a request that names a block height, neither is a provider known to be below that block (MAG-2785, MAG-2786).
 - `insufficient-groups` — too few candidate groups (or, for per-group, too few groups with enough providers) for `min-groups`.
 
 ### Outlier behavior
@@ -269,12 +272,12 @@ actually reached on a deterministic method:
 - `smartrouter_cross_validation_mismatch_total{spec, apiInterface, method, group, finality}`
   is incremented **once per distinct outlier group** for a successful deterministic quorum — not
   once per provider. (Non-deterministic methods legitimately differ and are not counted; a quorum
-  *failure* emits a `lava-cross-validation-failure-reason` instead, never this metric.) The
+  *failure* emits a `router-cross-validation-failure-reason` instead, never this metric.) The
   `finality` label (`finalized` / `not_finalized` / `unknown`) lets alerting prioritize
   post-finality divergence over benign pre-finality propagation lag.
 - Provider-level detail is available separately: each dissenting provider is emitted in an info
   log (`cross-validation outlier detected`, with provider/group/finality/hashes) and listed in the
-  `lava-cross-validation-disagreeing-providers` response header.
+  `router-cross-validation-disagreeing-providers` response header.
 
 So a single divergent provider is observed and outvoted **when enough providers still agree**;
 under a strict (unanimous) policy it instead causes a quorum failure.
@@ -283,7 +286,7 @@ under a strict (unanimous) policy it instead causes a quorum failure.
 
 The quorum **early-exits** as soon as the agreement threshold (and any diversity requirement) is
 met — it does not wait for the remaining in-flight providers. A provider that loses that race is a
-**straggler**: it appears in `lava-cross-validation-pending-providers` (never silently dropped, and
+**straggler**: it appears in `router-cross-validation-pending-providers` (never silently dropped, and
 never *accused* in `disagreeing-providers`, which lists only dissent the router actually received —
 MAG-2187).
 
@@ -332,7 +335,7 @@ One row per recorded comparison outcome, oldest first:
 | `Seq`, `RecordedAt` | monotonic id and timestamp; `Seq` is the unambiguous ordering key |
 | `Source` | `reply-time` (seen before the reply → in `disagreeing-providers`) or `straggler` (resolved after it → was in `pending-providers`) |
 | `ChainID`, `ApiInterface` | the row's own chain identity, as on every other `/debug` row |
-| `RequestID` | the `Lava-Guid` response header value — **not** `/debug/logs`' `request_id`, which is the caller's `X-Request-Id` |
+| `RequestID` | the `Router-Guid` response header value — **not** `/debug/logs`' `request_id`, which is the caller's `X-Request-Id` |
 | `Method`, `ProviderAddress`, `ProviderGroup`, `Finality` | who dissented, on what, in which group, at which finality |
 | `Outcome` | `disagreed` at reply time; any straggler outcome on the async path |
 | `ConsensusHash`, `OutlierHash` | full 32-byte hex; the log's short form is a prefix. `OutlierHash` is the provider's own hash — equal to `ConsensusHash` on an agreed straggler, and `""` when nothing was hashed (`node-error` / `protocol-error` / `not-received`) |
@@ -341,7 +344,7 @@ One row per recorded comparison outcome, oldest first:
 Every straggler resolution is recorded, not only dissent: an `agreed` row is the positive control a
 test asserting "no dissent happened" anchors on. A cross-validated request where **everyone agreed at
 reply time** records nothing — that request is proven to have run by its own
-`lava-cross-validation-status` / `-agreeing-providers` headers.
+`router-cross-validation-status` / `-agreeing-providers` headers.
 
 Filters (optional, ANDed): `request_id`, `chain_id`, `outcome`, `limit` (keeps the most recent N).
 `POST /debug/cross-validation-events/clear` empties the ring for test isolation.
@@ -350,6 +353,37 @@ Both answer **503**, never an empty 200, when the recorder is not installed — 
 recorded" and "nothing dissented" are opposite answers. The ring is bounded (4096 events); the
 `X-Cross-Validation-Events-Dropped` response header reports evictions so truncation cannot pass for
 absence.
+
+### Compliance record (always on, not debug-gated)
+
+Unrelated to the debug ring above: every cross-validated request — success or failure, agreement or
+dissent — emits exactly one structured JSON log line, `"cross-validation record"`, into the router's
+normal log output (MAG-2787, part of MAG-2782's Kraken compliance work — RTS (EU) 2024/1774
+Art. 14(1)(a)/23(2)(b), DORA Art. 12(7)). Unlike the debug ring, this is **always on**, independent of
+`--debug-address`, and independent of `--log-level` — it is written through a dedicated fixed-level
+logger specifically so turning the router's verbosity down can never silence compliance evidence. The
+router holds nothing and serves no read API for these records; a separate ticket (MAG-2788) covers
+reading them back from the log pipeline (Loki on S3).
+
+The record carries digests and metadata only, **never** a request or response body. Key fields:
+
+| Field | Meaning |
+| --- | --- |
+| `seq` | process-wide monotonic counter, assigned before the record is queued for writing — a gap in the sequence as seen in the log stream is how a dropped record becomes visible, rather than silent. A request whose stragglers were still in flight is written when they resolve, up to the straggler deadline after its reply, so records are not in `seq` order: a missing `seq` is a drop only once that deadline has passed. It starts again at 1 when the process restarts |
+| `requestId` | the same value returned in the `Router-Guid` response header |
+| `tenant` | the caller's customer-id/dapp-id header as sent: up to 128 bytes of valid UTF-8, else `other`; `DefaultDappID` when absent. Unlike the `customer` Prometheus label it is not capped in count, so keep it in the line body and never promote it to a Loki label |
+| `method` | the spec's api name, written as `relay_end` writes it: a REST path without its leading slash (`cosmos/bank/v1beta1/balances/{address}`), because the fleet's log collector rewrites a value that starts with `/` as `/REDACTED`. An unlisted api named by URL is the caller's own path, so it is withheld as `Default-REDACTED` |
+| `agreementThreshold`, `maxParticipants`, `minGroups` | the policy **as resolved for this request**, not whatever the config says when the record is later read |
+| `status`, `failureReason` | `success` or `failed`; the closed failure-reason enum on failure |
+| `servedDigest` | which answer was served — empty on failure, where there was no winner |
+| `pluralitySize`, `pluralityProviders` | on a failed quorum, the largest agreeing group's composition |
+| `endpoints` | every provider queried, each with its outcome (`agreed`/`disagreed`/`node-error`/`protocol-error`/`not-received`) and digest — a digest is only ever meaningful alongside its outcome, since an empty digest means both "answered with empty content" and "never answered" |
+| `lateResolutions` | stragglers that resolved after the reply, with how long that took — empty when nothing was still pending at reply time |
+| `digestAlgorithmVersion` | which canonicalization every digest in the record used |
+
+Writing is asynchronous through a bounded queue: a full queue drops the record rather than blocking
+the relay, and increments `smartrouter_cross_validation_record_dropped_total{spec, apiInterface}` — the
+same drop a reader with no metrics access can still see as a hole in `seq`.
 
 ## Usage
 
@@ -373,9 +407,9 @@ the cache more than its rare hits save. 1 MiB fits Solana `getBlock` replies (1.
 16% of the time). On ETH and Base, `eth_getBlockReceipts` replies run up to and past 1 MiB, so a
 cap that low there cuts those entries; size the cap per chain from `smartrouter_cache_entry_bytes`.
 
-### Per-request time budget (`lava-relay-timeout`)
+### Per-request time budget (`router-relay-timeout`)
 
-A caller can send `lava-relay-timeout: <Go duration>` (for example `300ms` or `5s`) to set the
+A caller can send `router-relay-timeout: <Go duration>` (for example `300ms` or `5s`) to set the
 request's attempt window: how long the router waits on one endpoint before it also tries the next.
 The router bounds the value (MAG-3600):
 
@@ -409,7 +443,7 @@ and no other endpoint, primary or backup, is tried while it does.
 A request extended this way is one of those: its window is its whole budget, so one quiet endpoint
 can hold it for as long as the caller asked, up to the flag's value.
 
-A reply to a request that carried the header includes `Lava-Relay-Timeout-Applied`: the window the
+A reply to a request that carried the header includes `Router-Relay-Timeout-Applied`: the window the
 router actually used, as a Go duration. Like the router's other reply headers, it is absent when the
 request failed without any reply.
 
@@ -441,6 +475,42 @@ read, so messages sent over a WebSocket carry no caller ids today. Reading the u
 would not be the same fix: one socket multiplexes many subscriptions and requests, so those ids
 would label every request on the connection rather than the one the caller tagged.
 
+An HTTP request or a gRPC call needs no caller id to be found again: the router names it by its
+GUID, in the reply's `Router-Guid` header, or in the error id of an error reply without one. In debug
+mode, `/debug/relay-end?guid=<GUID>` returns that request's `relay_end` event as one JSON object
+([docs/RELAY-END-EVENT.md](../../docs/RELAY-END-EVENT.md#reading-one-requests-event)). The
+exceptions are a WebSocket message answered successfully and a gRPC stream opened successfully: their
+replies carry no GUID, so their events, though kept, are found only through `/debug/logs`. Their
+error replies do carry it, as `Error_GUID` or in the gRPC status text.
+
+### The answers one request received (`/debug/relay-answers`)
+
+In debug mode (`--debug-address`), `GET /debug/relay-answers?request_id=<Router-Guid>` lists the
+answers one request's attempts handed back, in the order they reached the router (MAG-4358). The
+id is the `Router-Guid` header of the reply, not the caller's `X-Request-Id`. A write goes to every
+primary at once, and what its caller gets depends on that order: a refusal that arrives first is
+held while the router waits for an acceptance. This route shows the order without a log line or the
+metrics port. It is read-only, and reading it does not change any reply.
+
+One row per answer, oldest first:
+
+| Field | Meaning |
+| --- | --- |
+| `Seq` | per-process order key, taken as the answer reached the request. The router reads a request's answers in this order; only two answers handed over in the same instant can swap |
+| `ArrivedAt`, `ElapsedMs` | when the answer arrived, to the second, and how long after the request's relay processing started, to the millisecond. Two answers of one request usually share an `ArrivedAt`: order them by `Seq`, and compare `ElapsedMs` for the time between them |
+| `ChainID`, `ApiInterface`, `RequestID` | the request |
+| `Method` | the request's api, named as `relay_end` names it: without its leading slash, capped at 256 characters, and `Default-REDACTED` for an unlisted api the request named by URL, whose name would be the caller's own path |
+| `ProviderAddress` | who answered |
+| `StatusCode` | the status the upstream answered with. A 5xx or 429 that failed the attempt keeps its status here. `0` means no status came back. On gRPC a call that succeeded reads `200`, and a node's error reads its gRPC status code, `1` to `16` |
+| `Outcome` | `success`, `node-error` or `protocol-error`: what the router made of the answer. `unread` means the answer arrived after the router had stopped reading for its reply: a write's other deliveries, or a cross-validation straggler (see `/debug/cross-validation-events` for those) |
+
+A cache hit, the router's own health check and a subscription record nothing: a subscription is
+served by the subscription managers, not the relay processor. Without `request_id` the route lists
+every request's answers. An optional `limit` keeps the most recent N rows. The route answers
+**503** when the recorder is not installed, so "nothing was recorded" never reads as "nothing
+answered". The ring holds the last 4096 answers, and the `X-Relay-Answers-Dropped` header counts
+the evicted ones.
+
 ### Usage telemetry (OTel)
 
 Off by default. When enabled, the smart router emits two event types as
@@ -460,20 +530,24 @@ inlinable no-op call and nothing else.
 
 ### Extensions no node offers
 
-A caller asks for an extension, such as `archive`, with the `lava-extension` request header
+A caller asks for an extension, such as `archive`, with the `router-extension` request header
 (comma-separated for several). When no node on the router offers one it asked for, the request is
 still served, from a node without it, and the reply says so:
 
 | Header | Value |
 | --- | --- |
-| `Lava-Extension-Unavailable` | The extensions the caller asked for with `lava-extension` that no node on this router offers, comma-separated. The answer came from a node without them, so a caller that needs one of them should not trust it. |
+| `Router-Extension-Unavailable` | The extensions the caller asked for with `router-extension` that no node on this router offers, comma-separated. The answer came from a node without them, so a caller that needs one of them should not trust it. |
 
 The header is absent when every requested extension was applied, so its presence alone means the
 request was served without something the caller asked for. It only ever names extensions the
 caller requested: one the router adds on its own, such as `archive` for an `eth_call` deep behind
-the head, is never listed, and `lava-extension: none` never produces it. The header arrives as an
+the head, is never listed, and `router-extension: none` never produces it. The header arrives as an
 HTTP response header on JSON-RPC, REST and Tendermint RPC, and as response metadata on gRPC;
 messages over a WebSocket carry no headers.
+
+A node configured with an extension offers it only while it serves it. When the only nodes
+declaring one were refused it at startup, were unreachable then, or cannot take the request, the
+request is served from a node without it and the reply says so the same way.
 
 On the operator side the router logs a WARN once per extension per endpoint, the first time a
 reply reports it, naming the extension, chain and interface, and counts every such request in
@@ -495,7 +569,7 @@ own headers are appended, the reply keeps only:
 
 Everything else the upstream or its CDN sends — server and ray ids, its CORS policy, cookies,
 quota counters, product headers — is dropped, and so is any header an upstream sends under a
-name the router owns (`lava-*`, `Provider-Latest-Block`, `Smart-Router-Version`,
+name the router owns (`router-*`, `Provider-Latest-Block`,
 `status-code`), whether or not a spec lists it. A cache hit goes through the same filter
 when it is served, from either tier, so an entry written by an older router or read from the
 secondary cache replays the same reduced set (`docs/SECONDARY-CACHE.md`). The filter is
@@ -532,5 +606,5 @@ User Request --> Smart Router --> Provider Selection (QoS-based)
 curl http://localhost:7779/metrics
 
 # Health check
-curl http://localhost:3333/lava/health
+curl http://localhost:3333/router/health
 ```

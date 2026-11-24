@@ -15,8 +15,8 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/endpointstate"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	rand "github.com/magma-Devs/smart-router/utils/rand"
 	"github.com/prometheus/client_golang/prometheus"
@@ -111,7 +111,7 @@ func trackProviderURLsEvery(t *testing.T, blockTime time.Duration, provider stri
 	mm := metrics.NewSmartRouterMetricsManager(metrics.SmartRouterMetricsManagerOptions{})
 	require.NotNil(t, mm)
 	rpcss := &RPCSmartRouterServer{
-		listenEndpoint:             &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		listenEndpoint:             &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 		smartRouterEndpointMetrics: mm,
 	}
 	m := endpointstate.NewEndpointMonitor(ctx, endpointstate.EndpointChainTrackerConfig{
@@ -126,9 +126,9 @@ func trackProviderURLsEvery(t *testing.T, blockTime time.Duration, provider stri
 	rpcss.endpointChainTrackerManager = m // before any tracker polls
 	for _, u := range upstreams {
 		mm.RegisterEndpoint("ETH1", "jsonrpc", u.srv.URL, provider)
-		conn, err := lavasession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: u.srv.URL}, 5, "jsonrpc")
+		conn, err := routersession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: u.srv.URL}, 5, "jsonrpc")
 		require.NoError(t, err)
-		ep := &lavasession.Endpoint{NetworkAddress: u.srv.URL, Enabled: true, DirectConnections: []lavasession.DirectRPCConnection{conn}}
+		ep := &routersession.Endpoint{NetworkAddress: u.srv.URL, Enabled: true, DirectConnections: []routersession.DirectRPCConnection{conn}}
 		_, err = m.GetOrCreateTracker("", ep, conn)
 		require.NoError(t, err)
 	}
@@ -139,7 +139,7 @@ func trackProviderURLsEvery(t *testing.T, blockTime time.Duration, provider stri
 // OnNewBlock, and every later poll answers the same block. The url's series stands at it from the
 // first poll, and its answered-until time keeps moving: answering, and stuck.
 func TestURLLatestBlock_StuckURLStandsStillWhileItKeepsAnswering(t *testing.T) {
-	const provider = "lava@mag4204Stuck"
+	const provider = "provider@mag4204Stuck"
 	var head atomic.Int64
 	head.Store(990)
 	stuck := newHeadUpstream(t, func() int64 { return 1000 }, nil)
@@ -161,7 +161,7 @@ func TestURLLatestBlock_StuckURLStandsStillWhileItKeepsAnswering(t *testing.T) {
 // while the clock moves on, until the clock passes it: down, not stuck. Nothing is deleted, so
 // nothing depends on when the next poll comes, however far a Retry-After or a slow chain pushes it.
 func TestURLLatestBlock_URLThatStopsAnsweringStopsItsAnsweredUntil(t *testing.T) {
-	const provider = "lava@mag4204StopsAnswering"
+	const provider = "provider@mag4204StopsAnswering"
 	var head atomic.Int64
 	head.Store(990)
 	var down atomic.Bool
@@ -192,7 +192,7 @@ func TestURLLatestBlock_URLThatStopsAnsweringStopsItsAnsweredUntil(t *testing.T)
 // A burst of failed polls on a stuck url changes nothing on its series: there is nothing to
 // delete, so there is no gap and no swing for the alerts to read.
 func TestURLLatestBlock_ErrorBurstLeavesAStuckURLsSeries(t *testing.T) {
-	const provider = "lava@mag4204ErrorBurst"
+	const provider = "provider@mag4204ErrorBurst"
 	var failLeft atomic.Int64
 	stuck := newHeadUpstream(t, func() int64 { return 1000 }, func() bool {
 		for {
@@ -222,7 +222,7 @@ func TestURLLatestBlock_ErrorBurstLeavesAStuckURLsSeries(t *testing.T) {
 // just after cleanupStaleTrackers removed the url's tracker and deleted its series. That write
 // must not leave a series standing still for the life of the pod.
 func TestURLLatestBlock_LateWriteForARemovedURLIsUndone(t *testing.T) {
-	const provider = "lava@mag4204LateWrite"
+	const provider = "provider@mag4204LateWrite"
 	const removed = "http://removed.mag4204-late-write:8545"
 	var head atomic.Int64
 	head.Store(1100)
@@ -241,14 +241,14 @@ func TestURLLatestBlock_LateWriteForARemovedURLIsUndone(t *testing.T) {
 
 // A provider's websocket door never serves a relay, so it gets no series of its own.
 func TestOnEndpointPollBlock_WebsocketURLIsLeftOut(t *testing.T) {
-	const provider = "lava@mag4204Websocket"
+	const provider = "provider@mag4204Websocket"
 	const httpsURL, wssURL = "https://rpc.mag4204-ws.example", "wss://ws.mag4204-ws.example"
 	mm := metrics.NewSmartRouterMetricsManager(metrics.SmartRouterMetricsManagerOptions{})
 	require.NotNil(t, mm)
 	mm.RegisterEndpoint("ETH1", "jsonrpc", httpsURL, provider)
 	mm.RegisterEndpoint("ETH1", "jsonrpc", wssURL, provider)
 	rpcss := &RPCSmartRouterServer{
-		listenEndpoint:             &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		listenEndpoint:             &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 		smartRouterEndpointMetrics: mm,
 	}
 
@@ -275,8 +275,8 @@ func TestHarvest_MovesTheRelayedToURLsSeries(t *testing.T) {
 	t.Cleanup(m.Stop)
 
 	const url = "http://harvest.mag4204:8545"
-	const provider = "lava@mag4204Harvest"
-	ep := &lavasession.Endpoint{NetworkAddress: url, Enabled: true}
+	const provider = "provider@mag4204Harvest"
+	ep := &routersession.Endpoint{NetworkAddress: url, Enabled: true}
 	_, err := m.GetOrCreateTracker("", ep, nil)
 	require.NoError(t, err)
 	gen, ok := m.ObservationGeneration(url)
@@ -286,7 +286,7 @@ func TestHarvest_MovesTheRelayedToURLsSeries(t *testing.T) {
 	require.NotNil(t, mm)
 	mm.RegisterEndpoint("ETH1", "jsonrpc", url, provider)
 	rpcss := &RPCSmartRouterServer{
-		listenEndpoint:              &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		listenEndpoint:              &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 		endpointChainTrackerManager: m,
 		smartRouterEndpointMetrics:  mm,
 		chainParser:                 newRealChainParserForHarvest(t, "ETH1"),
@@ -315,7 +315,7 @@ func TestHarvest_LateWriteForARemovedURLIsUndone(t *testing.T) {
 	defer cancel()
 
 	const url = "http://harvest-late.mag4204:8545"
-	const provider = "lava@mag4204HarvestLate"
+	const provider = "provider@mag4204HarvestLate"
 	mm := metrics.NewSmartRouterMetricsManager(metrics.SmartRouterMetricsManagerOptions{})
 	require.NotNil(t, mm)
 	mm.RegisterEndpoint("ETH1", "jsonrpc", url, provider)
@@ -335,14 +335,14 @@ func TestHarvest_LateWriteForARemovedURLIsUndone(t *testing.T) {
 	})
 	t.Cleanup(m.Stop)
 
-	ep := &lavasession.Endpoint{NetworkAddress: url, Enabled: true}
+	ep := &routersession.Endpoint{NetworkAddress: url, Enabled: true}
 	_, err := m.GetOrCreateTracker("", ep, nil)
 	require.NoError(t, err)
 	gen, ok := m.ObservationGeneration(url)
 	require.True(t, ok)
 
 	rpcss := &RPCSmartRouterServer{
-		listenEndpoint:              &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		listenEndpoint:              &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 		endpointChainTrackerManager: m,
 		smartRouterEndpointMetrics:  mm,
 		chainParser:                 newRealChainParserForHarvest(t, "ETH1"),

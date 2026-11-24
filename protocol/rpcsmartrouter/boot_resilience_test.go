@@ -9,8 +9,8 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/magma-Devs/smart-router/utils/rand"
 	"github.com/stretchr/testify/require"
 )
@@ -27,14 +27,14 @@ import (
 // target the extracted units that carry the behavior: tier validation, the dark
 // verdict, the adaptive retry cadence, re-admission merging, and the health seed.
 
-func bootTestEndpoint() *lavasession.RPCEndpoint {
-	return &lavasession.RPCEndpoint{ChainID: "BSC", ApiInterface: "jsonrpc", NetworkAddress: "127.0.0.1:0"}
+func bootTestEndpoint() *routersession.RPCEndpoint {
+	return &routersession.RPCEndpoint{ChainID: "BSC", ApiInterface: "jsonrpc", NetworkAddress: "127.0.0.1:0"}
 }
 
-func bootTestProviders(names ...string) []*lavasession.RPCStaticProviderEndpoint {
-	providers := make([]*lavasession.RPCStaticProviderEndpoint, 0, len(names))
+func bootTestProviders(names ...string) []*routersession.RPCStaticProviderEndpoint {
+	providers := make([]*routersession.RPCStaticProviderEndpoint, 0, len(names))
 	for _, n := range names {
-		providers = append(providers, &lavasession.RPCStaticProviderEndpoint{
+		providers = append(providers, &routersession.RPCStaticProviderEndpoint{
 			Name: n, ChainID: "BSC", ApiInterface: "jsonrpc",
 			NodeUrls: []common.NodeUrl{{Url: "http://" + n + ":8545"}},
 		})
@@ -43,12 +43,12 @@ func bootTestProviders(names ...string) []*lavasession.RPCStaticProviderEndpoint
 }
 
 // failThese returns a validate func that fails exactly the named providers.
-func failThese(names ...string) func(context.Context, *lavasession.RPCStaticProviderEndpoint) error {
+func failThese(names ...string) func(context.Context, *routersession.RPCStaticProviderEndpoint) error {
 	failing := make(map[string]struct{}, len(names))
 	for _, n := range names {
 		failing[n] = struct{}{}
 	}
-	return func(_ context.Context, p *lavasession.RPCStaticProviderEndpoint) error {
+	return func(_ context.Context, p *routersession.RPCStaticProviderEndpoint) error {
 		if _, bad := failing[p.Name]; bad {
 			return errors.New("unreachable")
 		}
@@ -83,7 +83,7 @@ func TestValidateProviderTier_PartitionsAndPreservesConfiguredOrder(t *testing.T
 func TestValidateProviderTier_EmptyTierIsNotAnError(t *testing.T) {
 	failedSet, failedOrdered := validateProviderTier(
 		context.Background(), nil, bootTestEndpoint(), nil, reverifyTierBackup,
-		func(context.Context, *lavasession.RPCStaticProviderEndpoint) error {
+		func(context.Context, *routersession.RPCStaticProviderEndpoint) error {
 			t.Fatal("validate must not be called for an empty tier")
 			return nil
 		}, nil)
@@ -117,7 +117,7 @@ func TestValidateProviderTier_RunsConcurrently(t *testing.T) {
 		defer close(done)
 		validateProviderTier(
 			context.Background(), providers, bootTestEndpoint(), nil, reverifyTierStatic,
-			func(context.Context, *lavasession.RPCStaticProviderEndpoint) error {
+			func(context.Context, *routersession.RPCStaticProviderEndpoint) error {
 				cur := atomic.AddInt64(&inFlight, 1)
 				for {
 					old := atomic.LoadInt64(&peak)
@@ -142,11 +142,11 @@ func TestValidateProviderTier_RunsConcurrently(t *testing.T) {
 
 func TestChainIsDark(t *testing.T) {
 	const chainKey = "BSC-jsonrpc"
-	session := map[uint64]*lavasession.ConsumerSessionsWithProvider{0: createTestProviderSession("p", 1)}
+	session := map[uint64]*routersession.ConsumerSessionsWithProvider{0: createTestProviderSession("p", 1)}
 
 	for _, tc := range []struct {
 		name           string
-		static, backup map[uint64]*lavasession.ConsumerSessionsWithProvider
+		static, backup map[uint64]*routersession.ConsumerSessionsWithProvider
 		wantDark       bool
 	}{
 		{"primaries healthy", session, nil, false},
@@ -170,9 +170,9 @@ func TestChainIsDark(t *testing.T) {
 func TestRetryIntervalFor(t *testing.T) {
 	require.Equal(t, retryDarkBaseInterval, retryIntervalFor(true),
 		"a chain that cannot serve retries promptly — every second is downtime")
-	require.Equal(t, retryMaxInterval, retryIntervalFor(false),
-		"a merely degraded chain waits the full interval; retries buy redundancy, not availability")
-	require.Less(t, retryDarkBaseInterval, retryMaxInterval)
+	require.Equal(t, VerificationRetryDelay, retryIntervalFor(false),
+		"a merely degraded chain waits the first verification retry delay; retries buy redundancy, not availability")
+	require.Less(t, retryDarkBaseInterval, VerificationRetryDelay)
 }
 
 func TestSeedInitialHealth_DarkChainReportsUnhealthyImmediately(t *testing.T) {
@@ -196,8 +196,8 @@ func TestSeedInitialHealth_NilReceiverIsSafe(t *testing.T) {
 }
 
 func TestMergeRecoveredSessions(t *testing.T) {
-	convert := func(providers []*lavasession.RPCStaticProviderEndpoint) map[uint64]*lavasession.ConsumerSessionsWithProvider {
-		out := make(map[uint64]*lavasession.ConsumerSessionsWithProvider, len(providers))
+	convert := func(providers []*routersession.RPCStaticProviderEndpoint) map[uint64]*routersession.ConsumerSessionsWithProvider {
+		out := make(map[uint64]*routersession.ConsumerSessionsWithProvider, len(providers))
 		for i, p := range providers {
 			out[uint64(i)] = createTestProviderSession(p.Name, 0)
 		}
@@ -205,12 +205,12 @@ func TestMergeRecoveredSessions(t *testing.T) {
 	}
 
 	t.Run("no recoveries returns the original map untouched", func(t *testing.T) {
-		existing := map[uint64]*lavasession.ConsumerSessionsWithProvider{0: createTestProviderSession("a", 1)}
+		existing := map[uint64]*routersession.ConsumerSessionsWithProvider{0: createTestProviderSession("a", 1)}
 		require.Equal(t, existing, mergeRecoveredSessions(existing, nil, convert, 7))
 	})
 
 	t.Run("recovered sessions append past the highest existing index", func(t *testing.T) {
-		existing := map[uint64]*lavasession.ConsumerSessionsWithProvider{
+		existing := map[uint64]*routersession.ConsumerSessionsWithProvider{
 			0: createTestProviderSession("a", 1),
 			5: createTestProviderSession("b", 1),
 		}
@@ -236,7 +236,7 @@ func TestPruneRestoredFromFailed(t *testing.T) {
 	const chainKey = "BSC-jsonrpc"
 
 	t.Run("restored providers are dropped, others kept", func(t *testing.T) {
-		failed := map[string][]*lavasession.RPCStaticProviderEndpoint{
+		failed := map[string][]*routersession.RPCStaticProviderEndpoint{
 			chainKey: bootTestProviders("x", "y", "z"),
 		}
 		pruneRestoredFromFailed(failed, chainKey, map[string]struct{}{"y": {}})
@@ -247,7 +247,7 @@ func TestPruneRestoredFromFailed(t *testing.T) {
 	})
 
 	t.Run("entry is deleted once nothing is pending so the retry loop can stop", func(t *testing.T) {
-		failed := map[string][]*lavasession.RPCStaticProviderEndpoint{
+		failed := map[string][]*routersession.RPCStaticProviderEndpoint{
 			chainKey: bootTestProviders("x", "y"),
 		}
 		pruneRestoredFromFailed(failed, chainKey, map[string]struct{}{"x": {}, "y": {}})
@@ -255,7 +255,7 @@ func TestPruneRestoredFromFailed(t *testing.T) {
 	})
 
 	t.Run("absent chain is a no-op", func(t *testing.T) {
-		failed := map[string][]*lavasession.RPCStaticProviderEndpoint{}
+		failed := map[string][]*routersession.RPCStaticProviderEndpoint{}
 		require.NotPanics(t, func() {
 			pruneRestoredFromFailed(failed, chainKey, map[string]struct{}{"x": {}})
 		})
@@ -277,17 +277,16 @@ func TestReadmitRecoveredProviders_RestoresBothTiers(t *testing.T) {
 	require.True(t, rpsr.chainIsDark(chainKey))
 
 	var convertCalls int32
-	convert := func(providers []*lavasession.RPCStaticProviderEndpoint) map[uint64]*lavasession.ConsumerSessionsWithProvider {
+	convert := func(providers []*routersession.RPCStaticProviderEndpoint) map[uint64]*routersession.ConsumerSessionsWithProvider {
 		atomic.AddInt32(&convertCalls, 1)
-		out := make(map[uint64]*lavasession.ConsumerSessionsWithProvider, len(providers))
+		out := make(map[uint64]*routersession.ConsumerSessionsWithProvider, len(providers))
 		for i, p := range providers {
 			out[uint64(i)] = createTestProviderSession(p.Name, 0)
 		}
 		return out
 	}
 
-	rpsr.readmitRecoveredProviders(chainKey, rpcEndpoint, convert,
-		staticProviders, nil, backupProviders, nil)
+	rpsr.readmitRecoveredProviders(chainKey, rpcEndpoint, convert, staticProviders, backupProviders)
 
 	require.Len(t, rpsr.providerSessions[chainKey], 1, "primary re-admitted")
 	require.Len(t, rpsr.backupProviderSessions[chainKey], 1, "backup re-admitted — backups are retried too now")
@@ -307,11 +306,11 @@ func TestReadmitRecoveredProviders_NoRecoveriesStillRecordsStillFailed(t *testin
 	rpsr.failedStaticProviders[chainKey] = stillFailing
 
 	rpsr.readmitRecoveredProviders(chainKey, rpcEndpoint,
-		func([]*lavasession.RPCStaticProviderEndpoint) map[uint64]*lavasession.ConsumerSessionsWithProvider {
+		func([]*routersession.RPCStaticProviderEndpoint) map[uint64]*routersession.ConsumerSessionsWithProvider {
 			t.Fatal("nothing recovered — must not build sessions")
 			return nil
 		},
-		nil, stillFailing, nil, nil)
+		nil, nil)
 
 	require.Len(t, rpsr.failedStaticProviders[chainKey], 1, "still queued for the next retry")
 	require.Empty(t, rpsr.providerSessions[chainKey])
@@ -320,7 +319,7 @@ func TestReadmitRecoveredProviders_NoRecoveriesStillRecordsStillFailed(t *testin
 
 // A dark chain must keep retrying and start serving as soon as an upstream returns,
 // without a process restart. This is MAG-2525's headline requirement.
-func TestRetryFailedProviders_DarkChainAdoptsProviderWhenItReturns(t *testing.T) {
+func TestVerificationRetries_DarkChainAdoptsProviderWhenItReturns(t *testing.T) {
 	rand.InitRandomSeed()
 	shortenRetryIntervals(t)
 	const chainKey = "BSC-jsonrpc"
@@ -334,7 +333,7 @@ func TestRetryFailedProviders_DarkChainAdoptsProviderWhenItReturns(t *testing.T)
 
 	// The upstream stays down for the first few attempts, then recovers.
 	var attempts int32
-	restoreValidate := swapBootValidate(func(_ context.Context, _ *lavasession.RPCStaticProviderEndpoint) error {
+	restoreValidate := swapBootValidate(func(_ context.Context, _ *routersession.RPCStaticProviderEndpoint) error {
 		if atomic.AddInt32(&attempts, 1) < 3 {
 			return errors.New("still down")
 		}
@@ -348,9 +347,9 @@ func TestRetryFailedProviders_DarkChainAdoptsProviderWhenItReturns(t *testing.T)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		rpsr.retryFailedProviders(ctx, chainKey, nil, rpcEndpoint,
-			func(providers []*lavasession.RPCStaticProviderEndpoint) map[uint64]*lavasession.ConsumerSessionsWithProvider {
-				out := make(map[uint64]*lavasession.ConsumerSessionsWithProvider, len(providers))
+		rpsr.runVerificationRetries(ctx, chainKey, nil, rpcEndpoint,
+			func(providers []*routersession.RPCStaticProviderEndpoint) map[uint64]*routersession.ConsumerSessionsWithProvider {
+				out := make(map[uint64]*routersession.ConsumerSessionsWithProvider, len(providers))
 				for i, p := range providers {
 					out[uint64(i)] = createTestProviderSession(p.Name, 0)
 				}
@@ -361,20 +360,22 @@ func TestRetryFailedProviders_DarkChainAdoptsProviderWhenItReturns(t *testing.T)
 	// The dark backoff doubles from its base, so three attempts land well inside this.
 	require.Eventually(t, func() bool { return !rpsr.chainIsDark(chainKey) }, 10*time.Second, 5*time.Millisecond,
 		"a dark chain must adopt a recovered provider on the fast backoff, not wait for the 15m epoch tick")
+	require.GreaterOrEqual(t, atomic.LoadInt32(&attempts), int32(3))
+	require.Empty(t, rpsr.failedStaticProviders[chainKey])
 
-	// With nothing left failing, the loop reports done and exits on its own.
+	// The loop runs for the life of the chain, and stops with it.
+	cancel()
 	select {
 	case <-done:
-	case <-time.After(retryMaxInterval + 5*time.Second):
-		cancel()
-		<-done
-		t.Fatal("retry loop should self-terminate once every provider has recovered")
+	case <-time.After(5 * time.Second):
+		t.Fatal("the retry loop must stop when its context is cancelled")
 	}
-
-	require.GreaterOrEqual(t, atomic.LoadInt32(&attempts), int32(3))
 }
 
-func TestRetryFailedProviders_StopsWhenNothingIsPending(t *testing.T) {
+// With nothing failing the loop sleeps until something is scheduled, never building a
+// session, and stops with its context (MAG-3950: it no longer exits when its lists empty,
+// or a provider demoted later would never be retried).
+func TestVerificationRetries_IdlesUntilCancelled(t *testing.T) {
 	rand.InitRandomSeed()
 	shortenRetryIntervals(t)
 	const chainKey = "BSC-jsonrpc"
@@ -390,8 +391,8 @@ func TestRetryFailedProviders_StopsWhenNothingIsPending(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		rpsr.retryFailedProviders(ctx, chainKey, nil, rpcEndpoint,
-			func([]*lavasession.RPCStaticProviderEndpoint) map[uint64]*lavasession.ConsumerSessionsWithProvider {
+		rpsr.runVerificationRetries(ctx, chainKey, nil, rpcEndpoint,
+			func([]*routersession.RPCStaticProviderEndpoint) map[uint64]*routersession.ConsumerSessionsWithProvider {
 				t.Error("no failed providers — must not build sessions")
 				return nil
 			})
@@ -399,15 +400,19 @@ func TestRetryFailedProviders_StopsWhenNothingIsPending(t *testing.T) {
 
 	select {
 	case <-done:
-	case <-time.After(retryDarkBaseInterval + 5*time.Second):
-		cancel()
-		<-done
-		t.Fatal("loop must exit when both failed lists are empty")
+		t.Fatal("the loop must keep running with nothing pending")
+	case <-time.After(10 * retryDarkBaseInterval):
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the retry loop must stop when its context is cancelled")
 	}
 }
 
 // One chain being dark must not disturb another chain's state.
-func TestRetryFailedProviders_ChainsAreIsolated(t *testing.T) {
+func TestVerificationRetries_ChainsAreIsolated(t *testing.T) {
 	rand.InitRandomSeed()
 	shortenRetryIntervals(t)
 	rpsr := createTestRPCSmartRouter()
@@ -419,14 +424,14 @@ func TestRetryFailedProviders_ChainsAreIsolated(t *testing.T) {
 
 	smHealthy, _ := createTestSessionManager("ETH1", "jsonrpc")
 	rpsr.sessionManagers[healthyKey] = smHealthy
-	rpsr.providerSessions[healthyKey] = map[uint64]*lavasession.ConsumerSessionsWithProvider{
+	rpsr.providerSessions[healthyKey] = map[uint64]*routersession.ConsumerSessionsWithProvider{
 		0: createTestProviderSession("eth-primary", 1),
 	}
 
 	require.True(t, rpsr.chainIsDark(darkKey))
 	require.False(t, rpsr.chainIsDark(healthyKey))
 
-	restoreValidate := swapBootValidate(func(context.Context, *lavasession.RPCStaticProviderEndpoint) error {
+	restoreValidate := swapBootValidate(func(context.Context, *routersession.RPCStaticProviderEndpoint) error {
 		return errors.New("still down")
 	})
 	defer restoreValidate()
@@ -437,8 +442,8 @@ func TestRetryFailedProviders_ChainsAreIsolated(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		rpsr.retryFailedProviders(ctx, darkKey, nil, darkEndpoint,
-			func([]*lavasession.RPCStaticProviderEndpoint) map[uint64]*lavasession.ConsumerSessionsWithProvider {
+		rpsr.runVerificationRetries(ctx, darkKey, nil, darkEndpoint,
+			func([]*routersession.RPCStaticProviderEndpoint) map[uint64]*routersession.ConsumerSessionsWithProvider {
 				return nil
 			})
 	}()
@@ -452,31 +457,35 @@ func TestRetryFailedProviders_ChainsAreIsolated(t *testing.T) {
 // swapBootValidate substitutes the retry loop's provider probe and returns a
 // restore func. The chainParser argument is irrelevant to these tests, so the
 // fake takes the shorter signature.
-func swapBootValidate(fn func(context.Context, *lavasession.RPCStaticProviderEndpoint) error) func() {
+func swapBootValidate(fn func(context.Context, *routersession.RPCStaticProviderEndpoint) error) func() {
 	prev := retryValidateFn
-	retryValidateFn = func(ctx context.Context, p *lavasession.RPCStaticProviderEndpoint, _ chainlib.ChainParser) (chainlib.ProviderAdmission, error) {
+	retryValidateFn = func(ctx context.Context, p *routersession.RPCStaticProviderEndpoint, _ chainlib.ChainParser, _ chainlib.ProviderAdmission, _ []chainlib.CheckID) (chainlib.ProviderAdmission, error) {
 		return chainlib.ProviderAdmission{}, fn(ctx, p)
 	}
 	return func() { retryValidateFn = prev }
 }
 
 // shortenRetryIntervals compresses the retry cadence so loop behavior can be
-// exercised in milliseconds. The ratio between the two is preserved, since the
-// point of the design is that a dark chain retries far sooner than a degraded one.
+// exercised in milliseconds. The ratios are preserved, since the point of the design
+// is that a dark chain retries far sooner than a degraded one.
 func shortenRetryIntervals(t *testing.T) {
 	t.Helper()
 	prevDark, prevMax := retryDarkBaseInterval, retryMaxInterval
+	prevDelay, prevMaxDelay := VerificationRetryDelay, VerificationRetryMaxDelay
 	retryDarkBaseInterval = 10 * time.Millisecond
 	retryMaxInterval = 500 * time.Millisecond
+	VerificationRetryDelay = 150 * time.Millisecond
+	VerificationRetryMaxDelay = 4500 * time.Millisecond
 	t.Cleanup(func() {
 		retryDarkBaseInterval, retryMaxInterval = prevDark, prevMax
+		VerificationRetryDelay, VerificationRetryMaxDelay = prevDelay, prevMaxDelay
 	})
 }
 
 // The epoch re-verifier promotes a provider back into the pairing, but until this fix
 // it left that provider sitting in the failed list. retryFailedProviders would then
 // revalidate it, succeed, and merge a SECOND session for the same name —
-// mergeRecoveredSessions keys by index and does not dedupe by PublicLavaAddress. The
+// mergeRecoveredSessions keys by index and does not dedupe by PublicAddress. The
 // consumer session manager's pairing map collapses the duplicate but validAddresses
 // does not, so the provider ends up with double its selection weight.
 func TestUpdateEpoch_PromotedProviderLeavesTheFailedList(t *testing.T) {
@@ -492,8 +501,8 @@ func TestUpdateEpoch_PromotedProviderLeavesTheFailedList(t *testing.T) {
 	rpsr.failedStaticProviders[chainKey] = staticProviders
 	rpsr.failedBackupProviders[chainKey] = backupProviders
 
-	convert := func(providers []*lavasession.RPCStaticProviderEndpoint) map[uint64]*lavasession.ConsumerSessionsWithProvider {
-		out := make(map[uint64]*lavasession.ConsumerSessionsWithProvider, len(providers))
+	convert := func(providers []*routersession.RPCStaticProviderEndpoint) map[uint64]*routersession.ConsumerSessionsWithProvider {
+		out := make(map[uint64]*routersession.ConsumerSessionsWithProvider, len(providers))
 		for i, p := range providers {
 			out[uint64(i)] = createTestProviderSession(p.Name, 0)
 		}
@@ -533,8 +542,8 @@ func TestUpdateEpoch_PromotionPrunesOnlyItsOwnTier(t *testing.T) {
 	rpsr.failedStaticProviders[chainKey] = shared
 	rpsr.failedBackupProviders[chainKey] = sharedBackup
 
-	convert := func(providers []*lavasession.RPCStaticProviderEndpoint) map[uint64]*lavasession.ConsumerSessionsWithProvider {
-		out := make(map[uint64]*lavasession.ConsumerSessionsWithProvider, len(providers))
+	convert := func(providers []*routersession.RPCStaticProviderEndpoint) map[uint64]*routersession.ConsumerSessionsWithProvider {
+		out := make(map[uint64]*routersession.ConsumerSessionsWithProvider, len(providers))
 		for i, p := range providers {
 			out[uint64(i)] = createTestProviderSession(p.Name, 0)
 		}
@@ -548,7 +557,7 @@ func TestUpdateEpoch_PromotionPrunesOnlyItsOwnTier(t *testing.T) {
 			configuredStatic:           shared,
 			configuredBackup:           sharedBackup,
 			// applyReverification runs static first, then backup.
-			validateFn: func(context.Context, *lavasession.RPCStaticProviderEndpoint) error {
+			validateFn: func(context.Context, *routersession.RPCStaticProviderEndpoint) error {
 				tierSeen++
 				if tierSeen == 1 {
 					return nil // static recovered

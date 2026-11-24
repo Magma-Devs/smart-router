@@ -32,8 +32,8 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
@@ -165,7 +165,7 @@ func (apip *GrpcChainParser) setupForProvider(reflectionConnection *grpc.ClientC
 	// (MAG-2350). Verification builds each connection's proxy on a clone of its own.
 	wanted := grpcDescriptorConfig{source: grpcConfig.GetDescriptorSource(), path: grpcConfig.DescriptorSetPath}
 	if apip.descriptorConfig != nil && *apip.descriptorConfig != wanted {
-		return utils.LavaFormatError("conflicting gRPC descriptor-source across a chain's node-urls", nil,
+		return utils.FormatError("conflicting gRPC descriptor-source across a chain's node-urls", nil,
 			utils.LogAttr("configured", apip.descriptorConfig.String()),
 			utils.LogAttr("conflicting", wanted.String()),
 			utils.LogAttr("resolution", "block parsing resolves through one registry per chain, so every gRPC node-url on a chain must declare the same descriptor-source and descriptor-set-path"))
@@ -213,7 +213,7 @@ func (apip *GrpcChainParser) CraftMessage(parsing *spectypes.ParseDirective, con
 //
 // The chain proxy's relay path resolves the descriptor via live reflection during the send
 // (see the SendNodeMsg path) and calls SetParsingData itself. But a caller that sends a gRPC poll
-// through a lavasession.DirectRPCConnection — the per-endpoint ChainTracker poller — gets the
+// through a routersession.DirectRPCConnection — the per-endpoint ChainTracker poller — gets the
 // descriptor resolved INSIDE the connection (it caches it and exposes it via GetCachedMethodDescriptor)
 // and a raw protobuf response back, so the crafted message has no descriptor. This wires the
 // connection's descriptor into that message.
@@ -223,15 +223,15 @@ func (apip *GrpcChainParser) CraftMessage(parsing *spectypes.ParseDirective, con
 // parser_arg navigation behaves identically on poll and relay responses.
 func HydrateGrpcResponseParsing(chainMessage ChainMessageForSend, methodDescriptor *desc.MethodDescriptor) error {
 	if methodDescriptor == nil {
-		return utils.LavaFormatError("HydrateGrpcResponseParsing: nil method descriptor", nil)
+		return utils.FormatError("HydrateGrpcResponseParsing: nil method descriptor", nil)
 	}
 	grpcMessage, ok := chainMessage.GetRPCMessage().(*rpcInterfaceMessages.GrpcMessage)
 	if !ok {
-		return utils.LavaFormatError("HydrateGrpcResponseParsing: chain message is not a gRPC message", nil)
+		return utils.FormatError("HydrateGrpcResponseParsing: chain message is not a gRPC message", nil)
 	}
 	descriptorSource, err := grpcurl.DescriptorSourceFromFileDescriptors(methodDescriptor.GetFile())
 	if err != nil {
-		return utils.LavaFormatError("HydrateGrpcResponseParsing: failed building descriptor source", err)
+		return utils.FormatError("HydrateGrpcResponseParsing: failed building descriptor source", err)
 	}
 	_, formatter, err := grpcurl.RequestParserAndFormatter(grpcurl.FormatJSON, descriptorSource, nil, grpcurl.FormatOptions{
 		EmitJSONDefaultFields: false,
@@ -239,7 +239,7 @@ func HydrateGrpcResponseParsing(chainMessage ChainMessageForSend, methodDescript
 		AllowUnknownFields:    true,
 	})
 	if err != nil {
-		return utils.LavaFormatError("HydrateGrpcResponseParsing: failed building formatter", err)
+		return utils.FormatError("HydrateGrpcResponseParsing: failed building formatter", err)
 	}
 	grpcMessage.SetParsingData(methodDescriptor, formatter)
 	return nil
@@ -255,12 +255,17 @@ func (apip *GrpcChainParser) ParseMsg(url string, data []byte, connectionType st
 	// Check API is supported and save it in nodeMsg.
 	apiCont, err := apip.getSupportedApi(url, connectionType)
 	if err != nil {
-		return nil, utils.LavaFormatError("failed to getSupportedApi gRPC", err, utils.LogAttr("url", url), utils.LogAttr("connectionType", connectionType))
+		return nil, utils.FormatError("failed to getSupportedApi gRPC", err, utils.LogAttr("url", url), utils.LogAttr("connectionType", connectionType))
 	}
 
 	apiCollection, err := apip.getApiCollection(connectionType, apiCont.collectionKey.InternalPath, apiCont.collectionKey.Addon)
 	if err != nil {
-		return nil, utils.LavaFormatError("failed to getApiCollection gRPC", err)
+		return nil, utils.FormatError("failed to getApiCollection gRPC", err)
+	}
+
+	// A request no node can decode is refused here, once, before any provider is picked.
+	if err := checkGrpcRequestMessage(apip.registry, url, data); err != nil {
+		return nil, err
 	}
 
 	// handle headers
@@ -291,7 +296,7 @@ func (apip *GrpcChainParser) ParseMsg(url string, data []byte, connectionType st
 		parsedBlock, err := grpcMessage.ParseBlock(overwriteReqBlock)
 		parsedInput.SetBlock(parsedBlock)
 		if err != nil {
-			utils.LavaFormatError("failed parsing block from an overwrite header", err,
+			utils.FormatError("failed parsing block from an overwrite header", err,
 				utils.LogAttr("chain", apip.spec.Name),
 				utils.LogAttr("overwriteRequestedBlock", overwriteReqBlock),
 			)
@@ -351,7 +356,7 @@ type GrpcChainListener struct {
 
 func NewGrpcChainListener(
 	ctx context.Context,
-	listenEndpoint *lavasession.RPCEndpoint,
+	listenEndpoint *routersession.RPCEndpoint,
 	relaySender RelaySender,
 	healthReporter HealthReporter,
 	rpcConsumerLogs *metrics.RPCConsumerLogs,
@@ -384,6 +389,9 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 	sendRelayCallback := func(ctx context.Context, method string, reqBody []byte) ([]byte, metadata.MD, error) {
 		guid := utils.GenerateUniqueIdentifier()
 		ctx = utils.WithUniqueIdentifier(ctx, guid)
+		// The call's deadline here is the caller's own grpc-timeout. Recorded so an attempt that
+		// ends at it is not counted against the endpoint (common.IsClientCancellation).
+		ctx = common.WithCallerDeadline(ctx)
 		msgSeed := strconv.FormatUint(guid, 10)
 		metadataValues, _ := metadata.FromIncomingContext(ctx)
 		ctx = utils.ExtractWantedHeadersFromCachedMap(metadataValues, ctx)
@@ -392,7 +400,7 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 		dappID := extractDappIDFromGrpcHeader(metadataValues)
 
 		grpcHeaders := convertToMetadataMapOfSlices(metadataValues)
-		utils.LavaFormatInfo("in <<< GRPC Relay ",
+		utils.FormatInfo("in <<< GRPC Relay ",
 			utils.LogAttr("GUID", ctx),
 			utils.LogAttr(utils.KEY_REQUEST_ID, ctx),
 			utils.LogAttr(utils.KEY_TASK_ID, ctx),
@@ -408,14 +416,26 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 		apil.logger.AddMetricForGrpc(metricsData, err, &metadataValues)
 
 		if err != nil {
+			if message, ok := refusedRequestMessage(err); ok {
+				// The router refused the request itself, so it is the caller's to fix:
+				// INVALID_ARGUMENT, the status gRPC gives a wrong request, with one fixed sentence
+				// and never err's text, which lists the router's provider names. A plain error, as
+				// below, reaches the client as Unknown (MAG-3800).
+				apil.logger.LogRequestAndResponse("grpc in/out", true, method, relayBodyForLog(string(reqBody), cmdFlags.DebugRelays), "", message, msgSeed, time.Since(startTime), err)
+				// The request id goes in router-guid, as on a served call and on the HTTP refusal,
+				// since the sentence alone no longer carries it.
+				replyMetadata := convertRelayMetaDataToMDMetaData(relayReply.GetMetadata())
+				replyMetadata.Set(common.GUID_HEADER_NAME, msgSeed)
+				return nil, replyMetadata, status.Error(codes.InvalidArgument, message)
+			}
 			errMasking := apil.logger.GetUniqueGuidResponseForError(err, msgSeed)
 			apil.logger.LogRequestAndResponse("grpc in/out", true, method, relayBodyForLog(string(reqBody), cmdFlags.DebugRelays), "", errMasking, msgSeed, time.Since(startTime), err)
 			// Even on error the relay result may carry response metadata — notably the
-			// lava-cross-validation-* failure headers synthesized on a quorum/structural failure. Surface it
+			// router-cross-validation-* failure headers synthesized on a quorum/structural failure. Surface it
 			// (the proxy attaches it as gRPC trailers on the error path) so gRPC clients get the same
 			// structured cross-validation signal as the HTTP interfaces. nil/empty when there is nothing to
 			// propagate, preserving prior behavior for ordinary errors.
-			return nil, convertRelayMetaDataToMDMetaData(relayReply.GetMetadata()), utils.LavaFormatError("Failed to SendRelay", fmt.Errorf("%s", errMasking))
+			return nil, convertRelayMetaDataToMDMetaData(relayReply.GetMetadata()), utils.FormatError("Failed to SendRelay", fmt.Errorf("%s", errMasking))
 		}
 		apil.logger.LogRequestAndResponse("grpc in/out", false, method, string(reqBody), "", "", msgSeed, time.Since(startTime), nil)
 
@@ -434,7 +454,7 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 	var reflectionSource grpcproxy.ReflectionSource
 	if source, ok := apil.relaySender.(grpcproxy.ReflectionSource); ok {
 		reflectionSource = source
-		utils.LavaFormatInfo("gRPC reflection support enabled",
+		utils.FormatInfo("gRPC reflection support enabled",
 			utils.LogAttr("address", apil.endpoint.NetworkAddress),
 		)
 	}
@@ -450,7 +470,7 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 	if subscriptionProvider, ok := apil.relaySender.(GRPCSubscriptionProvider); ok && specHasSubscription {
 		if subscriptionManager := subscriptionProvider.GetGRPCSubscriptionManager(); subscriptionManager != nil {
 			streamCallback = apil.makeStreamRelayCallback(subscriptionManager, cmdFlags.DebugRelays)
-			utils.LavaFormatInfo("gRPC server-streaming support enabled",
+			utils.FormatInfo("gRPC server-streaming support enabled",
 				utils.LogAttr("address", apil.endpoint.NetworkAddress),
 				utils.LogAttr("chainID", apil.endpoint.ChainID),
 			)
@@ -459,39 +479,39 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 
 	_, httpServer, err := grpcproxy.NewGRPCProxyWithReflection(sendRelayCallback, apil.endpoint.HealthCheckPath, cmdFlags, apil.healthReporter, reflectionSource, streamCallback)
 	if err != nil {
-		utils.LavaFormatFatal("provider failure RegisterServer", err, utils.Attribute{Key: "listenAddr", Value: apil.endpoint.NetworkAddress})
+		utils.FormatFatal("provider failure RegisterServer", err, utils.Attribute{Key: "listenAddr", Value: apil.endpoint.NetworkAddress})
 	}
 	apil.httpServer = httpServer
 
 	// setup chain parser
 	apil.chainParser.setupForConsumer(reflectionSource)
 
-	utils.LavaFormatInfo("Server listening", utils.Attribute{Key: "Address", Value: lis.Addr()})
+	utils.FormatInfo("Server listening", utils.Attribute{Key: "Address", Value: lis.Addr()})
 
 	var serveExecutor func() error
 	if apil.endpoint.TLSEnabled {
-		utils.LavaFormatInfo("Running with self signed TLS certificate")
+		utils.FormatInfo("Running with self signed TLS certificate")
 		var certificateErr error
-		httpServer.TLSConfig, certificateErr = lavasession.GetSelfSignedConfig()
+		httpServer.TLSConfig, certificateErr = routersession.GetSelfSignedConfig()
 		if certificateErr != nil {
-			utils.LavaFormatFatal("failed getting a self signed certificate", certificateErr)
+			utils.FormatFatal("failed getting a self signed certificate", certificateErr)
 		}
 		serveExecutor = func() error { return httpServer.ServeTLS(lis, "", "") }
 	} else {
-		utils.LavaFormatInfo("Running with disabled TLS configuration")
+		utils.FormatInfo("Running with disabled TLS configuration")
 		serveExecutor = func() error { return httpServer.Serve(lis) }
 	}
 
 	fmt.Printf(`
  ┌───────────────────────────────────────────────────┐
- │               Lava's Grpc Server                  │
+ │               Router's Grpc Server                │
  │               %s│
  │               Version: %s│
  └───────────────────────────────────────────────────┘
 
 `, truncateAndPadString(apil.endpoint.NetworkAddress, 36), truncateAndPadString(version.Version, 27))
 	if err := serveExecutor(); !errors.Is(err, http.ErrServerClosed) {
-		utils.LavaFormatFatal("Portal failed to serve", err, utils.Attribute{Key: "Address", Value: lis.Addr()}, utils.Attribute{Key: "ChainID", Value: apil.endpoint.ChainID})
+		utils.FormatFatal("Portal failed to serve", err, utils.Attribute{Key: "Address", Value: lis.Addr()}, utils.Attribute{Key: "ChainID", Value: apil.endpoint.ChainID})
 	}
 }
 
@@ -542,7 +562,7 @@ func (apil *GrpcChainListener) makeStreamRelayCallback(subscriptionManager GRPCS
 		metricsData := metrics.NewRelayAnalytics(dappID, apil.endpoint.ChainID, apil.endpoint.ApiInterface)
 		metricsData.SetProcessingTimestampBeforeRelay(startTime)
 
-		utils.LavaFormatInfo("in <<< GRPC stream subscribe",
+		utils.FormatInfo("in <<< GRPC stream subscribe",
 			utils.LogAttr("GUID", ctx),
 			utils.LogAttr(utils.KEY_REQUEST_ID, ctx),
 			utils.LogAttr(utils.KEY_TASK_ID, ctx),
@@ -568,7 +588,7 @@ func (apil *GrpcChainListener) makeStreamRelayCallback(subscriptionManager GRPCS
 		apil.logger.AddMetricForGrpc(metricsData, err, &metadataValues)
 		if err != nil {
 			apil.logger.LogRequestAndResponse("grpc stream in/out", true, method, relayBodyForLog(string(reqBody), debugRelays), "", err.Error(), connectionUniqueId, time.Since(startTime), err)
-			return nil, utils.LavaFormatError("failed to start gRPC subscription", err,
+			return nil, utils.FormatError("failed to start gRPC subscription", err,
 				utils.LogAttr("GUID", ctx),
 				utils.LogAttr("_method", method),
 				utils.LogAttr("dappID", dappID),
@@ -590,7 +610,7 @@ func (apil *GrpcChainListener) makeStreamRelayCallback(subscriptionManager GRPCS
 			Metadata: streamResponseHeaders(firstReply.GetMetadata()),
 			Close: func() {
 				if err := subscriptionManager.UnsubscribeAll(context.Background(), clientKey); err != nil {
-					utils.LavaFormatWarning("failed to release gRPC subscription on stream close", err,
+					utils.FormatWarning("failed to release gRPC subscription on stream close", err,
 						utils.LogAttr("GUID", ctx),
 						utils.LogAttr("_method", method),
 					)
@@ -689,7 +709,7 @@ type GrpcChainProxy struct {
 	descriptorsCache *common.SafeSyncMap[string, *desc.MethodDescriptor]
 }
 
-func NewGrpcChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint lavasession.RPCProviderEndpoint, parser ChainParser) (ChainProxy, error) {
+func NewGrpcChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint routersession.RPCProviderEndpoint, parser ChainParser) (ChainProxy, error) {
 	if err := requireNodeUrl(rpcProviderEndpoint); err != nil {
 		return nil, err
 	}
@@ -706,7 +726,7 @@ func NewGrpcChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint lav
 	return newGrpcChainProxy(ctx, averageBlockTime, parser, conn, rpcProviderEndpoint)
 }
 
-func newGrpcChainProxy(ctx context.Context, averageBlockTime time.Duration, parser ChainParser, conn chainproxy.GRPCConnectorInterface, rpcProviderEndpoint lavasession.RPCProviderEndpoint) (ChainProxy, error) {
+func newGrpcChainProxy(ctx context.Context, averageBlockTime time.Duration, parser ChainParser, conn chainproxy.GRPCConnectorInterface, rpcProviderEndpoint routersession.RPCProviderEndpoint) (ChainProxy, error) {
 	cp := &GrpcChainProxy{
 		// NodeUrl is what carries grpc-config onto the request path; without it
 		// cp.NodeUrl.GrpcConfig is the zero value and descriptor-source is invisible
@@ -716,17 +736,17 @@ func newGrpcChainProxy(ctx context.Context, averageBlockTime time.Duration, pars
 	}
 	cp.conn = conn
 	if cp.conn == nil {
-		return nil, utils.LavaFormatError("g_conn == nil", nil)
+		return nil, utils.FormatError("g_conn == nil", nil)
 	}
 
 	reflectionConnection, err := conn.GetRpc(context.Background(), true)
 	if err != nil {
-		return nil, utils.LavaFormatError("reflectionConnection Error", err)
+		return nil, utils.FormatError("reflectionConnection Error", err)
 	}
 	// this connection is kept open so it needs to be closed on teardown
 	go func() {
 		<-ctx.Done()
-		utils.LavaFormatInfo("tearing down reflection connection, context done")
+		utils.FormatInfo("tearing down reflection connection, context done")
 		conn.ReturnRpc(reflectionConnection)
 	}()
 
@@ -761,15 +781,15 @@ func (cp *GrpcChainProxy) methodDescriptorFor(ctx context.Context, descriptorSou
 	}
 	descriptor, err := descriptorSource.FindSymbol(svc)
 	if err != nil {
-		return nil, utils.LavaFormatError("descriptorSource.FindSymbol", err, traceAttrs(ctx)...)
+		return nil, utils.FormatError("descriptorSource.FindSymbol", err, traceAttrs(ctx)...)
 	}
 	serviceDescriptor, ok := descriptor.(*desc.ServiceDescriptor)
 	if !ok {
-		return nil, utils.LavaFormatError("serviceDescriptor, ok := descriptor.(*desc.ServiceDescriptor)", nil, traceAttrs(ctx, utils.Attribute{Key: "descriptor", Value: descriptor})...)
+		return nil, utils.FormatError("serviceDescriptor, ok := descriptor.(*desc.ServiceDescriptor)", nil, traceAttrs(ctx, utils.Attribute{Key: "descriptor", Value: descriptor})...)
 	}
 	methodDescriptor := serviceDescriptor.FindMethodByName(methodName)
 	if methodDescriptor == nil {
-		return nil, utils.LavaFormatError("serviceDescriptor.FindMethodByName returned nil", nil, traceAttrs(ctx, utils.Attribute{Key: "methodName", Value: methodName})...)
+		return nil, utils.FormatError("serviceDescriptor.FindMethodByName returned nil", nil, traceAttrs(ctx, utils.Attribute{Key: "methodName", Value: methodName})...)
 	}
 	cp.descriptorsCache.Store(cacheKey, methodDescriptor)
 	return methodDescriptor, nil
@@ -778,7 +798,7 @@ func (cp *GrpcChainProxy) methodDescriptorFor(ctx context.Context, descriptorSou
 func (cp *GrpcChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMessageForSend) (relayReply *RelayReplyWrapper, err error) {
 	conn, err := cp.conn.GetRpc(ctx, true)
 	if err != nil {
-		return nil, utils.LavaFormatError("grpc get connection failed ", err, traceAttrs(ctx)...)
+		return nil, utils.FormatError("grpc get connection failed ", err, traceAttrs(ctx)...)
 	}
 	defer cp.conn.ReturnRpc(conn)
 
@@ -788,7 +808,7 @@ func (cp *GrpcChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMes
 	rpcInputMessage := chainMessage.GetRPCMessage()
 	nodeMessage, ok := rpcInputMessage.(*rpcInterfaceMessages.GrpcMessage)
 	if !ok {
-		return nil, utils.LavaFormatError("invalid message type in grpc failed to cast RPCInput from chainMessage", nil, traceAttrs(ctx, utils.Attribute{Key: "rpcMessage", Value: rpcInputMessage})...)
+		return nil, utils.FormatError("invalid message type in grpc failed to cast RPCInput from chainMessage", nil, traceAttrs(ctx, utils.Attribute{Key: "rpcMessage", Value: rpcInputMessage})...)
 	}
 
 	metadataMap := make(map[string]string, 0)
@@ -806,7 +826,7 @@ func (cp *GrpcChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMes
 	cl := grpcreflect.NewClientAuto(ctx, conn)
 	descriptorSource, err := rpcInterfaceMessages.DescriptorSourceForGrpcConfig(&cp.NodeUrl.GrpcConfig, rpcInterfaceMessages.DescriptorSourceFromServer(cl))
 	if err != nil {
-		return nil, utils.LavaFormatError("failed resolving grpc descriptor source", err, traceAttrs(ctx)...)
+		return nil, utils.FormatError("failed resolving grpc descriptor source", err, traceAttrs(ctx)...)
 	}
 	methodDescriptor, err := cp.methodDescriptorFor(ctx, descriptorSource, nodeMessage.Path)
 	if err != nil {
@@ -824,11 +844,11 @@ func (cp *GrpcChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMes
 			msgLocal := msgFactory.NewMessage(methodDescriptor.GetInputType())
 			err = proto.Unmarshal(nodeMessage.Msg, msgLocal)
 			if err != nil {
-				return nil, utils.LavaFormatError("Failed to unmarshal proto.Unmarshal(nodeMessage.Msg, msgLocal)", err)
+				return nil, utils.FormatError("Failed to unmarshal proto.Unmarshal(nodeMessage.Msg, msgLocal)", err)
 			}
 			jsonBytes, err := marshalJSON(msgLocal)
 			if err != nil {
-				return nil, utils.LavaFormatError("Failed to unmarshal marshalJSON(msgLocal)", err)
+				return nil, utils.FormatError("Failed to unmarshal marshalJSON(msgLocal)", err)
 			}
 			reader = bytes.NewReader(jsonBytes)
 		} else {
@@ -843,7 +863,7 @@ func (cp *GrpcChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMes
 		AllowUnknownFields:    true,
 	})
 	if err != nil {
-		return nil, utils.LavaFormatError("Failed to create formatter", err, traceAttrs(ctx)...)
+		return nil, utils.FormatError("Failed to create formatter", err, traceAttrs(ctx)...)
 	}
 
 	// used when parsing the grpc result
@@ -852,29 +872,31 @@ func (cp *GrpcChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMes
 	if formatMessage {
 		err = rp.Next(msg)
 		if err != nil {
-			return nil, utils.LavaFormatError("rp.Next(msg) Failed", err, traceAttrs(ctx)...)
+			return nil, utils.FormatError("rp.Next(msg) Failed", err, traceAttrs(ctx)...)
 		}
 	}
 
-	utils.LavaFormatTrace("provider sending node message",
+	utils.FormatTrace("provider sending node message",
 		utils.LogAttr("_method", nodeMessage.Path),
 		utils.LogAttr("headers", utils.RedactHeaderMap(metadataMap)),
 		utils.LogAttr("apiInterface", spectypes.APIInterfaceGrpc),
 	)
 
-	var respHeaders metadata.MD
+	var respHeaders, respTrailers metadata.MD
 	response := msgFactory.NewMessage(methodDescriptor.GetOutputType())
 	connectCtx, cancel := cp.CapTimeoutForSend(ctx, chainMessage)
 	defer cancel()
-	err = conn.Invoke(connectCtx, "/"+nodeMessage.Path, msg, response, grpc.Header(&respHeaders))
+	err = conn.Invoke(connectCtx, "/"+nodeMessage.Path, msg, response, grpc.Header(&respHeaders), grpc.Trailer(&respTrailers))
 	if err != nil {
 		// A corroborated rate limit fails the send with the typed sentinel — matching the
 		// HTTP transports — instead of being converted into a node-error reply. gRPC has
 		// no status code to check, so common.RateLimitFromGRPC keys on the known texts,
-		// or on RESOURCE_EXHAUSTED corroborated by a retry delay in the metadata.
+		// or on RESOURCE_EXHAUSTED corroborated by a retry delay in the metadata: header or
+		// trailer, since a status-only reply has no header block and grpc-go's own retry reads
+		// the delay from the trailer (MAG-4915).
 		if st, ok := status.FromError(err); ok {
-			if retryAfter, limited := common.RateLimitFromGRPC(uint32(st.Code()), st.Message(), respHeaders); limited {
-				return nil, utils.LavaFormatWarning("gRPC node rate-limited the request", common.RateLimited(err, retryAfter),
+			if retryAfter, limited := common.RateLimitFromGRPC(uint32(st.Code()), st.Message(), metadata.Join(respHeaders, respTrailers)); limited {
+				return nil, utils.FormatWarning("gRPC node rate-limited the request", common.RateLimited(err, retryAfter),
 					utils.Attribute{Key: "GUID", Value: ctx},
 					utils.Attribute{Key: "chainID", Value: cp.BaseChainProxy.ChainID},
 					utils.Attribute{Key: "apiName", Value: nodeMessage.Path},
@@ -906,7 +928,7 @@ func (cp *GrpcChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMes
 	var respBytes []byte
 	respBytes, err = proto.Marshal(response)
 	if err != nil {
-		return nil, utils.LavaFormatError("proto.Marshal(response) Failed", err, traceAttrs(ctx)...)
+		return nil, utils.FormatError("proto.Marshal(response) Failed", err, traceAttrs(ctx)...)
 	}
 	// set response status code
 	validResponseStatus := http.StatusOK
@@ -934,12 +956,12 @@ func parseGrpcNodeErrorToReply(ctx context.Context, err error) ([]byte, uint32, 
 		errorCode = uint32(statusError.Code())
 		respBytes, marshalingError = json.Marshal(&GrpcNodeErrorResponse{ErrorMessage: statusError.Message(), ErrorCode: errorCode})
 		if marshalingError != nil {
-			return nil, errorCode, utils.LavaFormatError("json.Marshal(&GrpcNodeErrorResponse Failed 1", err, traceAttrs(ctx)...)
+			return nil, errorCode, utils.FormatError("json.Marshal(&GrpcNodeErrorResponse Failed 1", err, traceAttrs(ctx)...)
 		}
 	} else {
 		respBytes, marshalingError = json.Marshal(&GrpcNodeErrorResponse{ErrorMessage: err.Error(), ErrorCode: errorCode})
 		if marshalingError != nil {
-			return nil, errorCode, utils.LavaFormatError("json.Marshal(&GrpcNodeErrorResponse Failed 2", err, traceAttrs(ctx)...)
+			return nil, errorCode, utils.FormatError("json.Marshal(&GrpcNodeErrorResponse Failed 2", err, traceAttrs(ctx)...)
 		}
 	}
 	return respBytes, errorCode, nil

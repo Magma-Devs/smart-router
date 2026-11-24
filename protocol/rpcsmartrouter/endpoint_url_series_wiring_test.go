@@ -15,9 +15,9 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/endpointstate"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils/rand"
 	"github.com/prometheus/client_golang/prometheus"
@@ -60,7 +60,7 @@ func urlSeriesLabels(t *testing.T, name, provider string) []map[string]string {
 // first answer counts for 6 minutes: 5 polls and one more interval. Not the 2-minute floor, and
 // not 2 x 5 minutes.
 func TestURLLatestBlock_AnsweredUntilFollowsTheChainsPollInterval(t *testing.T) {
-	const provider = "lava@mag4204SlowChain"
+	const provider = "provider@mag4204SlowChain"
 	upstream := newHeadUpstream(t, func() int64 { return 1000 }, nil)
 	label := metrics.URLFingerprint(upstream.srv.URL)
 
@@ -77,9 +77,9 @@ func TestURLLatestBlock_AnsweredUntilFollowsTheChainsPollInterval(t *testing.T) 
 // The node urls CreateSmartRouterEndpoint registers carry their spec path onto the per-url
 // series: internal_path is how an alert tells TON's /v2 from its /v3.
 func TestRegisterEndpointMetrics_GivesTheURLsSeriesItsPath(t *testing.T) {
-	const provider = "lava@mag4204Path"
+	const provider = "provider@mag4204Path"
 	mm := metrics.NewSmartRouterMetricsManager(metrics.SmartRouterMetricsManagerOptions{})
-	listen := &lavasession.RPCEndpoint{ChainID: "TON", ApiInterface: spectypes.APIInterfaceRest}
+	listen := &routersession.RPCEndpoint{ChainID: "TON", ApiInterface: spectypes.APIInterfaceRest}
 	v2 := common.NodeUrl{Url: "http://ton-wiring.example/api/v2", InternalPath: "/v2"}
 	v3 := common.NodeUrl{Url: "http://ton-wiring.example/api/v3", InternalPath: "/v3"}
 	registerEndpointMetrics(mm, listen, v2, provider)
@@ -106,7 +106,7 @@ func TestDirectRelay_CountsTheRelayOnTheURLItWentTo(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	const provider = "lava@mag4204Relays"
+	const provider = "provider@mag4204Relays"
 	const path = "/cosmos/base/tendermint/v1beta1/blocks/17"
 	parser, _, _, closeServer, endpoint, err := chainlib.CreateChainLibMocks(
 		ctx, "LAVA", spectypes.APIInterfaceRest, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -117,17 +117,17 @@ func TestDirectRelay_CountsTheRelayOnTheURLItWentTo(t *testing.T) {
 	defer closeServer()
 
 	nodeURL := endpoint.NodeUrls[0]
-	conn, err := lavasession.NewDirectRPCConnection(ctx, nodeURL, 5, spectypes.APIInterfaceRest)
+	conn, err := routersession.NewDirectRPCConnection(ctx, nodeURL, 5, spectypes.APIInterfaceRest)
 	require.NoError(t, err)
 	defer conn.Close()
-	session := lavasession.NewConsumerSessionWithProvider(provider, []*lavasession.Endpoint{{
-		NetworkAddress: nodeURL.Url, Enabled: true, DirectConnections: []lavasession.DirectRPCConnection{conn},
+	session := routersession.NewConsumerSessionWithProvider(provider, []*routersession.Endpoint{{
+		NetworkAddress: nodeURL.Url, Enabled: true, DirectConnections: []routersession.DirectRPCConnection{conn},
 	}}, 100000, 1, 1)
 	session.StaticProvider = true
 	sessionManager, rpcEndpoint := createTestSessionManager("LAVA", spectypes.APIInterfaceRest)
 	rpcEndpoint.NetworkAddress = "127.0.0.1:0"
 	require.NoError(t, sessionManager.UpdateAllProviders(1,
-		map[uint64]*lavasession.ConsumerSessionsWithProvider{0: session}, nil))
+		map[uint64]*routersession.ConsumerSessionsWithProvider{0: session}, nil))
 	logs, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
 	require.NoError(t, err)
 	mm := metrics.NewSmartRouterMetricsManager(metrics.SmartRouterMetricsManagerOptions{})
@@ -176,7 +176,7 @@ func TestDirectRelay_CountsTheRelayOnTheURLItWentTo(t *testing.T) {
 // pod: the harvest that would undo a late block write is dropped by the generation gate, so the
 // count has to undo itself.
 func TestDirectRelay_LateCountForARemovedURLIsUndone(t *testing.T) {
-	const provider = "lava@mag4204LateCount"
+	const provider = "provider@mag4204LateCount"
 	const removed = "http://removed.mag4204-late-count:8545"
 	kept := newHeadUpstream(t, func() int64 { return 1000 }, nil)
 	rpcss, mm := trackProviderURLs(t, provider, kept)

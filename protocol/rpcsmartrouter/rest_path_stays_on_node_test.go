@@ -11,7 +11,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 )
@@ -47,7 +47,7 @@ func TestRESTRelay_ClientPathNeverChangesTheUpstreamHost(t *testing.T) {
 	t.Cleanup(closeServer)
 	nodeHost := strings.TrimPrefix(endpoint.NodeUrls[0].Url, "http://")
 
-	directConn, err := lavasession.NewDirectRPCConnection(ctx, endpoint.NodeUrls[0], 5, "")
+	directConn, err := routersession.NewDirectRPCConnection(ctx, endpoint.NodeUrls[0], 5, "")
 	require.NoError(t, err)
 	sender := &DirectRPCRelaySender{directConnection: directConn, endpointName: "configured-node"}
 

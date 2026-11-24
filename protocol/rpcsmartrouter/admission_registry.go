@@ -4,7 +4,7 @@ import (
 	"sync"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 )
 
 // admissionRegistry holds the admission last recorded for each provider of one
@@ -15,28 +15,42 @@ import (
 // Guarded because those paths do not all hold the router lock.
 type admissionRegistry struct {
 	mu         sync.RWMutex
-	admissions map[*lavasession.RPCStaticProviderEndpoint]chainlib.ProviderAdmission
+	admissions map[*routersession.RPCStaticProviderEndpoint]chainlib.ProviderAdmission
 	// strikes counts, per provider and node-url position, the epoch passes in a
 	// row that refused a url admitted before them.
-	strikes map[*lavasession.RPCStaticProviderEndpoint]map[int]int
+	strikes map[*routersession.RPCStaticProviderEndpoint]map[int]int
 }
 
 func newAdmissionRegistry() *admissionRegistry {
 	return &admissionRegistry{
-		admissions: map[*lavasession.RPCStaticProviderEndpoint]chainlib.ProviderAdmission{},
-		strikes:    map[*lavasession.RPCStaticProviderEndpoint]map[int]int{},
+		admissions: map[*routersession.RPCStaticProviderEndpoint]chainlib.ProviderAdmission{},
+		strikes:    map[*routersession.RPCStaticProviderEndpoint]map[int]int{},
 	}
 }
 
-func (r *admissionRegistry) admissionFor(provider *lavasession.RPCStaticProviderEndpoint) chainlib.ProviderAdmission {
+func (r *admissionRegistry) admissionFor(provider *routersession.RPCStaticProviderEndpoint) chainlib.ProviderAdmission {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.admissions[provider]
 }
 
+// striking reports whether a url of the provider failed a pass it is still graced for:
+// it keeps its place until a second pass in a row refuses it (MAG-3950 retries that
+// pass about a retry delay later, not an epoch later).
+func (r *admissionRegistry) striking(provider *routersession.RPCStaticProviderEndpoint) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for index, strikes := range r.strikes[provider] {
+		if strikes > 0 && !r.admissions[provider].URLRefused(index) {
+			return true
+		}
+	}
+	return false
+}
+
 // record stores a boot or retry pass's admission as it stands, and reports whether
 // the admitted set moved.
-func (r *admissionRegistry) record(provider *lavasession.RPCStaticProviderEndpoint, admission chainlib.ProviderAdmission) bool {
+func (r *admissionRegistry) record(provider *routersession.RPCStaticProviderEndpoint, admission chainlib.ProviderAdmission) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.strikes, provider)
@@ -45,8 +59,9 @@ func (r *admissionRegistry) record(provider *lavasession.RPCStaticProviderEndpoi
 
 // recordReverified gives a url the grace a whole provider gets (MAG-2445): one that
 // fails for the first time keeps its place until it has failed
-// reverifyDemoteThreshold epoch passes running.
-func (r *admissionRegistry) recordReverified(provider *lavasession.RPCStaticProviderEndpoint, admission chainlib.ProviderAdmission) bool {
+// reverifyDemoteThreshold passes running, epoch passes and the retries that re-ran
+// what refuses it.
+func (r *admissionRegistry) recordReverified(provider *routersession.RPCStaticProviderEndpoint, admission chainlib.ProviderAdmission) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	previous := r.admissions[provider]
@@ -58,6 +73,12 @@ func (r *admissionRegistry) recordReverified(provider *lavasession.RPCStaticProv
 	var graced []int
 	for _, index := range admission.RefusedURLs() {
 		if previous.URLRefused(index) {
+			continue
+		}
+		// A retry that kept the url's failing verdict instead of running the check again
+		// is no new strike: the url's own retry is (MAG-3950).
+		if !admission.URLRefusalRan(index) {
+			graced = append(graced, index)
 			continue
 		}
 		strikes[index]++
@@ -81,7 +102,7 @@ func (r *admissionRegistry) recordReverified(provider *lavasession.RPCStaticProv
 // so recording a new admission is not by itself enough to get a recovered service
 // back into the pairing. A first record that refuses anything has moved too — a
 // session built before it holds every url.
-func (r *admissionRegistry) store(provider *lavasession.RPCStaticProviderEndpoint, admission chainlib.ProviderAdmission) bool {
+func (r *admissionRegistry) store(provider *routersession.RPCStaticProviderEndpoint, admission chainlib.ProviderAdmission) bool {
 	previous, seen := r.admissions[provider]
 	// Assigned unconditionally, including an empty admission: that is how a
 	// service that has recovered gets un-refused.

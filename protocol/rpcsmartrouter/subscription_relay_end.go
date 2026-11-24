@@ -9,9 +9,8 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
-	"github.com/magma-Devs/smart-router/utils"
 )
 
 // relayEndSelectionSubscription is the selection of a subscription request, which a subscription
@@ -26,7 +25,7 @@ var _ chainlib.SubscriptionRelayReporter = (*RPCSmartRouterServer)(nil)
 // unsubscribe or unsubscribe-all frame, or a gRPC stream's open (chainlib.SubscriptionRelayReporter).
 // A subscription can carry a transaction (Substrate's submit-and-watch), so these are relays too.
 func (rpcss *RPCSmartRouterServer) ReportSubscriptionRelay(ctx context.Context, protocolMessage chainlib.ProtocolMessage, start time.Time, err error) {
-	utils.LogEvent(relayEndEvent, rpcss.buildSubscriptionRelayEnd(ctx, protocolMessage, start, err))
+	emitRelayEnd(rpcss.buildSubscriptionRelayEnd(ctx, protocolMessage, start, err))
 }
 
 // buildSubscriptionRelayEnd reads the manager's record of what it did upstream: a request it sent is
@@ -49,10 +48,10 @@ func (rpcss *RPCSmartRouterServer) buildSubscriptionRelayEnd(ctx context.Context
 	switch {
 	case chainlib.IsFunctionTagOfType(protocolMessage, spectypes.FUNCTION_TAG_UNSUBSCRIBE_ALL):
 		// The router tears a client's subscriptions down itself.
-		end.outcome, end.errorCode = relayOutcomeRouterError, common.LavaErrorSubscriptionCleanupFailed.Name
+		end.outcome, end.errorCode = relayOutcomeRouterError, common.RouterErrorSubscriptionCleanupFailed.Name
 	case upstream.Sent && upstream.Err == nil:
 		// The upstream answered, so what failed was the router's own setup of the subscription.
-		end.outcome, end.errorCode = relayOutcomeRouterError, common.LavaErrorSubscriptionInitFailed.Name
+		end.outcome, end.errorCode = relayOutcomeRouterError, common.RouterErrorSubscriptionInitFailed.Name
 	case upstream.Sent:
 		end.outcome, end.errorCode = relayOutcomeNoAnswer, relayEndErrorCode(err, nil, end.attempts)
 	default:
@@ -86,25 +85,25 @@ func (rpcss *RPCSmartRouterServer) subscriptionAttempt(upstream chainlib.Subscri
 	if errors.As(upstream.Err, &nodeError) {
 		attempt.outcome = attemptOutcomeNodeError
 		attempt.nodeCode = nodeError.Code
-		attempt.lavaError = common.ClassifyError(nil, family, transport, nodeError.Code, nodeError.Message)
+		attempt.routerError = common.ClassifyError(nil, family, transport, nodeError.Code, nodeError.Message)
 		attempt.message = relayEndText(nodeError.Message)
 	} else {
 		attempt.transport = true
-		attempt.lavaError = common.ClassifyError(common.DetectConnectionError(upstream.Err), family, transport, 0, upstream.Err.Error())
-		attempt.outcome = subscriptionTransportOutcome(attempt.lavaError)
+		attempt.routerError = common.ClassifyError(common.DetectConnectionError(upstream.Err), family, transport, 0, upstream.Err.Error())
+		attempt.outcome = subscriptionTransportOutcome(attempt.routerError)
 		attempt.message = relayEndText(upstream.Err.Error())
 	}
-	attempt.errorCode = relayEndCode(attempt.lavaError)
+	attempt.errorCode = relayEndCode(attempt.routerError)
 	return attempt
 }
 
-func subscriptionTransportOutcome(lavaError *common.LavaError) string {
+func subscriptionTransportOutcome(routerError *common.RouterError) string {
 	switch {
-	case lavaError.IsRateLimited():
+	case routerError.IsRateLimited():
 		return attemptOutcomeRateLimited
-	case lavaError == common.LavaErrorContextCanceled:
+	case routerError == common.RouterErrorContextCanceled:
 		return attemptOutcomeCancelled
-	case lavaError == common.LavaErrorContextDeadline, lavaError == common.LavaErrorConnectionTimeout, lavaError == common.LavaErrorNoResponseTimeout:
+	case routerError == common.RouterErrorContextDeadline, routerError == common.RouterErrorConnectionTimeout, routerError == common.RouterErrorNoResponseTimeout:
 		return attemptOutcomeTimeout
 	}
 	return attemptOutcomeTransportError
@@ -132,7 +131,7 @@ func (n *subscriptionEndpointNames) name(url string) string {
 }
 
 // providerNamesByURL maps every node URL of the providers to its provider's name.
-func providerNamesByURL(lists ...[]*lavasession.RPCStaticProviderEndpoint) map[string]string {
+func providerNamesByURL(lists ...[]*routersession.RPCStaticProviderEndpoint) map[string]string {
 	names := map[string]string{}
 	for _, providers := range lists {
 		for _, provider := range providers {

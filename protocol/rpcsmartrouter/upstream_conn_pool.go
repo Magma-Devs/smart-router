@@ -82,6 +82,14 @@ type connPool[C pooledConn] struct {
 	lastReconnectErr error
 	onReconnect      func() // called after a successful reconnect (to restore subscriptions)
 	onClose          func() // called once, as Close begins
+	// departed reports whether the endpoint has left both of its manager's tiers. Nil means
+	// it never does. See maybeScaleDown.
+	departed func() bool
+	// slotsHeld counts the slots taken and not yet released, on every connection the pool
+	// handed one out on. Unlike totalSlots it includes a connection the pool has since
+	// dropped as dead, whose subscription is restoring and still holds its slot there.
+	// Taken under lock; released without it.
+	slotsHeld atomic.Int32
 
 	minConnections int
 	maxConnections int
@@ -147,6 +155,7 @@ func (p *connPool[C]) take(ctx context.Context, reserve bool) (C, error) {
 	conn, err := p.pickConnectionLocked(ctx)
 	if err == nil && reserve {
 		conn.addSlots(1)
+		p.slotsHeld.Add(1)
 	}
 	p.lock.Unlock()
 
@@ -183,7 +192,7 @@ func (p *connPool[C]) pickConnectionLocked(ctx context.Context) (C, error) {
 		if err != nil {
 			// If we can't create a new connection but have an existing one, use it
 			if found {
-				utils.LavaFormatWarning(p.logPrefix()+"failed to scale up, using existing connection", err,
+				utils.FormatWarning(p.logPrefix()+"failed to scale up, using existing connection", err,
 					utils.LogAttr("endpoint", p.sanitizedURL),
 					utils.LogAttr("currentConnections", len(p.connections)),
 					utils.LogAttr(p.vocabulary.slotAttr, lowestSlots),
@@ -194,7 +203,7 @@ func (p *connPool[C]) pickConnectionLocked(ctx context.Context) (C, error) {
 			return none, fmt.Errorf("failed to create connection: %w", err)
 		}
 
-		utils.LavaFormatInfo(p.logPrefix()+"scaled up",
+		utils.FormatInfo(p.logPrefix()+"scaled up",
 			utils.LogAttr("endpoint", p.sanitizedURL),
 			utils.LogAttr("totalConnections", len(p.connections)),
 			utils.LogAttr("reason", "all connections near capacity"),
@@ -222,7 +231,7 @@ func (p *connPool[C]) dropUnhealthyLocked() []C {
 			continue
 		}
 		dropped = append(dropped, conn)
-		utils.LavaFormatDebug(p.logPrefix()+"dropped a dead connection",
+		utils.FormatDebug(p.logPrefix()+"dropped a dead connection",
 			utils.LogAttr("endpoint", p.sanitizedURL),
 			utils.LogAttr("remainingConnections", len(kept)),
 		)
@@ -242,7 +251,7 @@ func (p *connPool[C]) createConnectionLocked(ctx context.Context) (C, error) {
 	p.connections = append(p.connections, conn)
 	p.backoff.Reset()
 
-	utils.LavaFormatDebug(p.logPrefix()+"connection added",
+	utils.FormatDebug(p.logPrefix()+"connection added",
 		utils.LogAttr("endpoint", p.sanitizedURL),
 		utils.LogAttr("totalConnections", len(p.connections)),
 	)
@@ -259,26 +268,43 @@ func (p *connPool[C]) release(conn C) {
 	}
 
 	conn.addSlots(-1)
+	p.slotsHeld.Add(-1)
 
 	// Consider scaling down if we have excess connections with no slots
 	p.maybeScaleDown()
 }
 
-// maybeScaleDown removes empty connections if we have more than minConnections
+// maybeScaleDown removes empty connections if we have more than minConnections.
+//
+// Once the endpoint has departed and its last subscription has left, the floor is no
+// connection at all. Its manager places no new subscription there, so minConnections only kept
+// sockets open to an upstream the router no longer serves, for the life of the process
+// (MAG-4924). While any subscription holds a slot, the floor stays: a restore that dropped its
+// dead connection has re-dialed one it has not taken a slot on yet, and the WebSocket waiters
+// on that reconnect judge it by whether the pool still holds a healthy connection. A
+// subscription that lands here afterwards dials one again, as one would after boot.
 func (p *connPool[C]) maybeScaleDown() {
+	departed := p.departed != nil && p.departed()
+
 	p.lock.Lock()
 	defer p.lock.Unlock()
 
-	if len(p.connections) <= p.minConnections {
+	// Read under the lock, which every take holds while it counts its slot.
+	floor := p.minConnections
+	if departed && p.slotsHeld.Load() <= 0 {
+		floor = 0
+	}
+
+	if len(p.connections) <= floor {
 		return
 	}
 
-	// Find connections with no slots (excluding the first minConnections)
+	// Find connections with no slots (excluding the first floor connections)
 	var toRemove []C
 	kept := make([]C, 0, len(p.connections))
 
 	for i, conn := range p.connections {
-		if i < p.minConnections {
+		if i < floor {
 			// Keep minimum connections
 			kept = append(kept, conn)
 		} else if conn.slots() == 0 && !conn.IsHealthy() {
@@ -286,7 +312,7 @@ func (p *connPool[C]) maybeScaleDown() {
 			toRemove = append(toRemove, conn)
 		} else if conn.slots() == 0 {
 			// Mark for potential removal (only if we have excess)
-			if len(kept)+len(p.connections)-i-1 >= p.minConnections {
+			if len(kept)+len(p.connections)-i-1 >= floor {
 				toRemove = append(toRemove, conn)
 			} else {
 				kept = append(kept, conn)
@@ -302,7 +328,7 @@ func (p *connPool[C]) maybeScaleDown() {
 		// Close removed connections asynchronously
 		go func(conns []C) {
 			closeConns(conns)
-			utils.LavaFormatDebug(p.logPrefix()+"scaled down",
+			utils.FormatDebug(p.logPrefix()+"scaled down",
 				utils.LogAttr("endpoint", p.sanitizedURL),
 				utils.LogAttr("removedConnections", len(conns)),
 				utils.LogAttr("remainingConnections", len(kept)),
@@ -409,7 +435,7 @@ func (p *connPool[C]) reconnectOnFreshLadder(ctx context.Context) error {
 		}
 		delay = reconnectDelay(delay, err)
 
-		utils.LavaFormatDebug(p.logPrefix()+"reconnect failed, retrying",
+		utils.FormatDebug(p.logPrefix()+"reconnect failed, retrying",
 			utils.LogAttr("endpoint", p.sanitizedURL),
 			utils.LogAttr("attempt", ladder.Attempt()),
 			utils.LogAttr("next_delay", delay),
@@ -437,7 +463,7 @@ func (p *connPool[C]) reconnectOnSharedLadder(ctx context.Context) error {
 	delay = reconnectDelay(delay, p.lastReconnectErr)
 	p.lock.RUnlock()
 
-	utils.LavaFormatDebug(p.logPrefix()+"waiting before reconnect",
+	utils.FormatDebug(p.logPrefix()+"waiting before reconnect",
 		utils.LogAttr("endpoint", p.sanitizedURL),
 		utils.LogAttr("backoff", delay),
 	)
@@ -483,7 +509,7 @@ func (p *connPool[C]) adoptReconnected(conn C, logAttrs ...utils.Attribute) erro
 
 	closeConns(dropped)
 
-	utils.LavaFormatInfo(p.logPrefix()+"reconnected successfully",
+	utils.FormatInfo(p.logPrefix()+"reconnected successfully",
 		append([]utils.Attribute{
 			utils.LogAttr("endpoint", p.sanitizedURL),
 			utils.LogAttr("totalConnections", total),
@@ -525,7 +551,7 @@ func (p *connPool[C]) Close() error {
 
 	closeConns(conns)
 
-	utils.LavaFormatDebug(p.logPrefix()+"closed",
+	utils.FormatDebug(p.logPrefix()+"closed",
 		utils.LogAttr("endpoint", p.sanitizedURL),
 		utils.LogAttr("closedConnections", len(conns)),
 	)

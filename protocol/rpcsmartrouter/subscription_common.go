@@ -4,13 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	rpcclient "github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/holdoff"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/magma-Devs/smart-router/utils"
 	"golang.org/x/time/rate"
 	"google.golang.org/grpc/status"
@@ -186,9 +188,10 @@ func subscriptionClientKey(dappID, consumerIp, connectionUniqueId string) string
 
 // subscriptionEndpoints holds the two endpoint tiers a manager places new subscriptions on,
 // and picks one. Selection priority:
-//  1. Sticky session (any tier — endpointsByURL spans both)
-//  2. Primary tier (optimizer or first-available)
-//  3. Backup tier (optimizer or first-available) — only when primary is exhausted
+//  1. Sticky session (any tier — endpointsByURL spans both), unless a better-ranked url is left
+//  2. Primary tier, urls in rotation (optimizer or first-available)
+//  3. Backup tier, urls in rotation (optimizer or first-available) — only when primary is exhausted
+//  4. Last chance: the primary tier's urls out of rotation, then the backup tier's, each by rank
 //
 // This mirrors the HTTP backup model (ConsumerSessionManager.getSessionWithProviderOrError).
 // Sticky entries are written by the managers once the upstream answered, not here, so a
@@ -197,16 +200,21 @@ type subscriptionEndpoints struct {
 	logPrefix string // "DirectWS" or "DirectGRPC"
 	// exhausted is the error selectEndpoint returns when neither tier has an endpoint to give.
 	exhausted string
-	// chainFamily is the family the error registry reads a node's refusal of a subscribe by
-	// (everyEndpointWouldRefuse).
-	chainFamily common.ChainFamily
+	// chainID names the chain whose family the error registry reads a node's refusal of a
+	// subscribe by (everyEndpointWouldRefuse). The family is read at each refusal, not here:
+	// it is registered when the spec loads (RegisterChainFamilies), which can come after the
+	// manager is built.
+	chainID string
 
 	optimizer   WebSocketEndpointOptimizer // can be nil: first-available selection
-	stickyStore *lavasession.StickySessionStore
+	stickyStore *routersession.StickySessionStore
 
 	// rateLimitHoldoff is the hold-off registry selection reads and a subscribe's rate limit
-	// is recorded into. Nil reads relayHoldoff at the time of the call; see holdoffs.
+	// is recorded into. Nil reads relayHoldoff() at the time of the call; see holdoffs.
 	rateLimitHoldoff *holdoff.Registry
+
+	// lendRank ranks a url for selection (SetURLLendRank). Unset ranks every url in rotation.
+	lendRank atomic.Pointer[func(url string) int]
 
 	// The tiers are mutable: SetEndpoints swaps them (copy-on-write) whenever the live
 	// pairing changes, so a provider that was down at boot joins the tier once it recovers.
@@ -222,9 +230,9 @@ func newSubscriptionEndpoints(logPrefix, exhausted, chainID string, primary, bac
 	return subscriptionEndpoints{
 		logPrefix:      logPrefix,
 		exhausted:      exhausted,
-		chainFamily:    common.GetChainFamilyOrDefault(chainID),
+		chainID:        chainID,
 		optimizer:      optimizer,
-		stickyStore:    lavasession.NewStickySessionStore(),
+		stickyStore:    routersession.NewStickySessionStore(),
 		primary:        primary,
 		backup:         backup,
 		endpointsByURL: indexEndpoints(primary, backup),
@@ -249,7 +257,56 @@ func (se *subscriptionEndpoints) holdoffs() *holdoff.Registry {
 	if se.rateLimitHoldoff != nil {
 		return se.rateLimitHoldoff
 	}
-	return relayHoldoff
+	return relayHoldoff()
+}
+
+// inRotationRank is the rank ConsumerSessionManager.URLLendRank gives a url in rotation. A url
+// out of rotation ranks higher, the worse its state.
+const inRotationRank = 0
+
+// SetURLLendRank gives selection the router's ranking of each url (ConsumerSessionManager.
+// URLLendRank). A url switched off after node errors, or held head-stalled, is out for relays;
+// without this a new subscription, a sticky client's included, could still be placed on it
+// (MAG-4161).
+func (se *subscriptionEndpoints) SetURLLendRank(lendRank func(url string) int) {
+	se.lendRank.Store(&lendRank)
+}
+
+// rankURLs ranks every url of byURL once, so the sticky check and every pass of one selection read
+// the same rank for a url. Each url is read on its own, not all of them under one lock.
+func (se *subscriptionEndpoints) rankURLs(byURL map[string]*common.NodeUrl) map[string]int {
+	lendRank := se.lendRank.Load()
+	ranks := make(map[string]int, len(byURL))
+	for url := range byURL {
+		ranks[url] = inRotationRank
+		if lendRank != nil && *lendRank != nil {
+			ranks[url] = (*lendRank)(url)
+		}
+	}
+	return ranks
+}
+
+// candidateRanks are the ranks the urls have, best first.
+func candidateRanks(ranks map[string]int) []int {
+	var found []int
+	for _, rank := range ranks {
+		if !slices.Contains(found, rank) {
+			found = append(found, rank)
+		}
+	}
+	slices.Sort(found)
+	return found
+}
+
+// atRank returns the endpoints of tier whose url has rank.
+func atRank(tier []*common.NodeUrl, ranks map[string]int, rank int) []*common.NodeUrl {
+	kept := make([]*common.NodeUrl, 0, len(tier))
+	for _, ep := range tier {
+		if ranks[ep.Url] == rank {
+			kept = append(kept, ep)
+		}
+	}
+	return kept
 }
 
 // endpointsSnapshot is an immutable view of both tiers plus the URL index, taken under the
@@ -272,6 +329,24 @@ func (se *subscriptionEndpoints) endpointsSnapshot() endpointsSnapshot {
 	}
 }
 
+// without returns the snapshot with the endpoints in tried left out of both tiers and the index.
+func (snapshot endpointsSnapshot) without(tried map[string]struct{}) endpointsSnapshot {
+	if len(tried) == 0 {
+		return snapshot
+	}
+	untried := func(tier []*common.NodeUrl) []*common.NodeUrl {
+		kept := make([]*common.NodeUrl, 0, len(tier))
+		for _, ep := range tier {
+			if _, done := tried[ep.Url]; !done {
+				kept = append(kept, ep)
+			}
+		}
+		return kept
+	}
+	primary, backup := untried(snapshot.primary), untried(snapshot.backup)
+	return endpointsSnapshot{primary: primary, backup: backup, byURL: indexEndpoints(primary, backup)}
+}
+
 // setEndpoints replaces both tiers and reports whether anything changed.
 //
 // The tiers are built once at boot from the providers that passed verification, so
@@ -285,11 +360,11 @@ func (se *subscriptionEndpoints) endpointsSnapshot() endpointsSnapshot {
 // it, and where the endpoint drops packets rather than refusing them, that attempt lasts
 // the whole connect timeout.
 //
-// Existing upstream pools are deliberately left alone. A pool keyed by a URL that just
-// left the tier still serves its live subscriptions until they close; tearing it down
-// here would kill working subscriptions on a provider that merely failed spec
-// re-verification. Nothing reaps such a pool afterwards: once its last subscription
-// leaves, its scale-down stops at the pool's minimum and that many connections stay open.
+// Existing upstream pools are not torn down here. A pool keyed by a URL that just left
+// the tiers still serves its live subscriptions until they close; tearing it down here
+// would kill working subscriptions on a provider that merely failed spec re-verification.
+// The pool reads the URL as departed (departs), and once its last subscription leaves it
+// closes every connection it holds.
 func (se *subscriptionEndpoints) setEndpoints(primary, backup []*common.NodeUrl) (changed bool) {
 	byURL := indexEndpoints(primary, backup)
 
@@ -305,6 +380,28 @@ func (se *subscriptionEndpoints) setEndpoints(primary, backup []*common.NodeUrl)
 	se.backup = backup
 	se.endpointsByURL = byURL
 	return true
+}
+
+// departs returns the departed check for the pool of url: whether url is in neither tier
+// now. It reads the tiers at each call, so a URL that comes back is served again.
+func (se *subscriptionEndpoints) departs(url string) func() bool {
+	return func() bool {
+		_, serving := se.endpointsSnapshot().byURL[url]
+		return !serving
+	}
+}
+
+// scaleDownDepartedPools lets the pool of each URL that left both tiers close its idle
+// connections. Without it, a pool idle when its URL left would wait for a release that
+// never comes. The scale-downs run in the background: the caller holds the router's
+// lock, and a pool holds its own lock across a dial. Caller holds its manager's lock.
+func scaleDownDepartedPools[P interface{ maybeScaleDown() }](se *subscriptionEndpoints, pools map[string]P) {
+	byURL := se.endpointsSnapshot().byURL
+	for url, pool := range pools {
+		if _, serving := byURL[url]; !serving {
+			go pool.maybeScaleDown()
+		}
+	}
 }
 
 // sameEndpointURLs reports whether two tiers hold the same URLs in the same order.
@@ -323,50 +420,94 @@ func sameEndpointURLs(a, b []*common.NodeUrl) bool {
 }
 
 // selectEndpoint selects the endpoint a client's new subscription goes to.
-func (se *subscriptionEndpoints) selectEndpoint(ctx context.Context, clientKey string, ignoredEndpoints map[string]struct{}) (*common.NodeUrl, error) {
+func (se *subscriptionEndpoints) selectEndpoint(ctx context.Context, clientKey string) (*common.NodeUrl, error) {
+	return se.selectUntriedEndpoint(ctx, clientKey, nil)
+}
+
+// selectUntriedEndpoint is selectEndpoint over the endpoints not in tried, the ones this
+// subscribe has not failed on (subscribeWithFailover). A tried endpoint is left out of every
+// step: a sticky one is passed over, and the ranks and the hold-off are read among the rest,
+// so a held-off endpoint is tried before the backup tier when the ready one has failed.
+func (se *subscriptionEndpoints) selectUntriedEndpoint(ctx context.Context, clientKey string, tried map[string]struct{}) (*common.NodeUrl, error) {
 	// One snapshot for the whole cascade: setEndpoints can swap the tiers underneath
 	// us, and re-reading between tiers could see primary from before the swap and
 	// backup from after.
-	snapshot := se.endpointsSnapshot()
+	snapshot := se.endpointsSnapshot().without(tried)
+
+	// One ranking for the whole selection too: a url's state can change while it runs, and the
+	// sticky check and every pass below must read the same one. Without a lookup every url
+	// ranks in rotation and this is the cascade as it always was.
+	ranks := se.rankURLs(snapshot.byURL)
+	candidates := candidateRanks(ranks)
 
 	// Tier 0: sticky session for this client (resolves across both tiers).
 	if clientKey != "" {
 		if stickySession, exists := se.stickyStore.Get(clientKey); exists {
 			if stickyEndpoint, found := snapshot.byURL[stickySession.Provider]; found {
-				if _, ignored := ignoredEndpoints[stickySession.Provider]; !ignored {
-					utils.LavaFormatDebug(se.logPrefix+": using sticky session endpoint",
+				if ranks[stickySession.Provider] == candidates[0] {
+					// No url ranks better: in rotation, or as good as anything left.
+					utils.FormatDebug(se.logPrefix+": using sticky session endpoint",
 						utils.LogAttr("clientKey", clientKey),
 						utils.LogAttr("endpoint", sanitizeEndpointURL(stickySession.Provider)),
 					)
 					return stickyEndpoint, nil
 				}
-				// Sticky endpoint is ignored — clear and continue to cascade.
-				utils.LavaFormatDebug(se.logPrefix+": sticky endpoint ignored, clearing affinity",
+				// Out of rotation while a better url is left (MAG-4161). The affinity stays:
+				// the manager rewrites it once the subscription is up on another endpoint.
+				utils.FormatDebug(se.logPrefix+": sticky endpoint out of rotation, skipping it",
 					utils.LogAttr("clientKey", clientKey),
-					utils.LogAttr("ignoredEndpoint", sanitizeEndpointURL(stickySession.Provider)),
+					utils.LogAttr("endpoint", sanitizeEndpointURL(stickySession.Provider)),
+					utils.LogAttr("rank", ranks[stickySession.Provider]),
 				)
-				se.stickyStore.Delete(clientKey)
 			}
 		}
 	}
 
-	// Tier 1: primary endpoints.
-	ep, primaryErr := se.selectFromTier(ctx, snapshot.primary, snapshot.byURL, ignoredEndpoints)
+	// Tiers 1 and 2 over the urls in rotation. A url the router took out for relays (switched
+	// off after node errors, head-stalled) is left out of them as relay selection leaves it out
+	// (MAG-4161).
+	inRotation := func(tier []*common.NodeUrl) []*common.NodeUrl { return atRank(tier, ranks, inRotationRank) }
+	if ep, err := se.selectFromTiers(ctx, inRotation(snapshot.primary), inRotation(snapshot.backup), snapshot.byURL); err == nil {
+		return ep, nil
+	}
+
+	// Last chance: no url in rotation is left. A node behind the chain, or one that kept
+	// failing, beats no subscription at all, and relay selection lends such a url the same way
+	// on its last chance: the primaries before the backups, and within a tier a head-stalled
+	// url, still answering, before a switched-off one (lendRankLocked).
+	for _, tier := range [][]*common.NodeUrl{snapshot.primary, snapshot.backup} {
+		for _, rank := range candidates {
+			if rank == inRotationRank {
+				continue
+			}
+			ep, err := se.selectFromTier(ctx, atRank(tier, ranks, rank), snapshot.byURL)
+			if err != nil {
+				continue
+			}
+			utils.FormatInfo(se.logPrefix+": no endpoint in rotation left, placing the subscription on one out of rotation",
+				utils.LogAttr("endpoint", sanitizeEndpointURL(ep.Url)),
+				utils.LogAttr("rank", rank),
+			)
+			return ep, nil
+		}
+	}
+
+	return nil, fmt.Errorf("%s", se.exhausted)
+}
+
+// selectFromTiers runs tier 1 then tier 2: the backup tier is consulted only when the primary
+// tier has no endpoint to give.
+func (se *subscriptionEndpoints) selectFromTiers(ctx context.Context, primary, backup []*common.NodeUrl, byURL map[string]*common.NodeUrl) (*common.NodeUrl, error) {
+	ep, primaryErr := se.selectFromTier(ctx, primary, byURL)
 	if primaryErr == nil {
 		return ep, nil
 	}
 
-	// Tier 2: backup endpoints (only when primary is exhausted).
-	utils.LavaFormatDebug(se.logPrefix+": primary endpoints exhausted, falling back to backup",
+	utils.FormatDebug(se.logPrefix+": primary endpoints exhausted, falling back to backup",
 		utils.LogAttr("primaryReason", primaryErr.Error()),
-		utils.LogAttr("backupCount", len(snapshot.backup)),
+		utils.LogAttr("backupCount", len(backup)),
 	)
-	ep, backupErr := se.selectFromTier(ctx, snapshot.backup, snapshot.byURL, ignoredEndpoints)
-	if backupErr == nil {
-		return ep, nil
-	}
-
-	return nil, fmt.Errorf("%s", se.exhausted)
+	return se.selectFromTier(ctx, backup, byURL)
 }
 
 // subscribeWithFailover opens a new subscription with subscribe on endpoint, the one
@@ -400,13 +541,13 @@ func (se *subscriptionEndpoints) subscribeWithFailover(ctx context.Context, clie
 			return nil, err
 		}
 		tried[endpoint.Url] = struct{}{}
-		next, selectErr := se.selectEndpoint(ctx, clientKey, tried)
+		next, selectErr := se.selectUntriedEndpoint(ctx, clientKey, tried)
 		if selectErr != nil {
 			// Every endpoint failed. The client gets the last one's error, which is also the
 			// attempt its relay record names.
 			return nil, err
 		}
-		utils.LavaFormatWarning(se.logPrefix+": subscribe failed on an endpoint, trying the next", err,
+		utils.FormatWarning(se.logPrefix+": subscribe failed on an endpoint, trying the next", err,
 			utils.LogAttr("endpoint", sanitizeEndpointURL(endpoint.Url)),
 			utils.LogAttr("next", sanitizeEndpointURL(next.Url)),
 		)
@@ -424,13 +565,13 @@ func (se *subscriptionEndpoints) subscribeWithFailover(ctx context.Context, clie
 func (se *subscriptionEndpoints) everyEndpointWouldRefuse(err error) bool {
 	var jsonRPCAnswer *rpcclient.JsonError
 	if errors.As(err, &jsonRPCAnswer) {
-		return common.ClassifyNodeErrorForRetry(se.chainFamily, common.TransportJsonRPC, jsonRPCAnswer.Code, jsonRPCAnswer.Message).IsNonRetryable
+		return common.ClassifyNodeErrorForRetry(common.GetChainFamilyOrDefault(se.chainID), common.TransportJsonRPC, jsonRPCAnswer.Code, jsonRPCAnswer.Message).IsNonRetryable
 	}
 	// The status's own message, not err's text: the wrapping is ours, not the node's evidence.
 	var grpcAnswer interface{ GRPCStatus() *status.Status }
 	if errors.As(err, &grpcAnswer) {
 		answer := grpcAnswer.GRPCStatus()
-		return common.ClassifyNodeErrorForRetry(se.chainFamily, common.TransportGRPC, int(answer.Code()), answer.Message()).IsNonRetryable
+		return common.ClassifyNodeErrorForRetry(common.GetChainFamilyOrDefault(se.chainID), common.TransportGRPC, int(answer.Code()), answer.Message()).IsNonRetryable
 	}
 	return false
 }
@@ -447,37 +588,13 @@ func notHeldOff(registry *holdoff.Registry, tier []*common.NodeUrl) []*common.No
 	return ready
 }
 
-// notIgnored returns the endpoints of tier that are not in ignoredEndpoints.
-func notIgnored(tier []*common.NodeUrl, ignoredEndpoints map[string]struct{}) []*common.NodeUrl {
-	if len(ignoredEndpoints) == 0 {
-		return tier
-	}
-	kept := make([]*common.NodeUrl, 0, len(tier))
-	for _, ep := range tier {
-		if _, ignored := ignoredEndpoints[ep.Url]; !ignored {
-			kept = append(kept, ep)
-		}
-	}
-	return kept
-}
-
-// firstNotIgnored returns the first endpoint of tier that is not in ignoredEndpoints.
-func firstNotIgnored(tier []*common.NodeUrl, ignoredEndpoints map[string]struct{}) *common.NodeUrl {
-	for _, ep := range tier {
-		if _, ignored := ignoredEndpoints[ep.Url]; !ignored {
-			return ep
-		}
-	}
-	return nil
-}
-
 // selectFromTier picks one endpoint from the given tier using the optimizer when
-// available, falling back to first-non-ignored. Tier-agnostic — the cascade order is the
-// caller's responsibility.
+// available, falling back to the tier's first endpoint. Tier-agnostic — the cascade order
+// is the caller's responsibility.
 //
 // tier and byURL come from one endpointsSnapshot so the optimizer's chosen URL is
 // resolved against the same generation of the index it was offered from.
-func (se *subscriptionEndpoints) selectFromTier(ctx context.Context, tier []*common.NodeUrl, byURL map[string]*common.NodeUrl, ignoredEndpoints map[string]struct{}) (*common.NodeUrl, error) {
+func (se *subscriptionEndpoints) selectFromTier(ctx context.Context, tier []*common.NodeUrl, byURL map[string]*common.NodeUrl) (*common.NodeUrl, error) {
 	if len(tier) == 0 {
 		return nil, fmt.Errorf("tier is empty")
 	}
@@ -485,22 +602,13 @@ func (se *subscriptionEndpoints) selectFromTier(ctx context.Context, tier []*com
 	// Rate-limit hold-off: prefer endpoints that are not currently held off after a 429.
 	// Only narrows the tier when something ready remains — a subscription must still be
 	// served when every endpoint is held off, so the full tier stays in that case.
-	//
-	// Readiness is judged among the endpoints not ignored. One this subscribe already failed
-	// on is no candidate: counted as the ready one, it would narrow the tier to itself, and a
-	// held-off endpoint would be passed over for the backup tier, or for an error, without
-	// ever being tried (MAG-4730).
-	candidates := notIgnored(tier, ignoredEndpoints)
-	if ready := notHeldOff(se.holdoffs(), candidates); len(ready) > 0 && len(ready) < len(candidates) {
+	if ready := notHeldOff(se.holdoffs(), tier); len(ready) > 0 {
 		tier = ready
 	}
 
-	// Single endpoint or no optimizer: first-non-ignored.
+	// Single endpoint or no optimizer: the tier's first endpoint.
 	if len(tier) == 1 || se.optimizer == nil {
-		if ep := firstNotIgnored(tier, ignoredEndpoints); ep != nil {
-			return ep, nil
-		}
-		return nil, fmt.Errorf("all endpoints in tier are ignored/unavailable")
+		return tier[0], nil
 	}
 
 	// Optimizer over this tier.
@@ -510,14 +618,11 @@ func (se *subscriptionEndpoints) selectFromTier(ctx context.Context, tier []*com
 	}
 
 	// cu=1 and requestedBlock=LATEST_BLOCK (-2) are sensible defaults for subscriptions.
-	selectedURLs := se.optimizer.ChooseUpstream(ctx, allURLs, ignoredEndpoints, 1, -2)
+	selectedURLs := se.optimizer.ChooseUpstream(ctx, allURLs, nil, 1, -2)
 
 	if len(selectedURLs) == 0 {
-		// Optimizer returned nothing — fall back to first-non-ignored within tier.
-		if ep := firstNotIgnored(tier, ignoredEndpoints); ep != nil {
-			return ep, nil
-		}
-		return nil, fmt.Errorf("optimizer returned no endpoints and all fallbacks in tier are ignored")
+		// Optimizer returned nothing — fall back to the tier's first endpoint.
+		return tier[0], nil
 	}
 
 	selectedURL := selectedURLs[0]
@@ -526,7 +631,7 @@ func (se *subscriptionEndpoints) selectFromTier(ctx context.Context, tier []*com
 		return nil, fmt.Errorf("optimizer selected unknown endpoint: %s", utils.RedactURL(selectedURL))
 	}
 
-	utils.LavaFormatDebug(se.logPrefix+": selected endpoint via optimizer",
+	utils.FormatDebug(se.logPrefix+": selected endpoint via optimizer",
 		utils.LogAttr("endpoint", sanitizeEndpointURL(selectedURL)),
 		utils.LogAttr("tierSize", len(tier)),
 	)

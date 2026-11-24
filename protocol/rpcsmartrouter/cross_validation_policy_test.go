@@ -10,7 +10,7 @@ import (
 	"github.com/golang/mock/gomock"
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/spf13/viper"
@@ -165,9 +165,16 @@ func TestCrossValidationPolicyResolver_Resolve(t *testing.T) {
 			wantParams:    common.CrossValidationParams{MaxParticipants: 3, AgreementThreshold: 3, MinGroups: 1},
 		},
 		{
-			// Regression (more severe): min-groups has NO caller header, yet pre-fix a caller sending
-			// max-participants:1 clamped MinGroups (2) down to 1 — disabling the operator's diversity mandate
-			// entirely. The effective max is now floored at the operator min-groups (2) so diversity survives.
+			// Regression (more severe): min-groups has NO caller header, yet pre-MAG-2333-fix a caller
+			// sending max-participants:1 clamped MinGroups (2) down to 1 — disabling the operator's
+			// diversity mandate entirely. max-participants carries no explicit floor of its own, so two
+			// mechanisms now independently protect it: the operatorMinGroups guard below (which used to
+			// be the only one, and is still exercised here as defense-in-depth) and MAG-2784's separate
+			// fix to resolveKnob, which floors an unfloored knob at its default — 3, already >= the
+			// min-groups floor of 2, so that guard happens to be non-binding in this exact case. The
+			// same default-floor fix also applies to agreement-threshold, which carries no floor of its
+			// own either: the caller's threshold:1 now floors at the DEFAULT (2) instead of passing
+			// through unclamped.
 			name:     "caller-shrunk max-participants cannot disable operator min-groups diversity (no max floor)",
 			method:   "eth_getBalance",
 			policy:   CrossValidationPolicy{Enabled: true, MinGroups: Bound{Floor: new(2)}},
@@ -175,7 +182,7 @@ func TestCrossValidationPolicyResolver_Resolve(t *testing.T) {
 			caller:        common.CrossValidationParams{MaxParticipants: 1, AgreementThreshold: 1},
 			callerPresent: true,
 			wantApplies:   true,
-			wantParams:    common.CrossValidationParams{MaxParticipants: 2, AgreementThreshold: 1, MinGroups: 2},
+			wantParams:    common.CrossValidationParams{MaxParticipants: 3, AgreementThreshold: 2, MinGroups: 2},
 		},
 	}
 
@@ -314,8 +321,8 @@ func TestParseCrossValidationConfig_RejectsNonInteger(t *testing.T) {
 // to the preflight entry point, which is what makes the ordering structural rather than something you
 // have to read the logs to confirm.
 func TestPreflightValidateCrossValidationConfig(t *testing.T) {
-	ethEndpoint := &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"}
-	preflightFor := func(t *testing.T, yamlBody string, endpoints ...*lavasession.RPCEndpoint) error {
+	ethEndpoint := &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"}
+	preflightFor := func(t *testing.T, yamlBody string, endpoints ...*routersession.RPCEndpoint) error {
 		t.Helper()
 		v := viper.New()
 		v.SetConfigType("yaml")
@@ -386,7 +393,7 @@ func TestPreflightValidateCrossValidationConfig(t *testing.T) {
 		require.NoError(t, preflight(t, policyFor("eth1", "JSONRPC", "      enabled: true\n")))
 	})
 	t.Run("a policy for another configured endpoint is accepted", func(t *testing.T) {
-		lava := &lavasession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "rest"}
+		lava := &routersession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "rest"}
 		require.NoError(t, preflightFor(t, policyFor("LAVA", "rest", "      enabled: true\n"), ethEndpoint, lava))
 		require.ErrorContains(t, preflightFor(t, policyFor("LAVA", "rest", "      enabled: true\n"), ethEndpoint), "no endpoint serves",
 			"the same policy with its endpoint absent from the config")
@@ -812,8 +819,8 @@ func TestGroupLabel_ConfigToSession_InertWithoutPolicy(t *testing.T) {
 	require.Equal(t, "tier-1", endpoints[0].GroupLabel)
 
 	// -> ConsumerSessionsWithProvider.GroupLabel (mirrors the provider build in rpcsmartrouter.go)
-	session := lavasession.NewConsumerSessionWithProvider(endpoints[0].Name,
-		[]*lavasession.Endpoint{{NetworkAddress: "http://a", Enabled: true}}, 1, 1, 0)
+	session := routersession.NewConsumerSessionWithProvider(endpoints[0].Name,
+		[]*routersession.Endpoint{{NetworkAddress: "http://a", Enabled: true}}, 1, 1, 0)
 	session.GroupLabel = endpoints[0].GroupLabel
 	require.Equal(t, "tier-1", session.GroupLabel, "group label must flow config -> session record")
 

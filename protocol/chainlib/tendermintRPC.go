@@ -17,9 +17,9 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/parser"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
@@ -75,7 +75,7 @@ func (apip *TendermintChainParser) CraftMessage(parsing *spectypes.ParseDirectiv
 
 // ParseMsg parses message data into chain message object
 func (apip *TendermintChainParser) ParseMsg(urlPath string, data []byte, connectionType string, metadata []pairingtypes.Metadata, extensionInfo extensionslib.ExtensionInfo) (ChainMessage, error) {
-	utils.LavaFormatTrace("[Archive Debug] TendermintChainParser.ParseMsg called", utils.LogAttr("urlPath", urlPath), utils.LogAttr("extensionInfo", extensionInfo))
+	utils.FormatTrace("[Archive Debug] TendermintChainParser.ParseMsg called", utils.LogAttr("urlPath", urlPath), utils.LogAttr("extensionInfo", extensionInfo))
 	// Guard that the TendermintChainParser instance exists
 	if apip == nil {
 		return nil, errors.New("TendermintChainParser not defined")
@@ -122,7 +122,7 @@ func (apip *TendermintChainParser) ParseMsg(urlPath string, data []byte, connect
 	}
 	// Check batch size limit
 	if MaxBatchRequestSize > 0 && msgsLength > MaxBatchRequestSize {
-		return nil, utils.LavaFormatWarning("batch request size exceeded", ErrBatchRequestSizeExceeded,
+		return nil, utils.FormatWarning("batch request size exceeded", ErrBatchRequestSizeExceeded,
 			utils.LogAttr("batchSize", msgsLength),
 			utils.LogAttr("maxAllowed", MaxBatchRequestSize),
 		)
@@ -133,12 +133,16 @@ func (apip *TendermintChainParser) ParseMsg(urlPath string, data []byte, connect
 	var blockFold requestedBlockFold
 	blockHashes := []string{}
 	parsedDefault := true
+	// This batch walk and JsonRPCChainParser.ParseMsg's share two blocks, an element's requested
+	// block and the batch's combined api, and stay two walks until an owner question is answered: a
+	// one-element batch gets its api's parse directive here and none on JSON-RPC (each parser's
+	// newBatchChainMessage). One walk would have to pick an answer.
 	for idx, msg := range msgs {
 		parsedInput := parser.NewParsedInput()
 		// Check api is supported and save it in nodeMsg
 		apiCont, err := apip.getSupportedApi(msg.Method, connectionType)
 		if err != nil {
-			utils.LavaFormatDebug("getSupportedApi tendermintrpc failed",
+			utils.FormatDebug("getSupportedApi tendermintrpc failed",
 				utils.LogAttr("method", msg.Method),
 				utils.LogAttr("connectionType", connectionType),
 				utils.LogAttr("error", err),
@@ -158,7 +162,7 @@ func (apip *TendermintChainParser) ParseMsg(urlPath string, data []byte, connect
 		msgs[idx].BaseMessage = jsonrpcBaseMessage(metadata, settingHeaderDirective)
 		msg.BaseMessage = msgs[idx].BaseMessage
 
-		if overwriteReqBlock == "" {
+		if overwriteReqBlock == "" { //nolint:dupl // kept twin of the JSON-RPC batch walk; see the comment above the walk
 			// Fetch requested block, it is used for data reliability
 			parsedInput = parser.ParseBlockFromParams(msg, apiCont.api.BlockParsing, apiCont.api.Parsers)
 			if hashes, err := parsedInput.GetBlockHashes(); err == nil {
@@ -171,7 +175,7 @@ func (apip *TendermintChainParser) ParseMsg(urlPath string, data []byte, connect
 			parsedBlock, err := msg.ParseBlock(overwriteReqBlock)
 			parsedInput.SetBlock(parsedBlock)
 			if err != nil {
-				utils.LavaFormatError("failed parsing block from an overwrite header", err,
+				utils.FormatError("failed parsing block from an overwrite header", err,
 					utils.LogAttr("chain", apip.spec.Name),
 					utils.LogAttr("overwriteReqBlock", overwriteReqBlock),
 				)
@@ -186,14 +190,14 @@ func (apip *TendermintChainParser) ParseMsg(urlPath string, data []byte, connect
 		parsedBlock := parsedInput.GetBlock()
 		blockFold.add(parsedBlock, parsedBlock, parsedInput, overwriteReqBlock == "" && apiNamesNoBlock(apiCont.api))
 
-		if idx == 0 {
+		if idx == 0 { //nolint:dupl // kept twin of the JSON-RPC batch walk; see the comment above the walk
 			// on the first entry store them
 			api = apiCont.api
 			apiCollection = apiCollectionForMessage
 		} else {
 			// on next entries we need to compare to existing data
 			if api == nil {
-				utils.LavaFormatFatal("invalid parsing, api is nil", nil)
+				utils.FormatFatal("invalid parsing, api is nil", nil)
 			}
 			// on a batch request we need to do the following:
 			// 1. create a new api object, since it's not a single one
@@ -205,7 +209,7 @@ func (apip *TendermintChainParser) ParseMsg(urlPath string, data []byte, connect
 			category = category.Combine(apiCont.api.GetCategory())
 			if apiCollectionForMessage.CollectionData.AddOn != "" && apiCollectionForMessage.CollectionData.AddOn != apiCollection.CollectionData.AddOn {
 				if apiCollection.CollectionData.AddOn != "" {
-					return nil, utils.LavaFormatError("unable to parse batch request with api from multiple addons", nil,
+					return nil, utils.FormatError("unable to parse batch request with api from multiple addons", nil,
 						utils.Attribute{Key: "first addon", Value: apiCollection.CollectionData.AddOn},
 						utils.Attribute{Key: "second addon", Value: apiCollectionForMessage.CollectionData.AddOn})
 				}
@@ -247,7 +251,9 @@ func (apip *TendermintChainParser) ParseMsg(urlPath string, data []byte, connect
 		}
 	}
 
-	utils.LavaFormatTrace("[Archive Debug] TendermintRPC ParseMsg calling ExtensionParsing", utils.LogAttr("addon", apiCollection.CollectionData.AddOn), utils.LogAttr("extensionInfo", extensionInfo), utils.LogAttr("urlPath", urlPath))
+	// The cache never writes the request as final when the fold left an element out (MAG-4650).
+	nodeMsg.blocklessElement = blockFold.skippedBlocklessElement()
+	utils.FormatTrace("[Archive Debug] TendermintRPC ParseMsg calling ExtensionParsing", utils.LogAttr("addon", apiCollection.CollectionData.AddOn), utils.LogAttr("extensionInfo", extensionInfo), utils.LogAttr("urlPath", urlPath))
 	apip.BaseChainParser.ExtensionParsing(apiCollection.CollectionData.AddOn, nodeMsg, extensionInfo)
 	return nodeMsg, nil
 }
@@ -314,11 +320,10 @@ func (apip *TendermintChainParser) ChainBlockStats() (allowedBlockLagForQosSync 
 type TendermintRpcChainListener struct {
 	chainListenerBase
 	wsListenerBase
-	app *fiber.App // captured during Serve so Shutdown can drain HTTP
 }
 
 // NewTendermintRpcChainListener creates a new instance of TendermintRpcChainListener
-func NewTendermintRpcChainListener(ctx context.Context, listenEndpoint *lavasession.RPCEndpoint,
+func NewTendermintRpcChainListener(ctx context.Context, listenEndpoint *routersession.RPCEndpoint,
 	relaySender RelaySender, healthReporter HealthReporter,
 	rpcConsumerLogs *metrics.RPCConsumerLogs,
 	refererData *RefererData,
@@ -345,8 +350,10 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 	// Setup HTTP Server
 	// true: this listener registers a GET catch-all that upgrades, so the health
 	// route may hand an upgrade on its own path past the health handler.
-	app := createAndSetupBaseAppListener(cmdFlags, apil.endpoint.HealthCheckPath, apil.healthReporter, true)
-	apil.app = app
+	// true: a DELETE goes on to the routes, which serve none, so fiber refuses it as it refuses a
+	// PUT: 405, with an Allow of the methods this listener does serve (GET and POST), instead of the
+	// shared 204 that told the caller it was done (MAG-4524).
+	app := createAndSetupBaseAppListener(cmdFlags, apil.endpoint.HealthCheckPath, apil.healthReporter, true, true)
 
 	// ConnectionType "": ParseMsg looks a Tendermint subscription method up without one.
 	wsUpgradeMiddleware, websocketCallbackWithDappID := apil.websocketRoutes(ctx, app, &apil.chainListenerBase, cmdFlags, "tendermintrpc", "")
@@ -359,7 +366,7 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 			return httpRelayRequest{body: string(fiberCtx.Body()), logMethod: "POST", logPath: fiberCtx.Request().URI().String()}
 		},
 		logReceived: func(ctx context.Context, guid uint64, msgSeed, dappID string, req httpRelayRequest, headers []pairingtypes.Metadata) {
-			utils.LavaFormatInfo("in <<<", traceAttrs(ctx,
+			utils.FormatInfo("in <<<", traceAttrs(ctx,
 				utils.LogAttr("seed", msgSeed),
 				utils.LogAttr("_msg", req.loggedBody),
 				utils.LogAttr("dappID", dappID),
@@ -388,7 +395,7 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 			return httpRelayRequest{path: path, url: path + query, logMethod: "GET", logPath: fiberCtx.Request().URI().String()}
 		},
 		logReceived: func(ctx context.Context, _ uint64, _, dappID string, req httpRelayRequest, headers []pairingtypes.Metadata) {
-			utils.LavaFormatInfo("urirpc in <<<", traceAttrs(ctx,
+			utils.FormatInfo("urirpc in <<<", traceAttrs(ctx,
 				utils.LogAttr("_msg", req.path),
 				utils.LogAttr("dappID", dappID),
 				utils.LogAttr("headers", common.RedactMetadata(headers)),
@@ -424,7 +431,7 @@ type tendermintRpcChainProxy struct {
 	JrpcChainProxy
 }
 
-func NewtendermintRpcChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint lavasession.RPCProviderEndpoint, chainParser ChainParser) (ChainProxy, error) {
+func NewtendermintRpcChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint routersession.RPCProviderEndpoint, chainParser ChainParser) (ChainProxy, error) {
 	if err := requireNodeUrl(rpcProviderEndpoint); err != nil {
 		return nil, err
 	}
@@ -454,7 +461,7 @@ func (cp *tendermintRpcChainProxy) SendNodeMsg(ctx context.Context, chainMessage
 	if !ok {
 		batchMessage, ok := rpcInputMessage.(*rpcInterfaceMessages.JsonrpcBatchMessage)
 		if !ok {
-			return nil, utils.LavaFormatError("invalid message type in tendermintrpc failed to cast RPCInput from chainMessage", nil, utils.Attribute{Key: "rpcMessage", Value: rpcInputMessage}, utils.Attribute{Key: "ptrCast", Value: ok})
+			return nil, utils.FormatError("invalid message type in tendermintrpc failed to cast RPCInput from chainMessage", nil, utils.Attribute{Key: "rpcMessage", Value: rpcInputMessage}, utils.Attribute{Key: "ptrCast", Value: ok})
 		}
 		return cp.sendBatchMessage(ctx, batchMessage, chainMessage)
 	}
@@ -507,7 +514,7 @@ func (cp *tendermintRpcChainProxy) SendURI(ctx context.Context, nodeMessage *rpc
 	// checking if rest reply data is in json format
 	err = cp.HandleJSONFormatError(reply.RelayReply.Data)
 	if err != nil {
-		return nil, utils.LavaFormatError("Tendermint reply is neither a JSON object nor a JSON array of objects", nil, utils.Attribute{Key: "reply.Data", Value: string(reply.RelayReply.Data)})
+		return nil, utils.FormatError("Tendermint reply is neither a JSON object nor a JSON array of objects", nil, utils.Attribute{Key: "reply.Data", Value: string(reply.RelayReply.Data)})
 	}
 
 	return reply, nil
@@ -523,7 +530,7 @@ func (cp *tendermintRpcChainProxy) SendRPC(ctx context.Context, nodeMessage *rpc
 	var replyMsg *rpcInterfaceMessages.RPCResponse
 	replyMsg, err = rpcInterfaceMessages.ConvertTendermintMsg(rpcMessage)
 	if err != nil {
-		return nil, utils.LavaFormatError("tendermintRPC error", err)
+		return nil, utils.FormatError("tendermintRPC error", err)
 	}
 
 	err = cp.ValidateRequestAndResponseIds(nodeMessage.ID, rpcMessage.ID)
@@ -534,7 +541,7 @@ func (cp *tendermintRpcChainProxy) SendRPC(ctx context.Context, nodeMessage *rpc
 		if replyMsg.Error != nil {
 			responseError = replyMsg.Error.Message
 		}
-		return nil, utils.LavaFormatError("tendermintRPC ID mismatch error", err, traceAttrs(ctx,
+		return nil, utils.FormatError("tendermintRPC ID mismatch error", err, traceAttrs(ctx,
 			utils.Attribute{Key: "requestId", Value: nodeMessage.ID},
 			utils.Attribute{Key: "responseId", Value: rpcMessage.ID},
 			utils.Attribute{Key: "responseError", Value: responseError},
@@ -565,5 +572,5 @@ func (apil *TendermintRpcChainListener) Shutdown(ctx context.Context) error {
 	if apil == nil {
 		return nil
 	}
-	return drainHTTPThenWS(ctx, apil.app, &apil.wsWG, "TendermintRPC")
+	return drainHTTPThenWS(ctx, &apil.gate, &apil.wsWG, "TendermintRPC")
 }

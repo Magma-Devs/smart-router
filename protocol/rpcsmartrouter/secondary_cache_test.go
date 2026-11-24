@@ -15,10 +15,10 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/chainstate"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/performance"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	"github.com/magma-Devs/smart-router/protocol/relaycoretest"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
@@ -76,11 +76,18 @@ func (f *fakeCacheReader) recorded() []*pairingtypes.RelayCacheGet {
 // exercised — a fake that merely records SetEntry cannot prove a follow-up GET hits.
 func startCacheServerForTest(t *testing.T) (*performance.Cache, *ecocache.RelayerCacheServer) {
 	t.Helper()
+	return startCacheServerWithNonFinalizedTTLForTest(t, 5*time.Second)
+}
+
+// startCacheServerWithNonFinalizedTTLForTest is startCacheServerForTest with nonFinalized as the
+// shortest lifetime of an entry that is not final, for tests that watch one expire.
+func startCacheServerWithNonFinalizedTTLForTest(t *testing.T, nonFinalized time.Duration) (*performance.Cache, *ecocache.RelayerCacheServer) {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
 	cs := &ecocache.CacheServer{CacheMaxCost: 1 << 20}
-	cs.InitCache(ctx, time.Hour, 5*time.Second, 5*time.Second, time.Hour, "disabled", 1, 1)
+	cs.InitCache(ctx, time.Hour, nonFinalized, 5*time.Second, time.Hour, "disabled", 1, 1)
 	rcs := &ecocache.RelayerCacheServer{CacheServer: cs}
 
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
@@ -128,7 +135,7 @@ func newSecondaryTestServer(chainParser chainlib.ChainParser, primary *performan
 		secondaryCache:        secondary,
 		secondaryCacheTimeout: timeout,
 		chainParser:           chainParser,
-		listenEndpoint:        &lavasession.RPCEndpoint{ChainID: "LAVA", ApiInterface: spectypes.APIInterfaceRest},
+		listenEndpoint:        &routersession.RPCEndpoint{ChainID: "LAVA", ApiInterface: spectypes.APIInterfaceRest},
 	}
 }
 
@@ -157,7 +164,7 @@ func runSecondaryLookupOn(t *testing.T, rpcss *RPCSmartRouterServer, chainID str
 	hashKey, outputFormatter, err := protocolMessage.HashCacheRequest(chainID)
 	require.NoError(t, err)
 
-	usedProviders := lavasession.NewUsedProviders(nil)
+	usedProviders := routersession.NewUsedProviders(nil)
 	stateMachine, err := NewSmartRouterRelayStateMachine(ctx, usedProviders, &SmartRouterRelaySenderMock{retValue: nil}, protocolMessage, nil, false)
 	require.NoError(t, err)
 	relayProcessor := relaycore.NewRelayProcessor(ctx, &common.DefaultCrossValidationParams, relaycoretest.RelayProcessorMetrics, relaycoretest.RelayProcessorMetrics, stateMachine)
@@ -496,7 +503,7 @@ func TestSecondaryPoisonedEntrySanitizedForCallerAndBackfill(t *testing.T) {
 				Sig:         []byte{0xde, 0xad},
 				SigBlocks:   []byte{0xbe, 0xef},
 				Metadata: []pairingtypes.Metadata{
-					{Name: "Lava-Provider-Address", Value: "lava@provider1"},
+					{Name: "Router-Provider-Address", Value: "provider@provider1"},
 					{Name: "X-Provider-ID", Value: "prov-42"},
 					{Name: "X-Backend", Value: "geth-fra-03"},
 					{Name: "X-Served-By", Value: "edge-9.internal"},
@@ -524,7 +531,7 @@ func TestSecondaryPoisonedEntrySanitizedForCallerAndBackfill(t *testing.T) {
 	require.Nil(t, result.Reply.SigBlocks)
 	require.Equal(t, []pairingtypes.Metadata{{Name: "Content-Type", Value: "application/json"}}, result.Reply.Metadata,
 		"every identity-bearing header is dropped; only the transport allowlist survives")
-	require.Equal(t, "", result.ProviderInfo.ProviderAddress, "locally minted Lava-Provider-Address: Cached still applies downstream")
+	require.Equal(t, "", result.ProviderInfo.ProviderAddress, "locally minted Router-Provider-Address: Cached still applies downstream")
 	require.Equal(t, payload, result.Reply.Data)
 	require.Zero(t, result.Reply.LatestBlock, "a foreign chain height must not ride out on the served reply")
 
@@ -666,7 +673,7 @@ func TestSecondaryLookupNeverRequestsForeignBlockHashHeights(t *testing.T) {
 		},
 	}
 	rpcss := newSecondaryTestServer(chainParser, nil, fake, 100*time.Millisecond)
-	rpcss.listenEndpoint = &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: spectypes.APIInterfaceJsonRPC}
+	rpcss.listenEndpoint = &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: spectypes.APIInterfaceJsonRPC}
 
 	hashKey, outputFormatter, err := protocolMessage.HashCacheRequest("ETH1")
 	require.NoError(t, err)
@@ -811,7 +818,7 @@ func TestSecondaryFutureKeyBackfillNeverRaisesPrimaryChainTip(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // Entry-kind resolution is the single helper BOTH tiers call, which is what makes a
-// replayed node error carry lava-identified-node-error regardless of which cache
+// replayed node error carry router-identified-node-error regardless of which cache
 // answered. Pinning it here covers the primary tier's use too: that call site is two
 // lines inside sendRelayToEndpoint, which cannot be driven without a full session and
 // endpoint fixture, whereas the decision itself lives entirely in this function.

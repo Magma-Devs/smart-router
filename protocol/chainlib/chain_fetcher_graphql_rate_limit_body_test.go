@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 )
@@ -75,7 +75,7 @@ func newSuiGraphQLChainFetcherWithReply(t *testing.T, body string) *ChainFetcher
 	require.NoError(t, err)
 	cp.SetSpec(suiGraphQLPollSpec())
 	return &ChainFetcher{
-		endpoint:    &lavasession.RPCProviderEndpoint{ChainID: "SUI", ApiInterface: spectypes.APIInterfaceGraphQL},
+		endpoint:    &routersession.RPCProviderEndpoint{ChainID: "SUI", ApiInterface: spectypes.APIInterfaceGraphQL},
 		chainRouter: replyingChainRouter{body: body},
 		chainParser: cp,
 	}
@@ -131,4 +131,24 @@ func TestChainFetcher_FetchLatestBlockNum_GraphQLHeadPollAnswer(t *testing.T) {
 	block, err := cf.FetchLatestBlockNum(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, int64(334287093), block)
+}
+
+// The startup, re-verification and health-command head fetch reads the reply as the per-url poll
+// does: a GraphQL 200 that carries an error is a failed fetch, whatever head sits beside the
+// error (MAG-5124). Read as a plain 200, a provider whose database is down verified as healthy.
+func TestChainFetcher_FetchLatestBlockNum_GraphQLErrorReplyIsAFailedFetch(t *testing.T) {
+	for name, body := range map[string]string{
+		"node fault, no data":                     `{"data":null,"errors":[{"message":"Internal error occurred while processing request","extensions":{"code":"INTERNAL_SERVER_ERROR"}}]}`,
+		"node fault beside a readable head":       `{"data":{"serviceConfig":{"availableRange":{"last":{"sequenceNumber":334287093}}}},"errors":[{"message":"Internal error occurred while processing request","extensions":{"code":"INTERNAL_SERVER_ERROR"}}]}`,
+		"unreadable error beside a readable head": `{"data":{"serviceConfig":{"availableRange":{"last":{"sequenceNumber":334287093}}}},"errors":[{"message":"something went wrong"}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			cf := newSuiGraphQLChainFetcherWithReply(t, body)
+
+			_, err := cf.FetchLatestBlockNum(context.Background())
+			require.Error(t, err, "a reply that carries an error is not a healthy fetch")
+			require.NotErrorIs(t, err, common.StatusCodeError429, "and it is not a rate limit")
+			require.Zero(t, cf.latestBlock, "the head beside an error must not be stored")
+		})
+	}
 }

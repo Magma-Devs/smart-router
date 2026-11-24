@@ -11,14 +11,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gofiber/fiber/v2"
 	"github.com/gorilla/websocket"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	specutils "github.com/magma-Devs/smart-router/utils/keeper"
@@ -308,9 +307,7 @@ func TestTendermintURIRPC(t *testing.T) {
 }
 
 func TestTendermintRpcChainListener_Shutdown_DrainsWSWaitGroup(t *testing.T) {
-	listener := &TendermintRpcChainListener{
-		app: fiber.New(fiber.Config{DisableStartupMessage: true}),
-	}
+	listener := &TendermintRpcChainListener{}
 	listener.wsWG.Add(1)
 	go func() {
 		time.Sleep(100 * time.Millisecond)
@@ -326,9 +323,7 @@ func TestTendermintRpcChainListener_Shutdown_DrainsWSWaitGroup(t *testing.T) {
 }
 
 func TestTendermintRpcChainListener_Shutdown_RespectsContextDeadline(t *testing.T) {
-	listener := &TendermintRpcChainListener{
-		app: fiber.New(fiber.Config{DisableStartupMessage: true}),
-	}
+	listener := &TendermintRpcChainListener{}
 	listener.wsWG.Add(1)
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
@@ -413,7 +408,7 @@ func startTestTendermintListenerWithSubscriptions(t *testing.T, ctx context.Cont
 	if !rand.Initialized() {
 		rand.InitRandomSeed()
 	}
-	endpoint := &lavasession.RPCEndpoint{
+	endpoint := &routersession.RPCEndpoint{
 		NetworkAddress:  "127.0.0.1:0",
 		ChainID:         "COS5",
 		ApiInterface:    "tendermintrpc",
@@ -492,7 +487,7 @@ func TestTendermintRpcChainListener_WebSocketUpgradesOnAnyPath(t *testing.T) {
 	defer cancelServe()
 	_, addr := startTestTendermintListener(t, serveCtx)
 
-	for _, path := range []string{"/", "/ws", "/websocket", "/lava@dapp"} {
+	for _, path := range []string{"/", "/ws", "/websocket", "/provider@dapp"} {
 		client, resp, err := websocket.DefaultDialer.Dial("ws://"+addr+path, nil)
 		require.NoError(t, err, "WS dial on %q should upgrade", path)
 		require.Equal(t, http.StatusSwitchingProtocols, resp.StatusCode, "path %q", path)
@@ -692,7 +687,7 @@ func TestTendermintRpcChainListener_UnsubscribeAllReplies(t *testing.T) {
 }
 
 // The REST and JSON-RPC proxies run a transport failure through HandleNodeError, so the router sees a
-// coded, retryable LavaError; the Tendermint URI proxy returned the raw *url.Error (MAG-4278).
+// coded, retryable RouterError; the Tendermint URI proxy returned the raw *url.Error (MAG-4278).
 func TestTendermintSendURI_ClassifiesTransportErrorsLikeTheOtherProxies(t *testing.T) {
 	spec, err := specutils.GetSpecFromLocalDirs([]string{"../../specs/"}, "LAVA")
 	require.NoError(t, err)
@@ -708,7 +703,7 @@ func TestTendermintSendURI_ClassifiesTransportErrorsLikeTheOtherProxies(t *testi
 	}}
 	_, err = cp.SendURI(context.Background(), &rpcInterfaceMessages.TendermintrpcMessage{Path: "status"}, chainMessage)
 	require.Error(t, err)
-	require.ErrorIs(t, err, common.LavaErrorConnectionRefused, "the URI path must hand back the same coded error the REST proxy produces, not the raw *url.Error")
+	require.ErrorIs(t, err, common.RouterErrorConnectionRefused, "the URI path must hand back the same coded error the REST proxy produces, not the raw *url.Error")
 }
 
 // TestCheckResponseErrorForTendermintBatch_SeesTheAppErrorASingleReplySees calls the classifier

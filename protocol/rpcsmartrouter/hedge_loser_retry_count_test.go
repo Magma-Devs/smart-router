@@ -13,10 +13,10 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils/rand"
@@ -24,29 +24,29 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// MAG-3762. Lava-Retries counts every attempt the router sent, a hedge's loser included
+// MAG-3762. Router-Retries counts every attempt the router sent, a hedge's loser included
 // (MAG-1818). Since an attempt outlives the window that dispatches the hedge, the loser is still
 // running when the hedge wins, so it has no result when the reply is built. Counting results
 // alone reported the race as zero retries and named only the winner.
 
 // dispatchedTo records one batch per provider, in order, the way a request's first attempt and
 // each later retry or hedge go out.
-func dispatchedTo(providers ...string) *lavasession.UsedProviders {
-	usedProviders := lavasession.NewUsedProviders(nil)
+func dispatchedTo(providers ...string) *routersession.UsedProviders {
+	usedProviders := routersession.NewUsedProviders(nil)
 	for _, provider := range providers {
-		usedProviders.AddUsed(lavasession.ConsumerSessionsMap{provider: &lavasession.SessionInfo{}}, nil)
+		usedProviders.AddUsed(routersession.ConsumerSessionsMap{provider: &routersession.SessionInfo{}}, nil)
 	}
 	return usedProviders
 }
 
 // dispatchedTogether records a single batch holding every provider, the way a stateful fan-out
 // goes out.
-func dispatchedTogether(providers ...string) *lavasession.UsedProviders {
-	batch := lavasession.ConsumerSessionsMap{}
+func dispatchedTogether(providers ...string) *routersession.UsedProviders {
+	batch := routersession.ConsumerSessionsMap{}
 	for _, provider := range providers {
-		batch[provider] = &lavasession.SessionInfo{}
+		batch[provider] = &routersession.SessionInfo{}
 	}
-	usedProviders := lavasession.NewUsedProviders(nil)
+	usedProviders := routersession.NewUsedProviders(nil)
 	usedProviders.AddUsed(batch, nil)
 	return usedProviders
 }
@@ -287,7 +287,7 @@ func TestRetryCountHeader_CountsAttemptsWithoutResult(t *testing.T) {
 		{
 			// Unchanged as well: a cross-validation round sends every participant in one batch and
 			// names them in its own headers. The participant still out when the reply was built is
-			// pending, not a retry, so neither Lava-Retries nor Lava-Provider-Address is set.
+			// pending, not a retry, so neither Router-Retries nor Router-Provider-Address is set.
 			name: "a cross-validation round is one batch, not N retries",
 			rp: &MockRelayProcessorForHeaders{
 				selection:                       relaycore.CrossValidation,
@@ -390,25 +390,25 @@ func TestRESTListener_HedgedLoserCountsAsARetry(t *testing.T) {
 	}))
 	defer fastNode.Close()
 
-	upstream := func(name string, nodeURL common.NodeUrl) *lavasession.ConsumerSessionsWithProvider {
-		conn, err := lavasession.NewDirectRPCConnection(ctx, nodeURL, 5, spectypes.APIInterfaceRest)
+	upstream := func(name string, nodeURL common.NodeUrl) *routersession.ConsumerSessionsWithProvider {
+		conn, err := routersession.NewDirectRPCConnection(ctx, nodeURL, 5, spectypes.APIInterfaceRest)
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = conn.Close() })
-		provider := lavasession.NewConsumerSessionWithProvider(name, []*lavasession.Endpoint{{
+		provider := routersession.NewConsumerSessionWithProvider(name, []*routersession.Endpoint{{
 			NetworkAddress:    nodeURL.Url,
 			Enabled:           true,
-			DirectConnections: []lavasession.DirectRPCConnection{conn},
+			DirectConnections: []routersession.DirectRPCConnection{conn},
 		}}, 100000, 1, 1)
 		provider.StaticProvider = true
 		return provider
 	}
-	rpcEndpoint := &lavasession.RPCEndpoint{ChainID: "LAVA", ApiInterface: spectypes.APIInterfaceRest, NetworkAddress: "127.0.0.1:0"}
+	rpcEndpoint := &routersession.RPCEndpoint{ChainID: "LAVA", ApiInterface: spectypes.APIInterfaceRest, NetworkAddress: "127.0.0.1:0"}
 	optimizer := &fixedOrderOptimizer{
 		ProviderOptimizer: provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "LAVA"),
 		order:             []string{"slow-upstream", "fast-upstream"},
 	}
-	sessionManager := lavasession.NewConsumerSessionManager(rpcEndpoint, optimizer, nil, "test-router", lavasession.NewActiveSubscriptionProvidersStorage())
-	require.NoError(t, sessionManager.UpdateAllProviders(1, map[uint64]*lavasession.ConsumerSessionsWithProvider{
+	sessionManager := routersession.NewConsumerSessionManager(rpcEndpoint, optimizer, nil, "test-router", routersession.NewActiveSubscriptionProvidersStorage())
+	require.NoError(t, sessionManager.UpdateAllProviders(1, map[uint64]*routersession.ConsumerSessionsWithProvider{
 		0: upstream("slow-upstream", slowNode.NodeUrls[0]),
 		1: upstream("fast-upstream", common.NodeUrl{Url: fastNode.URL}),
 	}, nil))
@@ -447,7 +447,7 @@ func TestRESTListener_HedgedLoserCountsAsARetry(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Equal(t, http.StatusOK, response.StatusCode, "body=%s", body)
-	require.Equal(t, "true", response.Header.Get(common.LAVA_HEDGE_TRIGGERED_HEADER),
+	require.Equal(t, "true", response.Header.Get(common.HEDGE_TRIGGERED_HEADER),
 		"setup: the ticker must have hedged, or this measures nothing")
 	require.EqualValues(t, 1, slowRelays.Load(), "setup: the slow upstream must have been asked first")
 	require.EqualValues(t, 1, fastRelays.Load(), "setup: the hedge must have gone to the other upstream")
@@ -469,7 +469,7 @@ func TestRESTListener_HedgedLoserCountsAsARetry(t *testing.T) {
 
 // MAG-3778: every upstream is slower than the attempt window, so the ticker hedges while the first
 // attempt is still running, and the first attempt answers before the hedge can. The hedge is cut
-// off with no result, and the reply still counts it: Lava-Retries counts every attempt the router
+// off with no result, and the reply still counts it: Router-Retries counts every attempt the router
 // sent (MAG-1818), not the attempts that came back, so it reports one retry and names the hedge
 // before the upstream that answered.
 func TestJsonRpcListener_FirstAttemptBeatingItsHedgeCountsTheHedge(t *testing.T) {
@@ -504,7 +504,7 @@ func TestJsonRpcListener_FirstAttemptBeatingItsHedgeCountsTheHedge(t *testing.T)
 
 	require.Equal(t, http.StatusOK, read.status, read.body)
 	require.EqualValues(t, 2, arrivals.Load(), "setup: the ticker must have hedged to the other upstream")
-	require.Equal(t, "true", read.header.Get(common.LAVA_HEDGE_TRIGGERED_HEADER))
+	require.Equal(t, "true", read.header.Get(common.HEDGE_TRIGGERED_HEADER))
 	// Either upstream may be asked first; the body says which one answered.
 	winner, hedge := "upstream-1", "upstream-2"
 	if strings.Contains(read.body, `"0x2"`) {
@@ -528,7 +528,7 @@ func TestJsonRpcListener_FirstAttemptBeatingItsHedgeCountsTheHedge(t *testing.T)
 // without pinning: a pinned request is answered by its upstream or fails, and never hedges
 // (MAG-2280). Everything else is the real optimizer.
 type fixedOrderOptimizer struct {
-	lavasession.ProviderOptimizer
+	routersession.ProviderOptimizer
 	order []string
 }
 

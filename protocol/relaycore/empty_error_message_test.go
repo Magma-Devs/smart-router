@@ -11,7 +11,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 )
@@ -21,7 +21,7 @@ import (
 // CheckResponseError. SetResponse writes to a buffered channel, so the caller decides the order
 // replies arrive in rather than racing timers against WaitForResults.
 func deliverJsonrpcReply(relayProcessor *RelayProcessor, provider string, body string) {
-	relayProcessor.GetUsedProviders().RemoveUsed(provider, lavasession.NewRouterKey(nil), nil)
+	relayProcessor.GetUsedProviders().RemoveUsed(provider, routersession.NewRouterKey(nil), nil)
 	relayProcessor.SetResponse(&RelayResponse{
 		RelayResult: common.RelayResult{
 			Request: &pairingtypes.RelayRequest{
@@ -50,13 +50,13 @@ func TestReadWaitsThroughEmptyMessageError(t *testing.T) {
 	chainMsg, err := chainParser.ParseMsg("", []byte(`{"jsonrpc":"2.0","method":"eth_getBalance","params":["0xDEAD","latest"],"id":1}`), http.MethodPost, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 	require.NoError(t, err)
 	protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "dapp", "127.0.0.1")
-	usedProviders := lavasession.NewUsedProviders(nil)
+	usedProviders := routersession.NewUsedProviders(nil)
 	relayProcessor := NewRelayProcessor(ctx, nil, RelayProcessorMetrics, RelayProcessorMetrics, newMockRelayStateMachineWithSelection(protocolMessage, usedProviders, Stateless))
 
 	// Nothing else contends for the selection lock, so it is taken at once; a short deadline here
 	// would only add a way to fail on a loaded machine.
 	require.NoError(t, usedProviders.TryLockSelection(ctx))
-	usedProviders.AddUsed(lavasession.ConsumerSessionsMap{"empty-error@test": &lavasession.SessionInfo{}, "healthy@test": &lavasession.SessionInfo{}}, nil)
+	usedProviders.AddUsed(routersession.ConsumerSessionsMap{"empty-error@test": &routersession.SessionInfo{}, "healthy@test": &routersession.SessionInfo{}}, nil)
 
 	// Only the empty-message error has arrived, so nothing but that error can end a wait now. Each
 	// wait must run out its deadline instead: the error is a node error, and the healthy node has yet

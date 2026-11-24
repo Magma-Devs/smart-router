@@ -13,6 +13,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	"github.com/magma-Devs/smart-router/utils"
 )
@@ -41,9 +42,10 @@ type httpRelaySpec struct {
 	// answerError may answer a relay error before the masked envelope; handled false falls through.
 	answerError func(ctx context.Context, fiberCtx *fiber.Ctx, err error, reply *pairingtypes.RelayReply) (handled bool, sendErr error)
 	// refusal answers a request the router declined by one of its own limits (MAG-4577): the
-	// status, the body, and the reply text for the failure line; ok false falls through. Unlike
-	// answerError, relayHTTP writes the failure line for it, with the cut body (MAG-4454).
-	refusal func(err error, msgSeed string) (status int, body []byte, loggedReply string, ok bool)
+	// status, the body, the reply text for the failure line, and the headers the reply carries
+	// beside Router-Guid (Router-Write-Outcome on a refused write, MAG-5120); ok false falls through.
+	// Unlike answerError, relayHTTP writes the failure line for it, with the cut body (MAG-4454).
+	refusal func(err error, msgSeed string) (status int, body []byte, loggedReply string, headers map[string]string, ok bool)
 	// noAnswer is the shape of the router's own 502/504 when no node answered (MAG-4481).
 	noAnswer noAnswerShape
 	// errorBody builds the masked error envelope.
@@ -97,11 +99,30 @@ func (apil *chainListenerBase) relayHTTP(spec httpRelaySpec) fiber.Handler {
 				}
 			}
 			if spec.refusal != nil {
-				if status, body, loggedReply, ok := spec.refusal(err, msgSeed); ok {
+				if status, body, loggedReply, headers, ok := spec.refusal(err, msgSeed); ok {
 					apil.logger.LogRequestAndResponse(spec.logModule, true, req.logMethod, req.logPath, req.loggedBody, loggedReply, msgSeed, time.Since(startTime), err)
 					fiberCtx.Status(status)
+					// A refusal is made before any provider is asked, so no relay ran to put the
+					// request's headers on it. The request id goes on here, the one the body's guid
+					// and the router's log lines carry (MAG-4351).
+					fiberCtx.Set(common.GUID_HEADER_NAME, msgSeed)
+					for name, value := range headers {
+						fiberCtx.Set(name, value)
+					}
 					return addHeadersAndSendBytes(fiberCtx, reply.GetMetadata(), body)
 				}
+			}
+			if message, ok := refusedRequestMessage(err); ok {
+				// The router refused the request itself before asking any provider: the request is
+				// the reason, so it is a client error, not the 500 that tells every alert rule and
+				// retry policy the router failed (MAG-3800). The listener's own error body carries
+				// one fixed sentence, never err's text, which lists the router's provider names.
+				// Masked mode keeps the sentence too: the router wrote it, so it holds nothing to hide.
+				response := spec.errorBody(fiberCtx, relayResult, refusalEnvelope(message, msgSeed), msgSeed)
+				apil.logger.LogRequestAndResponse(spec.logModule, true, req.logMethod, req.logPath, req.loggedBody, loggedReply(response), msgSeed, time.Since(startTime), err)
+				fiberCtx.Status(fiber.StatusBadRequest)
+				fiberCtx.Set(common.GUID_HEADER_NAME, msgSeed)
+				return addHeadersAndSendBytes(fiberCtx, reply.GetMetadata(), response)
 			}
 			errMasking := apil.logger.GetUniqueGuidResponseForError(err, msgSeed)
 			// MAG-4481: the upstream's own answer as is, or the router's 502/504 when none answered.
@@ -135,6 +156,34 @@ func (apil *chainListenerBase) relayHTTP(spec httpRelaySpec) fiber.Handler {
 	}
 }
 
+// refusedRequestMessage reports whether err is a refusal of the request itself that every
+// interface answers as a client error, and the one sentence the caller is given for it: a
+// router-select-provider name that none of the router's providers carries (MAG-3800), and on gRPC a
+// binary request that is not a protobuf message (MAG-5421).
+func refusedRequestMessage(err error) (message string, ok bool) {
+	switch {
+	case errors.Is(err, routersession.SelectedProviderNotConfiguredError):
+		return routersession.SelectedProviderNotConfiguredError.Error(), true
+	case errors.Is(err, GrpcRequestNotProtobufError):
+		return GrpcRequestNotProtobufError.Error(), true
+	}
+	return "", false
+}
+
+// refusalEnvelope is the {"Error_GUID":…,"Error":…} text a listener's errorBody reads, built for
+// a router-written sentence: unlike GetUniqueGuidResponseForError it keeps the sentence in masked
+// mode as well.
+func refusalEnvelope(message, msgSeed string) string {
+	envelope, err := json.Marshal(struct {
+		ErrorGUID string `json:"Error_GUID"`
+		Error     string `json:"Error"`
+	}{ErrorGUID: msgSeed, Error: message})
+	if err != nil {
+		return message
+	}
+	return string(envelope)
+}
+
 // receivedAttrs are a received line's GUID and the tracing ids ctx carries, followed by the
 // handler's own attributes.
 func receivedAttrs(ctx context.Context, guid uint64, attrs ...utils.Attribute) []utils.Attribute {
@@ -149,7 +198,7 @@ func receivedAttrs(ctx context.Context, guid uint64, attrs ...utils.Attribute) [
 // logReceivedWithSeedAfterDapp writes the received line the REST POST and GraphQL handlers share.
 func logReceivedWithSeedAfterDapp(message string) func(context.Context, uint64, string, string, httpRelayRequest, []pairingtypes.Metadata) {
 	return func(ctx context.Context, guid uint64, msgSeed, dappID string, req httpRelayRequest, headers []pairingtypes.Metadata) {
-		utils.LavaFormatInfo(message, receivedAttrs(ctx, guid,
+		utils.FormatInfo(message, receivedAttrs(ctx, guid,
 			utils.LogAttr("path", req.path),
 			utils.LogAttr("dappID", dappID),
 			utils.LogAttr("msgSeed", msgSeed),
@@ -168,7 +217,7 @@ func (apil *chainListenerBase) listen(ctx context.Context, app *fiber.App) {
 		apil.listeningAddress.Store(&addr)
 	}()
 
-	ListenWithRetry(ctx, app, apil.endpoint.NetworkAddress, addrChannelSafe)
+	listenWithRetry(ctx, app, apil.endpoint.NetworkAddress, addrChannelSafe, &apil.gate)
 }
 
 // answerJsonRpcBatchTooLarge answers a batch over the operator's size limit with 429.
@@ -253,8 +302,8 @@ func (wsl *wsListenerBase) websocketRoutes(ctx context.Context, app *fiber.App, 
 			rateLimit = 0
 		}
 
-		utils.LavaFormatDebug(name+" websocket opened", utils.LogAttr("consumerIp", websocketConn.LocalAddr().String()))
-		defer utils.LavaFormatDebug(name+" websocket closed", utils.LogAttr("consumerIp", websocketConn.LocalAddr().String()))
+		utils.FormatDebug(name+" websocket opened", utils.LogAttr("consumerIp", websocketConn.LocalAddr().String()))
+		defer utils.FormatDebug(name+" websocket closed", utils.LogAttr("consumerIp", websocketConn.LocalAddr().String()))
 
 		consumerWebsocketManager := NewConsumerWebsocketManager(ConsumerWebsocketManagerOptions{
 			WebsocketConn:          websocketConn,

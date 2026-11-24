@@ -60,7 +60,7 @@ func TestFailedRelayReply_UpstreamAnswerGoesBackAsIs(t *testing.T) {
 		"large body, as is, untrimmed": strings.Repeat("x", 5000),
 	}
 	for name, body := range bodies {
-		for _, shape := range []noAnswerShape{noAnswerJsonRpc, noAnswerJsonError} {
+		for _, shape := range []noAnswerShape{noAnswerJsonRpc, noAnswerJsonError, noAnswerGraphQL} {
 			reply, ok := buildFailedRelayReply(upstreamAnswered(503, body, "text/html"), "g1", []byte(`{"jsonrpc":"2.0","id":7}`), shape)
 			require.True(t, ok, name)
 			require.Equal(t, 503, reply.status, name)
@@ -156,4 +156,59 @@ func setMasked(t *testing.T) {
 	previous := metrics.ReturnMaskedErrors
 	metrics.ReturnMaskedErrors = "true"
 	t.Cleanup(func() { metrics.ReturnMaskedErrors = previous })
+}
+
+// GraphQL's no-answer reply is the router's own GraphQL error (MAG-5119, the chapter's cases T9 and
+// T10): the status the router chose, one error with the code NO_PROVIDER_ANSWER and the guid, no
+// data key, and a sentence of the router's own. Unlike the other shapes it carries no transport
+// cause at all, not even a redacted one: the cause names a provider's url and address.
+func TestFailedRelayReply_GraphQLNoAnswerIsTheRoutersGraphQLError(t *testing.T) {
+	refused := common.ClientFacingError{
+		Cause:           `http request failed: Post "https://node.example.com/v2/SECRETKEY": dial tcp 10.0.0.1:443: connect: connection refused`,
+		RouterErrorCode: 1002,
+		RouterErrorName: "PROTOCOL_CONNECTION_REFUSED",
+	}
+	timedOut := common.ClientFacingError{TimedOut: true, Timeout: 30 * time.Second, RouterErrorCode: 1007, RouterErrorName: "PROTOCOL_CONTEXT_DEADLINE"}
+	for _, tc := range []struct {
+		name        string
+		result      *common.RelayResult
+		wantStatus  int
+		wantMessage string
+	}{
+		{"a provider refused the connection (T9)", noUpstreamAnswer(502, refused), 502, "no provider answered the request"},
+		{"every provider timed out (T10)", noUpstreamAnswer(504, timedOut), 504, "no provider answered within 30s"},
+		{"timed out with no budget recorded", noUpstreamAnswer(504, common.ClientFacingError{TimedOut: true}), 504, "no provider answered within the request's timeout"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reply, ok := buildFailedRelayReply(tc.result, "5907", []byte(`{"query":"{ chainIdentifier }"}`), noAnswerGraphQL)
+			require.True(t, ok)
+			require.Equal(t, tc.wantStatus, reply.status)
+			require.False(t, reply.fromUpstream)
+			require.Equal(t, "5907", reply.guid, "the reply also sends the guid as Router-Guid")
+			require.Equal(t, "application/json; charset=utf-8", reply.contentType)
+
+			var fields map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(reply.body, &fields))
+			require.NotContains(t, fields, "data", "the router's own reply has no data key")
+			var body struct {
+				Errors []struct {
+					Message    string            `json:"message"`
+					Extensions map[string]string `json:"extensions"`
+				} `json:"errors"`
+			}
+			require.NoError(t, json.Unmarshal(reply.body, &body))
+			require.Len(t, body.Errors, 1)
+			require.Equal(t, tc.wantMessage, body.Errors[0].Message)
+			require.Equal(t, map[string]string{"code": "NO_PROVIDER_ANSWER", "guid": "5907"}, body.Errors[0].Extensions)
+			for _, leak := range []string{"node.example.com", "SECRETKEY", "10.0.0.1", "443", "connection refused", "dial tcp", "http request failed"} {
+				require.NotContains(t, string(reply.body), leak, "the reply names no provider and no transport error")
+			}
+		})
+	}
+
+	t.Run("masked mode keeps its masked reply", func(t *testing.T) {
+		setMasked(t)
+		_, ok := buildFailedRelayReply(noUpstreamAnswer(502, refused), "5907", nil, noAnswerGraphQL)
+		require.False(t, ok)
+	})
 }

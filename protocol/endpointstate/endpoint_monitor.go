@@ -5,6 +5,7 @@ import (
 	"errors"
 	"maps"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -14,8 +15,9 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chaintracker"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/endpointtip"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/holdoff"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/magma-Devs/smart-router/utils/backoff"
@@ -57,6 +59,10 @@ const (
 	EndpointChainTrackerPolling       EndpointChainTrackerState = "polling"
 	EndpointChainTrackerRetryingStart EndpointChainTrackerState = "retrying_start"
 	EndpointChainTrackerStopped       EndpointChainTrackerState = "stopped"
+	// EndpointChainTrackerNotTrackedByDesign is the state of a url that has no tracker on
+	// purpose: it serves only its add-on collections (standalone-addons) and none of them
+	// declares a way to read the head. See EndpointMonitor.untracked (MAG-5349).
+	EndpointChainTrackerNotTrackedByDesign EndpointChainTrackerState = "not_tracked_by_design"
 )
 
 // EndpointMonitor manages per-endpoint ChainTrackers for the Smart Router.
@@ -78,6 +84,23 @@ type EndpointMonitor struct {
 	// Map from endpoint URL to ChainTracker lifecycle state and last startup error.
 	trackerStates     map[string]EndpointChainTrackerState
 	trackerLastErrors map[string]string
+
+	// untracked holds the urls this monitor decided NOT to track (MAG-5349): a url that
+	// serves only its add-on collections (standalone-addons) where none of them declares
+	// GET_BLOCKNUM. Such a url has no head to read — a transaction-submit service is the
+	// case that forced this — and the base collection's head request is the very probe
+	// standalone-addons opted out of. A tracker for it could only fail its start and retry
+	// for the life of the url, so none is created. The entry is what makes the decision
+	// (and its one log line) happen once per url instead of once per relay. Guarded by mu;
+	// a url is in at most one of trackers and untracked.
+	//
+	// The key is the url alone, and two providers can list one url. The entry then stands only
+	// while every endpoint on the url has no head: the first one that can read it (a provider
+	// that lists the url as a base url) moves the url to trackers. See GetOrCreateTracker.
+	//
+	// The value is the set of endpoint shapes (headlessShape) already found to have no head on
+	// the url, so a repeated call for the same endpoint costs no spec lookup.
+	untracked map[string]map[string]struct{}
 
 	// Per-endpoint observation records (MAG-2158 / Topic A): the side-effect-free
 	// telemetry the probing layer (Topic D) and the per-chain ChainState (Topic C)
@@ -318,6 +341,7 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 		fetchers:          make(map[string]*EndpointPoller),
 		cancelFuncs:       make(map[string]context.CancelFunc),
 		trackerStates:     make(map[string]EndpointChainTrackerState),
+		untracked:         make(map[string]map[string]struct{}),
 		trackerLastErrors: make(map[string]string),
 		observations:      make(map[string]EndpointObservation),
 		generations:       make(map[string]uint64),
@@ -354,7 +378,7 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 	// client relay, so a rollout never boots straight into paused polls.
 	manager.lastClientRelayNanos.Store(time.Now().UnixNano())
 	if idleAfter > 0 {
-		utils.LavaFormatInfo("chain tracker idle mode enabled: polls pause after a quiet window and resume on the next client relay",
+		utils.FormatInfo("chain tracker idle mode enabled: polls pause after a quiet window and resume on the next client relay",
 			utils.LogAttr("chainID", config.ChainID),
 			utils.LogAttr("apiInterface", config.ApiInterface),
 			utils.LogAttr("idleAfter", idleAfter),
@@ -370,7 +394,7 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 	// appears when the answer is "off" leaves them with nothing to read when it is "on", and
 	// the spec reason can override the flag on some chains of a multichain process but not
 	// others. The reason attribute distinguishes the two ways it can be off.
-	utils.LavaFormatInfo("block-hash polling (fork detection) resolved",
+	utils.FormatInfo("block-hash polling (fork detection) resolved",
 		utils.LogAttr("chainID", config.ChainID),
 		utils.LogAttr("apiInterface", config.ApiInterface),
 		utils.LogAttr("enabled", !manager.hashPolling.HeadOnly()),
@@ -378,7 +402,7 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 	)
 
 	if manager.peerObservations != nil {
-		utils.LavaFormatInfo("fleet tracker gate enabled: borrowing peer poll observations from the cache backend",
+		utils.FormatInfo("fleet tracker gate enabled: borrowing peer poll observations from the cache backend",
 			utils.LogAttr("chainID", config.ChainID),
 			utils.LogAttr("apiInterface", config.ApiInterface),
 			utils.LogAttr("podID", manager.podID),
@@ -395,7 +419,7 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 	// arrived" — and the failure mode this knob actually has is a value that silently reverts
 	// (out of range, or truncated to the unset sentinel by an older binary). The resolved
 	// interval, not the requested divisor, is the thing worth stating.
-	utils.LavaFormatInfo("per-endpoint chain tracker poll cadence resolved",
+	utils.FormatInfo("per-endpoint chain tracker poll cadence resolved",
 		utils.LogAttr("chainID", config.ChainID),
 		utils.LogAttr("apiInterface", config.ApiInterface),
 		utils.LogAttr("averageBlockTime", avgBlockTime),
@@ -411,6 +435,9 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 // GetOrCreateTracker returns an existing ChainTracker for the endpoint or creates a new one.
 // Thread-safe - uses lazy initialization to avoid creating trackers for unused endpoints.
 //
+// It returns (nil, nil) for a url that is not tracked by design (see untracked): no tracker
+// exists and none is missing. IsUntrackedByDesign tells that case from a tracked url.
+//
 // providerName is the name the relay path records rate-limit hold-offs under (the provider's
 // public address). The tracker reads the relay path's (provider, url) entry, so a relay's
 // hold-off or the provider escalation slows its poll; it records its own 429s under the url
@@ -418,8 +445,8 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 // provider in hand pass "" and the tracker reads the url key alone (MAG-4165).
 func (m *EndpointMonitor) GetOrCreateTracker(
 	providerName string,
-	endpoint *lavasession.Endpoint,
-	directConnection lavasession.DirectRPCConnection,
+	endpoint *routersession.Endpoint,
+	directConnection routersession.DirectRPCConnection,
 ) (chaintracker.IChainTracker, error) {
 	endpointURL := endpoint.NetworkAddress
 
@@ -429,7 +456,14 @@ func (m *EndpointMonitor) GetOrCreateTracker(
 		m.mu.RUnlock()
 		return tracker, nil
 	}
+	// A url held as not tracked stays so only for an endpoint already found to have no head.
+	// Any other endpoint on the url (another provider lists it as a base url) falls through:
+	// if it can read the head, the url gets its tracker.
+	_, settled := m.untracked[endpointURL][headlessShape(endpoint)]
 	m.mu.RUnlock()
+	if settled {
+		return nil, nil
+	}
 
 	// Slow path: create new tracker
 	m.mu.Lock()
@@ -439,6 +473,33 @@ func (m *EndpointMonitor) GetOrCreateTracker(
 	if tracker, exists := m.trackers[endpointURL]; exists {
 		return tracker, nil
 	}
+	shapes, untracked := m.untracked[endpointURL]
+	if _, settled := shapes[headlessShape(endpoint)]; settled {
+		return nil, nil
+	}
+	if m.hasNoHeadByDesign(endpoint) {
+		if untracked {
+			// Another endpoint on a url already held as not tracked: same decision, no new line.
+			shapes[headlessShape(endpoint)] = struct{}{}
+			return nil, nil
+		}
+		m.untracked[endpointURL] = map[string]struct{}{headlessShape(endpoint): {}}
+		m.trackerStates[endpointURL] = EndpointChainTrackerNotTrackedByDesign
+		delete(m.trackerLastErrors, endpointURL)
+		utils.FormatInfo("no ChainTracker for endpoint: it serves only add-on collections and none of them declares a way to read the head",
+			utils.LogAttr("endpoint", endpointURL),
+			utils.LogAttr("chainID", m.chainID),
+			utils.LogAttr("apiInterface", m.apiInterface),
+			utils.LogAttr("addons", sortedAddons(endpoint)),
+		)
+		return nil, nil
+	}
+	// untracked here means: the url was held as not tracked for an endpoint that serves only
+	// add-on collections, and this endpoint can read the head on the same url (two providers
+	// list one url, one of them as a base url). The decision is per url, so it follows the
+	// endpoint that has a head; otherwise the base provider would lose its block height to the
+	// other's opt-out. The "not tracked" entry is dropped below, once the tracker is stored: if
+	// creating it fails, the url must keep the decision it has rather than be left with neither.
 
 	// Create the chain fetcher
 	fetcher := NewEndpointPoller(
@@ -501,7 +562,7 @@ func (m *EndpointMonitor) GetOrCreateTracker(
 		FlatPollInterval: m.flatPollInterval,
 		// Rate-limit hold-off keys: the relay path's provider name (read only) and this url,
 		// which the tracker's own 429s are recorded under (MAG-4165).
-		RateLimitProvider: providerName,
+		RateLimitProvider: holdoff.ProviderKey(m.chainID, m.apiInterface, providerName),
 		RateLimitURL:      endpointURL,
 		// Traffic gate (Topic B): the dedicated poll skips its ENTIRE cycle when a fresh
 		// relay-harvested tip already covers the endpoint. The gate lives on the ChainTracker
@@ -583,7 +644,7 @@ func (m *EndpointMonitor) GetOrCreateTracker(
 		m.obsMu.Lock()
 		delete(m.generations, endpointURL)
 		m.obsMu.Unlock()
-		return nil, utils.LavaFormatError("failed to create ChainTracker for endpoint", err,
+		return nil, utils.FormatError("failed to create ChainTracker for endpoint", err,
 			utils.LogAttr("endpoint", endpointURL),
 			utils.LogAttr("chainID", m.chainID),
 		)
@@ -595,18 +656,88 @@ func (m *EndpointMonitor) GetOrCreateTracker(
 	m.cancelFuncs[endpointURL] = trackerCancel
 	m.trackerStates[endpointURL] = EndpointChainTrackerNoBlockYet
 	delete(m.trackerLastErrors, endpointURL)
+	if untracked {
+		delete(m.untracked, endpointURL)
+		utils.FormatInfo("created ChainTracker for a url that was held as not tracked: another provider on the same url serves a collection with a head",
+			utils.LogAttr("endpoint", endpointURL),
+			utils.LogAttr("chainID", m.chainID),
+			utils.LogAttr("apiInterface", m.apiInterface),
+		)
+	}
 
 	// Start the tracker after registration. If startup probing fails, keep retrying
 	// until the endpoint recovers or this tracker is removed/stopped.
 	go m.startTrackerWithRetry(tracker, trackerCtx, endpointURL)
 
-	utils.LavaFormatInfo("created ChainTracker for endpoint",
+	utils.FormatInfo("created ChainTracker for endpoint",
 		utils.LogAttr("endpoint", endpointURL),
 		utils.LogAttr("chainID", m.chainID),
 		utils.LogAttr("avgBlockTime", m.averageBlockTime),
 	)
 
 	return tracker, nil
+}
+
+// hasNoHeadByDesign reports whether a url must not get a tracker: it serves only its add-on
+// collections (standalone-addons) and none of them declares GET_BLOCKNUM. It asks the same
+// lookup the poller would (EndpointPoller.FetchLatestBlockNum), so the answer is exactly
+// "this url's tracker could never start".
+//
+// Narrow on purpose. A url that serves the base collection and finds no GET_BLOCKNUM is a
+// broken spec, not a design, and keeps failing loudly through the tracker's start. A chain
+// with a custom wrapper (Solana) does not read the head through the directive at all, so the
+// directive's absence says nothing about it.
+func (m *EndpointMonitor) hasNoHeadByDesign(endpoint *routersession.Endpoint) bool {
+	if endpoint == nil || m.chainParser == nil || endpoint.ServesBaseCollection() {
+		return false
+	}
+	if !chaintracker.PollsHeadBySpecDirective(m.chainID) {
+		return false
+	}
+	_, _, ok := m.chainParser.GetParsingByTagForCollection(spectypes.FUNCTION_TAG_GET_BLOCKNUM, sortedAddons(endpoint), endpoint.InternalPath, false)
+	return !ok
+}
+
+// IsUntrackedByDesign reports whether the url has no tracker on purpose (see untracked).
+// The probe loop reads it to leave such a url out of its provider's sample: it has no polls
+// to be judged by, and "never polled" must not read as "dead".
+func (m *EndpointMonitor) IsUntrackedByDesign(endpointURL string) bool {
+	if m == nil {
+		return false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	_, untracked := m.untracked[endpointURL]
+	return untracked
+}
+
+// IsSettledUntracked reports whether a call for this endpoint has nothing to do: its url is
+// held as not tracked by design, and this endpoint is one already found to have no head.
+// False for any other endpoint on such a url — GetOrCreateTracker must still run for it, and
+// gives the url its tracker if the endpoint can read the head (two providers on one url, one
+// of them as a base url).
+func (m *EndpointMonitor) IsSettledUntracked(endpoint *routersession.Endpoint) bool {
+	if m == nil || endpoint == nil {
+		return false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	_, settled := m.untracked[endpoint.NetworkAddress][headlessShape(endpoint)]
+	return settled
+}
+
+// headlessShape is what hasNoHeadByDesign's answer depends on, beside the url: whether the
+// endpoint serves the base collection, its add-ons and its internal path. Two endpoints on one
+// url with the same shape get the same answer.
+func headlessShape(endpoint *routersession.Endpoint) string {
+	if endpoint == nil {
+		return ""
+	}
+	base := "addons-only"
+	if endpoint.ServesBaseCollection() {
+		base = "base"
+	}
+	return base + "|" + strings.Join(sortedAddons(endpoint), ",") + "|" + endpoint.InternalPath
 }
 
 func (m *EndpointMonitor) startTrackerWithRetry(tracker chaintracker.IChainTracker, trackerCtx context.Context, endpointURL string) {
@@ -628,7 +759,7 @@ func (m *EndpointMonitor) startTrackerWithRetry(tracker chaintracker.IChainTrack
 
 		retryDelay := m.trackerStartRetryDelayAfter(attempt, err)
 		m.setTrackerState(endpointURL, EndpointChainTrackerRetryingStart, err)
-		utils.LavaFormatWarning("ChainTracker startup failed; retrying", err,
+		utils.FormatWarning("ChainTracker startup failed; retrying", err,
 			utils.LogAttr("endpoint", endpointURL),
 			utils.LogAttr("chainID", m.chainID),
 			utils.LogAttr("attempt", attempt+1),
@@ -890,7 +1021,7 @@ func (m *EndpointMonitor) PollNow(ctx context.Context, endpointURL string) (obse
 	// naming the tracker's lifecycle state when no poll can be vouched for.
 	ran, pollErr := m.triggerPoll(ctx, endpointURL, false)
 	if errors.Is(pollErr, errNoTrackerForEndpoint) {
-		return EndpointObservation{}, false, utils.LavaFormatError("poll-now: no ChainTracker for endpoint", nil,
+		return EndpointObservation{}, false, utils.FormatError("poll-now: no ChainTracker for endpoint", nil,
 			utils.LogAttr("endpoint", endpointURL),
 			utils.LogAttr("chainID", m.chainID),
 		)
@@ -914,7 +1045,7 @@ func (m *EndpointMonitor) PollNow(ctx context.Context, endpointURL string) (obse
 			// tracker, the budget was too short for this upstream.
 			message = "poll-now: a poll is running but its result was not awaited; the record below predates it"
 		}
-		return observation, false, utils.LavaFormatError(message, pollErr,
+		return observation, false, utils.FormatError(message, pollErr,
 			utils.LogAttr("endpoint", endpointURL),
 			utils.LogAttr("chainID", m.chainID),
 			utils.LogAttr("trackerState", string(state)),
@@ -928,6 +1059,17 @@ func (m *EndpointMonitor) PollNow(ctx context.Context, endpointURL string) (obse
 func (m *EndpointMonitor) RemoveTracker(endpointURL string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	// A url that was never tracked (see untracked) has only its entry and its state to drop.
+	if _, untracked := m.untracked[endpointURL]; untracked {
+		delete(m.untracked, endpointURL)
+		delete(m.trackerStates, endpointURL)
+		utils.FormatInfo("forgot endpoint that had no ChainTracker by design",
+			utils.LogAttr("endpoint", endpointURL),
+			utils.LogAttr("chainID", m.chainID),
+		)
+		return
+	}
 
 	// Cancel the tracker's context first - this signals the goroutine to exit
 	if cancel, exists := m.cancelFuncs[endpointURL]; exists {
@@ -958,7 +1100,7 @@ func (m *EndpointMonitor) RemoveTracker(endpointURL string) {
 	// stale entry in the process-global map.
 	endpointtip.Default().Remove(m.tipKey(endpointURL))
 
-	utils.LavaFormatInfo("stopped and removed ChainTracker for endpoint",
+	utils.FormatInfo("stopped and removed ChainTracker for endpoint",
 		utils.LogAttr("endpoint", endpointURL),
 		utils.LogAttr("chainID", m.chainID),
 	)
@@ -1003,12 +1145,17 @@ func (m *EndpointMonitor) WorstCaseGapBetweenPolls() time.Duration {
 	return worstCaseGapBetweenPolls(m.PollInterval())
 }
 
-// GetAllEndpoints returns all endpoint URLs with active ChainTrackers.
+// GetAllEndpoints returns every endpoint URL this monitor knows: those with an active
+// ChainTracker, and those it holds as not tracked by design (see untracked). The second
+// kind is listed so the callers that drop a url which left the config (RemoveTracker)
+// drop it too.
 func (m *EndpointMonitor) GetAllEndpoints() []string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	return slices.Collect(maps.Keys(m.trackers))
+	urls := make([]string, 0, len(m.trackers)+len(m.untracked))
+	urls = slices.AppendSeq(urls, maps.Keys(m.trackers))
+	return slices.AppendSeq(urls, maps.Keys(m.untracked))
 }
 
 // GetEndpointCount returns the number of active ChainTrackers.
@@ -1041,6 +1188,7 @@ func (m *EndpointMonitor) Stop() {
 	m.cancelFuncs = make(map[string]context.CancelFunc)
 	m.trackerStates = make(map[string]EndpointChainTrackerState)
 	m.trackerLastErrors = make(map[string]string)
+	m.untracked = make(map[string]map[string]struct{})
 
 	// Mark stopped and clear observation state. stopped is sticky: recordPollObservation
 	// and RecordRelayObservation both bail when it is set, so an in-flight poll that
@@ -1057,7 +1205,7 @@ func (m *EndpointMonitor) Stop() {
 	m.lastPublished = make(map[string]time.Time)
 	m.obsMu.Unlock()
 
-	utils.LavaFormatInfo("stopped EndpointMonitor",
+	utils.FormatInfo("stopped EndpointMonitor",
 		utils.LogAttr("chainID", m.chainID),
 		utils.LogAttr("trackersStopped", trackerCount),
 	)

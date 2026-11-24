@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainstate"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/stretchr/testify/require"
 )
 
@@ -25,7 +25,7 @@ func newAdoptTestServer(t *testing.T, sharedState bool, seed int64) *RPCSmartRou
 		t.Fatalf("seed SetLatestBlock(%d) did not take", seed)
 	}
 	return &RPCSmartRouterServer{
-		listenEndpoint: &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		listenEndpoint: &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 		chainState:     cs,
 		sharedState:    sharedState,
 	}
@@ -71,7 +71,7 @@ func TestAdoptSharedStateTip(t *testing.T) {
 
 	t.Run("nil chain state does not panic", func(t *testing.T) {
 		rpcss := &RPCSmartRouterServer{
-			listenEndpoint: &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+			listenEndpoint: &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 			sharedState:    true,
 		}
 		require.NotPanics(t, func() { rpcss.adoptSharedStateTip(ctx, 5000, 1) })
@@ -94,7 +94,7 @@ func TestAdoptSharedStateTip(t *testing.T) {
 			TTL:              10 * time.Second,
 		}, clock)
 		rpcss := &RPCSmartRouterServer{
-			listenEndpoint: &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+			listenEndpoint: &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 			chainState:     cs,
 			sharedState:    true,
 		}
@@ -137,7 +137,7 @@ func TestAdoptSharedStateTip_StaleTipTakesLowerPeerValue(t *testing.T) {
 		t.Fatal("seed SetLatestBlock(2000) did not take")
 	}
 	rpcss := &RPCSmartRouterServer{
-		listenEndpoint: &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		listenEndpoint: &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 		chainState:     cs,
 		sharedState:    true,
 	}
@@ -159,4 +159,43 @@ func TestAdoptSharedStateTip_StaleTipTakesLowerPeerValue(t *testing.T) {
 	now = now.Add(30 * time.Second)
 	rpcss.adoptSharedStateTip(context.Background(), 1400, 1000)
 	require.Equal(t, int64(1400), tip(t, rpcss), "a stale local tip self-heals down to the peer value")
+}
+
+// TestAdoptSharedStateTip_EchoOfOwnTipIsNotAConfirmation is the half of MAG-4964 that kept a frozen
+// tip frozen past its TTL. A relay's block is published to the shared cache clamped to the publishing
+// router's tip (MAG-3755), so a lookup often hands back this router's OWN tip. Fed to SetLatestBlock,
+// that echo was an equal-block confirmation although no endpoint had reported the block, and it
+// refreshed the tip on every lookup: a tip the outlier guard held below the head never went stale, so
+// the guard never let the head in. An echo is not news. With nothing first-hand confirming the tip it
+// goes stale after one TTL, and the head the guard rejected is taken.
+func TestAdoptSharedStateTip_EchoOfOwnTipIsNotAConfirmation(t *testing.T) {
+	ctx := context.Background()
+	now := time.Unix(1700000000, 0)
+	cs := chainstate.NewWithClock("ETH1", chainstate.Config{
+		BucketWidth:      2,
+		OutlierThreshold: 100,
+		StalenessWindow:  10 * time.Second,
+		TTL:              10 * time.Second,
+	}, func() time.Time { return now })
+	const frozen = int64(2000)
+	if _, _, ok := cs.SetLatestBlock(frozen); !ok {
+		t.Fatalf("seed SetLatestBlock(%d) did not take", frozen)
+	}
+	rpcss := &RPCSmartRouterServer{
+		listenEndpoint: &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "rest"},
+		chainState:     cs,
+		sharedState:    true,
+	}
+	head := frozen + 500 // more than OutlierThreshold over the tip: rejected while the tip is fresh
+
+	// Two TTLs of traffic. Every second the endpoint answers its head, and a cache lookup for an older
+	// block (localSeenBlock below the tip) hands back the echo.
+	for i := 0; i < 20; i++ {
+		now = now.Add(time.Second)
+		rpcss.adoptSharedStateTip(ctx, frozen, frozen-100)
+		cs.SetLatestBlock(head)
+	}
+	got, ok := cs.GetLatestBlock()
+	require.True(t, ok)
+	require.Equal(t, head, got, "echoes of the tip must not keep a rejected head out past the TTL")
 }

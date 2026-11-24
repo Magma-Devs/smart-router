@@ -43,7 +43,7 @@
 #
 # ENVIRONMENT
 #   LAN_IP            override the auto-detected host address (VPNs, multi-NIC)
-#   REDIS_IMAGE       valkey/valkey:7.2 (default) or redis:7.2-alpine
+#   REDIS_IMAGE       valkey/valkey:9.1.3 (default) or redis:7.2-alpine
 #   ROUTER_PORT (3370)  METRICS_PORT (7790)   <- deliberately NOT the standalone
 #                                            lane's 3360/7779, so both can run at once
 #   PRIMARY_PORT (63811) REPLICA_PORT (63812) SENTINEL_PORTS (26390,26391,26392)
@@ -68,7 +68,7 @@ PROJECT_ROOT=$(git -C "$__dir" rev-parse --show-toplevel 2>/dev/null || true)
 LOGS_DIR="${PROJECT_ROOT}/debugging/logs"
 mkdir -p "$LOGS_DIR"
 
-REDIS_IMAGE="${REDIS_IMAGE:-valkey/valkey:7.2}"
+REDIS_IMAGE="${REDIS_IMAGE:-valkey/valkey:9.1.3}"
 PRIMARY_PORT="${PRIMARY_PORT:-63811}"
 REPLICA_PORT="${REPLICA_PORT:-63812}"
 IFS=',' read -r -a SENTINEL_PORTS <<< "${SENTINEL_PORTS:-26390,26391,26392}"
@@ -507,11 +507,11 @@ if [[ "$SKIP_SMOKE" != "1" ]]; then
 
     HEALTH=""
     for _ in $(seq 1 30); do
-        HEALTH=$(curl -s -o /dev/null -w '%{http_code}' -m 10 "http://127.0.0.1:${ROUTER_PORT}/lava/health")
+        HEALTH=$(curl -s -o /dev/null -w '%{http_code}' -m 10 "http://127.0.0.1:${ROUTER_PORT}/router/health")
         [[ "$HEALTH" == "200" ]] && break
         sleep 1
     done
-    [[ "$HEALTH" == "200" ]] && note "router /lava/health" "200" || { note "router /lava/health" "$HEALTH (want 200)"; SMOKE_FAIL=1; }
+    [[ "$HEALTH" == "200" ]] && note "router /router/health" "200" || { note "router /router/health" "$HEALTH (want 200)"; SMOKE_FAIL=1; }
 
     BODY=$(curl -sf -m 20 -X POST "http://127.0.0.1:${ROUTER_PORT}" -H 'Content-Type: application/json' -d "$RELAY" || true)
     [[ "$BODY" == *'"result"'* ]] && note "relay eth_getBlockByNumber" "ok" \

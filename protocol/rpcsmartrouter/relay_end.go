@@ -15,9 +15,9 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/internal/chainqueries"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
@@ -111,6 +111,7 @@ type relayEndAttempt struct {
 	errorCode        string
 	message          string
 	nodeCode         int           // the code of the node's JSON-RPC error reply; 0 when there is none
+	grpcStatus       int           // the status of a gRPC node error; 0 when there is none
 	latency          time.Duration // zero when unknown
 	returnedToClient bool
 	sent             bool // went out as a dispatch, so batch and sentAfter are known
@@ -119,9 +120,9 @@ type relayEndAttempt struct {
 	staleFallback    bool          // sent although the consistency check had passed its upstream over
 
 	// Not written: what the relay-level fields are derived from.
-	reply     *pairingtypes.RelayReply
-	lavaError *common.LavaError
-	transport bool // a protocol error: no node reply came back
+	reply       *pairingtypes.RelayReply
+	routerError *common.RouterError
+	transport   bool // a protocol error: no node reply came back
 }
 
 type relayEndAttempts []relayEndAttempt
@@ -209,7 +210,7 @@ func (e *relayEnd) listsAttempts() bool {
 }
 
 // relayEndSkips are the upstreams the consistency check passed over.
-type relayEndSkips []lavasession.ConsistencySkip
+type relayEndSkips []routersession.ConsistencySkip
 
 func (skips relayEndSkips) MarshalZerologArray(array *zerolog.Array) {
 	for i := range skips {
@@ -217,7 +218,7 @@ func (skips relayEndSkips) MarshalZerologArray(array *zerolog.Array) {
 	}
 }
 
-type relayEndSkip lavasession.ConsistencySkip
+type relayEndSkip routersession.ConsistencySkip
 
 func (s relayEndSkip) MarshalZerologObject(event *zerolog.Event) {
 	event.Str("upstream", s.Provider).
@@ -239,6 +240,9 @@ func (a *relayEndAttempt) MarshalZerologObject(event *zerolog.Event) {
 		Str("message", a.message)
 	if a.nodeCode != 0 {
 		event.Int("node_code", a.nodeCode)
+	}
+	if a.grpcStatus != 0 {
+		event.Int("grpc_status", a.grpcStatus)
 	}
 	if a.errorCode != "" {
 		event.Bool("retryable", a.retryable())
@@ -274,7 +278,7 @@ var _ chainlib.RelayRejectionReporter = (*RPCSmartRouterServer)(nil)
 
 // writeRelayEnd writes the relay's relay_end event. Each exit calls it once.
 func (rpcss *RPCSmartRouterServer) writeRelayEnd(ctx context.Context, in relayEndInput) {
-	utils.LogEvent(relayEndEvent, rpcss.buildRelayEnd(ctx, in))
+	emitRelayEnd(rpcss.buildRelayEnd(ctx, in))
 }
 
 // ReportRejectedRelay writes the relay_end of a request a listener parsed itself and could not hand
@@ -338,7 +342,7 @@ func (rpcss *RPCSmartRouterServer) buildRelayEnd(ctx context.Context, in relayEn
 	if in.processor != nil {
 		end.selection = relayEndSelection(in.processor.GetSelection())
 		end.stopReason = in.processor.GetStopReason()
-		var dispatches []lavasession.Dispatch
+		var dispatches []routersession.Dispatch
 		if usedProviders := in.processor.GetUsedProviders(); usedProviders != nil {
 			dispatches = usedProviders.Dispatches()
 			end.skipped = usedProviders.ConsistencySkips()
@@ -372,8 +376,10 @@ func (rpcss *RPCSmartRouterServer) buildRelayEnd(ctx context.Context, in relayEn
 	end.readTransaction(in.protocolMessage, reply)
 	end.status = in.result.GetStatusCode()
 
+	// Every reason a write's outcome is unclear is one unclearWriteError, so match the type, not one value.
+	var unclearWrite *unclearWriteError
 	switch {
-	case errors.Is(in.err, errUnknownWriteOutcome):
+	case errors.As(in.err, &unclearWrite):
 		end.outcome = relayOutcomeWriteUnknown
 	case in.err == nil && !served:
 		end.outcome = relayOutcomeRouterError // neither an answer nor an error: the router lost the result
@@ -396,10 +402,16 @@ func (rpcss *RPCSmartRouterServer) buildRelayEnd(ctx context.Context, in relayEn
 			end.errorCode, end.errorText = returned.errorCode, returned.message
 		}
 	case relayOutcomeWriteUnknown:
-		// What the listener sends, whether or not the router returned a result to carry it.
+		// What the listener sends, whether or not the router returned a result to carry it. A
+		// GraphQL write is the one exception (MAG-5122): graphQLUnclearWriteStatus answers it with
+		// HTTP 200, not 500, so the audit line has to read the status the client actually got.
 		end.status = http.StatusInternalServerError
+		if isGraphQLWrite(in.protocolMessage) {
+			end.status = http.StatusOK
+		}
 		end.errorCode = relayEndWriteUnknownCode(in.cause, end.attempts, requestRanOutOfRoad(end.stopReason))
-		end.errorText = relayEndText(errUnknownWriteOutcome.Error())
+		// The message the client reads, with the reason it gives (MAG-4380).
+		end.errorText = relayEndText(unclearWrite.Error())
 	default:
 		cause := in.cause
 		if cause == nil {
@@ -418,7 +430,7 @@ func (rpcss *RPCSmartRouterServer) buildRelayEnd(ctx context.Context, in relayEn
 // an attempt with no result has not answered by the time the relay ends. Results without a dispatch
 // (a cache hit) follow. Within one upstream, results pair in the header's order: protocol errors,
 // node errors, successes.
-func relayEndAttemptsOf(dispatched []lavasession.Dispatch, start time.Time, successes []common.RelayResult, nodeErrors, protocolErrors []relaycore.RelayError, ranOutOfRoad bool) relayEndAttempts {
+func relayEndAttemptsOf(dispatched []routersession.Dispatch, start time.Time, successes []common.RelayResult, nodeErrors, protocolErrors []relaycore.RelayError, ranOutOfRoad bool) relayEndAttempts {
 	recorded := make([]relayEndAttempt, 0, len(successes)+len(nodeErrors)+len(protocolErrors))
 	for i := range protocolErrors {
 		recorded = append(recorded, relayEndProtocolErrorAttempt(protocolErrors[i], ranOutOfRoad))
@@ -471,14 +483,14 @@ func relayEndAttemptsOf(dispatched []lavasession.Dispatch, start time.Time, succ
 // narrative lines print: whether another upstream may succeed where this one failed. An error the
 // registry did not classify takes UNKNOWN_ERROR's, as its error_code does.
 func (a *relayEndAttempt) retryable() bool {
-	if a.lavaError == nil {
-		return common.LavaErrorUnknown.Retryable
+	if a.routerError == nil {
+		return common.RouterErrorUnknown.Retryable
 	}
-	return a.lavaError.Retryable
+	return a.routerError.Retryable
 }
 
 func relayEndNodeErrorAttempt(nodeError relaycore.RelayError) relayEndAttempt {
-	attempt := relayEndAttempt{outcome: attemptOutcomeNodeError, lavaError: nodeError.LavaError, nodeCode: nodeError.JSONRPCErrorCode}
+	attempt := relayEndAttempt{outcome: attemptOutcomeNodeError, routerError: nodeError.RouterError, nodeCode: nodeError.JSONRPCErrorCode, grpcStatus: nodeError.GRPCStatus}
 	if nodeError.Response != nil {
 		result := &nodeError.Response.RelayResult
 		attempt.upstream = relayEndUpstream(result)
@@ -490,10 +502,10 @@ func relayEndNodeErrorAttempt(nodeError relaycore.RelayError) relayEndAttempt {
 	} else {
 		attempt.upstream = nodeError.ProviderInfo.ProviderAddress
 	}
-	if nodeError.LavaError.IsRateLimited() {
+	if nodeError.RouterError.IsRateLimited() {
 		attempt.outcome = attemptOutcomeRateLimited
 	}
-	attempt.errorCode = relayEndCode(nodeError.LavaError)
+	attempt.errorCode = relayEndCode(nodeError.RouterError)
 	if nodeError.Err != nil {
 		attempt.message = relayEndText(nodeError.Err.Error())
 	}
@@ -501,31 +513,38 @@ func relayEndNodeErrorAttempt(nodeError relaycore.RelayError) relayEndAttempt {
 }
 
 func relayEndProtocolErrorAttempt(protocolError relaycore.RelayError, ranOutOfRoad bool) relayEndAttempt {
-	attempt := relayEndAttempt{upstream: protocolError.ProviderInfo.ProviderAddress, lavaError: protocolError.LavaError, transport: true}
+	attempt := relayEndAttempt{upstream: protocolError.ProviderInfo.ProviderAddress, routerError: protocolError.RouterError, transport: true}
 	if protocolError.Response != nil {
 		attempt.latency = protocolError.Response.RelayResult.AttemptLatency
 	}
-	err := protocolError.GetError()
-	switch {
-	case protocolError.LavaError.IsRateLimited() || errors.Is(err, common.StatusCodeError429):
-		attempt.outcome = attemptOutcomeRateLimited
-	case errors.Is(err, context.Canceled) || protocolError.LavaError == common.LavaErrorContextCanceled:
-		// Cancelled because the budget ran out is a timeout; otherwise the router stopped waiting.
-		attempt.outcome = attemptOutcomeCancelled
-		if ranOutOfRoad {
-			attempt.outcome = attemptOutcomeTimeout
-		}
-	case errors.Is(err, context.DeadlineExceeded) || protocolError.LavaError == common.LavaErrorContextDeadline ||
-		protocolError.LavaError == common.LavaErrorConnectionTimeout || protocolError.LavaError == common.LavaErrorNoResponseTimeout:
-		attempt.outcome = attemptOutcomeTimeout
-	default:
-		attempt.outcome = attemptOutcomeTransportError
-	}
-	attempt.errorCode = relayEndCode(protocolError.LavaError)
-	if err != nil {
+	attempt.outcome = protocolErrorOutcome(protocolError, ranOutOfRoad)
+	attempt.errorCode = relayEndCode(protocolError.RouterError)
+	if err := protocolError.GetError(); err != nil {
 		attempt.message = relayEndText(err.Error())
 	}
 	return attempt
+}
+
+// protocolErrorOutcome is how a transport failure ended its attempt. An unclear write reads its
+// timeouts from here too (writeCutOffs), so the reason the client gets and relay_end's attempts
+// agree on which attempts timed out.
+func protocolErrorOutcome(protocolError relaycore.RelayError, ranOutOfRoad bool) string {
+	err := protocolError.GetError()
+	switch {
+	case protocolError.RouterError.IsRateLimited() || errors.Is(err, common.StatusCodeError429):
+		return attemptOutcomeRateLimited
+	case errors.Is(err, context.Canceled) || protocolError.RouterError == common.RouterErrorContextCanceled:
+		// Cancelled because the budget ran out is a timeout; otherwise the router stopped waiting.
+		if ranOutOfRoad {
+			return attemptOutcomeTimeout
+		}
+		return attemptOutcomeCancelled
+	case errors.Is(err, context.DeadlineExceeded) || protocolError.RouterError == common.RouterErrorContextDeadline ||
+		protocolError.RouterError == common.RouterErrorConnectionTimeout || protocolError.RouterError == common.RouterErrorNoResponseTimeout:
+		return attemptOutcomeTimeout
+	default:
+		return attemptOutcomeTransportError
+	}
 }
 
 // relayEndErrorCode names, from the error registry, why a relay that did not end on an answer
@@ -535,25 +554,25 @@ func relayEndErrorCode(cause error, result *common.RelayResult, attempts relayEn
 	if result != nil {
 		switch result.CrossValidationFailureReason {
 		case common.CrossValidationReasonInsufficientCapacity, common.CrossValidationReasonInsufficientGroups:
-			return common.LavaErrorInsufficientProviders.Name
+			return common.RouterErrorInsufficientProviders.Name
 		case common.CrossValidationReasonNoAgreement, common.CrossValidationReasonDiversityUnmet, common.CrossValidationReasonGroupQuorumUnmet:
-			return common.LavaErrorHashConsensusError.Name
+			return common.RouterErrorHashConsensusError.Name
 		}
 	}
 	switch {
 	case cause == nil:
 	case isRouterFault(cause):
-		return common.LavaErrorRelayProcessingFailed.Name
-	case errors.Is(cause, lavasession.PairingListEmptyError):
-		return common.LavaErrorNoProviders.Name
-	case errors.Is(cause, lavasession.AllProviderEndpointsDisabledError):
-		return common.LavaErrorAllEndpointsDisabled.Name
-	case errors.Is(cause, lavasession.SelectedProviderUnavailableError), errors.Is(cause, lavasession.SelectedProviderAlreadyFailedError):
-		return common.LavaErrorProviderUnavailable.Name
+		return common.RouterErrorRelayProcessingFailed.Name
+	case errors.Is(cause, routersession.PairingListEmptyError):
+		return common.RouterErrorNoProviders.Name
+	case errors.Is(cause, routersession.AllProviderEndpointsDisabledError):
+		return common.RouterErrorAllEndpointsDisabled.Name
+	case errors.Is(cause, routersession.SelectedProviderUnavailableError), errors.Is(cause, routersession.SelectedProviderAlreadyFailedError):
+		return common.RouterErrorProviderUnavailable.Name
 	case errors.Is(cause, chainlib.ErrBatchRequestSizeExceeded):
-		return common.LavaErrorBatchSizeExceeded.Name
+		return common.RouterErrorBatchSizeExceeded.Name
 	case errors.Is(cause, common.SubscriptionNotFoundError):
-		return common.LavaErrorSubscriptionNotFound.Name
+		return common.RouterErrorSubscriptionNotFound.Name
 	}
 	if connectionError := common.DetectConnectionError(cause); connectionError != nil {
 		return connectionError.Name
@@ -570,12 +589,12 @@ func relayEndErrorCode(cause error, result *common.RelayResult, attempts relayEn
 // upstream still silent, or an upstream's connection died after the request went out.
 func relayEndWriteUnknownCode(cause error, attempts relayEndAttempts, ranOutOfRoad bool) string {
 	if ranOutOfRoad {
-		return common.LavaErrorContextDeadline.Name
+		return common.RouterErrorContextDeadline.Name
 	}
 	// Only a transport error can leave a write unsettled; a node's reply settles its upstream, as in
 	// writeOutcomeIsUnknown.
 	for i := range attempts {
-		if attempts[i].transport && attempts[i].lavaError != nil && attempts[i].lavaError.MayHaveReachedNode {
+		if attempts[i].transport && attempts[i].routerError != nil && attempts[i].routerError.MayHaveReachedNode {
 			return attempts[i].errorCode
 		}
 	}
@@ -585,11 +604,11 @@ func relayEndWriteUnknownCode(cause error, attempts relayEndAttempts, ranOutOfRo
 	return ""
 }
 
-func relayEndCode(lavaError *common.LavaError) string {
-	if lavaError == nil {
-		return common.LavaErrorUnknown.Name
+func relayEndCode(routerError *common.RouterError) string {
+	if routerError == nil {
+		return common.RouterErrorUnknown.Name
 	}
-	return lavaError.Name
+	return routerError.Name
 }
 
 func relayEndUpstream(result *common.RelayResult) string {
@@ -704,6 +723,17 @@ func relayEndNamedByURL(protocolMessage chainlib.ProtocolMessage, apiInterface s
 		return len(protocolMessage.RelayPrivateData().GetData()) == 0
 	}
 	return true
+}
+
+// relayAnswerMethod names a request on the debug answer ring (GET /debug/relay-answers) the way
+// relay_end names it: without the leading slash, an unlisted api named by URL withheld, and capped
+// at relayEndMethodLimit. The ring keeps the last few thousand answers, so the raw api name would
+// put a caller's own path on the debug route and let one entry be as long as the request.
+func relayAnswerMethod(protocolMessage chainlib.ProtocolMessage, apiInterface string) string {
+	if protocolMessage == nil || protocolMessage.GetApi() == nil {
+		return ""
+	}
+	return relayEndMethod(protocolMessage.GetApi().Name, relayEndNamedByURL(protocolMessage, apiInterface))
 }
 
 func relayEndSelection(selection relaycore.Selection) string {

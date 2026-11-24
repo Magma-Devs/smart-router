@@ -4,11 +4,12 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/stretchr/testify/require"
 )
 
@@ -27,18 +28,20 @@ import (
 // threshold in a readable number of relays.
 func benchAfter(t *testing.T, value uint64) {
 	t.Helper()
-	original := lavasession.MaxConsecutiveConnectionAttempts
-	t.Cleanup(func() { lavasession.MaxConsecutiveConnectionAttempts = original })
-	lavasession.MaxConsecutiveConnectionAttempts = value
+	original := routersession.MaxConsecutiveConnectionAttempts
+	t.Cleanup(func() { routersession.MaxConsecutiveConnectionAttempts = original })
+	routersession.MaxConsecutiveConnectionAttempts = value
 }
 
 // directRelayHarness wires one endpoint to one upstream through the real relay path.
 type directRelayHarness struct {
 	rpcss    *RPCSmartRouterServer
-	session  *lavasession.SingleConsumerSession
-	endpoint *lavasession.Endpoint
+	session  *routersession.SingleConsumerSession
+	endpoint *routersession.Endpoint
 	// lostBroadcast is handed to relayInnerDirect as is; nil is a relay outside a broadcast.
 	lostBroadcast func(answeredWithNodeError bool) bool
+	// upstream is the endpoint's server; closing it makes the next dial refused.
+	upstream *httptest.Server
 }
 
 // relay runs one relay and reports the endpoint's refusal count and enabled bit afterwards.
@@ -67,43 +70,51 @@ func (h *directRelayHarness) relay(t *testing.T, hasNodeError bool, message stri
 
 func newDirectRelayHarness(t *testing.T, status int, body string) *directRelayHarness {
 	t.Helper()
-
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return newDirectRelayHarnessServing(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
 		_, _ = w.Write([]byte(body))
-	}))
+	})
+}
+
+// newDirectRelayHarnessServing is newDirectRelayHarness with the upstream's handler given, for a
+// case whose upstream changes its answer between relays.
+func newDirectRelayHarnessServing(t *testing.T, handler http.HandlerFunc) *directRelayHarness {
+	t.Helper()
+
+	upstream := httptest.NewServer(handler)
 	t.Cleanup(upstream.Close)
 
-	directConn, err := lavasession.NewDirectRPCConnection(context.Background(), common.NodeUrl{Url: upstream.URL}, 5, "")
+	directConn, err := routersession.NewDirectRPCConnection(context.Background(), common.NodeUrl{Url: upstream.URL}, 5, "")
 	require.NoError(t, err)
 
-	endpoint := &lavasession.Endpoint{
+	endpoint := &routersession.Endpoint{
 		NetworkAddress:    upstream.URL,
 		Enabled:           true,
-		DirectConnections: []lavasession.DirectRPCConnection{directConn},
+		DirectConnections: []routersession.DirectRPCConnection{directConn},
 	}
-	cswp := &lavasession.ConsumerSessionsWithProvider{
-		PublicLavaAddress: "upstream-under-test",
-		PairingEpoch:      100,
-		Endpoints:         []*lavasession.Endpoint{endpoint},
+	cswp := &routersession.ConsumerSessionsWithProvider{
+		PublicAddress: "upstream-under-test",
+		PairingEpoch:  100,
+		Endpoints:     []*routersession.Endpoint{endpoint},
 	}
 
 	return &directRelayHarness{
 		// A nil metrics manager is safe: every setter on it is nil-guarded, and the counter this
 		// asserts on lives on the Endpoint, not in the metric.
 		rpcss: &RPCSmartRouterServer{
-			listenEndpoint: &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+			listenEndpoint: &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 		},
-		session: &lavasession.SingleConsumerSession{
+		session: &routersession.SingleConsumerSession{
 			Parent: cswp,
-			Connection: &lavasession.DirectRPCSessionConnection{
+			Connection: &routersession.DirectRPCSessionConnection{
 				DirectConnection: directConn,
 				EndpointAddress:  upstream.URL,
 				Endpoint:         endpoint,
 			},
 		},
 		endpoint: endpoint,
+		upstream: upstream,
 	}
 }
 
@@ -156,11 +167,48 @@ func TestRelayInnerDirect_CleanAnswerResetsTheCounter(t *testing.T) {
 	benchAfter(t, 5)
 	h := newDirectRelayHarness(t, http.StatusOK, `{"jsonrpc":"2.0","id":1,"result":"0xabc"}`)
 
-	h.endpoint.MarkUnhealthy(lavasession.EndpointDisableNodeError)
-	h.endpoint.MarkUnhealthy(lavasession.EndpointDisableNodeError)
+	h.endpoint.MarkUnhealthy(routersession.EndpointDisableNodeError)
+	h.endpoint.MarkUnhealthy(routersession.EndpointDisableNodeError)
 
 	refusals, enabled := h.relay(t, false, "")
 	require.Zero(t, refusals, "a clean 2xx is positive proof the endpoint serves")
+	require.True(t, enabled)
+}
+
+// The same rule on probation (MAG-5094). The probe loop re-enables an endpoint on its polls alone,
+// with a trial budget of a few failures instead of the full one, and only a clean answer to a real
+// request restores the full budget. A caller's error is an answer, but not proof the endpoint
+// serves: it must leave the trial budget exactly where it was, not reset it.
+func TestRelayInnerDirect_OnProbationOnlyACleanAnswerRestoresTheFullBudget(t *testing.T) {
+	var body atomic.Value
+	body.Store(`{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"invalid params"}}`)
+	h := newDirectRelayHarnessServing(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body.Load().(string)))
+	})
+
+	// Switched off by the full budget of failures, then re-enabled by the probe loop's polls.
+	for i := uint64(0); i < routersession.MaxConsecutiveConnectionAttempts; i++ {
+		h.endpoint.MarkUnhealthy(routersession.EndpointDisableNodeError)
+	}
+	require.False(t, h.endpoint.IsEnabled(), "premise: the endpoint is switched off")
+	const k = 3
+	for i := 1; i <= k; i++ {
+		h.endpoint.RecordProbeVerdict(time.Now().Add(time.Duration(i)*time.Second), true, k)
+	}
+	require.True(t, h.endpoint.IsEnabled(), "premise: the polls re-enabled it")
+	onTrial := h.endpoint.ConnectionRefusals
+	require.Positive(t, onTrial, "premise: it came back on a trial budget, not a clean slate")
+
+	for i := 0; i < 3; i++ {
+		refusals, enabled := h.relay(t, true, "invalid params")
+		require.Equal(t, onTrial, refusals, "a caller's error neither spends the trial budget nor restores the full one")
+		require.True(t, enabled)
+	}
+
+	body.Store(`{"jsonrpc":"2.0","id":1,"result":"0xabc"}`)
+	refusals, enabled := h.relay(t, false, "")
+	require.Zero(t, refusals, "a clean answer restores the full budget")
 	require.True(t, enabled)
 }
 
@@ -177,8 +225,8 @@ func TestRelayInnerDirect_BlamelessAnswerNeitherBlamesNorCertifies(t *testing.T)
 	h := newDirectRelayHarness(t, http.StatusOK,
 		`{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"transaction not found"}}`)
 
-	h.endpoint.MarkUnhealthy(lavasession.EndpointDisableNodeError)
-	h.endpoint.MarkUnhealthy(lavasession.EndpointDisableNodeError)
+	h.endpoint.MarkUnhealthy(routersession.EndpointDisableNodeError)
+	h.endpoint.MarkUnhealthy(routersession.EndpointDisableNodeError)
 
 	for i := 0; i < 3; i++ {
 		refusals, enabled := h.relay(t, true, "transaction not found")
@@ -196,8 +244,8 @@ func TestRelayInnerDirect_UnrecognisedStatusDoesNotCertifyHealth(t *testing.T) {
 	benchAfter(t, 5)
 	h := newDirectRelayHarness(t, http.StatusForbidden, `{"error":"go away"}`)
 
-	h.endpoint.MarkUnhealthy(lavasession.EndpointDisableNodeError)
-	h.endpoint.MarkUnhealthy(lavasession.EndpointDisableNodeError)
+	h.endpoint.MarkUnhealthy(routersession.EndpointDisableNodeError)
+	h.endpoint.MarkUnhealthy(routersession.EndpointDisableNodeError)
 
 	refusals, _ := h.relay(t, false, "")
 	require.Equal(t, uint64(2), refusals,

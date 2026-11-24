@@ -10,10 +10,11 @@
 #                       --resp-cache-addresses 127.0.0.1:63790
 #
 # That config declares PublicNode and dRPC, each with an HTTP *and* a WS leg,
-# because the ETH1 spec requires a websocket leg per provider — an HTTP-only
-# provider is excluded at verification and drags overall-health to 503. The
-# lane therefore does NOT pass --skip-websocket-verification: bypassing the
-# gate would mask exactly the fixture property this lane exists to prove.
+# so both serve ETH1's subscriptions. Since MAG-3950 an HTTP-only provider is
+# not excluded at verification: it serves without subscriptions and publishes
+# the websocket's missing-url, so overall-health no longer catches a missing WS
+# leg. The lane does NOT pass --skip-websocket-verification, so each WS leg
+# still runs the spec's checks over its socket instead of only being dialed.
 #
 # The example config points resp-cache at the compose service name
 # ("valkey:6379"); the --resp-cache-addresses flag overrides it to this lane's
@@ -164,7 +165,7 @@ make -C "$PROJECT_ROOT" install
 echo "[Setup] starting valkey (docker, 127.0.0.1:${VALKEY_PORT}, volatile-lru)"
 docker run -d --rm --name "$VALKEY_NAME" --label "$LANE_LABEL" \
   -p 127.0.0.1:${VALKEY_PORT}:6379 \
-  valkey/valkey:7.2 valkey-server --maxmemory 256mb --maxmemory-policy volatile-lru >/dev/null
+  valkey/valkey:9.1.3 valkey-server --maxmemory 256mb --maxmemory-policy volatile-lru >/dev/null
 for _ in $(seq 1 20); do
     docker exec "$VALKEY_NAME" valkey-cli ping >/dev/null 2>&1 && break
     sleep 0.5
@@ -176,8 +177,8 @@ echo "[Setup] starting smart router (:${ROUTER_PORT}) with $CONFIG_REL"
 echo "        --resp-cache-addresses 127.0.0.1:${VALKEY_PORT} (overrides the config's compose address)"
 # NOTE: the config path must be RELATIVE to the project root — the router's
 # config loader resolves the argument against its search paths.
-# No --skip-websocket-verification: the example config supplies a WS leg per
-# provider and this lane must prove that.
+# No --skip-websocket-verification: each WS leg the example config supplies
+# runs the spec's checks over its socket (see the header).
 #
 # --relays-health-interval: cadence of the periodic health sweep. Readiness is
 # fail-closed only until endpoint setup verifies a provider, so the lane's
@@ -250,14 +251,14 @@ if [[ "$RUN_DEMO" == "1" ]]; then
     #    backend-selection log line we gate startup on, so a single probe here
     #    races the bind and reports 000. Poll to a bounded deadline instead of
     #    sleeping a guessed amount: the wait is observed, not assumed.
-    LAVA_HEALTH=""
+    ROUTER_HEALTH=""
     for _ in $(seq 1 30); do
-        LAVA_HEALTH=$(curl -s -o /dev/null -w '%{http_code}' -m 10 "http://127.0.0.1:${ROUTER_PORT}/lava/health")
-        [[ "$LAVA_HEALTH" == "200" ]] && break
+        ROUTER_HEALTH=$(curl -s -o /dev/null -w '%{http_code}' -m 10 "http://127.0.0.1:${ROUTER_PORT}/router/health")
+        [[ "$ROUTER_HEALTH" == "200" ]] && break
         sleep 1
     done
-    [[ "$LAVA_HEALTH" == "200" ]] && note "router /lava/health" "200" \
-        || { note "router /lava/health" "$LAVA_HEALTH (expected 200)"; DEMO_FAIL=1; }
+    [[ "$ROUTER_HEALTH" == "200" ]] && note "router /router/health" "200" \
+        || { note "router /router/health" "$ROUTER_HEALTH (expected 200)"; DEMO_FAIL=1; }
 
     # 2. metrics health — overall-health is fail-closed until endpoint setup
     #    has verified a provider, so poll rather than sampling once.

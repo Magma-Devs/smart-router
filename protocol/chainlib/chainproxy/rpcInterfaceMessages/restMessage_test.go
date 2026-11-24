@@ -82,6 +82,97 @@ func TestRestMessageGetParamsTrailingSlash(t *testing.T) {
 	}
 }
 
+// TestRestMessageGetParamsReadsTheBody pins MAG-5307: a method that carries a body names its block
+// there (TRX /wallet/getblockbynum {"num": N}), and without the body the block parser saw no
+// params at all.
+func TestRestMessageGetParamsReadsTheBody(t *testing.T) {
+	t.Parallel()
+
+	testTable := []struct {
+		name     string
+		specPath string
+		path     string
+		body     string
+		expected interface{}
+	}{
+		{
+			name:     "a POST body's fields are the params",
+			specPath: "/wallet/getblockbynum",
+			path:     "/wallet/getblockbynum",
+			body:     `{"num":0}`,
+			expected: map[string]interface{}{"num": float64(0)},
+		},
+		{
+			name:     "a nested body stays nested for the parser's path",
+			specPath: "/block",
+			path:     "/block",
+			body:     `{"network_identifier":{"network":"x"},"block_identifier":{"index":12}}`,
+			expected: map[string]interface{}{
+				"network_identifier": map[string]interface{}{"network": "x"},
+				"block_identifier":   map[string]interface{}{"index": float64(12)},
+			},
+		},
+		{
+			name:     "a path placeholder wins over a body field of the same name",
+			specPath: "/blocks/{height}",
+			path:     "/blocks/7",
+			body:     `{"height":9,"other":1}`,
+			expected: map[string]interface{}{"height": "7", "other": float64(1)},
+		},
+		{
+			name:     "a query value wins over a body field of the same name",
+			specPath: "/v1/chain/get_block",
+			path:     "/v1/chain/get_block?block_num_or_id=5",
+			body:     `{"block_num_or_id":6}`,
+			expected: map[string]interface{}{"block_num_or_id": "5"},
+		},
+		{
+			name:     "a body that is not an object is the params when nothing else names any",
+			specPath: "/batch",
+			path:     "/batch",
+			body:     `[1,2]`,
+			expected: []interface{}{float64(1), float64(2)},
+		},
+		{
+			name:     "a body that is not an object is dropped beside a placeholder",
+			specPath: "/blocks/{height}",
+			path:     "/blocks/7",
+			body:     `[1,2]`,
+			expected: map[string]interface{}{"height": "7"},
+		},
+		{
+			name:     "a body that is not JSON is no params, as before",
+			specPath: "/broadcast",
+			path:     "/broadcast",
+			body:     `tx=0xdead`,
+			expected: nil,
+		},
+		{
+			name:     "an empty object is no params",
+			specPath: "/wallet/getnowblock",
+			path:     "/wallet/getnowblock",
+			body:     " {} ",
+			expected: nil,
+		},
+		{
+			name:     "a whitespace body is no params",
+			specPath: "/wallet/getnowblock",
+			path:     "/wallet/getnowblock",
+			body:     "  \n",
+			expected: nil,
+		},
+	}
+
+	for _, testCase := range testTable {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			restMessage := RestMessage{Msg: []byte(testCase.body), Path: testCase.path, SpecPath: testCase.specPath}
+			require.Equal(t, testCase.expected, restMessage.GetParams())
+		})
+	}
+}
+
 // TestCheckResponseError_CosmosTransaction_Success tests successful Cosmos transaction (code=0)
 func TestCheckResponseError_CosmosTransaction_Success(t *testing.T) {
 	restMsg := RestMessage{}
@@ -684,7 +775,7 @@ func TestCheckResponseError_AnyNonSuccessIsANodeError(t *testing.T) {
 		{"Tezos injection failure is a JSON array in a 500", 500, `[{"kind":"temporary","id":"failure","msg":"Can't parse the operation"}]`, true, ""},
 		{"Beacon NOT_FOUND", 404, `{"code":404,"message":"NOT_FOUND: beacon block at slot 9","stacktraces":[]}`, true, "NOT_FOUND"},
 		{"toncenter ok:false with a 422", 422, `{"ok":false,"error":"failed to parse ton_addr","code":422}`, true, "failed to parse"},
-		{"tatum gateway empty 404 (the dfns incident)", 404, ``, true, "HTTP 404"},
+		{"tatum gateway empty 404 (MAG-3974)", 404, ``, true, "HTTP 404"},
 		{"nginx HTML 404", 404, `<html><head><title>404 Not Found</title></head></html>`, true, "404 Not Found"},
 		{"Horizon's own empty 405", 405, ``, true, "HTTP 405"},
 		{"Tezos missing block is an empty 404", 404, ``, true, "HTTP 404"},

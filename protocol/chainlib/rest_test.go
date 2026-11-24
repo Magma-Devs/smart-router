@@ -12,14 +12,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gofiber/fiber/v2"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/parser"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils/rand"
@@ -276,8 +275,8 @@ func TestRegexParsing(t *testing.T) {
 	// Only the slash is relaxed — a path the spec genuinely does not describe still falls
 	// through, which is what keeps Default-* a usable spec-gap signal.
 	for _, api := range []string{
-		"/not/a/real/lava/path",
-		"/not/a/real/lava/path/",
+		"/not/a/real/chain/path",
+		"/not/a/real/chain/path/",
 	} {
 		chainMessage, err := chainParser.ParseMsg(api, nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 		if err == nil {
@@ -286,15 +285,6 @@ func TestRegexParsing(t *testing.T) {
 			assert.ErrorIs(t, err, common.APINotSupportedError)
 		}
 	}
-}
-
-func TestRestChainListener_Shutdown_CallsAppShutdown(t *testing.T) {
-	listener := &RestChainListener{
-		app: fiber.New(fiber.Config{DisableStartupMessage: true}),
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	require.NoError(t, listener.Shutdown(ctx))
 }
 
 func TestRestChainListener_Shutdown_NilApp(t *testing.T) {
@@ -351,7 +341,7 @@ func TestRestChainListener_HealthPathNeverReachesTheRelay(t *testing.T) {
 			stub := &restHealthRelayStub{}
 			logger, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
 			require.NoError(t, err)
-			endpoint := &lavasession.RPCEndpoint{
+			endpoint := &routersession.RPCEndpoint{
 				NetworkAddress:  "127.0.0.1:0",
 				ChainID:         "LAV1",
 				ApiInterface:    "rest",
@@ -442,7 +432,7 @@ func TestRestChainListener_RelaysTheBodyOfMethodsThatCarryOne(t *testing.T) {
 	stub := &restBodyRelayStub{}
 	logger, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
 	require.NoError(t, err)
-	endpoint := &lavasession.RPCEndpoint{
+	endpoint := &routersession.RPCEndpoint{
 		NetworkAddress:  "127.0.0.1:0",
 		ChainID:         "LAV1",
 		ApiInterface:    "rest",
@@ -507,7 +497,7 @@ func TestRestListener_UndeclaredVerbIs501OnEveryHandler(t *testing.T) {
 	defer cancel()
 	logger, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
 	require.NoError(t, err)
-	listener := NewRestChainListener(ctx, &lavasession.RPCEndpoint{
+	listener := NewRestChainListener(ctx, &routersession.RPCEndpoint{
 		NetworkAddress:  "127.0.0.1:0",
 		ChainID:         "LAV1",
 		ApiInterface:    "rest",

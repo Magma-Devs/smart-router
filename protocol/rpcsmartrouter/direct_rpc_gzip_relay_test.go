@@ -13,7 +13,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/stretchr/testify/require"
 )
 
@@ -77,7 +77,7 @@ func TestDirectRPCRelaySender_GzipReplyIsInflatedBeforeTheRelayReadsIt(t *testin
 			defer upstream.Close()
 
 			ctx := context.Background()
-			directConn, err := lavasession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: upstream.URL, AcceptEncoding: tc.acceptEncoding}, 5, "")
+			directConn, err := routersession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: upstream.URL, AcceptEncoding: tc.acceptEncoding}, 5, "")
 			require.NoError(t, err)
 			sender := &DirectRPCRelaySender{
 				directConnection: directConn,

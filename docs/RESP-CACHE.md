@@ -82,7 +82,7 @@ a word.
 | `tls.cert-file` / `tls.key-file` | *(unset)* | Client keypair for mTLS (both or neither). |
 | `tls.server-name` | *(unset)* | Overrides the verification/SNI name. |
 | `tls.insecure-skip-verify` | `false` | Skips server verification (testing only). Warned about at startup, carried on the "backend configured" line, and shown in `GET /debug/cache-state` as `tls=insecure-skip-verify` in the tier's `address`, so a development setting that travelled to production is visible to whoever reads the deployment later. |
-| `dial-timeout` / `read-timeout` / `write-timeout` | `500ms` dial; client defaults for read/write | Per-operation network limits. A **fresh** connection's dial and TLS handshake are bounded by `dial-timeout` *and* by the caller's own deadline, whichever is sooner — the default is deliberately sub-second so a black-holed backend cannot make cold lookups linger. |
+| `dial-timeout` / `read-timeout` / `write-timeout` | `500ms` dial; client defaults for read/write | Per-operation network limits. A **fresh** connection's dial and TLS handshake are bounded by `dial-timeout` *and* by the caller's own deadline, whichever is sooner — the default is deliberately sub-second so a black-holed backend cannot make cold lookups linger. Under `topology: sentinel`, `dial-timeout` also sets how long a sentinel has to answer before the router leaves it: see [Topologies](#topologies). |
 | `pool-size` | client default | Connection pool size (per client; the read client has its own). |
 | `expiration.finalized` | `1h` | Lifetime of a settled (finalized) answer. The sidecar's `--expiration`. Every `expiration.*` duration needs a unit (`1h`, `3600s`, `250ms`): a bare number is read as nanoseconds, so `3600` is 3.6µs, and any lifetime that resolves below one millisecond — the precision a RESP expiry has — is refused at startup with a message saying what the number became. |
 | `expiration.finalized-multiplier` | `1` | Multiplier on `expiration.finalized`. The sidecar's `--expiration-multiplier`, which the published chart sets to `1.5` (90 minutes) — this is where a router on a RESP backend keeps that. A multiplied lifetime that resolves below one millisecond (the precision a RESP expiry has), or past what a duration can hold, is refused at startup: below that the client would round every write up to 1ms, and to the store a zero lifetime is a key that never expires, not one that expires at once. |
@@ -153,6 +153,26 @@ resp-cache:
 Supplying only the data-node credential is the common misconfiguration — a hardened sentinel
 set fails *discovery*, before any data node is reached.
 
+The router asks one sentinel, the one it is attached to, for the primary each time it opens a
+connection to it. That sentinel has two fifths of `dial-timeout` (200ms at the default) to
+complete a connection, and the same again to answer each request. A sentinel that misses that,
+because its node is gone or its process hangs, is left inside the same connection attempt:
+the router asks every sentinel it knows of at once, attaches to the first that answers, and
+connects to the primary that one names. The cache operation that needed the connection fails,
+and the next one succeeds. None of this depends on `pool-size`.
+
+A healthy sentinel that is far away is held to the same limit: one that takes longer than two
+fifths of `dial-timeout` to connect or to answer is treated as silent and is never used. With
+sentinels in another region, set `dial-timeout` to at least 2.5 times the slowest sentinel's
+connection time.
+
+Connections already open to the old primary are dropped when the attached sentinel announces
+the switch. When that sentinel was lost together with the primary, no announcement arrives:
+each idle connection to the lost primary fails the operation that picks it up, after that
+operation's timeout, and the router asks a sentinel again only once it opens a new connection.
+While the health probe is the only traffic (a 3s timeout, one probe a second), that is about
+4s for each idle connection.
+
 **Cluster** — sharded. Point at the **configuration endpoint** (e.g. the ElastiCache cluster
 configuration endpoint); node membership, slots, and replicas are discovered and tracked
 automatically:
@@ -209,7 +229,7 @@ and go-redis re-authenticates each one **in place** — no restart, no dropped o
 credential sources (e.g. an IAM SigV4 signer) can implement the `CredentialsSource` interface in
 `ecosystem/cache/redisstore`; the router deliberately bundles no cloud SDKs.
 
-Two caveats come from go-redis (v9.22) itself. First, re-authentication is driven by traffic:
+Two caveats come from go-redis (v9.23) itself. First, re-authentication is driven by traffic:
 the push only marks each connection, and the worker that re-authenticates a connection starts
 when that connection is next checked out and returned (a checkout of a marked connection is
 refused, which is what schedules the work). A connection that sits idle after the push, with no
@@ -234,7 +254,7 @@ force it, delete the previous ACL user (`ACL DELUSER`) or run `CLIENT KILL USER 
 both disconnect every session still authenticated as it, and the client reconnects with the
 current credentials. Keep the previous credential valid until then.
 
-Under `topology: sentinel` the go-redis failover client (v9.22) does not support in-place
+Under `topology: sentinel` the go-redis failover client (v9.23) does not support in-place
 streaming re-auth, so rotated credentials are resolved fresh **per connection attempt** — they
 apply on reconnects and failovers rather than being pushed to idle connections. Keep the
 previous credential valid for a rotation grace window (standard ACL dual-credential practice)
@@ -350,9 +370,24 @@ probe.
 
 The shared `smartrouter_cache_*` hit/miss series keep working unchanged.
 
-A router started with `--debug-relays` adds `Lava-Cache-Backend` to cache-served responses,
+A router started with `--debug-relays` adds `Router-Cache-Backend` to cache-served responses,
 naming the node that served the hit — the current master under sentinel, the touched shard
 under cluster. It is debug-gated because it exposes internal infrastructure addresses.
+
+The client library's own lines go through the router's logger, in the router's log format. A
+change of primary or of sentinel is logged at info, every time:
+
+| Message | Attributes |
+|---|---|
+| `resp-cache client follows a new primary` | `master`, `address` |
+| `resp-cache client attached to a sentinel` | `sentinel`, `primary` |
+| `resp-cache client discovered a sentinel` | `sentinel`, `master` |
+
+Every other line of the library is logged at warn as `resp-cache client reported a failure`,
+with the library's text in `detail`. Each kind of failure is printed at most once in 10s; the
+next line of that kind carries `suppressed`, the number dropped in between. The library has one
+logger for the process, so these lines do not say which store they are about when a secondary
+tier is configured.
 
 ### `GET /debug/cache-state`
 
@@ -517,6 +552,16 @@ The gRPC sidecar is the exception: its in-memory store cannot enumerate keys by 
 scopes what a router reads and writes, and is not a flush boundary there. Routers that must
 be flush-isolated from each other need separate sidecars, or the RESP backend.
 
+`POST /debug/reset-cache` (MAG-2454) runs the same `Flush` call, alone — the BTC-safe,
+cache-only alternative to `/debug/reset-all` for a test that only needs a clean cache. It
+skips every in-process reset `/debug/reset-all` bundles with it (session-manager state,
+scores, pairing, endpoint health, chain trackers), and the flush itself is the one above:
+same prefix scoping, same read/write endpoint reach, same sidecar full-keyspace caveat. That
+flush empties everything the backend holds for the router, not only replies: under
+`--shared-state` the fleet's sticky-session claims and fleet tracker gate observations go
+with them. Unlike `/debug/reset-all`, it leaves this pod's own sticky pins in place, so the
+pod keeps serving a pinned session from its local pin while the fleet's claim is gone.
+
 ## Precedence and rollback
 
 Switching backends is a configuration change; the RESP cache starts cold (no data migrates).
@@ -564,18 +609,22 @@ ports are held by anything else.
 
 | Lane | Covers |
 | --- | --- |
-| `scripts/pre_setups/init_smartrouter_eth_redis_demo.sh` | Redis + router; drop-in caching, and degraded mode when the backend is paused |
-| `scripts/pre_setups/init_smartrouter_eth_redis_sentinel.sh` | Primary + replica + 3 sentinels, both credential planes. `--failover` kills the primary and follows the promotion, `--recover` rejoins it, `--status` reports the topology |
-| `scripts/pre_setups/init_smartrouter_eth_redis_multiregion.sh` | Two regions and two routers; `--demo` shows a region-local read served from a replica while writes go to the primary region |
-| `scripts/pre_setups/init_smartrouter_eth_lavap_cache.sh` | No RESP infrastructure — router + cache sidecar only |
-| `scripts/pre_setups/init_smartrouter_eth_resp_cache.sh` | Single-node lane against the checked-in example config (`RUN_DEMO=1` for an end-to-end check) |
+| `scripts/pre_setups/cache/init_smartrouter_eth_redis_demo.sh` | Redis + router; drop-in caching, and degraded mode when the backend is paused |
+| `scripts/pre_setups/cache/init_smartrouter_eth_redis_sentinel.sh` | Primary + replica + 3 sentinels, both credential planes. `--failover` kills the primary and follows the promotion, `--recover` rejoins it, `--status` reports the topology |
+| `scripts/pre_setups/cache/init_smartrouter_eth_redis_multiregion.sh` | Two regions and two routers; `--demo` shows a region-local read served from a replica while writes go to the primary region |
+| `scripts/pre_setups/cache/init_smartrouter_eth_lavap_cache.sh` | No RESP infrastructure — router + cache sidecar only |
+| `scripts/pre_setups/cache/init_smartrouter_eth_resp_cache.sh` | Single-node lane against the checked-in example config (`RUN_DEMO=1` for an end-to-end check) |
 
 Test lanes — the docker-gated ones fail hard if docker is unreachable rather than skipping, so
 a documented command never prints PASS for a lane that verified nothing:
 
 - **Cross-backend parity** (every behavioural case against both the gRPC cache server and the
   RESP backend, no docker needed): `go test ./protocol/performance -run TestParity -v`
-- **Sentinel failover**: `RESP_CACHE_TEST_SENTINEL_DOCKER=1 go test ./ecosystem/cache/redisstore -run TestSentinelFailover -v -timeout 5m`
+- **Sentinel failover** (Linux only: three nodes, each a Valkey store and a sentinel, reached at
+  their container addresses through the production dialer and both password files. A hung
+  sentinel, a stopped sentinel, a node cut off the network and a stopped primary each end with
+  a write on the current primary. CI runs it on every pull request):
+  `RESP_CACHE_TEST_SENTINEL_DOCKER=1 go test ./ecosystem/cache/redisstore -run TestSentinelFailover -v -timeout 5m`
 - **Cluster** (three masters joined via one configuration endpoint; cross-slot pipelined
   lookups and prefix-scoped purge across masters):
   `RESP_CACHE_TEST_CLUSTER_DOCKER=1 go test ./ecosystem/cache/redisstore -run TestClusterDocker -v -timeout 5m`
@@ -585,7 +634,7 @@ a documented command never prints PASS for a lane that verified nothing:
   fails with a dial error:
 
   ```bash
-  docker run --rm -d --name rot-valkey -p 127.0.0.1:63795:6379 valkey/valkey:7.2
+  docker run --rm -d --name rot-valkey -p 127.0.0.1:63795:6379 valkey/valkey:9.1.3
   RESP_CACHE_TEST_VALKEY_ADDR=127.0.0.1:63795 \
     go test ./ecosystem/cache/redisstore -run TestLiveRotationAgainstRealValkey -v
   docker rm -f rot-valkey
@@ -601,7 +650,7 @@ the standalone one first.
 ### Setup
 
 ```bash
-scripts/pre_setups/init_smartrouter_eth_redis_demo.sh
+scripts/pre_setups/cache/init_smartrouter_eth_redis_demo.sh
 ```
 
 | | Where | Role |
@@ -614,7 +663,7 @@ It ends with a self-check, so a broken stack is caught before you start:
 
 ```
 [Smoke] relay -> cache write -> cache hit
-  router /lava/health            200
+  router /router/health          200
   relay eth_blockNumber          ok
   cache hits                     7
   resp_cache_connected           1
@@ -664,11 +713,11 @@ docker exec smartrouter-demo-redis redis-cli ttl sr:chaintip:ETH1        # 86399
 Issue the same request again and it is served from the backend:
 
 ```
-Lava-Provider-Address: Cached
-Lava-Cache-Backend: 127.0.0.1:63790
+Router-Provider-Address: Cached
+Router-Cache-Backend: 127.0.0.1:63790
 ```
 
-`Lava-Cache-Backend` appears only under `--debug-relays` (which the lanes pass). To read a
+`Router-Cache-Backend` appears only under `--debug-relays` (which the lanes pass). To read a
 stored value, note that `response.data` is base64 and, above the compression threshold,
 gzipped:
 
@@ -733,7 +782,7 @@ lane has to be re-run.
 ### 3. Sentinel failover
 
 ```bash
-scripts/pre_setups/init_smartrouter_eth_redis_sentinel.sh
+scripts/pre_setups/cache/init_smartrouter_eth_redis_sentinel.sh
 ```
 
 A primary, a replica and three sentinels, with the data plane and the sentinel control plane
@@ -753,12 +802,12 @@ Sending these commands to `:3360` reaches the standalone router, which answers h
 naming its own single Redis.
 
 ```bash
-scripts/pre_setups/init_smartrouter_eth_redis_sentinel.sh --status
+scripts/pre_setups/cache/init_smartrouter_eth_redis_sentinel.sh --status
 # sentinel reports master: <lan-ip>:63811
 #   sr-demo-primary    master
 #   sr-demo-replica    slave
 
-scripts/pre_setups/init_smartrouter_eth_redis_sentinel.sh --failover
+scripts/pre_setups/cache/init_smartrouter_eth_redis_sentinel.sh --failover
 ```
 
 ```
@@ -772,7 +821,7 @@ master before:  <lan-ip>:63811
 ```
 
 The router re-asked the sentinels and followed the new master; the connectivity gauge never
-left 1. With `--debug-relays`, `Lava-Cache-Backend` flips from `…:63811` to `…:63812` on the
+left 1. With `--debug-relays`, `Router-Cache-Backend` flips from `…:63811` to `…:63812` on the
 next cache hit, so the promotion is observable from outside the system. Call the endpoint
 twice — the first relay warms the cache, the second carries the header.
 
@@ -792,7 +841,7 @@ this applies.
 ### 4. Multi-region read/write split
 
 ```bash
-scripts/pre_setups/init_smartrouter_eth_redis_multiregion.sh
+scripts/pre_setups/cache/init_smartrouter_eth_redis_multiregion.sh
 ```
 
 | | | |
@@ -811,7 +860,7 @@ resp-cache:
 ```
 
 ```bash
-scripts/pre_setups/init_smartrouter_eth_redis_multiregion.sh --demo
+scripts/pre_setups/cache/init_smartrouter_eth_redis_multiregion.sh --demo
 ```
 
 ```
@@ -820,8 +869,8 @@ scripts/pre_setups/init_smartrouter_eth_redis_multiregion.sh --demo
 [2] the infrastructure replicates it to region B
       sr:rel:f:ETH1:a706caf8…:5
 [3] the SAME request through router-B — served locally, no node call
-    Lava-Provider-Address: Cached
-    Lava-Cache-Backend: 127.0.0.1:63822
+    Router-Provider-Address: Cached
+    Router-Cache-Backend: 127.0.0.1:63822
 [4] a DIFFERENT block (0x6) through router-B — writes go to region A
     new entry in region A (the WRITE endpoint):
       sr:rel:f:ETH1:7868f0c4…:6
@@ -840,8 +889,8 @@ than a replica role, so this lane uses `standalone` — the shape the feature is
 ### 5. No RESP infrastructure
 
 ```bash
-scripts/pre_setups/init_smartrouter_eth_redis_demo.sh --stop
-scripts/pre_setups/init_smartrouter_eth_lavap_cache.sh
+scripts/pre_setups/cache/init_smartrouter_eth_redis_demo.sh --stop
+scripts/pre_setups/cache/init_smartrouter_eth_lavap_cache.sh
 ```
 
 Router plus cache sidecar, no Redis and no `resp-cache:` block — today's deployment shape:
@@ -871,7 +920,7 @@ feature in a disabled state — it is on exactly the path it ran before.
 The cache lives outside the router, so restarting the router does not cost the cached data.
 
 ```bash
-scripts/pre_setups/init_smartrouter_eth_redis_demo.sh --persistence
+scripts/pre_setups/cache/init_smartrouter_eth_redis_demo.sh --persistence
 ```
 
 ```
@@ -901,7 +950,7 @@ infrastructure choice and outside what the router controls.
 Two routers, one backend: what one caches, the other serves.
 
 ```bash
-scripts/pre_setups/init_smartrouter_eth_redis_demo.sh --shared-state
+scripts/pre_setups/cache/init_smartrouter_eth_redis_demo.sh --shared-state
 ```
 
 ```
@@ -931,7 +980,7 @@ Router 2 stays up on `:3365`; `--stop` removes both.
 | Lane refuses: "port(s) are held by process(es) it does not own" | Another stack holds them. The lane prints a ready-made override; nothing was killed. |
 | `/metrics/overall-health` returns 503 right after boot | Fail-closed until the first relays health sweep. The lanes shorten the cadence to 15s; wait one cycle. |
 | `--scan` shows only `sr:chaintip:ETH1` | A `latest` query was relayed — sub-second TTL. Use a finalized block. |
-| `Lava-Cache-Backend` missing | Either the response was not a cache hit (check `Lava-Provider-Address`), or the router lacks `--debug-relays`. Call the endpoint twice. |
+| `Router-Cache-Backend` missing | Either the response was not a cache hit (check `Router-Provider-Address`), or the router lacks `--debug-relays`. Call the endpoint twice. |
 | Header names an unexpected backend | You are talking to a different lane's router — check the port (standalone `:3360`, sentinel `:3370`, multi-region `:3380`/`:3381`). |
 | `resp_cache_connected` is 0 | Backend unreachable — the container may have been `docker stop`ped, which deletes it (`--rm`). Re-run the lane. |
 | Relays fail or the smoke check fails | Public endpoint rate limits. Set `ETH_RPC_URL_1/2` and `ETH_WS_URL_1/2` to your own endpoints. |

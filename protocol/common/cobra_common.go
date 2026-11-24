@@ -22,7 +22,7 @@ const (
 	// cors related flags
 	CorsHeadersFlag         = "cors-headers"           // comma separated list of headers, or * for all, default simple cors specification headers
 	CorsCredentialsFlag     = "cors-credentials"       // comma separated list of headers, or * for all, default simple cors specification headers
-	CorsOriginFlag          = "cors-origin"            // comma separated list of origins, or * for all, default enabled completely
+	CorsOriginFlag          = "cors-origin"            // * for all (default), one origin, or a comma separated list (a listed request Origin is echoed back, see CORSAllowOrigin)
 	CorsMethodsFlag         = "cors-methods"           // comma separated list of methods, default "GET,POST,PUT,DELETE,OPTIONS"
 	CorsExposeHeadersFlag   = "cors-expose-headers"    // comma separated list of response headers to expose to the browser (Access-Control-Expose-Headers), or * for all. Empty = none exposed (browsers can then only read simple response headers).
 	CDNCacheDurationFlag    = "cdn-cache-duration"     // how long to cache the preflight response default 24 hours (in seconds) "86400"
@@ -118,6 +118,7 @@ const (
 	RateLimitWebSocketFlag                       = "rate-limit-websocket-requests-per-connection"
 	BanDurationForWebsocketRateLimitExceededFlag = "ban-duration-for-websocket-rate-limit-exceeded"
 	LimitParallelWebsocketConnectionsPerIpFlag   = "limit-parallel-websocket-connections-per-ip"
+	WebsocketTrustedProxiesFlag                  = "websocket-trusted-proxies"
 	LimitWebsocketIdleTimeFlag                   = "limit-websocket-connection-idle-time"
 	WebsocketKeepAliveIntervalFlag               = "websocket-keep-alive-interval"
 	WebsocketWriteTimeoutFlag                    = "websocket-write-timeout"
@@ -131,6 +132,10 @@ const (
 	// ProbeLoopIntervalFlagName is the cadence of the MAG-2161 (Topic D) proactive health prober —
 	// the telemetry-driven loop that owns direct-RPC endpoint health and probe-fed QoS.
 	ProbeLoopIntervalFlagName = "probe-loop-interval"
+	// VerificationRetryDelayFlag is how long a provider failing a spec verification waits for
+	// its first retry, and VerificationRetryMaxDelayFlag the longest it waits (MAG-3950).
+	VerificationRetryDelayFlag    = "verification-retry-delay"
+	VerificationRetryMaxDelayFlag = "verification-retry-max-delay"
 
 	// batch request size limit
 	MaxBatchRequestSizeFlag        = "max-batch-request-size"
@@ -147,7 +152,7 @@ const (
 	MaxSessionsPerProviderFlagName   = "max-sessions-per-provider"  // Max number of sessions allowed per provider
 	DefaultProcessingTimeoutFlagName = "default-processing-timeout" // default timeout for relay processing
 	MinRelayTimeoutFlagName          = "min-relay-timeout"          // minimum relay timeout floor (default 1s)
-	MaxCallerRelayTimeoutFlagName    = "max-caller-relay-timeout"   // how far a caller's lava-relay-timeout may stretch a request's budget (default 0: not at all)
+	MaxCallerRelayTimeoutFlagName    = "max-caller-relay-timeout"   // how far a caller's router-relay-timeout may stretch a request's budget (default 0: not at all)
 	CacheTimeoutFlagName             = "cache-timeout"              // per-relay cache lookup budget (default 50ms)
 	// CacheMaxEntryBytesFlagName caps the reply body the router writes to its cache: a larger
 	// reply is served but not written. Off by default (0): the cap applies only when the flag
@@ -179,9 +184,9 @@ const (
 type ConsumerCmdFlags struct {
 	HeadersFlag                       string        // comma separated list of headers, or * for all, default simple cors specification headers
 	CredentialsFlag                   string        // access-control-allow-credentials, defaults to "true"
-	OriginFlag                        string        // comma separated list of origins, or * for all, default enabled completely
+	OriginFlag                        string        // * for all (default), one origin, or a comma separated list; see CORSAllowOrigin
 	MethodsFlag                       string        // whether to allow access control headers *, most proxies have their own access control so its not required
-	ExposeHeadersFlag                 string        // Access-Control-Expose-Headers — response headers the browser is allowed to read (e.g. Lava-Provider-Address). Empty = none.
+	ExposeHeadersFlag                 string        // Access-Control-Expose-Headers — response headers the browser is allowed to read (e.g. Router-Provider-Address). Empty = none.
 	CDNCacheDuration                  string        // how long to cache the preflight response defaults 24 hours (in seconds) "86400"
 	RelaysHealthEnableFlag            bool          // enables relay health check
 	RelaysHealthIntervalFlag          time.Duration // interval for relay health check
@@ -240,7 +245,7 @@ func ValidateDurationConfigValues(v *viper.Viper, flagNames ...string) error {
 	for _, flagName := range flagNames {
 		switch raw := v.Get(flagName).(type) {
 		case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64:
-			return utils.LavaFormatError("duration config value has no unit, and a bare number is read as nanoseconds", nil,
+			return utils.FormatError("duration config value has no unit, and a bare number is read as nanoseconds", nil,
 				utils.LogAttr("flag", flagName),
 				utils.LogAttr("value", raw),
 				utils.LogAttr("write_it_as", "a duration with a unit, e.g. 30s, 500ms or 2m"),
@@ -257,7 +262,7 @@ func ValidateDurationConfigValues(v *viper.Viper, flagNames ...string) error {
 // again as soon as it is set.
 func ValidateEpochDuration(epochDuration time.Duration) error {
 	if epochDuration < 0 {
-		return utils.LavaFormatError("--"+EpochDurationFlag+" must not be negative", nil,
+		return utils.FormatError("--"+EpochDurationFlag+" must not be negative", nil,
 			utils.LogAttr("value", epochDuration),
 			utils.LogAttr("write_it_as", "a positive duration such as 30m, or leave it unset for the 15m default"),
 		)

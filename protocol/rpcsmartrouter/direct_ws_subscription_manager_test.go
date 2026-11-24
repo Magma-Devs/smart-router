@@ -391,10 +391,19 @@ type mockWSProtocolMessage struct {
 	// is told on teardown (MAG-4278 item 1), so a test that exercises a teardown has to carry
 	// the pairs its chain declares. Nil leaves the collection with none, as before.
 	parseDirectives []*spectypes.ParseDirective
+
+	// stateful marks this message's API a write, the same way a spec's Category.Stateful
+	// does for Substrate's submit-and-watch methods (MAG-5331). False (the default) is an
+	// ordinary read subscription, as every test before this one assumed.
+	stateful bool
 }
 
 func (m *mockWSProtocolMessage) GetApi() *spectypes.Api {
-	return &spectypes.Api{Name: m.method}
+	api := &spectypes.Api{Name: m.method}
+	if m.stateful {
+		api.Category.Stateful = common.CONSISTENCY_SELECT_ALL_PROVIDERS
+	}
+	return api
 }
 
 func (m *mockWSProtocolMessage) GetUnavailableExtensions() []string { return nil }
@@ -468,6 +477,8 @@ func (m *mockWSProtocolMessage) SetExtension(extension *spectypes.Extension)    
 func (m *mockWSProtocolMessage) GetUsedDefaultValue() bool                           { return false }
 func (m *mockWSProtocolMessage) GetParseDirective() *spectypes.ParseDirective        { return nil }
 func (m *mockWSProtocolMessage) IsBatch() bool                                       { return false }
+
+func (m *mockWSProtocolMessage) HasBlocklessElement() bool { return false }
 
 func (m *mockWSProtocolMessage) CheckResponseError(data []byte, httpStatusCode int) (bool, string) {
 	return false, ""
@@ -2004,12 +2015,12 @@ func TestTendermintSubscriptionEndToEnd(t *testing.T) {
 // (the interface is shared across both subscription managers despite its name).
 // It returns a configurable address from ChooseUpstream; relay-data callbacks are no-ops.
 type fakeSubscriptionOptimizer struct {
-	chooseFn func(allAddresses []string, ignored map[string]struct{}) []string
+	chooseFn func(allAddresses []string) []string
 }
 
-func (f *fakeSubscriptionOptimizer) ChooseUpstream(_ context.Context, allAddresses []string, ignored map[string]struct{}, _ uint64, _ int64) []string {
+func (f *fakeSubscriptionOptimizer) ChooseUpstream(_ context.Context, allAddresses []string, _ map[string]struct{}, _ uint64, _ int64) []string {
 	if f.chooseFn != nil {
-		return f.chooseFn(allAddresses, ignored)
+		return f.chooseFn(allAddresses)
 	}
 	return nil
 }

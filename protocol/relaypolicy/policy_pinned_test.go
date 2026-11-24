@@ -5,8 +5,8 @@ import (
 	"testing"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/stretchr/testify/require"
 )
 
@@ -47,7 +47,7 @@ func TestDecide_PinnedNeverLeavesThePinnedUpstream(t *testing.T) {
 // change it, and the resend used to be where the pin was dropped and the request rerouted
 // (MAG-4123). The send stage stops at once, before SendRelayAttempts identical refusals.
 func TestOnSendRelayResult_PinnedUpstreamUnservableStopsAtOnce(t *testing.T) {
-	for _, sentinel := range []error{lavasession.SelectedProviderUnavailableError, lavasession.SelectedProviderAlreadyFailedError} {
+	for _, sentinel := range []error{routersession.SelectedProviderUnavailableError, routersession.SelectedProviderAlreadyFailedError} {
 		t.Run(sentinel.Error(), func(t *testing.T) {
 			policy := NewPolicy(PolicyConfig{SendRelayAttempts: 3})
 			wrapped := fmt.Errorf("pinned provider is 15 blocks behind the chain tip: %w", sentinel)
@@ -61,9 +61,9 @@ func TestOnSendRelayResult_PinnedUpstreamUnservableStopsAtOnce(t *testing.T) {
 	})
 }
 
-// A plain lava-select-provider is not a strict pin (MAG-4826 D2): relaycore.PinnedByDirectives
+// A plain router-select-provider is not a strict pin (MAG-4826 D2): relaycore.PinnedByDirectives
 // reports false, so the policy decides exactly as for an unpinned request: a node error retries,
-// the window hedges, as the released docs promise. With lava-select-provider-strict: true it stops.
+// the window hedges, as the released docs promise. With router-select-provider-strict: true it stops.
 func TestDecide_PlainSelectProviderKeepsFailover(t *testing.T) {
 	policy := NewPolicy(PolicyConfig{MaxRetries: 10, RelayRetryLimit: 2, SendRelayAttempts: 3})
 	plain := relaycore.PinnedByDirectives(map[string]string{common.SELECT_PROVIDER_HEADER_NAME: "p1"})

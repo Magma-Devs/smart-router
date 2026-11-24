@@ -85,8 +85,14 @@ func NewGRPCProxyWithReflection(cb ProxyCallBack, healthCheckPath string, cmdFla
 	wrappedReflectionServer := grpcweb.WrapServer(reflectionGrpcServer)
 
 	handler := func(resp http.ResponseWriter, req *http.Request) {
-		// Set CORS headers
-		resp.Header().Set("Access-Control-Allow-Origin", cmdFlags.OriginFlag)
+		// Set CORS headers; a --cors-origin list answers with the caller's own origin when listed.
+		origin, send, vary := common.CORSAllowOrigin(cmdFlags.OriginFlag, req.Header.Get("Origin"))
+		if send {
+			resp.Header().Set("Access-Control-Allow-Origin", origin)
+		}
+		if vary {
+			resp.Header().Add("Vary", "Origin")
+		}
 
 		if req.Method == http.MethodOptions {
 			resp.Header().Set("Access-Control-Allow-Methods", cmdFlags.MethodsFlag)
@@ -166,7 +172,7 @@ func makeProxyFunc(callBack ProxyCallBack, streamCallBack StreamProxyCallBack) g
 		if err != nil {
 			// On error the handler returns no message, so gRPC sends a trailers-only response — SetHeader
 			// metadata is unreliable there, but trailers are always flushed with the status. Attach the
-			// reply metadata (e.g. lava-cross-validation-* failure headers) as trailers so error responses
+			// reply metadata (e.g. router-cross-validation-* failure headers) as trailers so error responses
 			// still carry it, matching the success path's SetHeader. Skipped when empty, so non-CV errors
 			// are unchanged.
 			if len(md) > 0 {
@@ -176,7 +182,7 @@ func makeProxyFunc(callBack ProxyCallBack, streamCallBack StreamProxyCallBack) g
 		}
 
 		if err := stream.SetHeader(md); err != nil {
-			utils.LavaFormatError("Got error when setting header", err, utils.LogAttr("headers", utils.RedactHeaders(md)))
+			utils.FormatError("Got error when setting header", err, utils.LogAttr("headers", utils.RedactHeaders(md)))
 		}
 		return stream.SendMsg(respBytes)
 	}
@@ -199,7 +205,7 @@ func serveServerStream(stream grpc.ServerStream, response *StreamResponse) error
 
 	if len(response.Metadata) > 0 {
 		if err := stream.SetHeader(lowercaseMetadata(response.Metadata)); err != nil {
-			utils.LavaFormatError("Got error when setting stream header", err, utils.LogAttr("headers", utils.RedactHeaders(response.Metadata)))
+			utils.FormatError("Got error when setting stream header", err, utils.LogAttr("headers", utils.RedactHeaders(response.Metadata)))
 		}
 	}
 
@@ -238,7 +244,7 @@ type RawBytesCodec struct{}
 func (RawBytesCodec) Marshal(v interface{}) ([]byte, error) {
 	bytes, ok := v.([]byte)
 	if !ok {
-		return nil, utils.LavaFormatError("cannot encode type", nil, utils.Attribute{Key: "v", Value: v})
+		return nil, utils.FormatError("cannot encode type", nil, utils.Attribute{Key: "v", Value: v})
 	}
 	return bytes, nil
 }
@@ -246,14 +252,14 @@ func (RawBytesCodec) Marshal(v interface{}) ([]byte, error) {
 func (RawBytesCodec) Unmarshal(data []byte, v interface{}) error {
 	bufferPtr, ok := v.(*[]byte)
 	if !ok {
-		return utils.LavaFormatDebug("cannot decode into type", utils.LogAttr("v", v), utils.LogAttr("data", data))
+		return utils.FormatDebug("cannot decode into type", utils.LogAttr("v", v), utils.LogAttr("data", data))
 	}
 	*bufferPtr = data
 	return nil
 }
 
 func (RawBytesCodec) Name() string {
-	return "lava/grpc-proxy-codec"
+	return "router/grpc-proxy-codec"
 }
 
 func (RawBytesCodec) String() string {

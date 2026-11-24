@@ -25,10 +25,10 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/chainstate"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	"github.com/magma-Devs/smart-router/protocol/relaycoretest"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
@@ -172,7 +172,7 @@ func TestDebugCrossValidationEvents_RowShape(t *testing.T) {
 		ApiInterface:    "jsonrpc",
 		RequestID:       "424242",
 		Method:          "eth_getBalance",
-		ProviderAddress: "lava@provider3",
+		ProviderAddress: "provider@provider3",
 		ProviderGroup:   "tier-1",
 		Outcome:         common.CrossValidationStragglerOutcomeDisagreed,
 		Finality:        "finalized",
@@ -187,7 +187,7 @@ func TestDebugCrossValidationEvents_RowShape(t *testing.T) {
 		ApiInterface:    "jsonrpc",
 		RequestID:       "424242",
 		Method:          "eth_getBalance",
-		ProviderAddress: "lava@provider4",
+		ProviderAddress: "provider@provider4",
 		ProviderGroup:   common.DefaultProviderGroup,
 		Outcome:         common.CrossValidationStragglerOutcomeNotReceived,
 		Finality:        "finalized",
@@ -206,7 +206,7 @@ func TestDebugCrossValidationEvents_RowShape(t *testing.T) {
 	require.Equal(t, "jsonrpc", first["ApiInterface"])
 	require.Equal(t, "424242", first["RequestID"])
 	require.Equal(t, "eth_getBalance", first["Method"])
-	require.Equal(t, "lava@provider3", first["ProviderAddress"])
+	require.Equal(t, "provider@provider3", first["ProviderAddress"])
 	require.Equal(t, "tier-1", first["ProviderGroup"])
 	require.Equal(t, "disagreed", first["Outcome"])
 	require.Equal(t, "finalized", first["Finality"])
@@ -283,7 +283,7 @@ func newCrossValidationEventTestServer(t *testing.T) (*RPCSmartRouterServer, cha
 	cs.SetLatestBlock(1_000_000)
 	return &RPCSmartRouterServer{
 		smartRouterEndpointMetrics: mm,
-		listenEndpoint:             &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		listenEndpoint:             &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 		chainParser:                chainParser,
 		chainState:                 cs,
 	}, chainParser
@@ -346,7 +346,7 @@ func TestCrossValidationEvents_ReplyTimePathRecords(t *testing.T) {
 // TestCrossValidationEvents_ReplyTimeAgreementRecordsNothing guards the surface against becoming a
 // log of every cross-validated relay: with no outlier there is nothing to record. A test asserting
 // "no dissent happened" reads an empty result here and confirms the request ran from its own
-// response headers (lava-cross-validation-status / -agreeing-providers).
+// response headers (router-cross-validation-status / -agreeing-providers).
 func TestCrossValidationEvents_ReplyTimeAgreementRecordsNothing(t *testing.T) {
 	useCrossValidationEventRing(t, 32)
 	srv, _ := newCrossValidationEventTestServer(t)
@@ -405,7 +405,7 @@ func TestCrossValidationEvents_StragglerPathRecords(t *testing.T) {
 			common.CROSS_VALIDATION_HEADER_MAX_PARTICIPANTS:    "3",
 			common.CROSS_VALIDATION_HEADER_AGREEMENT_THRESHOLD: "2",
 		}, nil, "dapp", "1.2.3.4")
-		sm, smErr := NewSmartRouterRelayStateMachineWithPolicy(baseCtx, lavasession.NewUsedProviders(nil), &SmartRouterRelaySenderMock{retValue: nil}, pm, nil, false, nil, "ETH1", "jsonrpc")
+		sm, smErr := NewSmartRouterRelayStateMachineWithPolicy(baseCtx, routersession.NewUsedProviders(nil), &SmartRouterRelaySenderMock{retValue: nil}, pm, nil, false, nil, "ETH1", "jsonrpc")
 		require.NoError(t, smErr)
 		rp := relaycore.NewRelayProcessor(baseCtx, sm.GetCrossValidationParams(), relaycoretest.RelayProcessorMetrics, relaycoretest.RelayProcessorMetrics, sm)
 		rp.SetCrossValidationQueriedProviders([]string{"p1", "p2", "p3"})
@@ -442,7 +442,7 @@ func TestCrossValidationEvents_StragglerPathRecords(t *testing.T) {
 		ctx := utils.WithUniqueIdentifier(baseCtx, 555000111)
 		method := "cv_events_straggler_disagreed"
 		rp, consensusHash := newCVProcessorWithConsensus(t)
-		srv.watchCrossValidationStragglers(ctx, rp, mkRelayResult(consensusHash), &MockProtocolMessage{api: deterministicAPI(method), requestedBlock: 100}, method, []string{"p3"})
+		srv.watchCrossValidationStragglers(ctx, rp, mkRelayResult(consensusHash), &MockProtocolMessage{api: deterministicAPI(method), requestedBlock: 100}, method, []string{"p3"}, nil)
 		pushSuccess(rp, "p3", "external", dissentBody)
 
 		events := awaitEvents(t, "555000111", 1)
@@ -469,7 +469,7 @@ func TestCrossValidationEvents_StragglerPathRecords(t *testing.T) {
 		ctx := utils.WithUniqueIdentifier(baseCtx, 555000222)
 		method := "cv_events_straggler_agreed"
 		rp, consensusHash := newCVProcessorWithConsensus(t)
-		srv.watchCrossValidationStragglers(ctx, rp, mkRelayResult(consensusHash), &MockProtocolMessage{api: deterministicAPI(method), requestedBlock: 100}, method, []string{"p3"})
+		srv.watchCrossValidationStragglers(ctx, rp, mkRelayResult(consensusHash), &MockProtocolMessage{api: deterministicAPI(method), requestedBlock: 100}, method, []string{"p3"}, nil)
 		pushSuccess(rp, "p3", "external", consensusBody)
 
 		event := awaitEvents(t, "555000222", 1)[0]
@@ -483,7 +483,7 @@ func TestCrossValidationEvents_StragglerPathRecords(t *testing.T) {
 		ctx := utils.WithUniqueIdentifier(baseCtx, 555000333)
 		method := "cv_events_straggler_dedup"
 		rp, consensusHash := newCVProcessorWithConsensus(t)
-		srv.watchCrossValidationStragglers(ctx, rp, mkRelayResult(consensusHash), &MockProtocolMessage{api: deterministicAPI(method), requestedBlock: 100}, method, []string{"p3", "p4"})
+		srv.watchCrossValidationStragglers(ctx, rp, mkRelayResult(consensusHash), &MockProtocolMessage{api: deterministicAPI(method), requestedBlock: 100}, method, []string{"p3", "p4"}, nil)
 		pushSuccess(rp, "p3", "external", dissentBody)
 		pushSuccess(rp, "p4", "external", dissentBody)
 

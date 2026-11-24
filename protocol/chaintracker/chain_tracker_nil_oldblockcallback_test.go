@@ -6,18 +6,18 @@ import (
 	"testing"
 	"time"
 
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/stretchr/testify/require"
 )
 
 // timeoutChainFetcher is a minimal ChainFetcher whose latest-block fetch always
 // fails with the exact error shape a wss upstream produces on a deadline: a
-// wrappedLavaError (from utils.LavaFormatWarning) wrapping context.DeadlineExceeded.
+// wrappedRouterError (from utils.FormatWarning) wrapping context.DeadlineExceeded.
 //
 // This mirrors production: SVMChainTracker.FetchLatestBlockNum wraps the raw
 // CallContext error returned by WebSocketDirectRPCConnection.SendRequest via
-// LavaFormatWarning, yielding a *wrappedLavaError whose single Unwrap() exposes a
+// FormatWarning, yielding a *wrappedRouterError whose single Unwrap() exposes a
 // net.Error. That is precisely what drives the net.Error branch of
 // fetchAllPreviousBlocksIfNecessary. (HTTP upstreams are shielded because
 // HTTPDirectRPCConnection.SendRequest wraps with fmt.Errorf, so one Unwrap() yields
@@ -25,15 +25,15 @@ import (
 type timeoutChainFetcher struct{}
 
 func (timeoutChainFetcher) FetchLatestBlockNum(ctx context.Context) (int64, error) {
-	return 0, utils.LavaFormatWarning("[test] simulated wss latest-block timeout", context.DeadlineExceeded)
+	return 0, utils.FormatWarning("[test] simulated wss latest-block timeout", context.DeadlineExceeded)
 }
 
 func (timeoutChainFetcher) FetchBlockHashByNum(ctx context.Context, blockNum int64) (string, error) {
 	return "", nil
 }
 
-func (timeoutChainFetcher) FetchEndpoint() lavasession.RPCProviderEndpoint {
-	return lavasession.RPCProviderEndpoint{}
+func (timeoutChainFetcher) FetchEndpoint() routersession.RPCProviderEndpoint {
+	return routersession.RPCProviderEndpoint{}
 }
 
 func (timeoutChainFetcher) CustomMessage(ctx context.Context, path string, data []byte, connectionType string, apiName string) ([]byte, error) {

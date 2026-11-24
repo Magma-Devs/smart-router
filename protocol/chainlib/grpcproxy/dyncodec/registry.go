@@ -34,6 +34,12 @@ type ProtoFileRegistry interface {
 	Close() error
 }
 
+// heldDescriptorSource is a ProtoFileRegistry that can tell which descriptors it already holds
+// without asking an upstream for them.
+type heldDescriptorSource interface {
+	HeldDescriptorByName(name protoreflect.FullName) (protoreflect.Descriptor, error)
+}
+
 type Registry struct {
 	remote ProtoFileRegistry
 
@@ -71,7 +77,7 @@ func (r *Registry) FindExtensionByName(field protoreflect.FullName) (protoreflec
 			}
 			xdExtensionDescriptor, ok := xd.(protoreflect.ExtensionDescriptor)
 			if !ok {
-				return nil, utils.LavaFormatError("Failed converting xd.(protoreflect.ExtensionDescriptor)", nil, utils.Attribute{Key: "xd", Value: xd})
+				return nil, utils.FormatError("Failed converting xd.(protoreflect.ExtensionDescriptor)", nil, utils.Attribute{Key: "xd", Value: xd})
 			}
 			return r.registerExtension(dynamicpb.NewExtensionType(xdExtensionDescriptor))
 		})
@@ -99,7 +105,7 @@ func (r *Registry) resolveMessage(message protoreflect.FullName) (protoreflect.M
 	}
 	messageDescriptor, ok := md.(protoreflect.MessageDescriptor)
 	if !ok {
-		return nil, utils.LavaFormatError("Failed converting md.(protoreflect.MessageDescriptor)", nil, utils.Attribute{Key: "md", Value: md})
+		return nil, utils.FormatError("Failed converting md.(protoreflect.MessageDescriptor)", nil, utils.Attribute{Key: "md", Value: md})
 	}
 	return r.registerMessage(dynamicpb.NewMessageType(messageDescriptor))
 }
@@ -129,6 +135,31 @@ func (r *Registry) FindDescriptorByName(name protoreflect.FullName) (protoreflec
 			defer r.mu.RUnlock()
 			return r.prefFiles.FindDescriptorByName(name)
 		})
+}
+
+// HeldDescriptorByName returns name's descriptor when the registry's remote holds it without
+// asking an upstream, or else when the registry itself does. It never waits on a lookup, so it
+// suits a check that runs on every request; ok is false when neither holds the name.
+//
+// The remote comes first: its snapshot is the build its upstream serves now, while a file the
+// registry resolved once is kept for the process's life, so after the upstream changes build it
+// would describe a request the upstream no longer reads that way.
+func (r *Registry) HeldDescriptorByName(name protoreflect.FullName) (protoreflect.Descriptor, bool) {
+	if r == nil {
+		return nil, false
+	}
+	if held, ok := r.remote.(heldDescriptorSource); ok {
+		if d, err := held.HeldDescriptorByName(name); err == nil {
+			return d, true
+		}
+	}
+	r.mu.RLock()
+	d, err := r.prefFiles.FindDescriptorByName(name)
+	r.mu.RUnlock()
+	if err == nil {
+		return d, true
+	}
+	return nil, false
 }
 
 // newFile builds a file descriptor from a fetched proto, resolving its imports through the

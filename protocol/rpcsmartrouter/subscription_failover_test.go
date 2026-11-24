@@ -447,11 +447,11 @@ func TestSelectEndpoint_HeldOffEndpointIsTriedOnceTheReadyOneFailed(t *testing.T
 			cascade := manager.build([]*common.NodeUrl{{Url: heldOff}, {Url: ready}}, []*common.NodeUrl{{Url: backup}}, nil)
 			registry.RecordRateLimit(heldOff, heldOff, time.Minute)
 
-			ep, err := cascade.selectEndpoint(context.Background(), "client-1", nil)
+			ep, err := cascade.selectEndpoint(context.Background(), "client-1")
 			require.NoError(t, err)
 			require.Equal(t, ready, ep.Url, "the ready primary goes first")
 
-			ep, err = cascade.selectEndpoint(context.Background(), "client-1", map[string]struct{}{ready: {}})
+			ep, err = cascade.selectUntriedEndpoint(context.Background(), "client-1", map[string]struct{}{ready: {}})
 			require.NoError(t, err)
 			require.Equal(t, heldOff, ep.Url, "with the ready primary tried, the held-off primary is next")
 		})

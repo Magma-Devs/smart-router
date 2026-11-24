@@ -10,7 +10,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
@@ -55,9 +55,9 @@ func newRetryTestProtocolMessage(t *testing.T, extensions []string, directiveHea
 	return chainlib.NewProtocolMessage(chainMsg, directiveHeaders, relayRequestData, "dapp", "1.2.3.4")
 }
 
-func newRetryTestStateMachine(t *testing.T, pm chainlib.ProtocolMessage) (*UnifiedRelayStateMachine, *lavasession.UsedProviders) {
+func newRetryTestStateMachine(t *testing.T, pm chainlib.ProtocolMessage) (*UnifiedRelayStateMachine, *routersession.UsedProviders) {
 	t.Helper()
-	usedProviders := lavasession.NewUsedProviders(nil)
+	usedProviders := routersession.NewUsedProviders(nil)
 	sm, err := NewUnifiedRelayStateMachine(
 		context.Background(),
 		usedProviders,
@@ -83,10 +83,10 @@ func newRetryTestStateMachine(t *testing.T, pm chainlib.ProtocolMessage) (*Unifi
 // counter moves only inside AddUsed. A test that transitions without dispatching stays at attempt
 // 0 forever and never enters the state the bug lived in — every assertion below would then hold
 // on the unfixed code too.
-func dispatchBatch(t *testing.T, usedProviders *lavasession.UsedProviders, provider string) {
+func dispatchBatch(t *testing.T, usedProviders *routersession.UsedProviders, provider string) {
 	t.Helper()
 	before := usedProviders.BatchNumber()
-	usedProviders.AddUsed(lavasession.ConsumerSessionsMap{provider: &lavasession.SessionInfo{}}, nil)
+	usedProviders.AddUsed(routersession.ConsumerSessionsMap{provider: &routersession.SessionInfo{}}, nil)
 	require.Equal(t, before+1, usedProviders.BatchNumber(), "the attempt counter must advance, or this test proves nothing")
 }
 
@@ -147,7 +147,7 @@ func TestRetryReSendsTheSameRequest(t *testing.T) {
 		// the identical message, so there is nothing to drop.
 		headers := map[string]string{
 			common.FORCE_CACHE_REFRESH_HEADER_NAME: "true",
-			common.LAVA_DEBUG_RELAY:                "true",
+			common.DEBUG_RELAY:                     "true",
 		}
 		pm := newRetryTestProtocolMessage(t, nil, headers)
 		pm.SetForceCacheRefresh(true)
@@ -161,6 +161,6 @@ func TestRetryReSendsTheSameRequest(t *testing.T) {
 		retried := sm.GetProtocolMessage()
 		require.True(t, retried.GetForceCacheRefresh())
 		require.Equal(t, 42*time.Second, retried.TimeoutOverride())
-		require.Equal(t, "true", retried.GetDirectiveHeaders()[common.LAVA_DEBUG_RELAY])
+		require.Equal(t, "true", retried.GetDirectiveHeaders()[common.DEBUG_RELAY])
 	})
 }

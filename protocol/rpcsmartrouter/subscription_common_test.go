@@ -6,13 +6,14 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/stretchr/testify/require"
 )
 
 // Both subscription managers place a new subscription by the same rules, because they run the
-// same code: sticky first across both tiers, then primary, then backup, skipping held-off and
-// ignored endpoints, and an error of the manager's own wording once nothing is left.
+// same code: sticky first across both tiers, then primary, then backup, skipping held-off
+// endpoints while another is ready, and an error of the manager's own wording once nothing is
+// left.
 func TestSubscriptionManagers_SelectEndpointsByTheSameRules(t *testing.T) {
 	primary := []*common.NodeUrl{{Url: "primary-a"}, {Url: "primary-b"}}
 	backup := []*common.NodeUrl{{Url: "backup-a"}}
@@ -35,31 +36,32 @@ func TestSubscriptionManagers_SelectEndpointsByTheSameRules(t *testing.T) {
 			endpoints.rateLimitHoldoff = reg
 			ctx := context.Background()
 
-			ep, err := endpoints.selectEndpoint(ctx, "client", nil)
+			ep, err := endpoints.selectEndpoint(ctx, "client")
 			require.NoError(t, err)
 			require.Equal(t, "primary-a", ep.Url, "the primary tier serves first")
 
-			endpoints.stickyStore.Set("client", &lavasession.StickySession{Provider: "backup-a"})
-			ep, err = endpoints.selectEndpoint(ctx, "client", nil)
+			endpoints.stickyStore.Set("client", &routersession.StickySession{Provider: "backup-a"})
+			ep, err = endpoints.selectEndpoint(ctx, "client")
 			require.NoError(t, err)
 			require.Equal(t, "backup-a", ep.Url, "a sticky endpoint resolves in either tier")
 
-			ep, err = endpoints.selectEndpoint(ctx, "client", map[string]struct{}{"backup-a": {}})
-			require.NoError(t, err)
-			require.Equal(t, "primary-a", ep.Url, "an ignored sticky endpoint falls through to the cascade")
-			_, stillSticky := endpoints.stickyStore.Get("client")
-			require.False(t, stillSticky, "and the affinity is cleared")
-
 			reg.RecordRateLimit("primary-a", "primary-a", time.Minute)
-			ep, err = endpoints.selectEndpoint(ctx, "", nil)
+			ep, err = endpoints.selectEndpoint(ctx, "")
 			require.NoError(t, err)
 			require.Equal(t, "primary-b", ep.Url, "a held-off endpoint is skipped while another is ready")
 
-			ep, err = endpoints.selectEndpoint(ctx, "", map[string]struct{}{"primary-a": {}, "primary-b": {}})
+			reg.RecordRateLimit("primary-b", "primary-b", time.Minute)
+			ep, err = endpoints.selectEndpoint(ctx, "")
 			require.NoError(t, err)
-			require.Equal(t, "backup-a", ep.Url, "backup serves once primary is exhausted")
+			require.Equal(t, "primary-a", ep.Url, "with every primary held off the full primary tier still serves")
 
-			_, err = endpoints.selectEndpoint(ctx, "", map[string]struct{}{"primary-a": {}, "primary-b": {}, "backup-a": {}})
+			require.True(t, endpoints.setEndpoints(nil, backup))
+			ep, err = endpoints.selectEndpoint(ctx, "")
+			require.NoError(t, err)
+			require.Equal(t, "backup-a", ep.Url, "backup serves once primary is empty")
+
+			require.True(t, endpoints.setEndpoints(nil, nil))
+			_, err = endpoints.selectEndpoint(ctx, "")
 			require.EqualError(t, err, exhausted)
 		})
 	}

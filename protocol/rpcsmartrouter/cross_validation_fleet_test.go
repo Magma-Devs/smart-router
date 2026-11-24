@@ -13,10 +13,10 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/magma-Devs/smart-router/utils/rand"
@@ -129,8 +129,8 @@ func fleetTestUpstream(t *testing.T) *httptest.Server {
 	return srv
 }
 
-func fleetTestPrimary(name, group, url string) *lavasession.RPCStaticProviderEndpoint {
-	return &lavasession.RPCStaticProviderEndpoint{
+func fleetTestPrimary(name, group, url string) *routersession.RPCStaticProviderEndpoint {
+	return &routersession.RPCStaticProviderEndpoint{
 		Name: name, ChainID: "ETH1", ApiInterface: "jsonrpc", GroupLabel: group,
 		NodeUrls: []common.NodeUrl{{Url: url, SkipVerifications: []string{"chain-id", "pruning"}}},
 	}
@@ -138,7 +138,7 @@ func fleetTestPrimary(name, group, url string) *lavasession.RPCStaticProviderEnd
 
 // bootFleetTestEndpoint runs the real CreateSmartRouterEndpoint for an ETH1 JSON-RPC endpoint with the given
 // primaries and a min-groups 2 policy on eth_getBalance.
-func bootFleetTestEndpoint(t *testing.T, primaries ...*lavasession.RPCStaticProviderEndpoint) (*RPCSmartRouter, error) {
+func bootFleetTestEndpoint(t *testing.T, primaries ...*routersession.RPCStaticProviderEndpoint) (*RPCSmartRouter, error) {
 	t.Helper()
 	rand.InitRandomSeed()
 	// The fake upstreams are HTTP only, as the helm chart's --skip-websocket-verification allows.
@@ -156,12 +156,12 @@ func bootFleetTestEndpoint(t *testing.T, primaries ...*lavasession.RPCStaticProv
 	t.Cleanup(cancel)
 	rpsr := createTestRPCSmartRouter()
 	rpsr.reverifyInputs = make(map[string]*chainReverifyInputs)
-	endpoint := &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc", NetworkAddress: "127.0.0.1:0"}
+	endpoint := &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc", NetworkAddress: "127.0.0.1:0"}
 	metricsManager := metrics.NewSmartRouterMetricsManager(metrics.SmartRouterMetricsManagerOptions{})
 	logs, err := metrics.NewRPCConsumerLogs(metricsManager, nil, nil)
 	require.NoError(t, err)
 	options := &rpcSmartRouterStartOptions{
-		rpcEndpoints:        []*lavasession.RPCEndpoint{endpoint},
+		rpcEndpoints:        []*routersession.RPCEndpoint{endpoint},
 		strategy:            provideroptimizer.StrategyBalanced,
 		cmdFlags:            common.ConsumerCmdFlags{StaticSpecPaths: []string{"../../specs/ethereum.json"}},
 		staticProvidersList: primaries,
@@ -182,7 +182,7 @@ func TestCreateSmartRouterEndpoint_GroupDownAtBoot(t *testing.T) {
 	t.Cleanup(down.Close)
 
 	t.Run("a group whose only primary is down at boot -> the endpoint starts", func(t *testing.T) {
-		// The debug ring buffer is a second, process-global log sink that every LavaFormat* call feeds
+		// The debug ring buffer is a second, process-global log sink that every Format* call feeds
 		// through an atomic pointer, so the boot's own goroutines can keep logging while it is read.
 		utils.EnableDebugLogBuffer(5000)
 		t.Cleanup(utils.DisableDebugLogBuffer)
@@ -193,7 +193,7 @@ func TestCreateSmartRouterEndpoint_GroupDownAtBoot(t *testing.T) {
 			fleetTestPrimary("sim-2", "group-a", up2.URL),
 			fleetTestPrimary("sim-3", "group-b", down.URL))
 		require.NoError(t, err)
-		key := (&lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"}).Key()
+		key := (&routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"}).Key()
 		require.Equal(t, map[string][]string{"group-a": {"sim-1", "sim-2"}}, rpsr.sessionManagers[key].ProviderGroupAssignments(),
 			"sim-3 failed verification, so only group-a is serving")
 		require.Len(t, rpsr.failedStaticProviders[key], 1, "and sim-3 is queued for the background retry")
@@ -238,7 +238,7 @@ func TestCreateSmartRouterEndpoint_GroupDownAtBoot(t *testing.T) {
 func TestCrossValidationFleet_GroupDownAtBoot(t *testing.T) {
 	parser := fleetTestParser(t)
 	resolver := fleetTestResolver(t, fleetTestPolicy("eth_getBalance", CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: new(2)}, MaxParticipants: Bound{Floor: new(2)}, MinGroups: Bound{Floor: new(2)}}))
-	configured := staticProviderGroupAssignments([]*lavasession.RPCStaticProviderEndpoint{
+	configured := staticProviderGroupAssignments([]*routersession.RPCStaticProviderEndpoint{
 		{Name: "sim-1", GroupLabel: "group-a"},
 		{Name: "sim-2", GroupLabel: "group-a"},
 		{Name: "sim-3", GroupLabel: "group-b"},
@@ -441,7 +441,7 @@ func TestValidateCrossValidationFleet_Warning(t *testing.T) {
 }
 
 func TestStaticProviderGroupAssignments(t *testing.T) {
-	providers := []*lavasession.RPCStaticProviderEndpoint{
+	providers := []*routersession.RPCStaticProviderEndpoint{
 		{Name: "sim-3", GroupLabel: "group-b"},
 		{Name: "sim-2", GroupLabel: "group-a"},
 		{Name: "sim-1", GroupLabel: "group-a"},

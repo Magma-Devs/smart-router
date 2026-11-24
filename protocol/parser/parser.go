@@ -107,14 +107,14 @@ func ParseRawBlock(rpcInput RPCInput, parsedInput *ParsedInput, defaultValue str
 		if defaultValue != "" {
 			parsedBlock, err = rpcInput.ParseBlock(defaultValue)
 			if err != nil {
-				utils.LavaFormatError("Failed parsing default value, setting to NOT_APPLICABLE", err,
+				utils.FormatError("Failed parsing default value, setting to NOT_APPLICABLE", err,
 					utils.LogAttr("default_value", defaultValue),
 				)
 				parsedBlock = spectypes.NOT_APPLICABLE
 			} else {
 				parsedInput.UsedDefaultValue = true
 			}
-			utils.LavaFormatDebug("Failed parsing block from string, assuming default value",
+			utils.FormatDebug("Failed parsing block from string, assuming default value",
 				utils.LogAttr("params", rpcInput.GetParams()),
 				utils.LogAttr("failed_parsed_value", rawBlock),
 				utils.LogAttr("default_value", defaultValue),
@@ -137,7 +137,7 @@ func parseRawEarliestBlock(rpcInput RPCInput, parsedInput *ParsedInput) {
 	}
 	earliest, err := rpcInput.ParseBlock(parsedInput.earliestDataRaw)
 	if err != nil {
-		utils.LavaFormatDebug("failed parsing the earliest block of a range, judging the request on its main block",
+		utils.FormatDebug("failed parsing the earliest block of a range, judging the request on its main block",
 			utils.LogAttr("earliest", parsedInput.earliestDataRaw),
 			utils.LogAttr("err", err),
 		)
@@ -149,7 +149,7 @@ func parseRawEarliestBlock(rpcInput RPCInput, parsedInput *ParsedInput) {
 
 func parseInputWithLegacyBlockParser(rpcInput RPCInput, blockParser spectypes.BlockParser, dataSource int) (string, bool, error) {
 	if rpcInput.GetError() != nil {
-		return "", false, utils.LavaFormatError("blockParsing - rpcInput is error", nil, utils.LogAttr("rpcInput.GetError()", rpcInput.GetError()))
+		return "", false, utils.FormatError("blockParsing - rpcInput is error", nil, utils.LogAttr("rpcInput.GetError()", rpcInput.GetError()))
 	}
 
 	result, usedDefaultValue, err := legacyParse(rpcInput, blockParser, dataSource)
@@ -159,7 +159,7 @@ func parseInputWithLegacyBlockParser(rpcInput RPCInput, blockParser spectypes.Bl
 
 	resString, ok := result[spectypes.DEFAULT_PARSED_RESULT_INDEX].(string)
 	if !ok {
-		return "", usedDefaultValue, utils.LavaFormatDebug("blockParsing - result[0].(string) - type assertion failed", utils.LogAttr("result[0]", result[0]))
+		return "", usedDefaultValue, utils.FormatDebug("blockParsing - result[0].(string) - type assertion failed", utils.LogAttr("result[0]", result[0]))
 	}
 
 	return resString, usedDefaultValue, nil
@@ -202,14 +202,14 @@ func parseBlock(rpcInput RPCInput, blockParser spectypes.BlockParser, genericPar
 func ParseBlockFromParams(rpcInput RPCInput, blockParser spectypes.BlockParser, genericParsers []spectypes.GenericParser) *ParsedInput {
 	parsedInput := parseBlock(rpcInput, blockParser, genericParsers, PARSE_PARAMS)
 	ParseRawBlock(rpcInput, parsedInput, blockParser.DefaultValue)
-	utils.LavaFormatTrace("ParseBlockFromParams result", utils.LogAttr("parsedInput", parsedInput))
+	utils.FormatTrace("ParseBlockFromParams result", utils.LogAttr("parsedInput", parsedInput))
 	return parsedInput
 }
 
 func ParseBlockFromReply(rpcInput RPCInput, blockParser spectypes.BlockParser, genericParsers []spectypes.GenericParser) *ParsedInput {
 	parsedInput := parseBlock(rpcInput, blockParser, genericParsers, PARSE_RESULT)
 	ParseRawBlock(rpcInput, parsedInput, blockParser.DefaultValue)
-	utils.LavaFormatTrace("ParseBlockFromReply result", utils.LogAttr("parsedInput", parsedInput))
+	utils.FormatTrace("ParseBlockFromReply result", utils.LogAttr("parsedInput", parsedInput))
 	return parsedInput
 }
 
@@ -231,13 +231,13 @@ func ParseBlockHashFromReplyAndDecode(rpcInput RPCInput, resultParser spectypes.
 	if parsedInput == nil {
 		parsedBlockHashFromBlockParser, _, err := parseInputWithLegacyBlockParser(rpcInput, resultParser, PARSE_RESULT)
 		if err != nil {
-			parseErrorLogLevel := utils.LAVA_LOG_WARN
+			parseErrorLogLevel := utils.LOG_WARN
 			if parsedSuccessfully {
 				// found a hash, no need to log warning later
-				parseErrorLogLevel = utils.LAVA_LOG_DEBUG
+				parseErrorLogLevel = utils.LOG_DEBUG
 			}
 
-			return "", utils.LavaFormatLog("failed to parse with legacy block parser", err,
+			return "", utils.FormatLog("failed to parse with legacy block parser", err,
 				[]utils.Attribute{
 					utils.LogAttr("rpcInput", rpcInput),
 					utils.LogAttr("resultParser", resultParser),
@@ -255,7 +255,7 @@ func ParseBlockHashFromReplyAndDecode(rpcInput RPCInput, resultParser spectypes.
 
 	numberOfParsedHashes := len(parsedBlockHashes)
 	if numberOfParsedHashes != 1 {
-		return "", utils.LavaFormatError("[ParseBlockHashFromReplyAndDecode] expected parsed hashes length 1", nil, utils.LogAttr("rpcInput.GetResult()", rpcInput.GetResult()), utils.LogAttr("hashes_length", numberOfParsedHashes))
+		return "", utils.FormatError("[ParseBlockHashFromReplyAndDecode] expected parsed hashes length 1", nil, utils.LogAttr("rpcInput.GetResult()", rpcInput.GetResult()), utils.LogAttr("hashes_length", numberOfParsedHashes))
 	}
 	return parseResponseByEncoding([]byte(parsedBlockHashes[0]), resultParser.Encoding)
 }
@@ -370,7 +370,7 @@ func parseRawResult(rawResult json.RawMessage) interface{} {
 
 	var result interface{}
 	if err := json.Unmarshal(rawResult, &result); err != nil {
-		utils.LavaFormatError("failed to unmarshal result", err, utils.LogAttr("result", rawResult))
+		utils.FormatError("failed to unmarshal result", err, utils.LogAttr("result", rawResult))
 		return nil
 	}
 
@@ -407,9 +407,9 @@ func ParseWithGenericParsers(rpcInput RPCInput, genericParsers []spectypes.Gener
 	}
 
 	if result == nil && earliestRaw == "" {
-		// we didn't find a generic parser that worked. LavaFormat* always returns an
+		// we didn't find a generic parser that worked. Format* always returns an
 		// error, whatever the log level.
-		return nil, utils.LavaFormatTrace("failed to parse with generic parsers",
+		return nil, utils.FormatTrace("failed to parse with generic parsers",
 			utils.LogAttr("parsingMap", parsingMap),
 			utils.LogAttr("genericParsers", genericParsers),
 		)
@@ -454,7 +454,7 @@ func parseRule(rule string, valueInterface interface{}) bool {
 		// case ">":
 		// 	// Handle ">" logic
 		default:
-			utils.LavaFormatError("Unsupported operator", nil, utils.LogAttr("operator", operator), utils.LogAttr("rule", rule), utils.LogAttr("value", value))
+			utils.FormatError("Unsupported operator", nil, utils.LogAttr("operator", operator), utils.LogAttr("rule", rule), utils.LogAttr("value", value))
 			continue
 		}
 	}
@@ -469,10 +469,10 @@ func parseGeneric(input interface{}, genericParser spectypes.GenericParser) (*Pa
 	}
 
 	if !parseRule(genericParser.Rule, value) {
-		return nil, utils.LavaFormatWarning("PARSER_TYPE_DEFAULT_VALUE Did not match any rule", nil, utils.LogAttr("value", value), utils.LogAttr("rules", genericParser.Rule))
+		return nil, utils.FormatWarning("PARSER_TYPE_DEFAULT_VALUE Did not match any rule", nil, utils.LogAttr("value", value), utils.LogAttr("rules", genericParser.Rule))
 	}
 
-	utils.LavaFormatTrace("parsed generic value",
+	utils.FormatTrace("parsed generic value",
 		utils.LogAttr("input", input),
 		utils.LogAttr("genericParser", genericParser),
 		utils.LogAttr("value", value),
@@ -520,7 +520,7 @@ func parseGeneric(input interface{}, genericParser spectypes.GenericParser) (*Pa
 func findGenericParserValue(input interface{}, genericParser spectypes.GenericParser) (interface{}, error) {
 	jqParser, err := gojq.Parse(genericParser.GetParsePath())
 	if err != nil {
-		return "", utils.LavaFormatError("failed to parse generic parser path", err, utils.LogAttr("path", genericParser.GetParsePath()))
+		return "", utils.FormatError("failed to parse generic parser path", err, utils.LogAttr("path", genericParser.GetParsePath()))
 	}
 
 	iter := jqParser.Run(input)
@@ -535,7 +535,7 @@ func findGenericParserValue(input interface{}, genericParser spectypes.GenericPa
 		}
 
 		if err, ok := val.(error); ok {
-			utils.LavaFormatTrace("generic parser path returned an error",
+			utils.FormatTrace("generic parser path returned an error",
 				utils.LogAttr("error", err),
 				utils.LogAttr("input", input),
 				utils.LogAttr("path", genericParser.GetParsePath()),
@@ -547,7 +547,7 @@ func findGenericParserValue(input interface{}, genericParser spectypes.GenericPa
 		return val, nil
 	}
 
-	return "", utils.LavaFormatTrace("generic parser path did not return the expected value",
+	return "", utils.FormatTrace("generic parser path did not return the expected value",
 		utils.LogAttr("input", input),
 		utils.LogAttr("path", genericParser.GetParsePath()),
 	)
@@ -558,10 +558,10 @@ func parseGenericParserBlockHash(value interface{}) (*ParsedInput, error) {
 
 	strVal, ok := value.(string)
 	if !ok {
-		return parsed, utils.LavaFormatDebug("failed to cast generic parser value to string", utils.LogAttr("value", value))
+		return parsed, utils.FormatDebug("failed to cast generic parser value to string", utils.LogAttr("value", value))
 	}
 	if len(strVal) < MinimumHashLength {
-		return parsed, utils.LavaFormatDebug("value length is below minimum hash length", utils.LogAttr("strVal", strVal), utils.LogAttr("len(strVal)", len(strVal)), utils.LogAttr("MinimumHashLength", MinimumHashLength))
+		return parsed, utils.FormatDebug("value length is below minimum hash length", utils.LogAttr("strVal", strVal), utils.LogAttr("len(strVal)", len(strVal)), utils.LogAttr("MinimumHashLength", MinimumHashLength))
 	}
 
 	parsed.parsedHashes = append(parsed.parsedHashes, strVal)
@@ -585,7 +585,7 @@ func parseResponseByEncoding(rawResult []byte, encoding string) (string, error) 
 		}
 		hexBytes, err := hex.DecodeString(hexString)
 		if err != nil {
-			return "", utils.LavaFormatError("tried decoding a hex response in parseResponseByEncoding but failed", err, utils.Attribute{Key: "data", Value: hexString})
+			return "", utils.FormatError("tried decoding a hex response in parseResponseByEncoding but failed", err, utils.Attribute{Key: "data", Value: hexString})
 		}
 		return base64.StdEncoding.EncodeToString(hexBytes), nil
 	default:
@@ -812,43 +812,7 @@ func parseDictionary(rpcInput RPCInput, input []string, dataSource int) ([]inter
 	if len(input) != 2 {
 		return nil, fmt.Errorf("invalid input format, input length: %d and needs to be 2", len(input))
 	}
-
-	// Unmarshall data
-	unmarshalledData, err := getDataToParse(rpcInput, dataSource)
-	if err != nil {
-		return nil, fmt.Errorf("invalid input format, data is not json: %s, error: %s", unmarshalledData, err)
-	}
-
-	// Extract arguments
-	propName := input[0]
-	innerSeparator := input[1]
-
-	switch unmarshalledDataTyped := unmarshalledData.(type) {
-	case []interface{}:
-		// If value attribute with propName exists in array return it
-		value := parseArrayOfInterfaces(unmarshalledDataTyped, propName, innerSeparator)
-		if value != nil {
-			return value, nil
-		}
-
-		// Else return an error
-		return nil, ValueNotSetError
-	case map[string]interface{}:
-		// If attribute with key propName exists return value
-		if val, ok := unmarshalledDataTyped[propName]; ok {
-			return appendInterfaceToInterfaceArrayWithError(blockInterfaceToString(val))
-		}
-
-		// Else return an error
-		return nil, ValueNotSetError
-	case string:
-		return appendInterfaceToInterfaceArrayWithError(blockInterfaceToString(unmarshalledDataTyped))
-	case nil:
-		// Handle nil params as "no parameters set"
-		return nil, ValueNotSetError
-	default:
-		return nil, fmt.Errorf("not Supported ParseDictionary with other types: %T", unmarshalledData)
-	}
+	return lookupDictionary(rpcInput, dataSource, input[0], input[1], nil)
 }
 
 // parseDictionaryOrOrdered return a value of prop specified in args if exists in dictionary
@@ -860,22 +824,28 @@ func parseDictionaryOrOrdered(rpcInput RPCInput, input []string, dataSource int)
 	if len(input) != 3 {
 		return nil, fmt.Errorf("ParseDictionaryOrOrdered: invalid input format, input length: %d and needs to be 3: %s", len(input), strings.Join(input, ","))
 	}
+	return lookupDictionary(rpcInput, dataSource, input[0], input[1], &input[2])
+}
 
+// lookupDictionary is the lookup parseDictionary and parseDictionaryOrOrdered share: propName's
+// value in a map, or in an array as a "propName<innerSeparator>value" string or a map element.
+// index is parseDictionaryOrOrdered's fallback, nil for parseDictionary: the array element at that
+// position, or the map entry keyed by its text. It must be an unsigned number, and is checked after
+// the data is read.
+func lookupDictionary(rpcInput RPCInput, dataSource int, propName, innerSeparator string, index *string) ([]interface{}, error) {
 	// Unmarshall data
 	unmarshalledData, err := getDataToParse(rpcInput, dataSource)
 	if err != nil {
 		return nil, fmt.Errorf("invalid input format, data is not json: %s, error: %s", unmarshalledData, err)
 	}
 
-	// Extract arguments
-	propName := input[0]
-	innerSeparator := input[1]
-	inp := input[2]
-
 	// Convert prop index to the uint
-	propIndex, err := strconv.ParseUint(inp, 10, 32)
-	if err != nil {
-		return nil, fmt.Errorf("invalid input format, input isn't an unsigned index: %s, error: %s", inp, err)
+	var propIndex uint64
+	if index != nil {
+		propIndex, err = strconv.ParseUint(*index, 10, 32)
+		if err != nil {
+			return nil, fmt.Errorf("invalid input format, input isn't an unsigned index: %s, error: %s", *index, err)
+		}
 	}
 
 	switch unmarshalledDataTyped := unmarshalledData.(type) {
@@ -886,30 +856,30 @@ func parseDictionaryOrOrdered(rpcInput RPCInput, input []string, dataSource int)
 			return value, nil
 		}
 
-		// If not make sure there are enough elements
-		if uint64(len(unmarshalledDataTyped)) <= propIndex {
+		// If not, fall back to the element at the index, when there is one
+		if index == nil || uint64(len(unmarshalledDataTyped)) <= propIndex {
 			return nil, ValueNotSetError
 		}
-
-		// Fetch value using prop index
-		block := unmarshalledDataTyped[propIndex]
-		return appendInterfaceToInterfaceArrayWithError(blockInterfaceToString(block))
+		return appendInterfaceToInterfaceArrayWithError(blockInterfaceToString(unmarshalledDataTyped[propIndex]))
 	case map[string]interface{}:
 		// If attribute with key propName exists return value
 		if val, ok := unmarshalledDataTyped[propName]; ok {
 			return appendInterfaceToInterfaceArrayWithError(blockInterfaceToString(val))
 		}
+		if index == nil {
+			return nil, ValueNotSetError
+		}
 
 		// If attribute with key index exists return value
-		if val, ok := unmarshalledDataTyped[inp]; ok {
+		if val, ok := unmarshalledDataTyped[*index]; ok {
 			return appendInterfaceToInterfaceArrayWithError(blockInterfaceToString(val))
 		}
 
 		// Else return not set error)
-		utils.LavaFormatDebug("Failed parsing parseDictionaryOrOrdered",
+		utils.FormatDebug("Failed parsing parseDictionaryOrOrdered",
 			utils.LogAttr("params", rpcInput.GetParams()),
 			utils.LogAttr("propName", propName),
-			utils.LogAttr("inp", inp),
+			utils.LogAttr("inp", *index),
 			utils.LogAttr("unmarshalledDataTyped", unmarshalledDataTyped),
 			utils.LogAttr("method", rpcInput.GetMethod()),
 			utils.LogAttr("err", ValueNotSetError),

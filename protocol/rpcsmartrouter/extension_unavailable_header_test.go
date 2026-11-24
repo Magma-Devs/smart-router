@@ -15,8 +15,8 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/chainstate"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/prometheus/client_golang/prometheus"
@@ -39,7 +39,7 @@ func headerValues(metadata []pairingtypes.Metadata, name string) []string {
 func appendHeadersFor(t *testing.T, srv *RPCSmartRouterServer, unavailable []string) []pairingtypes.Metadata {
 	t.Helper()
 	relayResult := &common.RelayResult{
-		ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider1"},
+		ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@provider1"},
 		Reply:        &pairingtypes.RelayReply{},
 	}
 	srv.appendHeadersToRelayResult(context.Background(), relayResult, 0, &MockRelayProcessorForHeaders{},
@@ -52,7 +52,7 @@ func TestExtensionUnavailableHeader_NamesTheDroppedExtension(t *testing.T) {
 	metadata := appendHeadersFor(t, &RPCSmartRouterServer{}, []string{"archive"})
 
 	require.Equal(t, []string{"archive"}, headerValues(metadata, common.EXTENSION_UNAVAILABLE_HEADER_NAME))
-	require.Equal(t, []string{"lava@provider1"}, headerValues(metadata, common.PROVIDER_ADDRESS_HEADER_NAME),
+	require.Equal(t, []string{"provider@provider1"}, headerValues(metadata, common.PROVIDER_ADDRESS_HEADER_NAME),
 		"the request is still served, and still says by whom")
 }
 
@@ -86,7 +86,7 @@ func TestExtensionUnavailableHeader_WarnsOncePerExtensionButHeadersEveryRequest(
 
 // The router adds archive on its own to an eth_call deep behind the head. The caller did not ask
 // for it, so on a fleet without an archive node that must not come back as the header: it names
-// only what the caller asked for with lava-extension. Driven through ParseRelay, so the caller's
+// only what the caller asked for with router-extension. Driven through ParseRelay, so the caller's
 // directive and the router's promotion arrive the way a real request brings them.
 func TestExtensionUnavailableHeader_NamesOnlyWhatTheCallerAskedFor(t *testing.T) {
 	const tip = 1_000_000
@@ -98,7 +98,7 @@ func TestExtensionUnavailableHeader_NamesOnlyWhatTheCallerAskedFor(t *testing.T)
 	srv := &RPCSmartRouterServer{
 		chainParser:    ethJsonRPCParser(t),
 		chainState:     chainState,
-		listenEndpoint: &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: spectypes.APIInterfaceJsonRPC},
+		listenEndpoint: &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: spectypes.APIInterfaceJsonRPC},
 	}
 	// The promotion needs a known head; without one the deep call below would not be promoted
 	// and the first case would pass without testing anything.
@@ -116,7 +116,7 @@ func TestExtensionUnavailableHeader_NamesOnlyWhatTheCallerAskedFor(t *testing.T)
 		reported []string
 	}{
 		{"the router's own archive promotion is not reported", ethCallAt(tip - 1000), nil, nil},
-		{"the caller's lava-extension is still reported", ethCallAt(tip), askForArchive, []string{extensionslib.ArchiveExtension}},
+		{"the caller's router-extension is still reported", ethCallAt(tip), askForArchive, []string{extensionslib.ArchiveExtension}},
 		{"asked for by the caller and the router, reported once", ethCallAt(tip - 1000), askForArchive, []string{extensionslib.ArchiveExtension}},
 	}
 	for _, tc := range cases {
@@ -126,7 +126,7 @@ func TestExtensionUnavailableHeader_NamesOnlyWhatTheCallerAskedFor(t *testing.T)
 			require.Empty(t, protocolMessage.GetExtensions(), "no node offers archive, so it is never applied")
 
 			relayResult := &common.RelayResult{
-				ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider1"},
+				ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@provider1"},
 				Reply:        &pairingtypes.RelayReply{},
 			}
 			srv.appendHeadersToRelayResult(ctx, relayResult, 0, &MockRelayProcessorForHeaders{}, protocolMessage,
@@ -154,7 +154,7 @@ func TestExtensionUnavailableHeader_NamesOnlyWhatTheCallerAskedFor(t *testing.T)
 // Literal strings cannot reproduce this; it takes a real listener and ONE connection. The handler
 // does what the JSON-RPC listener did before MAG-3881 (GetReqHeaders, then strings.Join per header, which returns
 // a lone value itself rather than a copy), on an app configured like the router's (not Immutable).
-// Both values are seven bytes and lava-extension is the only non-special header, so the second
+// Both values are seven bytes and router-extension is the only non-special header, so the second
 // request's value lands in the very slot the first one's did.
 func TestExtensionUnavailableHeader_WarnRegisterSurvivesKeepAliveBufferReuse(t *testing.T) {
 	const tip = 1_000_000
@@ -163,7 +163,7 @@ func TestExtensionUnavailableHeader_WarnRegisterSurvivesKeepAliveBufferReuse(t *
 	srv := &RPCSmartRouterServer{
 		chainParser:    ethJsonRPCParser(t),
 		chainState:     chainState,
-		listenEndpoint: &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: spectypes.APIInterfaceJsonRPC},
+		listenEndpoint: &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: spectypes.APIInterfaceJsonRPC},
 	}
 
 	app := fiber.New(fiber.Config{ReadBufferSize: 128 * 1024, WriteBufferSize: 128 * 1024})
@@ -178,7 +178,7 @@ func TestExtensionUnavailableHeader_WarnRegisterSurvivesKeepAliveBufferReuse(t *
 			return err
 		}
 		relayResult := &common.RelayResult{
-			ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider1"},
+			ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@provider1"},
 			Reply:        &pairingtypes.RelayReply{},
 		}
 		srv.appendHeadersToRelayResult(ctx, relayResult, 0, &MockRelayProcessorForHeaders{}, protocolMessage,
@@ -200,7 +200,7 @@ func TestExtensionUnavailableHeader_WarnRegisterSurvivesKeepAliveBufferReuse(t *
 	send := func(extension string) *http.Response {
 		t.Helper()
 		body := `{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}`
-		request := fmt.Sprintf("POST / HTTP/1.1\r\nHost: router\r\nContent-Type: application/json\r\nLava-Extension: %s\r\nContent-Length: %d\r\n\r\n%s",
+		request := fmt.Sprintf("POST / HTTP/1.1\r\nHost: router\r\nContent-Type: application/json\r\nRouter-Extension: %s\r\nContent-Length: %d\r\n\r\n%s",
 			extension, len(body), body)
 		_, err := conn.Write([]byte(request))
 		require.NoError(t, err)
@@ -257,7 +257,7 @@ func extensionUnavailableCount(t *testing.T, spec string) map[string]float64 {
 }
 
 // The operator counter fires on every request that carries the header, where the WARN fires once.
-// Its extension label takes only names the spec defines: a made-up lava-extension is dropped before
+// Its extension label takes only names the spec defines: a made-up router-extension is dropped before
 // it can be recorded, so callers cannot mint series.
 func TestExtensionUnavailableHeader_CountsEveryRequestAndOnlySpecExtensions(t *testing.T) {
 	// A spec label no other test uses, so the default registry's series are this test's alone.
@@ -267,7 +267,7 @@ func TestExtensionUnavailableHeader_CountsEveryRequestAndOnlySpecExtensions(t *t
 	srv := &RPCSmartRouterServer{
 		chainParser:                ethJsonRPCParser(t),
 		chainState:                 chainState,
-		listenEndpoint:             &lavasession.RPCEndpoint{ChainID: spec, ApiInterface: spectypes.APIInterfaceJsonRPC},
+		listenEndpoint:             &routersession.RPCEndpoint{ChainID: spec, ApiInterface: spectypes.APIInterfaceJsonRPC},
 		smartRouterEndpointMetrics: metrics.NewSmartRouterMetricsManager(metrics.SmartRouterMetricsManagerOptions{}),
 	}
 	relay := func(extensions string) []string {
@@ -277,7 +277,7 @@ func TestExtensionUnavailableHeader_CountsEveryRequestAndOnlySpecExtensions(t *t
 			[]pairingtypes.Metadata{{Name: common.EXTENSION_OVERRIDE_HEADER_NAME, Value: extensions}})
 		require.NoError(t, err)
 		relayResult := &common.RelayResult{
-			ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider1"},
+			ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@provider1"},
 			Reply:        &pairingtypes.RelayReply{},
 		}
 		srv.appendHeadersToRelayResult(ctx, relayResult, 0, &MockRelayProcessorForHeaders{}, protocolMessage,

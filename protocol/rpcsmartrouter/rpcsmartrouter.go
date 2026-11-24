@@ -1,4 +1,4 @@
-// Package rpcsmartrouter provides the RPC routing solution for the Lava protocol.
+// Package rpcsmartrouter provides the RPC routing solution for the Smart Router.
 //
 // # Architecture Overview
 //
@@ -23,6 +23,7 @@ import (
 	"math"
 	"net/http"
 	"os/signal"
+	"reflect"
 	"slices"
 	"sort"
 	"strconv"
@@ -37,11 +38,11 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/endpointstate"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/performance"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/magma-Devs/smart-router/protocol/statetracker"
 	"github.com/magma-Devs/smart-router/protocol/tracing"
 	epochstoragetypes "github.com/magma-Devs/smart-router/types/epoch"
@@ -81,7 +82,7 @@ var (
 
 	// StaticProviderDummyStake is used for stake-based provider selection weighting.
 	// For static providers that do NOT specify an explicit stake, we keep this at 0 so CalcWeightsByStake
-	// can apply the legacy "static provider boost" behavior (see lavasession package).
+	// can apply the legacy "static provider boost" behavior (see routersession package).
 	StaticProviderDummyStake = int64(0)
 )
 
@@ -164,7 +165,7 @@ func newUsageSinkFromOptions(options *rpcSmartRouterStartOptions) metrics.UsageE
 	}); otelSink != nil {
 		return otelSink
 	}
-	utils.LavaFormatWarning("usage-otel-enabled but OTel sink failed to construct; falling back to no-op sink", nil)
+	utils.FormatWarning("usage-otel-enabled but OTel sink failed to construct; falling back to no-op sink", nil)
 	return metrics.NoopUsageSink{}
 }
 
@@ -184,25 +185,29 @@ type AnalyticsServerAddresses struct {
 type RPCSmartRouter struct {
 	// Smart router doesn't need blockchain state tracking
 	epochTimer             *common.EpochTimer
-	mu                     sync.Mutex                                                      // protects the maps below during parallel endpoint setup and retry
-	sessionManagers        map[string]*lavasession.ConsumerSessionManager                  // key: chainID-apiInterface
-	providerSessions       map[string]map[uint64]*lavasession.ConsumerSessionsWithProvider // key: chainID-apiInterface
-	backupProviderSessions map[string]map[uint64]*lavasession.ConsumerSessionsWithProvider // key: chainID-apiInterface
+	mu                     sync.Mutex                                                        // protects the maps below during parallel endpoint setup and retry
+	sessionManagers        map[string]*routersession.ConsumerSessionManager                  // key: chainID-apiInterface
+	providerSessions       map[string]map[uint64]*routersession.ConsumerSessionsWithProvider // key: chainID-apiInterface
+	backupProviderSessions map[string]map[uint64]*routersession.ConsumerSessionsWithProvider // key: chainID-apiInterface
 
 	// failedStaticProviders holds providers that failed verification at startup,
 	// keyed by sessionManagerKey (chainID-apiInterface). The retry loop reads this
 	// to periodically re-validate and re-register recovered providers.
-	failedStaticProviders map[string][]*lavasession.RPCStaticProviderEndpoint
+	failedStaticProviders map[string][]*routersession.RPCStaticProviderEndpoint
 
 	// failedBackupProviders is the backup-tier counterpart. Backups used to recover
 	// only on the 15m epoch reverification, five times slower than the static tier's
 	// retry loop. That gap did not matter while a chain could never boot on backups
 	// alone; since MAG-2525 it can, so a failed backup may be the only thing standing
 	// between the chain and serving traffic.
-	failedBackupProviders map[string][]*lavasession.RPCStaticProviderEndpoint
+	failedBackupProviders map[string][]*routersession.RPCStaticProviderEndpoint
 
 	// Server references for per-endpoint ChainTracker cleanup on epoch updates
 	rpcServers map[string]*RPCSmartRouterServer // key: chainID-apiInterface
+
+	// relayErrors is the router's own count of node and protocol errors, shared by every endpoint
+	// server and read by GET /debug/relay-errors (MAG-4718). Kept whether or not metrics are on.
+	relayErrors *relaycore.RelayErrorTally
 
 	// smartRouterMetricsManager is held here, not just passed down, because the
 	// serving-tier gauge has to be republished from every path that mutates the
@@ -234,7 +239,7 @@ type RPCSmartRouter struct {
 }
 
 type rpcSmartRouterStartOptions struct {
-	rpcEndpoints             []*lavasession.RPCEndpoint
+	rpcEndpoints             []*routersession.RPCEndpoint
 	cache                    performance.CacheBackend
 	secondaryCache           performance.CacheReader // optional read-only fallback tier (docs/SECONDARY-CACHE.md); nil when unconfigured
 	secondaryCacheTimeout    time.Duration
@@ -243,8 +248,8 @@ type rpcSmartRouterStartOptions struct {
 	analyticsServerAddresses AnalyticsServerAddresses
 	cmdFlags                 common.ConsumerCmdFlags
 	stateShare               bool
-	staticProvidersList      []*lavasession.RPCStaticProviderEndpoint // define static providers as primary providers
-	backupProvidersList      []*lavasession.RPCStaticProviderEndpoint // define backup providers as emergency fallback when no providers available
+	staticProvidersList      []*routersession.RPCStaticProviderEndpoint // define static providers as primary providers
+	backupProvidersList      []*routersession.RPCStaticProviderEndpoint // define backup providers as emergency fallback when no providers available
 	upstreamSelectorConfig   provideroptimizer.UpstreamSelectorConfig
 	// bootBarrier holds every endpoint at its configuration check until all have passed theirs, so one
 	// refused configuration stops the router before any endpoint binds (MAG-3604; see
@@ -265,12 +270,13 @@ func (rpsr *RPCSmartRouter) Start(ctx context.Context, options *rpcSmartRouterSt
 	}
 
 	// Initialize session managers and provider sessions maps for epoch timer callbacks
-	rpsr.sessionManagers = make(map[string]*lavasession.ConsumerSessionManager)
-	rpsr.providerSessions = make(map[string]map[uint64]*lavasession.ConsumerSessionsWithProvider)
-	rpsr.backupProviderSessions = make(map[string]map[uint64]*lavasession.ConsumerSessionsWithProvider)
-	rpsr.failedStaticProviders = make(map[string][]*lavasession.RPCStaticProviderEndpoint)
-	rpsr.failedBackupProviders = make(map[string][]*lavasession.RPCStaticProviderEndpoint)
+	rpsr.sessionManagers = make(map[string]*routersession.ConsumerSessionManager)
+	rpsr.providerSessions = make(map[string]map[uint64]*routersession.ConsumerSessionsWithProvider)
+	rpsr.backupProviderSessions = make(map[string]map[uint64]*routersession.ConsumerSessionsWithProvider)
+	rpsr.failedStaticProviders = make(map[string][]*routersession.RPCStaticProviderEndpoint)
+	rpsr.failedBackupProviders = make(map[string][]*routersession.RPCStaticProviderEndpoint)
 	rpsr.rpcServers = make(map[string]*RPCSmartRouterServer)
+	rpsr.relayErrors = relaycore.NewRelayErrorTally()
 	rpsr.cacheBackend = options.cache
 	rpsr.reverifyInputs = make(map[string]*chainReverifyInputs)
 
@@ -284,7 +290,7 @@ func (rpsr *RPCSmartRouter) Start(ctx context.Context, options *rpcSmartRouterSt
 	currentEpoch := rpsr.epochTimer.GetCurrentEpoch()
 	timeUntilNext := rpsr.epochTimer.GetTimeUntilNextEpoch()
 
-	utils.LavaFormatInfo("RPCSmartRouter: using time-based epochs (standalone mode)",
+	utils.FormatInfo("RPCSmartRouter: using time-based epochs (standalone mode)",
 		utils.LogAttr("epochDuration", epochDuration),
 		utils.LogAttr("currentEpoch", currentEpoch),
 		utils.LogAttr("timeUntilNextEpoch", timeUntilNext),
@@ -325,7 +331,7 @@ func (rpsr *RPCSmartRouter) Start(ctx context.Context, options *rpcSmartRouterSt
 
 	rpcSmartRouterMetrics, err := metrics.NewRPCConsumerLogs(smartRouterMetricsManager, usageSink, smartRouterOptimizerQoSClient)
 	if err != nil {
-		utils.LavaFormatFatal("failed creating RPCSmartRouter logs", err)
+		utils.FormatFatal("failed creating RPCSmartRouter logs", err)
 	}
 
 	smartRouterMetricsManager.SetVersion(version.Version)
@@ -348,12 +354,12 @@ func (rpsr *RPCSmartRouter) Start(ctx context.Context, options *rpcSmartRouterSt
 	// all meet at the configuration barrier (see cross_validation_boot.go).
 	options.bootBarrier = newBootConfigBarrier(parallelJobs)
 
-	utils.LavaFormatInfo("RPCSmartRouter identifier: " + smartRouterIdentifier)
-	utils.LavaFormatInfo("RPCSmartRouter setting up endpoints", utils.Attribute{Key: "length", Value: strconv.Itoa(parallelJobs)})
+	utils.FormatInfo("RPCSmartRouter identifier: " + smartRouterIdentifier)
+	utils.FormatInfo("RPCSmartRouter setting up endpoints", utils.Attribute{Key: "length", Value: strconv.Itoa(parallelJobs)})
 
 	relaysMonitorAggregator := metrics.NewRelaysMonitorAggregator(options.cmdFlags.RelaysHealthIntervalFlag, smartRouterMetricsManager)
 	for _, rpcEndpoint := range options.rpcEndpoints {
-		go func(rpcEndpoint *lavasession.RPCEndpoint) error {
+		go func(rpcEndpoint *routersession.RPCEndpoint) error {
 			defer wg.Done()
 			err := rpsr.CreateSmartRouterEndpoint(ctx, rpcEndpoint, errCh,
 				optimizers, chainMutexes,
@@ -395,7 +401,7 @@ func (rpsr *RPCSmartRouter) Start(ctx context.Context, options *rpcSmartRouterSt
 	})
 
 	// Log that epoch timer is configured for all session managers
-	utils.LavaFormatInfo("RPCSmartRouter: Registered epoch timer callback for all session managers",
+	utils.FormatInfo("RPCSmartRouter: Registered epoch timer callback for all session managers",
 		utils.LogAttr("sessionManagerCount", len(rpsr.sessionManagers)),
 	)
 
@@ -407,13 +413,7 @@ func (rpsr *RPCSmartRouter) Start(ctx context.Context, options *rpcSmartRouterSt
 	// Start optional debug HTTP server for integration tests.
 	// Only starts when --debug-address flag is provided. Off by default.
 	if options.cmdFlags.DebugAddress != "" {
-		// Debug-mode-only: enable the in-memory ring-buffer log sink so the
-		// /debug/logs endpoint can serve recent logs to the test harness.
-		utils.EnableDebugLogBuffer(50000)
-		// Debug-mode-only, same reasoning: start recording cross-validation dissent so
-		// /debug/cross-validation-events can serve it (MAG-2772). Until this call the recorder is a
-		// nil check on the relay path, so a production router stores nothing.
-		enableCrossValidationEventRing(crossValidationEventRingCapacity)
+		enableDebugRecorders()
 		var currentOffsetNano atomic.Int64
 		debugMux := buildDebugMux(debugMuxDeps{
 			optimizers: optimizers,
@@ -435,20 +435,20 @@ func (rpsr *RPCSmartRouter) Start(ctx context.Context, options *rpcSmartRouterSt
 			srv.Shutdown(context.Background()) //nolint:errcheck
 		}()
 		go func() {
-			utils.LavaFormatInfo("Debug HTTP server started", utils.LogAttr("address", options.cmdFlags.DebugAddress))
+			utils.FormatInfo("Debug HTTP server started", utils.LogAttr("address", options.cmdFlags.DebugAddress))
 			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				utils.LavaFormatError("Debug HTTP server stopped", err)
+				utils.FormatError("Debug HTTP server stopped", err)
 			}
 		}()
 	}
 
-	utils.LavaFormatInfo("RPCSmartRouter done setting up all endpoints, ready for requests")
+	utils.FormatInfo("RPCSmartRouter done setting up all endpoints, ready for requests")
 
 	return nil
 }
 
 func (rpsr *RPCSmartRouter) Stop(shutdownGracePeriod time.Duration) {
-	utils.LavaFormatInfo("RPCSmartRouter: shutdown signal received, draining",
+	utils.FormatInfo("RPCSmartRouter: shutdown signal received, draining",
 		utils.LogAttr("gracePeriod", shutdownGracePeriod),
 	)
 
@@ -468,7 +468,7 @@ func (rpsr *RPCSmartRouter) Stop(shutdownGracePeriod time.Duration) {
 				return
 			}
 			if err := s.chainListener.Shutdown(shutdownCtx); err != nil {
-				utils.LavaFormatWarning("listener shutdown returned error", err, utils.LogAttr("endpoint", k))
+				utils.FormatWarning("listener shutdown returned error", err, utils.LogAttr("endpoint", k))
 			}
 		}(key, server)
 	}
@@ -493,7 +493,7 @@ func (rpsr *RPCSmartRouter) Stop(shutdownGracePeriod time.Duration) {
 	// open past shutdown. Nil-safe for routers started without a cache.
 	if rpsr.cacheBackend != nil {
 		if err := rpsr.cacheBackend.Close(); err != nil {
-			utils.LavaFormatWarning("cache backend close returned error", err)
+			utils.FormatWarning("cache backend close returned error", err)
 		}
 	}
 
@@ -504,7 +504,7 @@ func (rpsr *RPCSmartRouter) Stop(shutdownGracePeriod time.Duration) {
 		rpsr.usageSink.Close()
 	}
 
-	utils.LavaFormatInfo("RPCSmartRouter: graceful shutdown complete")
+	utils.FormatInfo("RPCSmartRouter: graceful shutdown complete")
 }
 
 // debugMuxDeps bundles the state the debug HTTP handlers reach into. Bundling
@@ -680,14 +680,19 @@ func reregisterChainTrackerRowsLocked(router *RPCSmartRouter) (ensured, created 
 				continue
 			}
 			ensured++
-			if _, err := server.endpointChainTrackerManager.GetOrCreateTracker(ep.ProviderAddress, ep.Endpoint, ep.DirectConnection); err != nil {
-				utils.LavaFormatWarning("reset-chaintracker-rows: failed to re-register endpoint", err,
+			tracker, err := server.endpointChainTrackerManager.GetOrCreateTracker(ep.ProviderAddress, ep.Endpoint, ep.DirectConnection)
+			if err != nil {
+				utils.FormatWarning("reset-chaintracker-rows: failed to re-register endpoint", err,
 					utils.LogAttr("endpoint", ep.Endpoint.NetworkAddress),
 					utils.LogAttr("chainKey", chainKey),
 				)
 				continue
 			}
-			if !existing[ep.Endpoint.NetworkAddress] {
+			// The url's series were deleted with its row; the tracking flag is written here, as
+			// on the other two paths that bring a url back (MAG-5349).
+			server.publishBlockTracking(ep.Endpoint.NetworkAddress)
+			// A url held as not tracked by design has no row to create: it is not counted.
+			if tracker != nil && !existing[ep.Endpoint.NetworkAddress] {
 				created++
 				existing[ep.Endpoint.NetworkAddress] = true
 			}
@@ -764,7 +769,7 @@ type providerScoresResponse struct {
 // so a /debug/provider-scores row can be joined to /debug/endpoint-state (MAG-2707).
 //
 // The two views key on different identities and neither can be derived from the other: the optimizer
-// — and therefore every score — is keyed by provider address (PublicLavaAddress, the same identity
+// — and therefore every score — is keyed by provider address (PublicAddress, the same identity
 // /debug/provider-routing reports), while per-endpoint health is keyed by NetworkAddress. Carrying
 // the URLs on the score row is what lets the automation ask "this provider's score moved, was its
 // endpoint healthy?" from two reads instead of needing a third mapping call.
@@ -825,24 +830,23 @@ func resetAllChainStates(deps debugMuxDeps) int {
 	})
 }
 
-// resetEndpointHealthAndGauge re-enables every endpoint across all session managers
+// resetEndpointHealth re-enables every endpoint across all session managers
 // (ConsumerSessionManager.ResetEndpointHealth — clears ConnectionRefusals, sets
-// Enabled=true) and mirrors the reset onto the per-endpoint Prometheus health gauge for
-// every provider (primary + backup), matching what the epoch tick does in updateEpoch.
-// Returns the number of endpoints actually re-enabled.
+// Enabled=true), matching what the epoch tick does in updateEpoch. Returns the number of
+// endpoints actually re-enabled.
 //
 // Endpoints disabled after MaxConsecutiveConnectionAttempts consecutive failures (e.g. an
 // all-providers-down stress burst) otherwise stay disabled until the next epoch tick, the
 // only other ResetHealth caller — contaminating later tests. Shared by /debug/reset-all
 // and /debug/reset-endpoint-health.
-func resetEndpointHealthAndGauge(deps debugMuxDeps) (total int) {
+func resetEndpointHealth(deps debugMuxDeps) (total int) {
 	withRouterLocked(deps, func(router *RPCSmartRouter) {
-		total = resetEndpointHealthAndGaugeLocked(router)
+		total = resetEndpointHealthLocked(router)
 	})
 	return total
 }
 
-func resetEndpointHealthAndGaugeLocked(router *RPCSmartRouter) int {
+func resetEndpointHealthLocked(router *RPCSmartRouter) int {
 	total := 0
 	for chainKey, csm := range router.sessionManagers {
 		if csm == nil {
@@ -862,26 +866,6 @@ func resetEndpointHealthAndGaugeLocked(router *RPCSmartRouter) int {
 			server.headStall.reset()
 			if server.endpointChainTrackerManager != nil {
 				server.endpointChainTrackerManager.ResetStallCounters()
-			}
-		}
-
-		// Mirror the struct reset onto the Prometheus health gauge so operators see
-		// providers recover immediately rather than at the next epoch tick — without it
-		// the gauge stays stuck at 0 until a successful relay, one a rarely-used backup
-		// may never receive.
-		server := router.rpcServers[chainKey]
-		if server == nil || server.smartRouterEndpointMetrics == nil || server.listenEndpoint == nil {
-			continue
-		}
-		for _, sessions := range []map[uint64]*lavasession.ConsumerSessionsWithProvider{
-			router.providerSessions[chainKey],
-			router.backupProviderSessions[chainKey],
-		} {
-			for _, cswp := range sessions {
-				if cswp != nil {
-					server.smartRouterEndpointMetrics.SetEndpointOverallHealth(
-						server.listenEndpoint.ChainID, server.listenEndpoint.ApiInterface, cswp.PublicLavaAddress, true)
-				}
 			}
 		}
 	}
@@ -950,7 +934,7 @@ func resolveSelectionWeights(flags *pflag.FlagSet) (provideroptimizer.UpstreamSe
 	// after any rescale — because the typed number is not what runs and an operator who
 	// reads this line should not have to work that out.
 	if priority != provideroptimizer.SelectionPriorityBalanced || len(overridden) > 0 {
-		utils.LavaFormatInfo("Working with provider selection priority: "+priority.String(),
+		utils.FormatInfo("Working with provider selection priority: "+priority.String(),
 			utils.LogAttr("availabilityWeight", config.AvailabilityWeight),
 			utils.LogAttr("latencyWeight", config.LatencyWeight),
 			utils.LogAttr("syncWeight", config.SyncWeight),
@@ -1149,7 +1133,7 @@ func debugCacheTierFrom(backend any) debugCacheTier {
 type routerConfigResponse struct {
 	SchemaVersion int
 
-	// lavasession
+	// routersession
 	MaxConsecutiveConnectionAttempts                 uint64 // the --bench-after setting
 	TimeoutForEstablishingAConnection                int64  // milliseconds
 	MaximumNumberOfFailuresAllowedPerConsumerSession int
@@ -1193,13 +1177,6 @@ type routerConfigResponse struct {
 	PerChainOptimizer map[string]routerConfigOptimizerWeights
 }
 
-// buildDebugMux constructs the /debug/time-warp, /debug/time, /debug/reset-scores,
-// and /debug/reset-all HTTP handlers.
-//
-// See rpcconsumer.buildDebugMux for full documentation of time-warp / time / reset-scores
-// — this is the rpcsmartrouter copy, extended with /debug/reset-all (a single endpoint
-// that flushes every router-internal state store so black-box tests can return to a
-// known-clean state without restarting the pod).
 // sharedStickyReason spells out why SharedSticky reads as it does on GET /debug/sticky-claims. False on
 // its own conflates a router that never asked for the claim registry with one that asked and could not
 // get it, and the two call for different fixes: the first is a values change, the second a cache backend
@@ -1215,6 +1192,25 @@ func sharedStickyReason(wired, requested bool) string {
 	}
 }
 
+// enableDebugRecorders installs what the debug server reads and a router without --debug-address
+// never keeps. Start calls it with the debug server. TestEnableDebugRecorders_InstallsTheRelayEndStore
+// pins what it installs; that Start calls it is exercised only where a router boots with
+// --debug-address (k3d), since no unit test runs Start.
+//   - The in-memory ring-buffer log sink, so /debug/logs can serve recent logs to the test harness.
+//   - Cross-validation dissent, so /debug/cross-validation-events can serve it (MAG-2772). Until this
+//     call the recorder is a nil check on the relay path, so a production router stores nothing.
+//   - Each relay's relay_end, for /debug/relay-end (MAG-4899), on the same terms.
+//   - The answers each request received, in the order they reached it, for /debug/relay-answers
+//     (MAG-4358), named as relay_end names a request (relayAnswerMethod).
+func enableDebugRecorders() {
+	utils.EnableDebugLogBuffer(debugLogBufferCapacity)
+	enableCrossValidationEventRing(crossValidationEventRingCapacity)
+	enableRelayEndStore(debugLogBufferCapacity, relayEndStoreByteBudget)
+	relaycore.EnableRelayAnswerRecording(relaycore.RelayAnswerRingCapacity, relayAnswerMethod)
+}
+
+// buildDebugMux builds every /debug/* route the --debug-address server serves. Each
+// route is documented on its handler.
 func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 	optimizers := deps.optimizers
 	currentOffsetNano := deps.offsetNano
@@ -1370,7 +1366,7 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		//    Why ResetBlockedProviders runs separately from
 		//    ResetTransientFailureState:
 		//    ResetTransientFailureState deliberately preserves
-		//    currentlyBlockedProviderAddresses because in lava-pairing-network
+		//    currentlyBlockedProviderAddresses because in pairing-network
 		//    mode unblocking is an epoch-boundary operation. In direct-rpc mode
 		//    (this fork's default) there are no epoch transitions, so blocked
 		//    providers can only accumulate across test runs unless we mass-
@@ -1410,7 +1406,7 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 			case err == nil:
 				cacheBeFlushed = true
 			case status.Code(err) == codes.Unimplemented:
-				utils.LavaFormatWarning("cache-be does not implement FlushCache; treating as legacy pod", err)
+				utils.FormatWarning("cache-be does not implement FlushCache; treating as legacy pod", err)
 			default:
 				http.Error(w, fmt.Sprintf("cache-be flush failed: %v", err), http.StatusInternalServerError)
 				return
@@ -1428,7 +1424,7 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		if deps.router != nil {
 			deps.router.rebuildPairingFromConfig()
 		}
-		resetEndpointHealthAndGauge(deps)
+		resetEndpointHealth(deps)
 
 		// Capability advertisement — hardcoded for in-process stores, plus a
 		// conditional "cache-be" key when the external pod was actually
@@ -1452,6 +1448,53 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 			writeDebugJSONf(w, `{"reset":true,"cleared":["optimizer","ristretto","retries-manager","session-manager","reported-providers","sticky-sessions","seen-block","chain-state","blocked-providers","endpoint-health","pairing","chain-trackers","probe-backoff","cache-be"]}`)
 		} else {
 			writeDebugJSONf(w, `{"reset":true,"cleared":["optimizer","ristretto","retries-manager","session-manager","reported-providers","sticky-sessions","seen-block","chain-state","blocked-providers","endpoint-health","pairing","chain-trackers","probe-backoff"]}`)
+		}
+	}))
+
+	// POST /debug/reset-cache — flushes only the cache backend, the --cache-be pod
+	// or the resp-cache store (MAG-2454): the BTC-safe, cache-only companion to
+	// /debug/reset-all. A cache-behavior test previously had only reset-all, which
+	// also resets session-manager state that trips a documented BTC-router
+	// regression (MAG-2395) and resets optimizer scores, pairing, endpoint health
+	// and chain-tracker state along with it — none of which a cache test wants
+	// disturbed. Same pattern as /debug/reset-scores: a focused reset added
+	// because reset-all's bundle is unsafe for one kind of test.
+	//
+	// CacheActive() gates it exactly as it gates reset-all's own cache-be step: a
+	// deployment with no cache backend has nothing to flush, and this reports
+	// that honestly (cleared: []) rather than erroring.
+	//
+	// Nothing else in this router is touched, but the backend holds more than
+	// replies: under --shared-state it also carries the fleet's sticky-session
+	// claims and the fleet tracker gate's endpoint observations, and Flush drops
+	// those with the replies (the RESP backend every key under the router's
+	// prefix, the sidecar its whole store). This pod's own sticky pins stay, where
+	// reset-all clears them with the session-manager state.
+	//
+	// This does NOT call ProviderOptimizer.ResetState — reset-all's own comments
+	// call that "the in-process Ristretto [response] reset", but what it actually
+	// clears is providersStorage, the optimizer's QoS/score cache
+	// (provider_optimizer.go's ResetState: "Discard all per-provider score
+	// caches"), not a response cache. The Ristretto store is the cache-be pod's
+	// own (ecosystem/cache), which Flush empties; every relay reply this router
+	// caches lives in the backend flushed below. Clearing providersStorage here
+	// would reset scores, which this endpoint's one job is to leave alone.
+	mux.HandleFunc("/debug/reset-cache", debugMethod(http.MethodPost, func(w http.ResponseWriter, r *http.Request) {
+		if deps.cache == nil || !deps.cache.CacheActive() {
+			writeDebugJSONf(w, `{"reset":true,"cleared":[]}`)
+			return
+		}
+		flushCtx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		err := deps.cache.Flush(flushCtx)
+		cancel()
+		switch {
+		case err == nil:
+			writeDebugJSONf(w, `{"reset":true,"cleared":["cache-be"]}`)
+		case status.Code(err) == codes.Unimplemented:
+			utils.FormatWarning("cache-be does not implement FlushCache; treating as legacy pod", err)
+			writeDebugJSONf(w, `{"reset":true,"cleared":[]}`)
+		default:
+			http.Error(w, fmt.Sprintf("cache-be flush failed: %v", err), http.StatusInternalServerError)
 		}
 	}))
 
@@ -1480,10 +1523,22 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		w.Write(body)
 	}))
 
+	// GET /debug/verification — per chain, what each configured provider is failing, with
+	// the start times smartrouter_provider_verification_failed publishes, and when its next
+	// verification retry is due (MAG-3950). Read-only. It is what an automated test reads
+	// instead of the logs or the metric.
+	mux.HandleFunc("/debug/verification", debugMethod(http.MethodGet, func(w http.ResponseWriter, r *http.Request) {
+		state := map[string]any{"chains": []verificationDebugChain{}}
+		if deps.router != nil {
+			state = deps.router.verificationDebugState()
+		}
+		writeDebugJSONValue(w, state, "failed to marshal verification state")
+	}))
+
 	// GET /debug/logs — return recent in-memory log records, optionally scoped
 	// by request_id and/or a [from,to] time window, so an external test harness
 	// can attach the router's logs to failing tests. The ring buffer is enabled
-	// only in debug mode (see EnableDebugLogBuffer in Start); when it was never
+	// only in debug mode (see enableDebugRecorders); when it was never
 	// enabled this returns an empty set. Each line is an already-valid JSON
 	// object (zerolog JSON record); we assemble the array by joining the raw
 	// bytes with commas rather than re-marshalling.
@@ -1504,16 +1559,14 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 			}
 		}
 
-		// limit defaults to 5000, capped at the ring capacity (50000).
+		// limit defaults to 5000, capped at the ring capacity.
 		limit := 5000
 		if v := q.Get("limit"); v != "" {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 {
 				limit = n
 			}
 		}
-		if limit > 50000 {
-			limit = 50000
-		}
+		limit = min(limit, debugLogBufferCapacity)
 
 		lines := utils.ReadDebugLogBuffer(requestID, from, to, limit)
 
@@ -1534,6 +1587,37 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 	mux.HandleFunc("/debug/logs/clear", debugMethod(http.MethodPost, func(w http.ResponseWriter, r *http.Request) {
 		utils.ClearDebugLogBuffer()
 		writeDebugJSONf(w, `{"cleared":true}`)
+	}))
+
+	// GET /debug/relay-end?guid=<Router-Guid> — the relay_end event of one request (MAG-4899), the object
+	// its log line carries (docs/RELAY-END-EVENT.md), so a test asserts on the router's record of the
+	// request it sent rather than searching the log. guid is the decimal Router-Guid of the reply.
+	// X-Relay-End-Records says how many events were written with that GUID: 1 for every relay, a
+	// retried one included, so a higher count is the router breaking that contract, and the body is
+	// then the last of them. The store keeps the newest GUIDs, up to debugLogBufferCapacity of them and
+	// relayEndStoreByteBudget bytes of records.
+	//   200  the record
+	//   400  no guid
+	//   404  a GUID the store does not hold: never written, or dropped as older than the rest
+	//   503  the store is not installed, which a router serving this mux never is
+	mux.HandleFunc("/debug/relay-end", debugMethod(http.MethodGet, func(w http.ResponseWriter, r *http.Request) {
+		guid := r.URL.Query().Get("guid")
+		if guid == "" {
+			http.Error(w, "guid is required: the Router-Guid of a reply", http.StatusBadRequest)
+			return
+		}
+		line, writes, enabled := readRelayEnd(guid)
+		if !enabled {
+			http.Error(w, "relay_end records are not kept on this router", http.StatusServiceUnavailable)
+			return
+		}
+		if writes == 0 {
+			http.Error(w, "no relay_end record for guid "+guid, http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Relay-End-Records", strconv.Itoa(writes))
+		_, _ = w.Write(line)
 	}))
 
 	// GET /debug/endpoint-state — per-endpoint poll-health + enable/recovery state (MAG-2202 endpoint 1).
@@ -1563,6 +1647,7 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 				url := ep.Endpoint.NetworkAddress
 				health := ep.Endpoint.HealthSnapshot()
 				obs := observations[url] // zero value when no observation recorded yet
+				trackerState, _, _ := server.endpointChainTrackerManager.GetTrackerState(url)
 				rows = append(rows, map[string]any{
 					"ChainID":        server.listenEndpoint.ChainID,
 					"ApiInterface":   server.listenEndpoint.ApiInterface,
@@ -1579,28 +1664,30 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 					"LatestBlock":              obs.LatestBlock,
 					"ObservedAt":               debugTimeRFC3339(obs.ObservedAt),
 					"Source":                   obs.Source.String(),
-					// The MAG-2550 replay gate, made visible: a disabled endpoint with a
-					// RelayProbeMethod is held pending a successful replay of that method (or
-					// the attempt-budget fallback) — NOT merely earning its poll streak.
-					"RelayProbeMethod":   health.RelayProbeMethod,
-					"RelayProbeAttempts": health.RelayProbeAttempts,
-					"ReenableProbeFlaps": health.ReenableProbeFlaps,
+					"ReenableProbeFlaps":       health.ReenableProbeFlaps,
 					// MAG-3986: Enabled is the event slot only. Usable is what selection
 					// sees — Enabled AND no state reason. StateReasons lists head-stalled
 					// with when it was added and the block it was stuck on; SameBlockCycles
-					// is the evidence that adds it, and a HighestBlockSeen above the stuck
-					// block removes it.
+					// and HighestBlockSince (how long the highest block has stood still,
+					// MAG-5243) are the evidence that adds it, and a HighestBlockSeen above
+					// the stuck block removes it.
 					"Usable":            health.Usable,
 					"StateReasons":      debugStateReasons(health.StateReasons),
 					"SameBlockCycles":   obs.SameBlockCycles,
 					"LastAnsweredBlock": obs.LastAnsweredBlock,
 					"HighestBlockSeen":  obs.HighestBlockSeen,
+					"HighestBlockSince": debugTimeRFC3339(obs.HighestBlockSince),
 					"Provider":          ep.ProviderAddress,
 					"Backup":            ep.Backup,
 					// PollIntervalMs is the live dedicated-poll cadence: base when healthy,
 					// exponentialBackoff-stretched when the endpoint has been failing. This is the
 					// observable /debug/reset-probe-backoff returns to base (MAG-2395).
 					"PollIntervalMs": backoffByURL[url].Milliseconds(),
+					// TrackerState is the lifecycle state of the url's tracker. "not_tracked_by_design"
+					// is a url with no tracker on purpose (MAG-5349): it serves only add-on collections
+					// and none declares a way to read the head, so the poll fields above stay empty
+					// for good and say nothing about its health.
+					"TrackerState": string(trackerState),
 					// HashPolling says whether this chain's tracker does block-hash work
 					// (fork detection) and, when it does not, WHY — "off-operator-choice"
 					// (--enable-fork-detection not set) vs "off-spec-no-block-by-num" (the
@@ -1688,7 +1775,7 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 	// that answered (endpointstate.LocalPodID: the host name and a per-process suffix), and the debug
 	// Service balances across a router's pods, so a reader pins one pod (a port-forward) or compares two
 	// readings only when their PodID matches. "adopted" is how a peer's claim shows up, which
-	// Lava-Provider-Address cannot show, because it reads the same whether a pod used its own claim or a
+	// Router-Provider-Address cannot show, because it reads the same whether a pod used its own claim or a
 	// peer's; a pod that dropped its local copy of its own claim (invalidated) reads it back as adopted
 	// too, and the registry does not say whose claim it holds, so the two cannot be split here.
 	// /debug/reset-all is not such a case: it clears this pod's local pins and flushes the shared claims
@@ -1718,6 +1805,82 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		return rows
 	}))
 
+	// GET /debug/relay-errors — the router's own count of node errors and protocol errors (MAG-4718).
+	// One row per chain, interface, provider and method with a count above zero. The counts are the
+	// router's record of each attempt it classified (relaycore.RelayErrorTally), kept beside the
+	// Prometheus counters rather than read from them, so the route works on a router run without
+	// --metrics-listen-address and its Method is the API name as relayed. NodeErrors and
+	// ProtocolErrors stay two numbers: failover treats a node error and a protocol error
+	// differently. Both are per attempt, so this is where an attempt the caller never saw (a retry
+	// answered) shows its classification. Cumulative since the process started and cleared by no
+	// /debug/reset-* route; PodID names the process, as on /debug/sticky-claims. Optional chain_id,
+	// api_interface and provider narrow the rows.
+	mux.HandleFunc("/debug/relay-errors", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "GET only", http.StatusMethodNotAllowed)
+			return
+		}
+		rows := []map[string]any{}
+		if deps.router != nil {
+			q := r.URL.Query()
+			chainID, apiInterface, provider := q.Get("chain_id"), q.Get("api_interface"), q.Get("provider")
+			podID := endpointstate.LocalPodID()
+			for _, count := range deps.router.relayErrors.Counts() {
+				if (chainID != "" && count.ChainID != chainID) ||
+					(apiInterface != "" && count.ApiInterface != apiInterface) ||
+					(provider != "" && count.ProviderAddress != provider) {
+					continue
+				}
+				rows = append(rows, map[string]any{
+					"ChainID":         count.ChainID,
+					"ApiInterface":    count.ApiInterface,
+					"ProviderAddress": count.ProviderAddress,
+					"Method":          count.Method,
+					"NodeErrors":      count.NodeErrors,
+					"ProtocolErrors":  count.ProtocolErrors,
+					"PodID":           podID,
+				})
+			}
+		}
+		writeDebugRows(w, rows)
+	})
+
+	// GET /debug/relay-answers?request_id=<Router-Guid> — the answers one request's attempts handed
+	// back, in the order they reached the router (MAG-4358, relaycore/relay_answers.go). One row per
+	// answer, oldest first: which provider, the status it answered with, and the router's verdict
+	// (success / node-error / protocol-error), or "unread" for an answer that arrived after the
+	// router stopped reading for its reply, such as a write's other deliveries. ElapsedMs is the time
+	// from the start of the request's relay processing to the answer. Seq is the order key, as on
+	// /debug/cross-validation-events, so the rows are not sorted. Optional limit keeps the most
+	// recent N rows. 503 when the recorder is not installed, so "nothing was recorded" never reads
+	// as "nothing answered"; X-Relay-Answers-Dropped reports the answers the bounded ring evicted.
+	mux.HandleFunc("/debug/relay-answers", debugMethod(http.MethodGet, func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		limit, _ := strconv.Atoi(q.Get("limit"))
+		answers, dropped, enabled := relaycore.ReadRelayAnswers(q.Get("request_id"), limit)
+		if !enabled {
+			http.Error(w, "relay answer recording is not enabled on this router", http.StatusServiceUnavailable)
+			return
+		}
+		rows := make([]map[string]any, 0, len(answers))
+		for _, answer := range answers {
+			rows = append(rows, map[string]any{
+				"Seq":             answer.Seq,
+				"ArrivedAt":       debugTimeRFC3339(answer.ArrivedAt),
+				"ElapsedMs":       answer.Elapsed.Milliseconds(),
+				"ChainID":         answer.ChainID,
+				"ApiInterface":    answer.ApiInterface,
+				"RequestID":       answer.RequestID,
+				"Method":          answer.Method,
+				"ProviderAddress": answer.ProviderAddress,
+				"StatusCode":      answer.StatusCode,
+				"Outcome":         answer.Outcome,
+			})
+		}
+		w.Header().Set("X-Relay-Answers-Dropped", strconv.FormatUint(dropped, 10))
+		encodeDebugJSON(w, rows, "failed encoding relay answers response")
+	}))
+
 	// GET /debug/probe-loop — per-chain proactive-prober cycle telemetry (MAG-2202 endpoint 4). Flat
 	// array of self-describing records (ChainID + ApiInterface): the configured --probe-loop-interval
 	// cadence (CycleIntervalMs) plus a snapshot of the last completed runProbeCycle — start/duration,
@@ -1741,17 +1904,10 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 				"EndpointsScored":     s.EndpointsScored,
 				"ReEnabledCount":      s.ReEnabledCount,
 				"SyncOmittedCount":    s.SyncOmittedCount,
-				// MAG-2550 replay-gate telemetry: how many disabled endpoints are held on
-				// recorded relay evidence, and the cumulative replay outcomes.
-				"EvidenceGatedCount": s.EvidenceGatedCount,
 				// Idle mode: the last cycle withheld its QoS feed / skipped the head-stall step
 				// because the chain was idle or a wake burst was still re-polling.
 				"QoSFeedPausedIdle":   s.QoSFeedPausedIdle,
 				"HeadStallPausedIdle": s.HeadStallPausedIdle,
-				"ReplaysAttempted":    s.ReplaysAttempted,
-				"ReplaysRecovered":    s.ReplaysRecovered,
-				"ReplaysStillFailing": s.ReplaysStillFailing,
-				"ReplaysInconclusive": s.ReplaysInconclusive,
 				// MAG-3986 head-stall transitions, cumulative since process start.
 				"StalledAdded":    s.StalledAdded,
 				"StalledRemoved":  s.StalledRemoved,
@@ -2007,14 +2163,14 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 	//
 	// One row per recorded comparison outcome, oldest first, from both recording paths (Source):
 	//   reply-time  a content outlier seen before the reply — it is in the request's
-	//               lava-cross-validation-disagreeing-providers header.
+	//               router-cross-validation-disagreeing-providers header.
 	//   straggler   a provider that lost the race to quorum (it is in pending-providers) and whose
 	//               late answer the async watcher resolved. EVERY resolution is recorded, not only
 	//               dissent: an "agreed" row is the positive control a test asserting "no dissent
 	//               happened" anchors on, and node-error / protocol-error / not-received rows say a
 	//               late answer arrived broken or never arrived.
 	//
-	// Filters (all optional, ANDed): request_id (the Lava-Guid response header value — NOT
+	// Filters (all optional, ANDed): request_id (the Router-Guid response header value — NOT
 	// /debug/logs' request_id, which is the caller's X-Request-Id), chain_id, outcome, limit (keeps
 	// the most recent N). Status codes:
 	//   200  the rows follow, as a flat JSON array; [] means the recorder was live and saw no dissent.
@@ -2070,10 +2226,10 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 
 	// POST /debug/reset-endpoint-health — focused companion to /debug/reset-all (MAG-2186):
 	// re-enable every provider endpoint disabled by MaxConsecutiveConnectionAttempts
-	// (Endpoint.Enabled=false) and mirror the reset onto the Prometheus health gauge,
-	// nothing else. The name mirrors Endpoint.ResetHealth() in the source for discoverability.
+	// (Endpoint.Enabled=false), nothing else. The name mirrors Endpoint.ResetHealth() in the
+	// source for discoverability.
 	mux.HandleFunc("/debug/reset-endpoint-health", debugMethod(http.MethodPost, func(w http.ResponseWriter, r *http.Request) {
-		reenabled := resetEndpointHealthAndGauge(deps)
+		reenabled := resetEndpointHealth(deps)
 		writeDebugJSONf(w, `{"reset":true,"endpoints_reenabled":%d}`, reenabled)
 	}))
 
@@ -2135,9 +2291,9 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		resp := routerConfigResponse{
 			SchemaVersion: 1,
 
-			MaxConsecutiveConnectionAttempts:                 lavasession.MaxConsecutiveConnectionAttempts,
-			TimeoutForEstablishingAConnection:                lavasession.TimeoutForEstablishingAConnection.Milliseconds(),
-			MaximumNumberOfFailuresAllowedPerConsumerSession: lavasession.MaximumNumberOfFailuresAllowedPerConsumerSession,
+			MaxConsecutiveConnectionAttempts:                 routersession.MaxConsecutiveConnectionAttempts,
+			TimeoutForEstablishingAConnection:                routersession.TimeoutForEstablishingAConnection.Milliseconds(),
+			MaximumNumberOfFailuresAllowedPerConsumerSession: routersession.MaximumNumberOfFailuresAllowedPerConsumerSession,
 
 			RelayRetryLimit:          relaycore.RelayRetryLimit,
 			DisableBatchRequestRetry: relaycore.DisableBatchRequestRetry,
@@ -2211,7 +2367,9 @@ func debugRowKey(m map[string]any) string {
 	// sort.Slice — which is NOT stable — leaves their order to chance. Absent on every other row
 	// type, where comma-ok yields "" and the key is unchanged.
 	pa, _ := m["ProviderAddress"].(string)
-	return cid + "\x00" + api + "\x00" + na + "\x00" + pa
+	// Method splits one provider's rows on /debug/relay-errors (MAG-4718).
+	method, _ := m["Method"].(string)
+	return cid + "\x00" + api + "\x00" + na + "\x00" + pa + "\x00" + method
 }
 
 // sortDebugRows orders rows by debugRowKey in place, so Go map-iteration order never leaks into a
@@ -2260,7 +2418,7 @@ func writeDebugJSONValue(w http.ResponseWriter, v any, failMessage string) {
 func encodeDebugJSON(w http.ResponseWriter, v any, failMessage string) {
 	setDebugJSONHeader(w)
 	if err := json.NewEncoder(w).Encode(v); err != nil {
-		utils.LavaFormatWarning(failMessage, err)
+		utils.FormatWarning(failMessage, err)
 	}
 }
 
@@ -2335,14 +2493,9 @@ func decodeDebugOffset(w http.ResponseWriter, r *http.Request) (offsetSeconds fl
 // everything else over http.
 func subscriptionCollectionProbe(chainParser chainlib.ChainParser) func(internalPath string, declaredAddons []string) bool {
 	return func(internalPath string, declaredAddons []string) bool {
-		addons, _, err := chainParser.SeparateAddonsExtensions(context.Background(), declaredAddons)
-		if err != nil {
-			// Verification refuses a url whose add-ons cannot be read, so this
-			// is reached only outside admission; an unreadable addon set falls
-			// back to "http collection" — the shape all but STRK's three ws
-			// paths have.
-			return false
-		}
+		// A name the spec does not define is ignored, as admission ignores it
+		// (MAG-3950): addons holds the add-ons the spec does define.
+		addons, _, _ := chainParser.SeparateAddonsExtensions(context.Background(), declaredAddons)
 		if len(addons) == 0 {
 			addons = append(addons, "")
 		}
@@ -2362,6 +2515,17 @@ func subscriptionCollectionProbe(chainParser chainlib.ChainParser) func(internal
 	}
 }
 
+// dialedNodeUrls is every url the router dials for these configured node urls:
+// expandInternalPaths over the spec's internal paths. Verification, admission and
+// the session build all read this one list, so a generated per-path url is checked
+// with its own path's verifications rather than riding on the configured url's —
+// on TON a bare base url has no root collection and so no checks at all, while the
+// `/v2` url generated from it carries the chain-id check (MAG-4214).
+func dialedNodeUrls(nodeUrls []common.NodeUrl, chainParser chainlib.ChainParser, apiInterface string) []common.NodeUrl {
+	servesRoot := chainParser.IsInternalPathEnabled("", apiInterface, "")
+	return expandInternalPaths(nodeUrls, chainParser.GetAllInternalPaths(), servesRoot, subscriptionCollectionProbe(chainParser))
+}
+
 // expandInternalPaths resolves each configured node-url into the set of urls
 // the router will actually dial, one per internal path the spec serves.
 //
@@ -2372,10 +2536,19 @@ func subscriptionCollectionProbe(chainParser chainlib.ChainParser) func(internal
 //
 //   - a url declaring `internal-path` IS that path's root and is taken as it
 //     stands;
-//   - a url declaring none is the shared root: it stays (for the spec's own
-//     root collection, if it has one) and additionally yields one url per
-//     other internal path, with the path appended — the same
-//     `nodeUrl.Url = baseUrl + internalPath` the chain router does;
+//   - a url declaring none is the shared root: it yields one url per other
+//     internal path, with the path appended — the same
+//     `nodeUrl.Url = baseUrl + internalPath` the chain router does — and stays
+//     itself only when the spec serves a root collection (servesRoot). On a
+//     spec with none (TON) no relay is ever routed to it, while its tracker
+//     polled the spec-wide head request at the bare base, got a 404 every
+//     poll, and pulled the provider's availability down (MAG-4214). It also
+//     stays when the transport filter below skipped a path for it: that path
+//     gets no url of its own, so its relays fall back to this one, as on main.
+//     AVAX `/C/rpc` is such a path — it inherits ETH1's eth_subscribe, so an
+//     https url never generates it, and a bare `.../ext/bc/C/rpc` url is the
+//     only endpoint C-chain traffic reaches. A websocket url, and a url no path
+//     could be generated from, stay as before;
 //   - a path is generated only on the transport that serves it. A ws url
 //     yields the spec's subscription collections and an http url yields the
 //     rest, so STRK's `/ws/rpc/v0_8` is a wss endpoint and its `/rpc/v0_8` an
@@ -2383,7 +2556,7 @@ func subscriptionCollectionProbe(chainParser chainlib.ChainParser) func(internal
 //
 // A spec with no internal paths at all (almost every chain) returns the input
 // unchanged.
-func expandInternalPaths(nodeUrls []common.NodeUrl, internalPaths []string, servesSubscriptions func(internalPath string, declaredAddons []string) bool) []common.NodeUrl {
+func expandInternalPaths(nodeUrls []common.NodeUrl, internalPaths []string, servesRoot bool, servesSubscriptions func(internalPath string, declaredAddons []string) bool) []common.NodeUrl {
 	nonRoot := make([]string, 0, len(internalPaths))
 	for _, internalPath := range internalPaths {
 		// A path is appended to a url, so only a url path can be expanded.
@@ -2407,20 +2580,20 @@ func expandInternalPaths(nodeUrls []common.NodeUrl, internalPaths []string, serv
 
 	expanded := make([]common.NodeUrl, 0, len(nodeUrls))
 	// An operator can declare the base url AND a pinned url that happens to
-	// equal base+path. Both are legitimate; emitting the same (url, path) twice
-	// would just probe it twice and register it twice in the metrics.
-	seen := make(map[string]struct{}, len(nodeUrls))
+	// equal base+path. Both are legitimate; emitting the same entry twice would
+	// just probe it twice and register it twice in the metrics. Only an entry
+	// equal in full is a duplicate: two entries on one url that differ in their
+	// key, timeout or add-ons are verified and dialed each on its own, as they
+	// are configured (MAG-4214 review).
 	add := func(nodeUrl common.NodeUrl) {
-		key := nodeUrl.Url + "\x00" + nodeUrl.InternalPath
-		if _, dup := seen[key]; dup {
+		if slices.ContainsFunc(expanded, func(e common.NodeUrl) bool { return reflect.DeepEqual(e, nodeUrl) }) {
 			return
 		}
-		seen[key] = struct{}{}
 		expanded = append(expanded, nodeUrl)
 	}
 	for _, nodeUrl := range nodeUrls {
-		add(nodeUrl)
 		if nodeUrl.InternalPath != "" {
+			add(nodeUrl)
 			continue
 		}
 		// gRPC node-urls are a bare host:port and do not parse as a url; the
@@ -2429,6 +2602,8 @@ func expandInternalPaths(nodeUrls []common.NodeUrl, internalPaths []string, serv
 		if err != nil {
 			isWs = false
 		}
+		var generatedUrls []common.NodeUrl
+		skippedPath := false
 		for _, internalPath := range nonRoot {
 			// The transport has to serve the collection: a ws url answers the
 			// spec's subscription collections and an http url the rest. On every
@@ -2437,6 +2612,7 @@ func expandInternalPaths(nodeUrls []common.NodeUrl, internalPaths []string, serv
 			// `wss://host/rpc/v0_9`) — urls no upstream serves, which relays for
 			// that path would then be routed onto.
 			if isWs != servesSubscriptions(internalPath, nodeUrl.Addons) {
+				skippedPath = true
 				continue
 			}
 			generated := nodeUrl
@@ -2445,14 +2621,21 @@ func expandInternalPaths(nodeUrls []common.NodeUrl, internalPaths []string, serv
 				// version into the url instead of declaring `internal-path`
 				// (`https://vendor/rpc/v0_8`, no field). It is the endpoint for
 				// that path as it stands; appending would ask the vendor for
-				// `/rpc/v0_8/rpc/v0_8`. It also stays the root endpoint, added
-				// above, which is what that config serves today.
+				// `/rpc/v0_8/rpc/v0_8`. On a spec with a root collection it also
+				// stays the root endpoint, added below, which is what that config
+				// serves today.
 				generated.InternalPath = internalPath
-				add(generated)
+				generatedUrls = append(generatedUrls, generated)
 				continue
 			}
 			generated.Url = nodeUrl.Url + internalPath
 			generated.InternalPath = internalPath
+			generatedUrls = append(generatedUrls, generated)
+		}
+		if servesRoot || isWs || skippedPath || len(generatedUrls) == 0 {
+			add(nodeUrl)
+		}
+		for _, generated := range generatedUrls {
 			add(generated)
 		}
 	}
@@ -2463,7 +2646,7 @@ func expandInternalPaths(nodeUrls []common.NodeUrl, internalPaths []string, serv
 // url, used for URL->name resolution in the ChainTracker callbacks and never exported (the per-url
 // series carry its fingerprint); the provider name, the endpoint_id of every Prometheus metric; and the spec path the url
 // serves, the internal_path label of its per-url series (MAG-4204).
-func registerEndpointMetrics(mm *metrics.SmartRouterMetricsManager, rpcEndpoint *lavasession.RPCEndpoint, url common.NodeUrl, providerName string) {
+func registerEndpointMetrics(mm *metrics.SmartRouterMetricsManager, rpcEndpoint *routersession.RPCEndpoint, url common.NodeUrl, providerName string) {
 	if mm == nil {
 		return
 	}
@@ -2473,7 +2656,7 @@ func registerEndpointMetrics(mm *metrics.SmartRouterMetricsManager, rpcEndpoint 
 
 func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	ctx context.Context,
-	rpcEndpoint *lavasession.RPCEndpoint,
+	rpcEndpoint *routersession.RPCEndpoint,
 	errCh chan error,
 	optimizers *common.SafeSyncMap[string, *provideroptimizer.ProviderOptimizer],
 	chainMutexes map[string]*sync.Mutex,
@@ -2509,7 +2692,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 
 	chainParser, err := chainlib.NewChainParser(rpcEndpoint.ApiInterface)
 	if err != nil {
-		err = utils.LavaFormatError("failed creating chain parser", err, utils.Attribute{Key: "endpoint", Value: rpcEndpoint})
+		err = utils.FormatError("failed creating chain parser", err, utils.Attribute{Key: "endpoint", Value: rpcEndpoint})
 		errCh <- err
 		return err
 	}
@@ -2521,12 +2704,12 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 		// Load spec from static file/directory/URL sources
 		err = statetracker.RegisterForSpecUpdatesOrSetStaticSpecsWithToken(ctx, chainParser, options.cmdFlags.StaticSpecPaths, *rpcEndpoint, options.cmdFlags.GitHubToken, options.cmdFlags.GitLabToken)
 		if err != nil {
-			err = utils.LavaFormatError("failed loading static spec", err, utils.Attribute{Key: "endpoint", Value: rpcEndpoint})
+			err = utils.FormatError("failed loading static spec", err, utils.Attribute{Key: "endpoint", Value: rpcEndpoint})
 			errCh <- err
 			return err
 		}
 	} else {
-		err = utils.LavaFormatError("no static spec paths configured; smart router requires --static-spec-paths to load chain specs", nil, utils.Attribute{Key: "chainID", Value: chainID})
+		err = utils.FormatError("no spec source configured; smart router requires --"+common.UseStaticSpecFlag+" to load chain specs", nil, utils.Attribute{Key: "chainID", Value: chainID})
 		errCh <- err
 		return err
 	}
@@ -2536,7 +2719,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	// returns before a provider is dialed or a listener bound — on this endpoint, and through the barrier
 	// on every other — instead of after the siblings have started serving.
 	if err = crossValidationBootCheck(rpcEndpoint, chainParser); err != nil {
-		err = utils.LavaFormatError("invalid cross-validation configuration", err, utils.Attribute{Key: "endpoint", Value: rpcEndpoint})
+		err = utils.FormatError("invalid cross-validation configuration", err, utils.Attribute{Key: "endpoint", Value: rpcEndpoint})
 		errCh <- err
 		return err
 	}
@@ -2545,7 +2728,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 		if abort := options.bootBarrier.wait(); abort != nil {
 			// The endpoint that failed reported its own error; this one is not repeated into errCh, so the
 			// first error Start reads is the cause.
-			return utils.LavaFormatWarning("startup aborted before this endpoint bound a listener: another endpoint refused its configuration", abort, utils.Attribute{Key: "endpoint", Value: rpcEndpoint})
+			return utils.FormatWarning("startup aborted before this endpoint bound a listener: another endpoint refused its configuration", abort, utils.Attribute{Key: "endpoint", Value: rpcEndpoint})
 		}
 	}
 
@@ -2562,7 +2745,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	relevantBackupProviderList := providersServing(options.backupProvidersList, rpcEndpoint)
 
 	if len(relevantStaticProviderList) == 0 && len(relevantBackupProviderList) == 0 {
-		err = utils.LavaFormatError("no static or backup providers configured for chain", nil,
+		err = utils.FormatError("no static or backup providers configured for chain", nil,
 			utils.Attribute{Key: "chainID", Value: chainID})
 		errCh <- err
 		return err
@@ -2612,11 +2795,11 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 		}
 		err = chainParser.SetPolicy(policy, chainID, rpcEndpoint.ApiInterface)
 		if err != nil {
-			utils.LavaFormatWarning("Failed to set auto-derived policy", err,
+			utils.FormatWarning("Failed to set auto-derived policy", err,
 				utils.Attribute{Key: "chainID", Value: chainID},
 				utils.Attribute{Key: "apiInterface", Value: rpcEndpoint.ApiInterface})
 		} else {
-			utils.LavaFormatInfo("Auto-derived policy from static providers",
+			utils.FormatInfo("Auto-derived policy from static providers",
 				utils.Attribute{Key: "chainID", Value: chainID},
 				utils.Attribute{Key: "apiInterface", Value: rpcEndpoint.ApiInterface},
 				utils.Attribute{Key: "addons", Value: addons},
@@ -2640,7 +2823,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	optimizer, loaded, err := optimizers.LoadOrStore(chainID, newOptimizer)
 	if err != nil {
 		errCh <- err
-		return utils.LavaFormatError("failed loading optimizer", err, utils.LogAttr("endpoint", rpcEndpoint.Key()))
+		return utils.FormatError("failed loading optimizer", err, utils.LogAttr("endpoint", rpcEndpoint.Key()))
 	}
 
 	if !loaded && smartRouterOptimizerQoSClient != nil {
@@ -2649,8 +2832,19 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	}
 
 	// Create active subscription provider storage for each unique chain
-	activeSubscriptionProvidersStorage := lavasession.NewActiveSubscriptionProvidersStorage()
-	sessionManager := lavasession.NewConsumerSessionManager(rpcEndpoint, optimizer, smartRouterMetricsManager, smartRouterIdentifier, activeSubscriptionProvidersStorage)
+	activeSubscriptionProvidersStorage := routersession.NewActiveSubscriptionProvidersStorage()
+	sessionManager := routersession.NewConsumerSessionManager(rpcEndpoint, optimizer, smartRouterMetricsManager, smartRouterIdentifier, activeSubscriptionProvidersStorage)
+	// Every name in the router's config, verified or not, on any chain or interface, so a
+	// router-select-provider name that a provider out of rotation carries is not answered as not
+	// configured (MAG-3800). The session manager's own lists hold the verified providers only. A
+	// provider configured only for another chain or interface has no URL for this route, which is
+	// the provider-unavailable reply, not the caller's mistake: only a name the router does not
+	// have at all is (Part I R-Q).
+	configuredNames := make([]string, 0, len(options.staticProvidersList)+len(options.backupProvidersList))
+	for _, provider := range slices.Concat(options.staticProvidersList, options.backupProvidersList) {
+		configuredNames = append(configuredNames, provider.Name)
+	}
+	sessionManager.SetConfiguredProviderNames(configuredNames)
 	// Cross-pod sticky sessions. Gated on --shared-state, the same operator signal the chain-tip
 	// and tracker-gate sharing use: "this chain runs on several replicas behind one cache". A
 	// single-replica router needs no registry, and its absence leaves stickiness pod-local.
@@ -2663,8 +2857,8 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 		// ceiling — leaving a window where the claim is gone while pods still route on their
 		// local copies, which is the split this feature removes. Warn rather than fail: the
 		// feature still helps, and refusing to start over a tuning choice is worse.
-		if wanted := epochDuration * lavasession.StickyClaimEpochSpan; wanted > cachecore.MaxStickyTTL {
-			utils.LavaFormatWarning("cross-pod sticky sessions: epoch duration exceeds the claim TTL ceiling; claims may expire while pods still honour them", nil,
+		if wanted := epochDuration * routersession.StickyClaimEpochSpan; wanted > cachecore.MaxStickyTTL {
+			utils.FormatWarning("cross-pod sticky sessions: epoch duration exceeds the claim TTL ceiling; claims may expire while pods still honour them", nil,
 				utils.LogAttr("epochDuration", epochDuration),
 				utils.LogAttr("requestedClaimTTL", wanted),
 				utils.LogAttr("ceiling", cachecore.MaxStickyTTL),
@@ -2688,32 +2882,35 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	admissionFor, recordAdmission := admissions.admissionFor, admissions.record
 
 	// Helper function to convert provider endpoints to sessions
-	convertProvidersToSessions := func(providerList []*lavasession.RPCStaticProviderEndpoint) map[uint64]*lavasession.ConsumerSessionsWithProvider {
-		sessions := make(map[uint64]*lavasession.ConsumerSessionsWithProvider)
+	convertProvidersToSessions := func(providerList []*routersession.RPCStaticProviderEndpoint) map[uint64]*routersession.ConsumerSessionsWithProvider {
+		sessions := make(map[uint64]*routersession.ConsumerSessionsWithProvider)
 		// Every connection built below, so the readiness step at the end of this
 		// function can run before any of them is reachable by a relay (MAG-2860).
-		createdConnections := []lavasession.DirectRPCConnection{}
+		createdConnections := []routersession.DirectRPCConnection{}
 		for idx, provider := range providerList {
 			// Only process providers matching this endpoint's API interface
 			if provider.ApiInterface != rpcEndpoint.ApiInterface || provider.ChainID != rpcEndpoint.ChainID {
 				continue
 			}
 
-			endpoints := []*lavasession.Endpoint{}
-			// expandInternalPaths gets each admitted url with its declared add-ons. Its
-			// subscription probe resolves a collection from them to decide ws-vs-http,
-			// so narrowing them here would move endpoints in or out per internal path as
-			// a side effect of admission (MAG-3326 review); a refused url goes whole,
-			// its expansions with it. Service admission is applied per endpoint below.
+			endpoints := []*routersession.Endpoint{}
+			// The dialed list is the one admission verified (dialedNodeUrls), expanded
+			// with each url's declared add-ons: its subscription probe resolves a
+			// collection from them to decide ws-vs-http, so narrowing them first would
+			// move endpoints in or out per internal path as a side effect of admission
+			// (MAG-3326 review). Each url, generated ones included, was verified on its
+			// own path and is dropped alone when refused (MAG-4214). Service admission
+			// is applied per endpoint below.
 			admission := admissionFor(provider)
-			for _, url := range expandInternalPaths(admittedNodeUrls(provider, admission), chainParser.GetAllInternalPaths(), subscriptionCollectionProbe(chainParser)) {
+			dialed := dialedNodeUrls(provider.NodeUrls, chainParser, provider.ApiInterface)
+			for _, url := range admittedNodeUrls(provider, dialed, admission) {
 				admittedServices, keep := admittedServicesFor(chainParser, admission, url)
 				if !keep {
 					// A url that serves only its add-ons and kept none has nothing left.
 					// Building it anyway would empty its service list, flip
 					// ServesBaseCollection() to true, and hand a node its operator
 					// declared cannot answer the base collection back to base traffic.
-					utils.LavaFormatWarning("dropping node url: every add-on it declared was refused", nil,
+					utils.FormatWarning("dropping node url: every add-on it declared was refused", nil,
 						utils.LogAttr("url", url.Url),
 						utils.LogAttr("addons", url.Addons),
 						utils.LogAttr("provider", provider.Name),
@@ -2739,7 +2936,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 				if standaloneAddons {
 					declaredAddons, _, sepErr := chainParser.SeparateAddonsExtensions(ctx, admittedServices)
 					if sepErr != nil || len(declaredAddons) == 0 {
-						utils.LavaFormatWarning("ignoring standalone-addons: url declares no add-on collection", sepErr,
+						utils.FormatWarning("ignoring standalone-addons: url declares no add-on collection", sepErr,
 							utils.LogAttr("url", url.Url),
 							utils.LogAttr("addons", url.Addons),
 							utils.LogAttr("provider", provider.Name),
@@ -2752,28 +2949,28 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 				// Create DirectRPCConnection for smart router (direct mode)
 				// Use default parallel connections for HTTP connection pooling
 				// Pass ApiInterface for proper protocol detection (bare host:port → gRPC when interface is gRPC)
-				directConn, err := lavasession.NewDirectRPCConnection(
+				directConn, err := routersession.NewDirectRPCConnection(
 					ctx,
 					url,
-					uint(lavasession.MaximumStreamsOverASingleConnection),
+					uint(routersession.MaximumStreamsOverASingleConnection),
 					provider.ApiInterface, // Used for protocol detection when URL has no scheme
 				)
 				if err != nil {
-					utils.LavaFormatWarning("failed to create direct RPC connection", err,
+					utils.FormatWarning("failed to create direct RPC connection", err,
 						utils.LogAttr("url", url.Url),
 						utils.LogAttr("provider", provider.Name),
 					)
 					continue
 				}
 
-				utils.LavaFormatInfo("created direct RPC connection",
+				utils.FormatInfo("created direct RPC connection",
 					utils.LogAttr("url", url.Url),
 					utils.LogAttr("protocol", directConn.GetProtocol()),
 					utils.LogAttr("provider", provider.Name),
 				)
 				createdConnections = append(createdConnections, directConn)
 
-				endpoint := &lavasession.Endpoint{
+				endpoint := &routersession.Endpoint{
 					NetworkAddress: url.Url,
 					Enabled:        true,
 					Addons:         extensions,
@@ -2785,7 +2982,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 					StandaloneAddons:  standaloneAddons,
 					InternalPath:      url.InternalPath,
 					Connections:       nil,
-					DirectConnections: []lavasession.DirectRPCConnection{directConn}, // Smart router uses direct RPC
+					DirectConnections: []routersession.DirectRPCConnection{directConn}, // Smart router uses direct RPC
 				}
 				endpoints = append(endpoints, endpoint)
 
@@ -2798,7 +2995,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 			// the session manager: UpdateAllProviders makes it selectable, but any
 			// relay attempt against it fails because there are no endpoints to dial.
 			if len(endpoints) == 0 {
-				utils.LavaFormatWarning("skipping static provider: all URL connections failed, no usable endpoints",
+				utils.FormatWarning("skipping static provider: all URL connections failed, no usable endpoints",
 					nil,
 					utils.LogAttr("provider", provider.Name),
 					utils.LogAttr("chain", rpcEndpoint.ChainID),
@@ -2819,7 +3016,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 			if stake > 0 {
 				stakeAmount = stake
 			}
-			providerEntry := lavasession.NewConsumerSessionWithProvider(
+			providerEntry := routersession.NewConsumerSessionWithProvider(
 				provider.Name,
 				endpoints,
 				999999999, // High compute units for availability
@@ -2828,6 +3025,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 			)
 			providerEntry.StaticProvider = true
 			providerEntry.GroupLabel = provider.GroupLabel // cross-validation group-diversity label (may be empty)
+			providerEntry.UnservedInternalPaths = unservedInternalPaths(dialed, endpoints)
 			sessions[uint64(idx)] = providerEntry
 		}
 
@@ -2846,7 +3044,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 		//
 		// Bounded and never fatal, in keeping with MAG-2525: a connection that does
 		// not finish is published anyway and falls back to on-demand resolution.
-		lavasession.PrewarmDirectConnections(ctx, createdConnections, lavasession.DirectRPCPrewarmBudget)
+		routersession.PrewarmDirectConnections(ctx, createdConnections, routersession.DirectRPCPrewarmBudget)
 
 		return sessions
 	}
@@ -2883,7 +3081,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 
 	switch {
 	case !chainServable:
-		utils.LavaFormatWarning("ATTENTION: no healthy providers for endpoint — serving unavailable until one recovers", nil,
+		utils.FormatWarning("ATTENTION: no healthy providers for endpoint — serving unavailable until one recovers", nil,
 			utils.LogAttr("chain", rpcEndpoint.ChainID),
 			utils.LogAttr("apiInterface", rpcEndpoint.ApiInterface),
 			utils.LogAttr("staticConfigured", len(relevantStaticProviderList)),
@@ -2891,7 +3089,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 			utils.LogAttr("hint", "endpoint reports unhealthy; providers are retried in the background and adopted when they recover"),
 		)
 	case servingTier == metrics.ServingTierDegraded:
-		utils.LavaFormatWarning("ATTENTION: no healthy static providers — serving from backup providers only", nil,
+		utils.FormatWarning("ATTENTION: no healthy static providers — serving from backup providers only", nil,
 			utils.LogAttr("chain", rpcEndpoint.ChainID),
 			utils.LogAttr("apiInterface", rpcEndpoint.ApiInterface),
 			utils.LogAttr("staticFailed", len(failedStaticSet)),
@@ -2899,7 +3097,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 			utils.LogAttr("hint", "degraded: static providers are retried in the background"),
 		)
 	default:
-		utils.LavaFormatInfo("Providers validated for api-interface",
+		utils.FormatInfo("Providers validated for api-interface",
 			utils.LogAttr("chain", rpcEndpoint.ChainID),
 			utils.LogAttr("apiInterface", rpcEndpoint.ApiInterface),
 			utils.LogAttr("healthyStatic", healthyStaticCount),
@@ -2922,26 +3120,30 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 		recordAdmission:            recordAdmission,
 		recordReverifiedAdmission:  admissions.recordReverified,
 		admissionFor:               admissionFor,
+		urlStriking:                admissions.striking,
 		countFailedCheck: func(tier reverifyTier, provider string, failure metrics.ProviderVerificationFailure) {
 			rpsr.smartRouterMetricsManager.CountVerificationCheckFailure(rpcEndpoint.ChainID, rpcEndpoint.ApiInterface, provider, tier.String(), failure)
 		},
-		refusedFor: func(p *lavasession.RPCStaticProviderEndpoint) []metrics.ProviderVerificationFailure {
+		refusedFor: func(p *routersession.RPCStaticProviderEndpoint) []metrics.ProviderVerificationFailure {
 			return refusalsOf(chainParser, p, admissionFor(p))
 		},
 		configuredStatic: relevantStaticProviderList,
 		configuredBackup: relevantBackupProviderList,
+		retries:          newRetrySchedule(),
 	}
 	for p, err := range failedStaticSet {
 		inputs.noteFailure(reverifyTierStatic, p.Name, err)
+		inputs.rescheduleFailed(reverifyTierStatic, p, nil, chainlib.ProviderAdmission{}, err, true)
 	}
 	for p, err := range failedBackupSet {
 		inputs.noteFailure(reverifyTierBackup, p.Name, err)
+		inputs.rescheduleFailed(reverifyTierBackup, p, nil, chainlib.ProviderAdmission{}, err, true)
 	}
 	// What boot refused a provider it admitted, as recorded unmerged by PHASE 1.
 	for _, tier := range []struct {
 		tier      reverifyTier
-		providers []*lavasession.RPCStaticProviderEndpoint
-		failed    map[*lavasession.RPCStaticProviderEndpoint]error
+		providers []*routersession.RPCStaticProviderEndpoint
+		failed    map[*routersession.RPCStaticProviderEndpoint]error
 	}{
 		{reverifyTierStatic, relevantStaticProviderList, failedStaticSet},
 		{reverifyTierBackup, relevantBackupProviderList, failedBackupSet},
@@ -2949,6 +3151,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 		for _, p := range tier.providers {
 			if _, failed := tier.failed[p]; !failed {
 				inputs.countRefusals(tier.tier, p, admissionFor(p))
+				inputs.retries.reconcile(tier.tier, p.Name, nil, inputs.retriesOf(p, admissionFor(p), nil), heldOffUntil(nil, p, inputs.chainParser), true)
 			}
 		}
 	}
@@ -2967,10 +3170,10 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	// Convert only healthy providers to ConsumerSessionsWithProvider format
 	providerSessions := convertProvidersToSessions(healthyStaticProviders)
 
-	var backupProviderSessions map[uint64]*lavasession.ConsumerSessionsWithProvider
+	var backupProviderSessions map[uint64]*routersession.ConsumerSessionsWithProvider
 	if len(healthyBackupProviders) > 0 {
 		backupProviderSessions = convertProvidersToSessions(healthyBackupProviders)
-		utils.LavaFormatInfo("Configured backup providers for endpoint",
+		utils.FormatInfo("Configured backup providers for endpoint",
 			utils.Attribute{Key: "chainID", Value: chainID},
 			utils.Attribute{Key: "apiInterface", Value: rpcEndpoint.ApiInterface},
 			utils.Attribute{Key: "backupCount", Value: len(backupProviderSessions)})
@@ -2980,7 +3183,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	currentEpoch := rpsr.epochTimer.GetCurrentEpoch()
 
 	// Update PairingEpoch for all provider sessions to current epoch
-	for _, tier := range []map[uint64]*lavasession.ConsumerSessionsWithProvider{providerSessions, backupProviderSessions} {
+	for _, tier := range []map[uint64]*routersession.ConsumerSessionsWithProvider{providerSessions, backupProviderSessions} {
 		for _, session := range tier {
 			session.Lock.Lock()
 			session.PairingEpoch = currentEpoch
@@ -2992,7 +3195,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	err = sessionManager.UpdateAllProviders(currentEpoch, providerSessions, backupProviderSessions)
 	if err != nil {
 		errCh <- err
-		return utils.LavaFormatError("failed updating static providers", err)
+		return utils.FormatError("failed updating static providers", err)
 	}
 
 	// Store provider sessions and failed providers for epoch updates and background retry
@@ -3010,9 +3213,9 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	rpsr.publishServingTierLocked(sessionManagerKey)
 	rpsr.mu.Unlock()
 
-	// Launch background retry for whichever tiers had failures. Backups are included
-	// because a chain can now be serving on them alone — or waiting on them to be the
-	// thing that lets it serve at all.
+	// The retry loop runs for every chain, failures at boot or not: a provider the epoch
+	// demotes later is retried by it too (MAG-3950). Backups are included because a chain
+	// can be serving on them alone, or waiting on them to serve at all.
 	if len(failedStaticEndpoints) > 0 || len(failedBackupEndpoints) > 0 {
 		failedNames := make([]string, 0, len(failedStaticEndpoints)+len(failedBackupEndpoints))
 		for _, p := range failedStaticEndpoints {
@@ -3021,7 +3224,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 		for _, p := range failedBackupEndpoints {
 			failedNames = append(failedNames, p.Name)
 		}
-		utils.LavaFormatInfo("Launching background retry goroutine for failed providers",
+		utils.FormatInfo("Launching background retry goroutine for failed providers",
 			utils.LogAttr("chain", rpcEndpoint.ChainID),
 			utils.LogAttr("apiInterface", rpcEndpoint.ApiInterface),
 			utils.LogAttr("failedStatic", len(failedStaticEndpoints)),
@@ -3029,8 +3232,8 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 			utils.LogAttr("failedProviders", failedNames),
 			utils.LogAttr("initialRetryInterval", retryIntervalFor(!chainServable).String()),
 		)
-		go rpsr.retryFailedProviders(ctx, sessionManagerKey, chainParser, rpcEndpoint, convertProvidersToSessions)
 	}
+	go rpsr.runVerificationRetries(ctx, sessionManagerKey, chainParser, rpcEndpoint, convertProvidersToSessions)
 
 	var relaysMonitor *metrics.RelaysMonitor
 	if options.cmdFlags.RelaysHealthEnableFlag {
@@ -3041,7 +3244,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 		relaysMonitorAggregator.RegisterRelaysMonitor(rpcEndpoint.String(), relaysMonitor)
 	}
 
-	rpcSmartRouterServer := &RPCSmartRouterServer{}
+	rpcSmartRouterServer := &RPCSmartRouterServer{relayErrors: rpsr.relayErrors}
 
 	// Create WebSocket subscription manager. Interface-typed so a chain with no
 	// WebSocket endpoint gets the NoOp implementation instead of a real one.
@@ -3077,9 +3280,10 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 		)
 		// Start background cleanup goroutine
 		directWSManager.SetEndpointNames(providerNamesByURL(relevantStaticProviderList, relevantBackupProviderList))
+		directWSManager.SetURLLendRank(sessionManager.URLLendRank)
 		directWSManager.Start(ctx)
 		wsSubscriptionManager = directWSManager
-		utils.LavaFormatInfo("Using DirectWSSubscriptionManager for direct WebSocket subscriptions",
+		utils.FormatInfo("Using DirectWSSubscriptionManager for direct WebSocket subscriptions",
 			utils.LogAttr("chainID", rpcEndpoint.ChainID),
 			utils.LogAttr("apiInterface", rpcEndpoint.ApiInterface),
 			utils.LogAttr("wsEndpointCount", len(wsEndpoints)),
@@ -3091,7 +3295,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 		// produce a WebSocket endpoint here, so the NoOp manager is permanent by
 		// definition and its error is the honest answer.
 		wsSubscriptionManager = NewNoOpWSSubscriptionManager(rpcEndpoint.ChainID, rpcEndpoint.ApiInterface)
-		utils.LavaFormatInfo("No WebSocket endpoints configured for direct subscriptions",
+		utils.FormatInfo("No WebSocket endpoints configured for direct subscriptions",
 			utils.LogAttr("chainID", rpcEndpoint.ChainID),
 			utils.LogAttr("apiInterface", rpcEndpoint.ApiInterface),
 			utils.LogAttr("hint", "Add ws:// or wss:// URLs to static-providers-list to enable subscriptions"),
@@ -3123,9 +3327,10 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 		)
 		// Start background cleanup goroutine
 		grpcSubManager.SetEndpointNames(providerNamesByURL(relevantStaticProviderList, relevantBackupProviderList))
+		grpcSubManager.SetURLLendRank(sessionManager.URLLendRank)
 		grpcSubManager.Start(ctx)
 		rpcSmartRouterServer.grpcSubscriptionManager = grpcSubManager
-		utils.LavaFormatInfo("Using DirectGRPCSubscriptionManager for gRPC streaming subscriptions",
+		utils.FormatInfo("Using DirectGRPCSubscriptionManager for gRPC streaming subscriptions",
 			utils.LogAttr("chainID", rpcEndpoint.ChainID),
 			utils.LogAttr("apiInterface", rpcEndpoint.ApiInterface),
 			utils.LogAttr("grpcEndpointCount", len(grpcEndpoints)),
@@ -3144,7 +3349,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	// passed verification above, and the cross-validation startup check must not judge the config by them.
 	err = rpcSmartRouterServer.ServeRPCRequests(ctx, rpcEndpoint, chainParser, sessionManager, staticProviderGroupAssignments(relevantStaticProviderList), options.cache, options.secondaryCache, options.secondaryCacheTimeout, options.cacheMaxEntryBytes, rpcSmartRouterMetrics, relaysMonitor, options.cmdFlags, options.stateShare, wsSubscriptionManager, smartRouterMetricsManager)
 	if err != nil {
-		err = utils.LavaFormatError("failed serving rpc requests", err, utils.Attribute{Key: "endpoint", Value: rpcEndpoint})
+		err = utils.FormatError("failed serving rpc requests", err, utils.Attribute{Key: "endpoint", Value: rpcEndpoint})
 		errCh <- err
 		return err
 	}
@@ -3158,7 +3363,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	// Not a bind confirmation: ServeRPCRequests starts the listener with `go chainListener.Serve(...)`,
 	// so the socket may still be a moment away. It does mean the endpoint was accepted and serving is
 	// underway, which is what the line is read as.
-	utils.LavaFormatInfo("RPCSmartRouter Listening", utils.Attribute{Key: "endpoints", Value: rpcEndpoint.String()})
+	utils.FormatInfo("RPCSmartRouter Listening", utils.Attribute{Key: "endpoints", Value: rpcEndpoint.String()})
 
 	// Store server reference for per-endpoint ChainTracker cleanup on epoch updates
 	rpsr.mu.Lock()
@@ -3168,12 +3373,12 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	return nil
 }
 
-func ParseEndpoints(viper_endpoints *viper.Viper) (endpoints []*lavasession.RPCEndpoint, err error) {
+func ParseEndpoints(viper_endpoints *viper.Viper) (endpoints []*routersession.RPCEndpoint, err error) {
 	err = viper_endpoints.UnmarshalKey(common.EndpointsConfigName, &endpoints)
 	if err != nil {
 		// The key, not the settings: they hold every node-url and auth header in the file, and
 		// none of them is registered for redaction yet (MAG-4863).
-		utils.LavaFormatFatal("could not unmarshal endpoints", err, utils.Attribute{Key: "config_key", Value: common.EndpointsConfigName})
+		utils.FormatFatal("could not unmarshal endpoints", err, utils.Attribute{Key: "config_key", Value: common.EndpointsConfigName})
 	}
 	for _, endpoint := range endpoints {
 		if endpoint.HealthCheckPath == "" {
@@ -3218,7 +3423,7 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			utils.LavaFormatInfo(common.ProcessStartLogText)
+			utils.FormatInfo(common.ProcessStartLogText)
 			common.ValidateAndCapMinRelayTimeout()
 
 			ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -3236,7 +3441,7 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 			}
 
 			// Apply the probe debug toggle to its atomic global once, at startup (after flag parse).
-			lavasession.SetDebugProbes(viper.GetBool(DebugProbesFlagName))
+			routersession.SetDebugProbes(viper.GetBool(DebugProbesFlagName))
 
 			// set log format
 			logFormat := viper.GetString("log-format")
@@ -3245,27 +3450,27 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 			closeLoggerOnFinish := common.SetupRollingLogger()
 			defer closeLoggerOnFinish()
 
-			utils.LavaFormatInfo("RPCSmartRouter started:", utils.Attribute{Key: "args", Value: strings.Join(args, ",")})
+			utils.FormatInfo("RPCSmartRouter started:", utils.Attribute{Key: "args", Value: strings.Join(args, ",")})
 
 			// setting the insecure option on provider dial, this should be used in development only!
-			lavasession.AllowInsecureConnectionToProviders = viper.GetBool(lavasession.AllowInsecureConnectionToProvidersFlag)
-			if lavasession.AllowInsecureConnectionToProviders {
-				utils.LavaFormatWarning("AllowInsecureConnectionToProviders is set to true, this should be used only in development", nil, utils.Attribute{Key: lavasession.AllowInsecureConnectionToProvidersFlag, Value: lavasession.AllowInsecureConnectionToProviders})
+			routersession.AllowInsecureConnectionToProviders = viper.GetBool(routersession.AllowInsecureConnectionToProvidersFlag)
+			if routersession.AllowInsecureConnectionToProviders {
+				utils.FormatWarning("AllowInsecureConnectionToProviders is set to true, this should be used only in development", nil, utils.Attribute{Key: routersession.AllowInsecureConnectionToProvidersFlag, Value: routersession.AllowInsecureConnectionToProviders})
 			}
 
-			var rpcEndpoints []*lavasession.RPCEndpoint
+			var rpcEndpoints []*routersession.RPCEndpoint
 			var viper_endpoints *viper.Viper
 			if len(args) > 1 {
 				viper_endpoints, err = common.ParseEndpointArgs(args, Yaml_config_properties, common.EndpointsConfigName)
 				if err != nil {
-					return utils.LavaFormatError("invalid endpoints arguments", err, utils.Attribute{Key: "endpoint_strings", Value: strings.Join(args, "")})
+					return utils.FormatError("invalid endpoints arguments", err, utils.Attribute{Key: "endpoint_strings", Value: strings.Join(args, "")})
 				}
 				viper.MergeConfigMap(viper_endpoints.AllSettings())
 				err := viper.SafeWriteConfigAs(DefaultRPCSmartRouterFileName)
 				if err != nil {
-					utils.LavaFormatInfo("did not create new config file, if it's desired remove the config file", utils.Attribute{Key: "file_name", Value: viper.ConfigFileUsed()})
+					utils.FormatInfo("did not create new config file, if it's desired remove the config file", utils.Attribute{Key: "file_name", Value: viper.ConfigFileUsed()})
 				} else {
-					utils.LavaFormatInfo("created new config file", utils.Attribute{Key: "file_name", Value: DefaultRPCSmartRouterFileName})
+					utils.FormatInfo("created new config file", utils.Attribute{Key: "file_name", Value: DefaultRPCSmartRouterFileName})
 				}
 			} else if err = viper.ReadInConfig(); err != nil {
 				// A missing config file is the most common operator mistake (e.g.
@@ -3274,15 +3479,15 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 				// dump — reserve the loud path for genuinely unexpected read
 				// failures like malformed YAML.
 				if isConfigNotFound(err) {
-					return utils.LavaFormatError(
+					return utils.FormatError(
 						configNotFoundMessage(configTarget, configIsFile),
 						err,
 						configLocationAttributes(configTarget, configIsFile)...,
 					)
 				}
-				utils.LavaFormatFatal("could not load config file", err, utils.Attribute{Key: "expected_config_name", Value: viper.ConfigFileUsed()})
+				utils.FormatFatal("could not load config file", err, utils.Attribute{Key: "expected_config_name", Value: viper.ConfigFileUsed()})
 			} else {
-				utils.LavaFormatInfo("read config file successfully", utils.Attribute{Key: "expected_config_name", Value: viper.ConfigFileUsed()})
+				utils.FormatInfo("read config file successfully", utils.Attribute{Key: "expected_config_name", Value: viper.ConfigFileUsed()})
 			}
 
 			// consistency-relief: set the process-wide consistency override AFTER the config
@@ -3292,19 +3497,19 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 			// to the built-in default (not silent clamp).
 			if f := viper.GetInt(relaycore.ConsistencyBlockGapFactorFlagName); f != 0 {
 				if f < 2 || f > 8 {
-					utils.LavaFormatWarning("--"+relaycore.ConsistencyBlockGapFactorFlagName+" out of allowed range [2,8]; reverting to default", nil, utils.LogAttr("provided", f))
+					utils.FormatWarning("--"+relaycore.ConsistencyBlockGapFactorFlagName+" out of allowed range [2,8]; reverting to default", nil, utils.LogAttr("provided", f))
 				} else {
 					relaycore.ConsistencyBlockGapFactorOverride = int64(f)
 				}
 			}
 			if relaycore.ConsistencyBlockGapFactorOverride != 0 {
-				utils.LavaFormatInfo("consistency-relief active",
+				utils.FormatInfo("consistency-relief active",
 					utils.LogAttr("consistencyBlockGapFactor", relaycore.ConsistencyBlockGapFactorOverride))
 			}
 
 			rpcEndpoints, err = ParseEndpoints(viper.GetViper())
 			if err != nil || len(rpcEndpoints) == 0 {
-				return utils.LavaFormatError("invalid endpoints definition", err)
+				return utils.FormatError("invalid endpoints definition", err)
 			}
 
 			// Reject a self-contradictory cross-validation config here, alongside the endpoints check,
@@ -3314,21 +3519,21 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 			// that it is listening — so a bad config is a clean startup error instead of a crash loop
 			// from a router that has already announced itself.
 			if err := PreflightValidateCrossValidationConfig(viper.GetViper(), rpcEndpoints); err != nil {
-				return utils.LavaFormatError("invalid cross-validation configuration", err)
+				return utils.FormatError("invalid cross-validation configuration", err)
 			}
 
 			// Smart router doesn't need blockchain chain ID
-			utils.LavaFormatInfo("Running Smart Router")
+			utils.FormatInfo("Running Smart Router")
 
 			logLevel, err := cmd.Flags().GetString("log-level")
 			if err != nil {
-				utils.LavaFormatFatal("failed to read log level flag", err)
+				utils.FormatFatal("failed to read log level flag", err)
 			}
 			utils.SetGlobalLoggingLevel(logLevel)
 
 			test_mode, err := cmd.Flags().GetBool(common.TestModeFlagName)
 			if err != nil {
-				utils.LavaFormatFatal("failed to read test_mode flag", err)
+				utils.FormatFatal("failed to read test_mode flag", err)
 			}
 			ctx = context.WithValue(ctx, common.Test_mode_ctx_key{}, test_mode)
 			// check if the command includes --pprof-address
@@ -3337,13 +3542,13 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 				// get pprof server ip address (default value: "")
 				pprofServerAddress, err := cmd.Flags().GetString("pprof-address")
 				if err != nil {
-					utils.LavaFormatFatal("failed to read pprof address flag", err)
+					utils.FormatFatal("failed to read pprof address flag", err)
 				}
 
 				// start pprof HTTP server
 				err = performance.StartPprofServer(pprofServerAddress)
 				if err != nil {
-					return utils.LavaFormatError("failed to start pprof HTTP server", err)
+					return utils.FormatError("failed to start pprof HTTP server", err)
 				}
 			}
 			// check if the command includes --pyroscope-address
@@ -3352,15 +3557,15 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 			}
 
 			// Parse direct RPC endpoints
-			var directRPCEndpoints []*lavasession.RPCStaticProviderEndpoint
+			var directRPCEndpoints []*routersession.RPCStaticProviderEndpoint
 			directRPCConfigKey := common.DirectRPCConfigName
 			if viper.IsSet(directRPCConfigKey) {
 				directRPCEndpoints, err = ParseStaticProviderEndpoints(viper.GetViper(), directRPCConfigKey)
 				if err != nil {
-					return utils.LavaFormatError("invalid direct-rpc endpoints definition", err)
+					return utils.FormatError("invalid direct-rpc endpoints definition", err)
 				}
 				for _, endpoint := range directRPCEndpoints {
-					utils.LavaFormatInfo("Direct RPC Endpoint:",
+					utils.FormatInfo("Direct RPC Endpoint:",
 						utils.Attribute{Key: "Name", Value: endpoint.Name},
 						utils.Attribute{Key: "Stake", Value: endpoint.Stake},
 						utils.Attribute{Key: "Urls", Value: endpoint.NodeUrls},
@@ -3370,16 +3575,16 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 			}
 
 			// Parse backup direct RPC endpoints
-			var backupDirectRPCEndpoints []*lavasession.RPCStaticProviderEndpoint
+			var backupDirectRPCEndpoints []*routersession.RPCStaticProviderEndpoint
 			backupConfigKey := common.BackupDirectRPCConfigName
 			if viper.IsSet(backupConfigKey) {
-				utils.LavaFormatInfo("Backup direct-rpc config found", utils.Attribute{Key: "configKey", Value: backupConfigKey})
+				utils.FormatInfo("Backup direct-rpc config found", utils.Attribute{Key: "configKey", Value: backupConfigKey})
 				backupDirectRPCEndpoints, err = ParseStaticProviderEndpoints(viper.GetViper(), backupConfigKey)
 				if err != nil {
-					return utils.LavaFormatError("invalid backup-direct-rpc endpoints definition", err)
+					return utils.FormatError("invalid backup-direct-rpc endpoints definition", err)
 				}
 				for _, endpoint := range backupDirectRPCEndpoints {
-					utils.LavaFormatInfo("Backup Direct RPC Endpoint:",
+					utils.FormatInfo("Backup Direct RPC Endpoint:",
 						utils.Attribute{Key: "Name", Value: endpoint.Name},
 						utils.Attribute{Key: "Urls", Value: endpoint.NodeUrls},
 						utils.Attribute{Key: "Chain ID", Value: endpoint.ChainID},
@@ -3398,12 +3603,12 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 			// between the two is as ambiguous as one shared within either. Failing here means it
 			// fails before any listener binds, and the error names every collision so one edit to
 			// the config fixes it.
-			if err := lavasession.ValidateUniqueProviderNames(directRPCEndpoints, backupDirectRPCEndpoints); err != nil {
-				return utils.LavaFormatError("invalid direct-rpc endpoints definition", err)
+			if err := routersession.ValidateUniqueProviderNames(directRPCEndpoints, backupDirectRPCEndpoints); err != nil {
+				return utils.FormatError("invalid direct-rpc endpoints definition", err)
 			}
 
 			if len(directRPCEndpoints) == 0 {
-				return utils.LavaFormatError(
+				return utils.FormatError(
 					"smart router requires direct-rpc endpoints configuration",
 					nil,
 					utils.Attribute{Key: "hint", Value: "add 'direct-rpc' section to config file"},
@@ -3421,7 +3626,7 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 				}
 
 				if !hasDirectRPC {
-					return utils.LavaFormatError(
+					return utils.FormatError(
 						"no direct-rpc endpoints configured for listener",
 						nil,
 						utils.Attribute{Key: "chainID", Value: endpoint.ChainID},
@@ -3432,7 +3637,7 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 			}
 
 			rpcSmartRouter := RPCSmartRouter{}
-			utils.LavaFormatInfo("smart-router Binary Version: " + version.Version)
+			utils.FormatInfo("smart-router Binary Version: " + version.Version + " commit " + version.Commit)
 			rand.InitRandomSeed()
 
 			// Backend selection (viper, not cmd.Flags, so every knob can also
@@ -3442,11 +3647,11 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 			// startup.
 			cache, err := performance.SelectCacheBackend(ctx, viper.GetViper())
 			if err != nil {
-				return utils.LavaFormatError("invalid cache backend configuration", err)
+				return utils.FormatError("invalid cache backend configuration", err)
 			}
 			cacheMaxEntryBytes, err := cacheMaxEntryBytesFrom(viper.GetViper())
 			if err != nil {
-				return utils.LavaFormatError("invalid cache configuration", err)
+				return utils.FormatError("invalid cache configuration", err)
 			}
 
 			// Optional read-only secondary cache tier (docs/SECONDARY-CACHE.md).
@@ -3463,7 +3668,7 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 			}
 			secondaryRespConfig, secondaryRespEnabled, err := performance.LoadSecondaryRespCacheConfig(viper.GetViper())
 			if err != nil {
-				return utils.LavaFormatError("invalid secondary cache configuration", err)
+				return utils.FormatError("invalid secondary cache configuration", err)
 			}
 			if secondaryRespEnabled {
 				// Refused rather than ranked: which store a router reads its second
@@ -3471,7 +3676,7 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 				// asked for, and the RESP block is new, so no deployed router has
 				// both.
 				if secondaryCacheConfig.Address != "" {
-					return utils.LavaFormatError("invalid secondary cache configuration", fmt.Errorf("both %s and the %s block are set; a router reads one secondary cache, so keep one of them", performance.SecondaryCacheFlagName, performance.SecondaryRespCacheViperKey))
+					return utils.FormatError("invalid secondary cache configuration", fmt.Errorf("both %s and the %s block are set; a router reads one secondary cache, so keep one of them", performance.SecondaryCacheFlagName, performance.SecondaryRespCacheViperKey))
 				}
 				secondaryCacheConfig.Address = strings.Join(secondaryRespConfig.Addresses, ",")
 				secondaryCacheConfig.Engine = performance.CacheEngineRESP
@@ -3501,10 +3706,10 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 				viper.IsSet(performance.SecondaryCacheModeFlagName),
 			)
 			if secondaryErr != nil {
-				return utils.LavaFormatError("invalid secondary cache configuration", secondaryErr)
+				return utils.FormatError("invalid secondary cache configuration", secondaryErr)
 			}
 			for _, warning := range secondaryWarnings {
-				utils.LavaFormatWarning(warning, nil)
+				utils.FormatWarning(warning, nil)
 			}
 			var secondaryCacheReader performance.CacheReader
 			if secondaryCacheConfig.Enabled() {
@@ -3517,7 +3722,7 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 						// file) fails startup, as it does for the primary; an
 						// unreachable backend does not, it degrades each lookup to a
 						// miss and the health probe reports it.
-						return utils.LavaFormatError("invalid secondary cache configuration", openErr)
+						return utils.FormatError("invalid secondary cache configuration", openErr)
 					}
 					secondaryCacheReader = secondaryRespCache
 				} else {
@@ -3525,15 +3730,15 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 					if err != nil {
 						// Same contract as the primary: never fatal — the client reconnects
 						// in the background and the tier is skipped until it is live.
-						utils.LavaFormatError("Failed To Connect to secondary cache at address", err, utils.Attribute{Key: "address", Value: secondaryCacheConfig.Address})
+						utils.FormatError("Failed To Connect to secondary cache at address", err, utils.Attribute{Key: "address", Value: secondaryCacheConfig.Address})
 					} else {
-						utils.LavaFormatInfo("secondary cache service connected", utils.Attribute{Key: "address", Value: secondaryCacheConfig.Address})
+						utils.FormatInfo("secondary cache service connected", utils.Attribute{Key: "address", Value: secondaryCacheConfig.Address})
 					}
 					secondaryCacheReader = secondaryCache
 				}
 				// Startup visibility (PRD nice-to-have): one line with the
 				// full secondary configuration.
-				utils.LavaFormatInfo("secondary cache configured",
+				utils.FormatInfo("secondary cache configured",
 					utils.Attribute{Key: "engine", Value: secondaryCacheConfig.Engine},
 					utils.Attribute{Key: "address", Value: secondaryCacheConfig.Address},
 					utils.Attribute{Key: "key-prefix", Value: secondaryCacheConfig.KeyPrefix},
@@ -3542,7 +3747,7 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 				)
 			}
 			if strategyFlag.Strategy != provideroptimizer.StrategyBalanced {
-				utils.LavaFormatInfo("Working with selection strategy: " + strategyFlag.String())
+				utils.FormatInfo("Working with selection strategy: " + strategyFlag.String())
 			}
 
 			analyticsServerAddresses := AnalyticsServerAddresses{
@@ -3561,7 +3766,7 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 			if err := scoreutils.SetProbeUpdateWeight(viper.GetFloat64(common.ProbeUpdateWeightFlagName)); err != nil {
 				return err
 			}
-			lavasession.SetBenchAfter(viper.GetUint64(common.BenchAfterFlagName))
+			routersession.SetBenchAfter(viper.GetUint64(common.BenchAfterFlagName))
 			upstreamSelectorConfig, err := resolveSelectionWeights(cmd.Flags())
 			if err != nil {
 				return err
@@ -3575,7 +3780,7 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 			}
 			upstreamSelectorConfig.SelectionMode = selectionMode
 			if selectionMode != provideroptimizer.SelectionModeWeightedRandom {
-				utils.LavaFormatInfo("Working with provider selection mode: " + selectionMode.String())
+				utils.FormatInfo("Working with provider selection mode: " + selectionMode.String())
 			}
 
 			// RPCSmartRouter always runs in standalone mode
@@ -3585,7 +3790,7 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 			}
 			if epochDuration == 0 {
 				epochDuration = common.StandaloneEpochDuration // 15 minutes default for standalone
-				utils.LavaFormatInfo("RPCSmartRouter: using default epoch duration for standalone mode",
+				utils.FormatInfo("RPCSmartRouter: using default epoch duration for standalone mode",
 					utils.LogAttr("epochDuration", epochDuration),
 				)
 			}
@@ -3599,17 +3804,22 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 				return err
 			}
 
+			trustedProxies, err := chainlib.ParseTrustedProxies(viper.GetString(common.WebsocketTrustedProxiesFlag))
+			if err != nil {
+				return utils.FormatError("invalid --"+common.WebsocketTrustedProxiesFlag, err)
+			}
+			chainlib.SetWebSocketTrustedProxies(trustedProxies)
 			chainlib.SetWebSocketKeepAliveInterval(viper.GetDuration(common.WebsocketKeepAliveIntervalFlag))
 			chainlib.SetMaxIdleTimeInSeconds(viper.GetInt64(common.LimitWebsocketIdleTimeFlag))
 			chainlib.SetWebSocketWriteTimeout(viper.GetDuration(common.WebsocketWriteTimeoutFlag))
 			if chainlib.WebSocketKeepAliveOutlivesIdleReaper(chainlib.GetWebSocketKeepAliveInterval(), chainlib.GetMaxIdleTimeInSeconds()) {
-				utils.LavaFormatWarning("websocket keep-alive is on with no idle limit: a quiet connection stays open for as long as its client keeps the socket, and a client that vanished is noticed only once its pings stop being acknowledged", nil,
+				utils.FormatWarning("websocket keep-alive is on with no idle limit: a quiet connection stays open for as long as its client keeps the socket, and a client that vanished is noticed only once its pings stop being acknowledged", nil,
 					utils.LogAttr(common.WebsocketKeepAliveIntervalFlag, chainlib.GetWebSocketKeepAliveInterval()),
 					utils.LogAttr(common.LimitWebsocketIdleTimeFlag, chainlib.GetMaxIdleTimeInSeconds()),
 				)
 			}
 			if chainlib.WebSocketWriteTimeoutUnbounded(chainlib.GetWebSocketWriteTimeout()) {
-				utils.LavaFormatWarning("websocket write deadline is off: a client that stops reading blocks its writer forever, and the connection's handler goroutine, read buffer and per-ip limiter slot are held for the life of the process", nil,
+				utils.FormatWarning("websocket write deadline is off: a client that stops reading blocks its writer forever, and the connection's handler goroutine, read buffer and per-ip limiter slot are held for the life of the process", nil,
 					utils.LogAttr(common.WebsocketWriteTimeoutFlag, chainlib.GetWebSocketWriteTimeout()),
 				)
 			}
@@ -3683,14 +3893,14 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 	}
 
 	// RPCSmartRouter command flags - no blockchain flags needed
-	cmdRPCSmartRouter.Flags().Bool(lavasession.AllowInsecureConnectionToProvidersFlag, false, "allow insecure provider-dialing. used for development and testing")
+	cmdRPCSmartRouter.Flags().Bool(routersession.AllowInsecureConnectionToProvidersFlag, false, "allow insecure provider-dialing. used for development and testing")
 	cmdRPCSmartRouter.Flags().String(common.ResponseCompressionFlag, common.DefaultResponseCompression, "client-facing response compression: gzip (default), brotli, or off")
-	cmdRPCSmartRouter.Flags().Uint64Var(&lavasession.MaximumStreamsOverASingleConnection, lavasession.MaximumStreamsOverASingleConnectionFlag, lavasession.DefaultMaximumStreamsOverASingleConnection, "maximum number of parallel streams over a single provider connection")
+	cmdRPCSmartRouter.Flags().Uint64Var(&routersession.MaximumStreamsOverASingleConnection, routersession.MaximumStreamsOverASingleConnectionFlag, routersession.DefaultMaximumStreamsOverASingleConnection, "maximum number of parallel streams over a single provider connection")
 	cmdRPCSmartRouter.Flags().Bool(common.TestModeFlagName, false, "test mode sends dummy data and prints all metadata in listeners")
 	cmdRPCSmartRouter.Flags().String(performance.PprofAddressFlagName, "", "pprof server address, used for code profiling")
 	cmdRPCSmartRouter.Flags().String("debug-address", "", "debug HTTP server for integration tests, e.g. :9999 — exposes /debug/time-warp (QoS clock) and /debug/chain-state-time-warp (per-chain ChainState TTL/staleness)")
 	if err := viper.BindPFlag("debug-address", cmdRPCSmartRouter.Flags().Lookup("debug-address")); err != nil {
-		utils.LavaFormatFatal("failed binding debug-address flag", err)
+		utils.FormatFatal("failed binding debug-address flag", err)
 	}
 	cmdRPCSmartRouter.Flags().String(performance.PyroscopeAddressFlagName, "", "pyroscope server address for continuous profiling (e.g., http://pyroscope:4040)")
 	cmdRPCSmartRouter.Flags().String(performance.PyroscopeAppNameFlagName, "smartrouter", "pyroscope application name for identifying this service")
@@ -3737,25 +3947,25 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 	cmdRPCSmartRouter.Flags().String(common.ProviderOptimizerSelectionMode, defaultSelectorConfig.SelectionMode.String(), fmt.Sprintf("how the winner is picked from the scored providers (%s): weighted_random draws proportionally to score, best always takes the highest scorer", strings.Join(provideroptimizer.SelectionModeNames(), "|")))
 	cmdRPCSmartRouter.Flags().String(common.ProviderOptimizerSelectionPriority, provideroptimizer.SelectionPriorityBalanced.String(), fmt.Sprintf("what to optimise for (%s) — a preset over the four qos-*-weight flags above; any weight set by hand overrides the preset", strings.Join(provideroptimizer.SelectionPriorityNames(), "|")))
 	if err := viper.BindPFlag(common.ProviderOptimizerAvailabilityWeight, cmdRPCSmartRouter.Flags().Lookup(common.ProviderOptimizerAvailabilityWeight)); err != nil {
-		utils.LavaFormatFatal("failed binding availability weight flag", err)
+		utils.FormatFatal("failed binding availability weight flag", err)
 	}
 	if err := viper.BindPFlag(common.ProviderOptimizerLatencyWeight, cmdRPCSmartRouter.Flags().Lookup(common.ProviderOptimizerLatencyWeight)); err != nil {
-		utils.LavaFormatFatal("failed binding latency weight flag", err)
+		utils.FormatFatal("failed binding latency weight flag", err)
 	}
 	if err := viper.BindPFlag(common.ProviderOptimizerSyncWeight, cmdRPCSmartRouter.Flags().Lookup(common.ProviderOptimizerSyncWeight)); err != nil {
-		utils.LavaFormatFatal("failed binding sync weight flag", err)
+		utils.FormatFatal("failed binding sync weight flag", err)
 	}
 	if err := viper.BindPFlag(common.ProviderOptimizerStakeWeight, cmdRPCSmartRouter.Flags().Lookup(common.ProviderOptimizerStakeWeight)); err != nil {
-		utils.LavaFormatFatal("failed binding stake weight flag", err)
+		utils.FormatFatal("failed binding stake weight flag", err)
 	}
 	if err := viper.BindPFlag(common.ProviderOptimizerMinSelectionChance, cmdRPCSmartRouter.Flags().Lookup(common.ProviderOptimizerMinSelectionChance)); err != nil {
-		utils.LavaFormatFatal("failed binding min selection chance flag", err)
+		utils.FormatFatal("failed binding min selection chance flag", err)
 	}
 	if err := viper.BindPFlag(common.ProviderOptimizerSelectionMode, cmdRPCSmartRouter.Flags().Lookup(common.ProviderOptimizerSelectionMode)); err != nil {
-		utils.LavaFormatFatal("failed binding selection mode flag", err)
+		utils.FormatFatal("failed binding selection mode flag", err)
 	}
 	if err := viper.BindPFlag(common.ProviderOptimizerSelectionPriority, cmdRPCSmartRouter.Flags().Lookup(common.ProviderOptimizerSelectionPriority)); err != nil {
-		utils.LavaFormatFatal("failed binding selection priority flag", err)
+		utils.FormatFatal("failed binding selection priority flag", err)
 	}
 	cmdRPCSmartRouter.Flags().String(metrics.MetricsListenFlagName, metrics.DisabledFlagOption, "the address to expose prometheus metrics (such as localhost:7779)")
 	// Usage telemetry (OTel) — off by default. When enabled, per-relay and
@@ -3775,29 +3985,29 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 	// CORS related flags
 	cmdRPCSmartRouter.Flags().String(common.CorsCredentialsFlag, "true", "Set up CORS allowed credentials,default \"true\"")
 	cmdRPCSmartRouter.Flags().String(common.CorsHeadersFlag, "", "Set up CORS allowed headers, * for all, default simple cors specification headers")
-	cmdRPCSmartRouter.Flags().String(common.CorsOriginFlag, "*", "Set up CORS allowed origin, enabled * by default")
+	cmdRPCSmartRouter.Flags().String(common.CorsOriginFlag, "*", "Set up CORS allowed origin: * for all (default), one origin, or a comma separated list, in which case a listed request Origin is echoed back with Vary: Origin")
 	cmdRPCSmartRouter.Flags().String(common.CorsMethodsFlag, "GET,POST,PUT,DELETE,OPTIONS", "set up Allowed OPTIONS methods, defaults to: \"GET,POST,PUT,DELETE,OPTIONS\"")
-	cmdRPCSmartRouter.Flags().String(common.CorsExposeHeadersFlag, "", "Set up CORS Access-Control-Expose-Headers — response headers a browser may read (e.g. \"Lava-Provider-Address\", or \"*\" for all). Empty by default (only simple response headers are readable from JS).")
+	cmdRPCSmartRouter.Flags().String(common.CorsExposeHeadersFlag, "", "Set up CORS Access-Control-Expose-Headers — response headers a browser may read (e.g. \"Router-Provider-Address\", or \"*\" for all). Empty by default (only simple response headers are readable from JS).")
 	cmdRPCSmartRouter.Flags().String(common.CDNCacheDurationFlag, "86400", "set up preflight options response cache duration, default 86400 (24h in seconds)")
-	cmdRPCSmartRouter.Flags().Bool(common.SharedStateFlag, false, "Share state across router replicas through the cache backend (cache-be or resp-cache): the consumer consistency seen-block travels through either. The per-endpoint chain-tracker poll observations (an upstream polled about once per interval fleet-wide instead of once per pod) additionally require --cache-be — the RESP backend does not carry them, so a RESP-backed router polls locally and logs a warning (docs/RESP-CACHE.md). Cross-pod sticky sessions (a lava-stickiness id resolving to the same upstream on every replica) travel through either backend; without this flag stickiness stays pod-local")
+	cmdRPCSmartRouter.Flags().Bool(common.SharedStateFlag, false, "Share state across router replicas through the cache backend (cache-be or resp-cache). Three things travel through either: the consumer consistency seen-block, the per-endpoint chain-tracker poll observations (an upstream polled about once per interval fleet-wide instead of once per pod; on resp-cache, among routers on the same key-prefix, see docs/RESP-CACHE.md), and cross-pod sticky sessions (a router-stickiness id resolving to the same upstream on every replica). Without this flag stickiness stays pod-local")
 	// relays health check related flags
 	cmdRPCSmartRouter.Flags().Bool(common.RelaysHealthEnableFlag, RelaysHealthEnableFlagDefault, "enables relays health check; when false, /readyz and /metrics/overall-health report 503 unconditionally, so keep it on under a readiness probe")
 	cmdRPCSmartRouter.Flags().Duration(common.RelayHealthIntervalFlag, RelayHealthIntervalFlagDefault, "interval between relay health checks")
 	cmdRPCSmartRouter.Flags().Duration(common.RelayHealthUnhealthyIntervalFlag, RelayHealthUnhealthyIntervalFlagDefault, "probe interval while a chain is unhealthy, and the longest a client relay no upstream answered waits for the next probe; bounds how fast /readyz follows upstreams going away and coming back (clamped to relays-health-interval)")
-	// Registered as a flagset-owned Bool (NOT BoolVar bound to the lavasession global): BoolVar writes
+	// Registered as a flagset-owned Bool (NOT BoolVar bound to the routersession global): BoolVar writes
 	// the bound global at registration time, which raced probe goroutines reading it. Applied to the
-	// atomic global in RunE via lavasession.SetDebugProbes.
+	// atomic global in RunE via routersession.SetDebugProbes.
 	cmdRPCSmartRouter.Flags().Bool(DebugProbesFlagName, false, "adding information to probes")
 	cmdRPCSmartRouter.Flags().StringArray(common.UseStaticSpecFlag, nil, "load specs from file, directory, or remote URL (GitHub/GitLab). Can be specified multiple times; later sources override earlier ones for same chain ID")
 	cmdRPCSmartRouter.Flags().String(common.GitHubTokenFlag, "", "GitHub personal access token for accessing private repositories (public repos are fetched via unmetered tarball downloads and need no token)")
 	cmdRPCSmartRouter.Flags().String(common.GitLabTokenFlag, "", "GitLab personal access token for accessing private repositories (supports gitlab.com and self-hosted instances)")
 	cmdRPCSmartRouter.Flags().Duration(common.EpochDurationFlag, 0, "duration of each epoch for time-based epoch system (e.g., 30m, 1h). Epochs always run: unset or 0 uses the standalone default of 15m, and a negative value is refused at startup")
 	cmdRPCSmartRouter.Flags().Duration(common.ShutdownGracePeriodFlag, common.DefaultShutdownGracePeriod, "graceful shutdown deadline for in-flight requests and WebSocket clients")
-	cmdRPCSmartRouter.Flags().IntVar(&relaycore.RelayRetryLimit, common.SetRelayRetryLimitFlag, 2, "max total relay retry attempts across all error types (node and protocol errors combined; 0 disables retries)")
+	cmdRPCSmartRouter.Flags().IntVar(&relaycore.RelayRetryLimit, common.SetRelayRetryLimitFlag, relaycore.DefaultRelayRetryLimit, "max total relay retry attempts across all error types (node and protocol errors combined; 0 disables retries)")
 	cmdRPCSmartRouter.Flags().Bool(common.StatefulToBackupFlag, false, "also broadcast stateful relays (transaction submission) to the backup tier. OFF by default: a stateful relay reaches every provider it selects, so this sends EVERY stateful request to the backup — including the ones the primaries serve fine — and a fast backup can answer the caller first. Turn it on to maximise the chance a transaction lands, accepting the backup spend")
 	cmdRPCSmartRouter.Flags().Duration(common.ReadYourWritesWindowFlag, common.DefaultReadYourWritesWindow, "how long an eth_sendRawTransaction's sender and hash stay pinned to the upstream that accepted it: the sender's pending-nonce reads and lookups of the hash go there, so a wallet reads back its own write instead of an upstream the write has not reached yet. Pod-local, and a preference — an upstream that cannot take the read gives way to ordinary selection. 0 turns it off")
 	if err := viper.BindPFlag(common.StatefulToBackupFlag, cmdRPCSmartRouter.Flags().Lookup(common.StatefulToBackupFlag)); err != nil {
-		utils.LavaFormatFatal("failed to bind stateful-to-backup flag", err)
+		utils.FormatFatal("failed to bind stateful-to-backup flag", err)
 	}
 	cmdRPCSmartRouter.Flags().BoolVar(&rpcInterfaceMessages.BatchNodeErrorOnAny, common.BatchNodeErrorOnAnyFlag, false, "if true, batch requests are treated as node errors if ANY sub-request fails; if false (default), only if ALL fail")
 	// optimizer qos sampling cadence — drives the in-memory /metrics
@@ -3805,35 +4015,38 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 	cmdRPCSmartRouter.Flags().DurationVar(&metrics.OptimizerQosServerSamplingInterval, common.OptimizerQosServerSamplingIntervalFlag, time.Second*1, "interval to sample optimizer qos reports")
 	// websocket flags
 	cmdRPCSmartRouter.Flags().IntVar(&chainlib.WebSocketRateLimit, common.RateLimitWebSocketFlag, chainlib.WebSocketRateLimit, "rate limit (per second) websocket requests per user connection, default is unlimited")
-	cmdRPCSmartRouter.Flags().Int64Var(&chainlib.MaximumNumberOfParallelWebsocketConnectionsPerIp, common.LimitParallelWebsocketConnectionsPerIpFlag, chainlib.MaximumNumberOfParallelWebsocketConnectionsPerIp, "limit number of parallel connections to websocket, per ip, default is unlimited (0)")
+	cmdRPCSmartRouter.Flags().Int64Var(&chainlib.MaximumNumberOfParallelWebsocketConnectionsPerIp, common.LimitParallelWebsocketConnectionsPerIpFlag, chainlib.MaximumNumberOfParallelWebsocketConnectionsPerIp, "limit number of parallel connections to websocket, per client address, default is unlimited (0). The client address is the connection's own, or the one X-Forwarded-For names through "+common.WebsocketTrustedProxiesFlag)
+	cmdRPCSmartRouter.Flags().String(common.WebsocketTrustedProxiesFlag, chainlib.DefaultWebSocketTrustedProxies, "the proxies trusted to name the client in X-Forwarded-For, for "+common.LimitParallelWebsocketConnectionsPerIpFlag+": a comma-separated list of IP addresses and CIDR ranges, empty to trust none. A connection from a trusted proxy is counted against the first address, read from the right of X-Forwarded-For, that is not one; any other connection against its own address. List only proxies that append to X-Forwarded-For the address they received the request from. The default trusts loopback and the private ranges, where a gateway in the router's cluster lives. Add the ranges of a CDN in front of that gateway, or every client behind one CDN edge shares one allowance")
 	cmdRPCSmartRouter.Flags().Int64(common.LimitWebsocketIdleTimeFlag, chainlib.DefaultMaxIdleTimeInSeconds, "limit the idle time in seconds for a websocket connection, default is 20 minutes ( 20 * 60 )")
 	cmdRPCSmartRouter.Flags().DurationVar(&chainlib.WebSocketBanDuration, common.BanDurationForWebsocketRateLimitExceededFlag, chainlib.WebSocketBanDuration, "once websocket rate limit is reached, user will be banned Xfor a duration, default no ban")
 	cmdRPCSmartRouter.Flags().Duration(common.WebsocketKeepAliveIntervalFlag, chainlib.DefaultWebSocketKeepAliveInterval, "how often to ping an open websocket connection so proxies in front of the router do not reap it as idle, 0 disables. A duration with a unit (30s, 500ms) — unlike "+common.LimitWebsocketIdleTimeFlag+", a bare number here means nanoseconds and is rejected at startup")
 	cmdRPCSmartRouter.Flags().Duration(common.WebsocketWriteTimeoutFlag, chainlib.DefaultWebSocketWriteTimeout, "how long one websocket frame write may take before the router closes the connection of a client that stopped reading, 0 disables the deadline. A duration with a unit (10s, 500ms) — a bare number here means nanoseconds and is rejected at startup")
 
-	cmdRPCSmartRouter.Flags().BoolVar(&chainlib.SkipWebsocketVerificationDefault, common.SkipWebsocketVerificationFlag, chainlib.SkipWebsocketVerificationDefault, "skip websocket verification for chains that require ws/wss endpoints")
+	cmdRPCSmartRouter.Flags().BoolVar(&chainlib.SkipWebsocketVerificationDefault, common.SkipWebsocketVerificationFlag, chainlib.SkipWebsocketVerificationDefault, "dial ws(s) node urls without running any check over them")
 	cmdRPCSmartRouter.Flags().BoolVar(&chainlib.SkipAllVerifications, common.SkipAllVerificationsFlag, chainlib.SkipAllVerifications, "skip ALL spec verifications for every provider this process serves, healthy ones included. An escape hatch for bringing a router up against upstreams that cannot survive being probed; prefer the per-node-url skip-verifications config (which accepts \"*\") for anything ongoing")
 
-	cmdRPCSmartRouter.Flags().DurationVar(&lavasession.ProbeLoopInterval, common.ProbeLoopIntervalFlagName, lavasession.ProbeLoopInterval, "cadence of the proactive health prober (MAG-2161 Topic D); must be > 0, default 5s")
+	cmdRPCSmartRouter.Flags().DurationVar(&routersession.ProbeLoopInterval, common.ProbeLoopIntervalFlagName, routersession.ProbeLoopInterval, "cadence of the proactive health prober (MAG-2161 Topic D); must be > 0, default 5s")
+	cmdRPCSmartRouter.Flags().DurationVar(&VerificationRetryDelay, common.VerificationRetryDelayFlag, VerificationRetryDelay, "how long a spec verification a provider is failing waits for its first retry; each check has its own wait, and each retry that still finds it failing doubles it, up to --"+common.VerificationRetryMaxDelayFlag+" (MAG-3950)")
+	cmdRPCSmartRouter.Flags().DurationVar(&VerificationRetryMaxDelay, common.VerificationRetryMaxDelayFlag, VerificationRetryMaxDelay, "the longest a spec verification a provider is failing waits between retries (MAG-3950)")
 	cmdRPCSmartRouter.Flags().Float64(common.ProbeUpdateWeightFlagName, scoreutils.DefaultProbeUpdateWeight, "weight multiplier for provider-optimizer probe updates (liveness/latency); must be > 0")
 	if err := viper.BindPFlag(common.ProbeUpdateWeightFlagName, cmdRPCSmartRouter.Flags().Lookup(common.ProbeUpdateWeightFlagName)); err != nil {
-		utils.LavaFormatFatal("failed binding probe update weight flag", err)
+		utils.FormatFatal("failed binding probe update weight flag", err)
 	}
 
 	cmdRPCSmartRouter.Flags().DurationVar(&common.DefaultTimeout, common.DefaultProcessingTimeoutFlagName, common.DefaultTimeout, "default timeout for relay processing (e.g., 30s, 1m)")
 	cmdRPCSmartRouter.Flags().DurationVar(&common.MinimumTimePerRelayDelay, common.MinRelayTimeoutFlagName, common.MinimumTimePerRelayDelay, "minimum relay timeout floor applied to all methods when CU-based timeout is lower (e.g., 1s, 5s)")
-	cmdRPCSmartRouter.Flags().DurationVar(&common.MaxCallerRelayTimeout, common.MaxCallerRelayTimeoutFlagName, common.MaxCallerRelayTimeout, "longest a caller's lava-relay-timeout header may make the router hold one request (e.g., 2m). It only lets the header extend a request past the budget the router gives it with no header, and never shortens a budget; the default 0 allows no extension. An extended request does not hedge, not even to the backup tier: its attempt window is its whole budget")
+	cmdRPCSmartRouter.Flags().DurationVar(&common.MaxCallerRelayTimeout, common.MaxCallerRelayTimeoutFlagName, common.MaxCallerRelayTimeout, "longest a caller's router-relay-timeout header may make the router hold one request (e.g., 2m). It only lets the header extend a request past the budget the router gives it with no header, and never shortens a budget; the default 0 allows no extension. An extended request does not hedge, not even to the backup tier: its attempt window is its whole budget")
 	cmdRPCSmartRouter.Flags().DurationVar(&common.CacheTimeout, common.CacheTimeoutFlagName, common.CacheTimeout, "per-relay cache lookup budget; must exceed the network round trip to the cache backend, so raise it for a remote (e.g. cross-region RESP) backend (e.g., 400ms)")
 	cmdRPCSmartRouter.Flags().Int64(common.CacheMaxEntryBytesFlagName, common.DefaultCacheMaxEntryBytes, "largest reply body, in bytes, written to the cache (gRPC or RESP backend); a larger reply is served but not written, since encoding a multi-MB entry costs more than its rare hits save. Off by default (0); set a value to turn it on")
-	cmdRPCSmartRouter.Flags().Uint64(common.BenchAfterFlagName, lavasession.DefaultBenchAfter,
+	cmdRPCSmartRouter.Flags().Uint64(common.BenchAfterFlagName, routersession.DefaultBenchAfter,
 		"consecutive failed requests to one endpoint address before it is taken out of rotation; a successful relay resets the count. Must be > 0")
 	// Bound to viper so the value is readable from config.yml, not just the command line. Without
 	// this, viper.GetUint64 below reads 0 for every operator who sets it in YAML — and 0 is exactly
 	// the value SetBenchAfter rejects, so the setting would silently do nothing.
 	if err := viper.BindPFlag(common.BenchAfterFlagName, cmdRPCSmartRouter.Flags().Lookup(common.BenchAfterFlagName)); err != nil {
-		utils.LavaFormatFatal("failed binding bench-after flag", err)
+		utils.FormatFatal("failed binding bench-after flag", err)
 	}
-	cmdRPCSmartRouter.Flags().IntVar(&lavasession.MaxSessionsAllowedPerProvider, common.MaxSessionsPerProviderFlagName, lavasession.MaxSessionsAllowedPerProvider, "max number of sessions allowed per provider")
+	cmdRPCSmartRouter.Flags().IntVar(&routersession.MaxSessionsAllowedPerProvider, common.MaxSessionsPerProviderFlagName, routersession.MaxSessionsAllowedPerProvider, "max number of sessions allowed per provider")
 
 	// batch request size limit
 	cmdRPCSmartRouter.Flags().IntVar(&chainlib.MaxBatchRequestSize, common.MaxBatchRequestSizeFlag, common.DefaultMaxBatchRequestSize, "max number of requests allowed within a batch request, 0 means unlimited")
@@ -3846,13 +4059,13 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 	// unless OTEL_SDK_DISABLED=true or OTEL_TRACES_EXPORTER=none; when no OTLP
 	// endpoint is configured the SDK falls back to the spec default
 	// (localhost:4317 for gRPC, localhost:4318 for HTTP).
-	// --otel-trace-body is the only Lava-specific knob, exposed as a CLI flag
+	// --otel-trace-body is the only router-specific knob, exposed as a CLI flag
 	// because it's a per-invocation debug toggle rather than deployment
 	// configuration. Body size is delegated to the SDK via
 	// OTEL_SPAN_ATTRIBUTE_VALUE_LENGTH_LIMIT (SDK default: unlimited).
 	cmdRPCSmartRouter.Flags().Bool(tracing.TraceBodyFlag, false, "record request/response bodies on trace spans (size limit delegated to OTel SDK via OTEL_SPAN_ATTRIBUTE_VALUE_LENGTH_LIMIT)")
 	if err := viper.BindPFlag(tracing.TraceBodyFlag, cmdRPCSmartRouter.Flags().Lookup(tracing.TraceBodyFlag)); err != nil {
-		utils.LavaFormatFatal("failed binding otel-trace-body flag", err)
+		utils.FormatFatal("failed binding otel-trace-body flag", err)
 	}
 
 	common.AddRollingLogConfig(cmdRPCSmartRouter)
@@ -3864,7 +4077,7 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 
 func (rpsr *RPCSmartRouter) updateEpoch(ctx context.Context, epoch uint64) {
 	// Copy session manager keys under lock to avoid iterating the map
-	// concurrently with retryFailedProviders which writes to rpsr maps under rpsr.mu.
+	// concurrently with the retry loop (runVerificationRetries), which writes to rpsr maps under rpsr.mu.
 	rpsr.mu.Lock()
 	chainKeys := make([]string, 0, len(rpsr.sessionManagers))
 	for k := range rpsr.sessionManagers {
@@ -3875,72 +4088,90 @@ func (rpsr *RPCSmartRouter) updateEpoch(ctx context.Context, epoch uint64) {
 	for _, chainKey := range chainKeys {
 		chainKeyLog := chainKey
 
-		utils.LavaFormatInfo("ConsumerSessionManager: Epoch update triggered",
+		utils.FormatInfo("ConsumerSessionManager: Epoch update triggered",
 			utils.LogAttr("epoch", epoch),
 			utils.LogAttr("chainKey", chainKeyLog),
 			utils.LogAttr("time", time.Now().Format("15:04:05 MST")),
 		)
 
-		// Resolve the per-chain metrics manager once so endpoint health resets below
-		// can also reset the corresponding Prometheus gauge. Without this, #2256's
-		// endpoint.ResetHealth() fixes the in-memory struct but the
-		// rpc_endpoint_overall_health gauge stays stuck at 0 (unhealthy) forever,
-		// since the only path back to 1 is a successful relay that calls
-		// SetEndpointOverallHealth(..., true) — which a backup may never receive.
-		var epochMetrics *metrics.SmartRouterMetricsManager
-		var epochChainID, epochApiInterface string
-		// listenEndpoint is a *lavasession.RPCEndpoint — always guard its deref.
-		// Skipping metric reset for a server with a nil listenEndpoint is preferable
-		// to a nil-deref panic that would kill the whole epoch transition and leave
-		// every endpoint.ResetHealth() undone.
-		if server, exists := rpsr.rpcServers[chainKey]; exists && server != nil && server.listenEndpoint != nil {
-			epochMetrics = server.smartRouterEndpointMetrics
-			epochChainID = server.listenEndpoint.ChainID
-			epochApiInterface = server.listenEndpoint.ApiInterface
+		// Re-verify the configured providers before taking the lock. A provider that
+		// accepts the connection and never answers holds its probe for
+		// SpecReVerifyAttemptTimeout, and every /debug/* state read waits on rpsr.mu, so
+		// the probes run unlocked, as the retry loop's do, and only their verdicts are
+		// applied under the lock below (MAG-5318). Skipped when inputs are absent (test
+		// path constructs RPCSmartRouter directly). A retry of this chain waits for the
+		// pass, and drops what it probed meanwhile (chainReverifyInputs.epochPasses).
+		rpsr.mu.Lock()
+		inputs := rpsr.reverifyInputs[chainKey]
+		var resets uint64
+		if inputs != nil {
+			inputs.beginEpochPass()
+			resets = inputs.pairingResets
 		}
-		var epochGauge func(provider string)
-		if epochMetrics != nil {
-			epochGauge = func(provider string) {
-				epochMetrics.SetEndpointOverallHealth(epochChainID, epochApiInterface, provider, true)
+		rpsr.mu.Unlock()
+		var probedStatic, probedBackup []reverifyProbe
+		if inputs != nil {
+			reverifyStart := time.Now()
+			probedStatic = probeReverification(ctx, inputs, inputs.configuredStatic, nil, nil)
+			probedBackup = probeReverification(ctx, inputs, inputs.configuredBackup, nil, nil)
+			// Per-chain re-verify is internally bounded by SpecReVerifyConcurrency,
+			// but updateEpoch iterates chains serially. Surfacing per-chain duration
+			// gives operators a signal when total tick time approaches epoch length —
+			// the cross-chain bound is Σ ⌈N_chain/conc⌉ × SpecReVerifyAttemptTimeout.
+			if elapsed := time.Since(reverifyStart); elapsed > SpecReVerifyAttemptTimeout {
+				utils.FormatWarning("re-verify: cycle exceeded single-attempt timeout — consider tuning SpecReVerifyConcurrency", nil,
+					utils.LogAttr("chainKey", chainKeyLog),
+					utils.LogAttr("elapsed", elapsed.String()),
+					utils.LogAttr("attemptTimeout", SpecReVerifyAttemptTimeout.String()),
+				)
 			}
 		}
+
 		// Lock for the read → create-fresh → write-back section.
-		// This prevents races with retryFailedProviders, which merges
+		// This prevents races with the retry loop, which merges
 		// recovered providers into rpsr.providerSessions under the same lock.
-		// The locked section is pure CPU work (map lookups + object creation).
+		// The pairing is read after the probes, so what a readmission or
+		// /debug/reset-pairing committed while they ran is kept, not overwritten.
 		rpsr.mu.Lock()
-		sessionManager := rpsr.sessionManagers[chainKey]
 		oldProviderSessions := rpsr.providerSessions[chainKey]
 		oldBackupSessions := rpsr.backupProviderSessions[chainKey]
 
 		// Create FRESH ConsumerSessionsWithProvider objects to avoid session accumulation
 		// This is critical: reusing the same objects causes sessions to accumulate in the Sessions map
 		// until hitting the 1000-session limit, causing "No pairings available" errors
-		freshProviderSessions := freshenTier(oldProviderSessions, epoch, epochGauge, "Created fresh provider session for epoch", chainKeyLog)
-		freshBackupSessions := freshenTier(oldBackupSessions, epoch, epochGauge, "Created fresh backup provider session for epoch", chainKeyLog)
+		freshProviderSessions := freshenTier(oldProviderSessions, epoch, "Created fresh provider session for epoch", chainKeyLog)
+		freshBackupSessions := freshenTier(oldBackupSessions, epoch, "Created fresh backup provider session for epoch", chainKeyLog)
 
-		// Re-verify configured providers and reconcile against the fresh maps:
-		// drop entries whose provider failed validation (demote), and append
-		// new sessions for configured providers that pass but weren't active
-		// (promote — recovering from failed-init). Skipped when inputs are
-		// absent (test path constructs RPCSmartRouter directly). Demoted
-		// sessions are collected and their direct connections closed *after*
-		// UpdateAllProviders below — closing earlier would race in-flight
-		// relays still holding pointers to the prior pairing.
-		var demotedSessions []*lavasession.ConsumerSessionsWithProvider
-		if inputs := rpsr.reverifyInputs[chainKey]; inputs != nil {
-			reverifyStart := time.Now()
-			var demotedStatic, demotedBackup []*lavasession.ConsumerSessionsWithProvider
+		// Reconcile the probes against the fresh maps: drop entries whose provider
+		// failed validation (demote), and append new sessions for configured
+		// providers that pass but weren't active (promote — recovering from
+		// failed-init). Demoted sessions are collected and their direct connections
+		// closed *after* UpdateAllProviders below — closing earlier would race
+		// in-flight relays still holding pointers to the prior pairing.
+		//
+		// A /debug/reset-pairing that ran while the probes did stands: it re-admits what
+		// the re-verifier demoted, and these verdicts were probed before it, so they are
+		// dropped and the pass only freshens the pairing the reset left (MAG-5318).
+		reset := inputs != nil && inputs.pairingResets != resets
+		if reset {
+			utils.FormatInfo("re-verify: the pairing was reset while the epoch pass probed, its verdicts are dropped",
+				utils.LogAttr("epoch", epoch),
+				utils.LogAttr("chainKey", chainKeyLog),
+			)
+		}
+		var demotedSessions []*routersession.ConsumerSessionsWithProvider
+		if inputs != nil && !reset {
+			var demotedStatic, demotedBackup []*routersession.ConsumerSessionsWithProvider
 			var promotedStatic, promotedBackup []string
-			freshProviderSessions, demotedStatic, promotedStatic = applyReverification(ctx, inputs, freshProviderSessions, reverifyTierStatic, epoch)
-			freshBackupSessions, demotedBackup, promotedBackup = applyReverification(ctx, inputs, freshBackupSessions, reverifyTierBackup, epoch)
+			freshProviderSessions, demotedStatic, promotedStatic = applyReverification(inputs, freshProviderSessions, reverifyTierStatic, epoch, probedStatic)
+			freshBackupSessions, demotedBackup, promotedBackup = applyReverification(inputs, freshBackupSessions, reverifyTierBackup, epoch, probedBackup)
 			demotedSessions = slices.Concat(demotedStatic, demotedBackup)
 
 			// A promoted provider supersedes any pending failed-init retry, the same
 			// invariant rebuildPairingFromConfig enforces. Without this the provider stays
-			// in the failed list, retryFailedProviders revalidates it, succeeds, and
+			// in the failed list, the retry loop revalidates it, succeeds, and
 			// mergeRecoveredSessions appends a SECOND session for it — that helper keys by
-			// index and does not dedupe by PublicLavaAddress. csm.pairing collapses the
+			// index and does not dedupe by PublicAddress. csm.pairing collapses the
 			// duplicate but pairingAddresses and validAddresses do not, so the provider
 			// lands twice in validAddresses with double its selection weight, and the
 			// superseded ConsumerSessionsWithProvider is dropped without its
@@ -3951,52 +4182,61 @@ func (rpsr *RPCSmartRouter) updateEpoch(ctx context.Context, epoch uint64) {
 			// twin recovered.
 			pruneRestoredFromFailed(rpsr.failedStaticProviders, chainKey, nameSet(promotedStatic))
 			pruneRestoredFromFailed(rpsr.failedBackupProviders, chainKey, nameSet(promotedBackup))
-			// Per-chain re-verify is internally bounded by SpecReVerifyConcurrency,
-			// but updateEpoch iterates chains serially. Surfacing per-chain duration
-			// gives operators a signal when total tick time approaches epoch length —
-			// the cross-chain bound is Σ ⌈N_chain/conc⌉ × SpecReVerifyAttemptTimeout.
-			if elapsed := time.Since(reverifyStart); elapsed > SpecReVerifyAttemptTimeout {
-				utils.LavaFormatWarning("re-verify: cycle exceeded single-attempt timeout — consider tuning SpecReVerifyConcurrency", nil,
-					utils.LogAttr("chainKey", chainKeyLog),
-					utils.LogAttr("elapsed", elapsed.String()),
-					utils.LogAttr("attemptTimeout", SpecReVerifyAttemptTimeout.String()),
-				)
-			}
+			// A provider this pass demoted joins the failed list, so the retry loop retries it
+			// on its backoff instead of leaving it to the next epoch (MAG-3950). The pass
+			// counted as an attempt for every provider it verified (decideReverification).
+			queueDemoted(&rpsr.failedStaticProviders, chainKey, inputs.configuredStatic, demotedStatic, promotedStatic)
+			queueDemoted(&rpsr.failedBackupProviders, chainKey, inputs.configuredBackup, demotedBackup, promotedBackup)
 		}
 
-		server := rpsr.rpcServers[chainKey]
-		err := rpsr.pushPairingLocked(chainKey, sessionManager, epoch, freshProviderSessions, freshBackupSessions)
+		// Update stored sessions with fresh objects, and push them to the session manager.
+		after, err := rpsr.commitPairingLocked(chainKey, epoch, freshProviderSessions, freshBackupSessions, demotedSessions)
+		if inputs != nil {
+			inputs.endEpochPass()
+		}
 		rpsr.mu.Unlock()
-
 		if err != nil {
-			utils.LavaFormatError("Failed to update providers on epoch change", err,
+			utils.FormatError("Failed to update providers on epoch change", err,
 				utils.LogAttr("epoch", epoch),
 				utils.LogAttr("chainKey", chainKeyLog),
 			)
 		}
-
-		// Now that the session manager is on the new pairing, drop the
-		// DirectRPCConnections that belonged to demoted providers. The session
-		// manager's own purge path closes endpoint.Connections but not
-		// endpoint.DirectConnections — those are smart-router-owned transports
-		// and would otherwise leak across a flap (active → demoted → active rebuilds).
-		if len(demotedSessions) > 0 {
-			go closeDemotedDirectConnections(demotedSessions)
-		}
-
-		// cleanupStaleTrackers is the genuinely heavy work (tracker teardown +
-		// connection close) and stays outside the lock. Must run AFTER
-		// UpdateAllProviders so connections are closed first.
-		if server != nil {
-			rpsr.cleanupStaleTrackers(chainKey, server, freshProviderSessions, freshBackupSessions)
-		}
+		after()
 	}
+}
+
+// commitPairingLocked is pushPairingLocked plus the cleanup that has to wait until the
+// session manager is on the new pairing, for the epoch pass, the re-admission of
+// recovered providers and the verification retry alike. Callers hold rpsr.mu, and run
+// the returned func once they release it.
+//
+// The returned func drops the DirectRPCConnections of the demoted sessions — the
+// session manager's own purge path closes endpoint.Connections but not
+// endpoint.DirectConnections, smart-router-owned transports that would otherwise leak
+// across a flap — and then cleans up stale trackers, the genuinely heavy work (tracker
+// teardown and connection close), outside the lock.
+func (rpsr *RPCSmartRouter) commitPairingLocked(
+	chainKey string,
+	epoch uint64,
+	static, backup map[uint64]*routersession.ConsumerSessionsWithProvider,
+	demoted []*routersession.ConsumerSessionsWithProvider,
+) (after func(), err error) {
+	server := rpsr.rpcServers[chainKey]
+	err = rpsr.pushPairingLocked(chainKey, rpsr.sessionManagers[chainKey], epoch, static, backup)
+	return func() {
+		if len(demoted) > 0 {
+			go closeDemotedDirectConnections(demoted)
+		}
+		if server != nil {
+			rpsr.cleanupStaleTrackers(chainKey, server, static, backup)
+		}
+	}, err
 }
 
 // providersServing returns the configured providers for rpcEndpoint's chain and
 // api-interface, in configured order (never nil).
-func providersServing(configured []*lavasession.RPCStaticProviderEndpoint, rpcEndpoint *lavasession.RPCEndpoint) []*lavasession.RPCStaticProviderEndpoint {
-	relevant := []*lavasession.RPCStaticProviderEndpoint{}
+func providersServing(configured []*routersession.RPCStaticProviderEndpoint, rpcEndpoint *routersession.RPCEndpoint) []*routersession.RPCStaticProviderEndpoint {
+	relevant := []*routersession.RPCStaticProviderEndpoint{}
 	for _, provider := range configured {
 		if provider.ChainID == rpcEndpoint.ChainID && provider.ApiInterface == rpcEndpoint.ApiInterface {
 			relevant = append(relevant, provider)
@@ -4007,11 +4247,11 @@ func providersServing(configured []*lavasession.RPCStaticProviderEndpoint, rpcEn
 
 // withoutFailed returns providers minus the ones boot validation failed, in
 // configured order; providers itself when none failed.
-func withoutFailed(providers []*lavasession.RPCStaticProviderEndpoint, failed map[*lavasession.RPCStaticProviderEndpoint]error) []*lavasession.RPCStaticProviderEndpoint {
+func withoutFailed(providers []*routersession.RPCStaticProviderEndpoint, failed map[*routersession.RPCStaticProviderEndpoint]error) []*routersession.RPCStaticProviderEndpoint {
 	if len(failed) == 0 {
 		return providers
 	}
-	healthy := make([]*lavasession.RPCStaticProviderEndpoint, 0, len(providers)-len(failed))
+	healthy := make([]*routersession.RPCStaticProviderEndpoint, 0, len(providers)-len(failed))
 	for _, p := range providers {
 		if _, isFailed := failed[p]; !isFailed {
 			healthy = append(healthy, p)
@@ -4026,26 +4266,21 @@ func withoutFailed(providers []*lavasession.RPCStaticProviderEndpoint, failed ma
 //
 // The reset is what gives a disabled endpoint a fresh start each epoch: an endpoint
 // disabled by ConnectionRefusals can never receive the successful relay that would
-// otherwise trigger ResetHealth, and backups rarely receive one at all. resetGauge
-// (nil when the chain has no metrics manager) mirrors the reset onto the
-// rpc_endpoint_overall_health gauge, which would otherwise stay stuck at 0 (#2256).
-// The cross-validation group label must survive the refresh.
+// otherwise trigger ResetHealth, and backups rarely receive one at all (#2256).
+// The cross-validation group label, and the internal paths the provider lost at
+// admission (MAG-4214), must survive the refresh.
 func freshenTier(
-	old map[uint64]*lavasession.ConsumerSessionsWithProvider,
+	old map[uint64]*routersession.ConsumerSessionsWithProvider,
 	epoch uint64,
-	resetGauge func(provider string),
 	debugMessage, chainKey string,
-) map[uint64]*lavasession.ConsumerSessionsWithProvider {
-	fresh := make(map[uint64]*lavasession.ConsumerSessionsWithProvider)
+) map[uint64]*routersession.ConsumerSessionsWithProvider {
+	fresh := make(map[uint64]*routersession.ConsumerSessionsWithProvider)
 	for idx, oldSession := range old {
 		for _, endpoint := range oldSession.Endpoints {
 			endpoint.ResetHealth()
 		}
-		if resetGauge != nil {
-			resetGauge(oldSession.PublicLavaAddress)
-		}
-		freshSession := lavasession.NewConsumerSessionWithProvider(
-			oldSession.PublicLavaAddress,
+		freshSession := routersession.NewConsumerSessionWithProvider(
+			oldSession.PublicAddress,
 			oldSession.Endpoints,
 			oldSession.MaxComputeUnits,
 			epoch,
@@ -4053,34 +4288,36 @@ func freshenTier(
 		)
 		freshSession.StaticProvider = oldSession.StaticProvider
 		freshSession.GroupLabel = oldSession.GroupLabel
+		freshSession.UnservedInternalPaths = oldSession.UnservedInternalPaths
 		fresh[idx] = freshSession
 
-		utils.LavaFormatDebug(debugMessage,
-			utils.LogAttr("provider", freshSession.PublicLavaAddress),
+		utils.FormatDebug(debugMessage,
+			utils.LogAttr("provider", freshSession.PublicAddress),
 			utils.LogAttr("epoch", epoch),
 			utils.LogAttr("chainKey", chainKey))
 	}
 	return fresh
 }
 
-// Retry cadence for providers that failed verification. A chain that still has a
-// healthy provider is merely degraded, so it waits the full interval — retries
-// there buy redundancy, not availability, and there is no reason to hammer a dead
-// upstream every few seconds. A chain that is dark cannot serve at all, so every
-// second of delay is downtime: it starts at retryDarkBaseInterval and backs off to
-// the same ceiling, which keeps recovery near-immediate for the common case (a
-// brief all-down window at boot) without pinning a chain to a 2s poll forever.
-// Package-level vars, not consts, so tests can shorten them.
+// Dark-chain retry cadence for providers out of the pairing. A chain that still has a
+// healthy provider is merely degraded, so each failed provider waits on its own backoff
+// (VerificationRetryDelay doubling to VerificationRetryMaxDelay, MAG-3950): retries
+// there buy redundancy, not availability. A chain that is dark cannot serve at all, so
+// every second of delay is downtime: the whole failed list is retried from
+// retryDarkBaseInterval, backing off to retryMaxInterval, which keeps recovery
+// near-immediate for the common case (a brief all-down window at boot) without pinning
+// a chain to a 2s poll forever. Package-level vars, not consts, so tests can shorten them.
 var (
 	retryDarkBaseInterval = 2 * time.Second
 	retryMaxInterval      = 3 * time.Minute // same as SpecValidator's disabled-chain interval
 )
 
+// retryIntervalFor is how long a provider that failed at boot waits for its first retry.
 func retryIntervalFor(dark bool) time.Duration {
 	if dark {
 		return retryDarkBaseInterval
 	}
-	return retryMaxInterval
+	return VerificationRetryDelay
 }
 
 // chainIsDark reports whether the chain has no provider registered in either
@@ -4115,9 +4352,9 @@ func (rpsr *RPCSmartRouter) chainIsDark(sessionManagerKey string) bool {
 // goroutine.
 func (rpsr *RPCSmartRouter) pushPairingLocked(
 	chainKey string,
-	sessionManager *lavasession.ConsumerSessionManager,
+	sessionManager *routersession.ConsumerSessionManager,
 	epoch uint64,
-	static, backup map[uint64]*lavasession.ConsumerSessionsWithProvider,
+	static, backup map[uint64]*routersession.ConsumerSessionsWithProvider,
 ) error {
 	rpsr.providerSessions[chainKey] = static
 	if len(backup) > 0 {
@@ -4127,6 +4364,9 @@ func (rpsr *RPCSmartRouter) pushPairingLocked(
 	}
 	rpsr.publishServingTierLocked(chainKey)
 	rpsr.republishSubscriptionEndpointsLocked(chainKey)
+	if sessionManager == nil {
+		return nil // a test-constructed router with no session manager for the chain
+	}
 	return sessionManager.UpdateAllProviders(epoch, static, backup)
 }
 
@@ -4138,21 +4378,22 @@ func (rpsr *RPCSmartRouter) pushPairingLocked(
 // stale reading is worse than none: left at 0 it pages forever after a recovery,
 // left at 2 it stays silent after a demotion takes the last provider away.
 func (rpsr *RPCSmartRouter) publishServingTierLocked(chainKey string) {
-	if rpsr.smartRouterMetricsManager == nil {
-		return
-	}
 	// Labels come from reverifyInputs, the only per-chain record of the endpoint.
 	// Absent in tests that build RPCSmartRouter directly; nothing to publish then.
 	inputs := rpsr.reverifyInputs[chainKey]
 	if inputs == nil || inputs.rpcEndpoint == nil {
 		return
 	}
-	rpsr.smartRouterMetricsManager.SetEndpointServingTier(
-		inputs.rpcEndpoint.ChainID,
-		inputs.rpcEndpoint.ApiInterface,
-		len(rpsr.providerSessions[chainKey]),
-		len(rpsr.backupProviderSessions[chainKey]),
-	)
+	if rpsr.smartRouterMetricsManager != nil {
+		rpsr.smartRouterMetricsManager.SetEndpointServingTier(
+			inputs.rpcEndpoint.ChainID,
+			inputs.rpcEndpoint.ApiInterface,
+			len(rpsr.providerSessions[chainKey]),
+			len(rpsr.backupProviderSessions[chainKey]),
+		)
+	}
+	// Tracked whether or not metrics are published: the transition logs and
+	// /debug/verification read the same record (MAG-3950).
 	rpsr.publishVerificationFailedLocked(chainKey, inputs)
 }
 
@@ -4166,23 +4407,25 @@ func (rpsr *RPCSmartRouter) publishServingTierLocked(chainKey string) {
 // covers the demotion path too, which never writes those lists.
 //
 // A provider in the pairing gets one scope=service series per add-on or extension
-// it was refused, so losing archive while still serving the base chain shows too.
-// A provider with neither has no series.
+// it was refused, so losing archive while still serving the base chain shows too,
+// and one scope=none series per Warning-severity check it fails. A provider with
+// none of these has no series.
 func (rpsr *RPCSmartRouter) publishVerificationFailedLocked(chainKey string, inputs *chainReverifyInputs) {
 	if inputs == nil || inputs.rpcEndpoint == nil {
 		return
 	}
+	now := time.Now()
 	for _, tier := range []struct {
 		tier       reverifyTier
-		configured []*lavasession.RPCStaticProviderEndpoint
-		active     map[uint64]*lavasession.ConsumerSessionsWithProvider
+		configured []*routersession.RPCStaticProviderEndpoint
+		active     map[uint64]*routersession.ConsumerSessionsWithProvider
 	}{
 		{reverifyTierStatic, inputs.configuredStatic, rpsr.providerSessions[chainKey]},
 		{reverifyTierBackup, inputs.configuredBackup, rpsr.backupProviderSessions[chainKey]},
 	} {
 		admitted := make(map[string]struct{}, len(tier.active))
 		for _, s := range tier.active {
-			admitted[s.PublicLavaAddress] = struct{}{}
+			admitted[s.PublicAddress] = struct{}{}
 		}
 		for _, p := range tier.configured {
 			var failures []metrics.ProviderVerificationFailure
@@ -4195,20 +4438,30 @@ func (rpsr *RPCSmartRouter) publishVerificationFailedLocked(chainKey string, inp
 			} else if inputs.refusedFor != nil {
 				failures = append(failures, inputs.refusedFor(p)...)
 			}
-			rpsr.smartRouterMetricsManager.SetProviderVerificationFailures(
-				inputs.rpcEndpoint.ChainID, inputs.rpcEndpoint.ApiInterface, p.Name, tier.tier.String(), failures)
+			tracked := inputs.trackFailures(tier.tier, p.Name, failures, now)
+			rpsr.smartRouterMetricsManager.SetProviderVerificationFailuresSince(
+				inputs.rpcEndpoint.ChainID, inputs.rpcEndpoint.ApiInterface, p.Name, tier.tier.String(), tracked)
 		}
 	}
 }
 
-// refusalsOf is what an admitted provider was refused, as the metric publishes it. A
-// provider keeps serving through all of it:
+// refusalsOf is what an admitted provider was refused, and the Warning checks it
+// fails, as the metric publishes them. A provider keeps serving through all of it:
 //   - scope=service: an add-on or extension no node url of the provider serves any more;
 //   - scope=url with a service: a service one url lost while another url still serves it;
-//   - scope=url with no service: a node url refused whole.
-func refusalsOf(chainParser chainlib.ChainParser, provider *lavasession.RPCStaticProviderEndpoint, admission chainlib.ProviderAdmission) []metrics.ProviderVerificationFailure {
-	refused, urlChecks := admission.Refused(), admission.RefusedURLChecks()
-	failures := make([]metrics.ProviderVerificationFailure, 0, len(refused)+len(urlChecks))
+//   - scope=url with no service: an http(s) node url refused whole;
+//   - scope=none: a check whose severity is Warning; nothing was switched off.
+//
+// The websocket is one of the provider's services here (MAG-3950). A ws(s) url carries
+// no relay, only subscriptions (MAG-3477), so a refused one costs the provider its
+// websocket: scope=service when no ws(s) url of it is left, scope=url while another
+// serves. A refused url is read from the list the admission verified, the dialed one
+// with its generated per-path urls (MAG-4214). A provider with no ws(s) url on a chain
+// that subscribes is published as the websocket's missing-url; its configured urls say so
+// as the dialed ones would, since expanding a url never changes its transport.
+func refusalsOf(chainParser chainlib.ChainParser, provider *routersession.RPCStaticProviderEndpoint, admission chainlib.ProviderAdmission) []metrics.ProviderVerificationFailure {
+	refused, refusedURLs := admission.Refused(), admission.RefusedURLs()
+	failures := make([]metrics.ProviderVerificationFailure, 0, len(refused)+len(refusedURLs)+1)
 	for _, r := range refused {
 		scope := metrics.VerificationScopeService
 		if servedElsewhere(chainParser, provider, admission, r.Service) {
@@ -4216,17 +4469,64 @@ func refusalsOf(chainParser chainlib.ChainParser, provider *lavasession.RPCStati
 		}
 		failures = append(failures, metrics.ProviderVerificationFailure{Scope: scope, Service: r.Service, Check: r.Check})
 	}
-	for _, check := range urlChecks {
-		failures = append(failures, metrics.ProviderVerificationFailure{Scope: metrics.VerificationScopeURL, Check: check})
+	urlFailures := make([]metrics.ProviderVerificationFailure, 0, len(refusedURLs))
+	for _, index := range refusedURLs {
+		failure := metrics.ProviderVerificationFailure{Scope: metrics.VerificationScopeURL, Check: failureCheck(admission.URLRefusal(index))}
+		if url, ok := admission.URLAt(index); ok && chainlib.IsWebSocketURL(url.Url) {
+			failure.Service = chainlib.WebSocketExtension
+			if !websocketLeft(chainParser, provider, admission) {
+				failure.Scope = metrics.VerificationScopeService
+			}
+		}
+		if !slices.Contains(urlFailures, failure) {
+			urlFailures = append(urlFailures, failure)
+		}
+	}
+	slices.SortFunc(urlFailures, func(x, y metrics.ProviderVerificationFailure) int {
+		if c := strings.Compare(x.Service, y.Service); c != 0 {
+			return c
+		}
+		return strings.Compare(x.Check, y.Check)
+	})
+	failures = append(failures, urlFailures...)
+	if chainlib.MissingWebsocket(provider.NodeUrls, chainParser) {
+		failures = append(failures, metrics.ProviderVerificationFailure{
+			Scope: metrics.VerificationScopeService, Service: chainlib.WebSocketExtension, Check: chainlib.CheckMissingURL,
+		})
+	}
+	for _, w := range admission.Warnings() {
+		failures = append(failures, metrics.ProviderVerificationFailure{
+			Scope: metrics.VerificationScopeNone, Service: w.Service, Check: w.Check, Severity: metrics.VerificationSeverityWarning,
+		})
 	}
 	return failures
 }
 
+// websocketLeft reports whether a ws(s) url the provider dials is still admitted. It
+// reads the dialed list, generated per-path urls included, and finds each url's verdict
+// by value, as servedElsewhere does (MAG-4214).
+func websocketLeft(chainParser chainlib.ChainParser, provider *routersession.RPCStaticProviderEndpoint, admission chainlib.ProviderAdmission) bool {
+	urls := provider.NodeUrls
+	if chainParser != nil {
+		urls = dialedNodeUrls(urls, chainParser, provider.ApiInterface)
+	}
+	for _, url := range urls {
+		if chainlib.IsWebSocketURL(url.Url) && !admission.RefusesURL(url) {
+			return true
+		}
+	}
+	return false
+}
+
 // servedElsewhere reports whether a node url of the provider still serves service: a
 // service refused on one url is not lost while another url keeps it.
-func servedElsewhere(chainParser chainlib.ChainParser, provider *lavasession.RPCStaticProviderEndpoint, admission chainlib.ProviderAdmission, service string) bool {
-	for index, url := range provider.NodeUrls {
-		if admission.URLRefused(index) {
+func servedElsewhere(chainParser chainlib.ChainParser, provider *routersession.RPCStaticProviderEndpoint, admission chainlib.ProviderAdmission, service string) bool {
+	urls := provider.NodeUrls
+	if chainParser != nil {
+		urls = dialedNodeUrls(urls, chainParser, provider.ApiInterface)
+	}
+	for _, url := range urls {
+		if admission.RefusesURL(url) {
 			continue
 		}
 		var services []string
@@ -4265,7 +4565,9 @@ type subscriptionEndpointSetter interface {
 // session maps, which is the same source of truth publishServingTierLocked reads. Only
 // live endpoints go in: a configured-but-dead endpoint in the primary tier would be
 // handed to a subscription with no fallback, and would suppress the primary→backup
-// cascade, which only fires when the primary tier is empty or fully ignored.
+// cascade, which only fires when the primary tier is empty or wholly out of rotation. The
+// session manager knows nothing against a url it holds no endpoint for, so such an entry
+// counts as in rotation (ConsumerSessionManager.URLLendRank).
 func (rpsr *RPCSmartRouter) republishSubscriptionEndpointsLocked(chainKey string) {
 	server := rpsr.rpcServers[chainKey]
 	if server == nil {
@@ -4283,7 +4585,7 @@ func (rpsr *RPCSmartRouter) republishSubscriptionEndpointsLocked(chainKey string
 		primary := collectEndpoints(wsSubscriptions, liveStatic, inputs.admissionFor, "")
 		backup := collectEndpoints(wsSubscriptions, liveBackup, inputs.admissionFor, "")
 		if setter.SetEndpoints(primary, backup) {
-			utils.LavaFormatInfo("subscriptions: WebSocket endpoint tiers updated to match live pairing",
+			utils.FormatInfo("subscriptions: WebSocket endpoint tiers updated to match live pairing",
 				utils.LogAttr("chainKey", chainKey),
 				utils.LogAttr("primaryCount", len(primary)),
 				utils.LogAttr("backupCount", len(backup)),
@@ -4295,7 +4597,7 @@ func (rpsr *RPCSmartRouter) republishSubscriptionEndpointsLocked(chainKey string
 		primary := collectEndpoints(grpcSubscriptions, liveStatic, inputs.admissionFor, "")
 		backup := collectEndpoints(grpcSubscriptions, liveBackup, inputs.admissionFor, "")
 		if server.grpcSubscriptionManager.SetEndpoints(primary, backup) {
-			utils.LavaFormatInfo("subscriptions: gRPC endpoint tiers updated to match live pairing",
+			utils.FormatInfo("subscriptions: gRPC endpoint tiers updated to match live pairing",
 				utils.LogAttr("chainKey", chainKey),
 				utils.LogAttr("primaryCount", len(primary)),
 				utils.LogAttr("backupCount", len(backup)),
@@ -4306,20 +4608,20 @@ func (rpsr *RPCSmartRouter) republishSubscriptionEndpointsLocked(chainKey string
 
 // activeProviders returns the configured providers that are currently in the pairing,
 // in configured order. Sessions are keyed by index and carry the provider name as
-// PublicLavaAddress (see convertProvidersToSessions), so this is the bridge from "what
+// PublicAddress (see convertProvidersToSessions), so this is the bridge from "what
 // is live" back to the RPCStaticProviderEndpoint records that own the NodeUrls.
 func activeProviders(
-	configured []*lavasession.RPCStaticProviderEndpoint,
-	sessions map[uint64]*lavasession.ConsumerSessionsWithProvider,
-) []*lavasession.RPCStaticProviderEndpoint {
+	configured []*routersession.RPCStaticProviderEndpoint,
+	sessions map[uint64]*routersession.ConsumerSessionsWithProvider,
+) []*routersession.RPCStaticProviderEndpoint {
 	if len(configured) == 0 || len(sessions) == 0 {
 		return nil
 	}
 	active := make(map[string]struct{}, len(sessions))
 	for _, s := range sessions {
-		active[s.PublicLavaAddress] = struct{}{}
+		active[s.PublicAddress] = struct{}{}
 	}
-	live := make([]*lavasession.RPCStaticProviderEndpoint, 0, len(active))
+	live := make([]*routersession.RPCStaticProviderEndpoint, 0, len(active))
 	for _, p := range configured {
 		if _, ok := active[p.Name]; ok {
 			live = append(live, p)
@@ -4328,131 +4630,118 @@ func activeProviders(
 	return live
 }
 
-// retryFailedProviders periodically re-validates providers that failed
-// verification and re-registers them when they recover. One goroutine per
-// endpoint that had failures in either tier.
-//
-// It covers both tiers. Before MAG-2525 only static providers were retried here
-// and backups waited for the 15m epoch reverification, which was tolerable when a
-// chain could not boot on backups alone. Now it can, so a failed backup may be the
-// only thing between the chain and serving traffic.
-func (rpsr *RPCSmartRouter) retryFailedProviders(
-	ctx context.Context,
-	sessionManagerKey string,
-	chainParser chainlib.ChainParser,
-	rpcEndpoint *lavasession.RPCEndpoint,
-	convertProvidersToSessions func([]*lavasession.RPCStaticProviderEndpoint) map[uint64]*lavasession.ConsumerSessionsWithProvider,
-) {
-	darkBackoff := retryDarkBaseInterval
-	timer := time.NewTimer(retryIntervalFor(rpsr.chainIsDark(sessionManagerKey)))
-	defer timer.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-timer.C:
-		}
-
-		rpsr.mu.Lock()
-		failedStatic := rpsr.failedStaticProviders[sessionManagerKey]
-		failedBackup := rpsr.failedBackupProviders[sessionManagerKey]
-		rpsr.mu.Unlock()
-
-		if len(failedStatic) == 0 && len(failedBackup) == 0 {
-			utils.LavaFormatInfo("All failed providers recovered — stopping retry loop",
-				utils.LogAttr("chain", rpcEndpoint.ChainID),
-				utils.LogAttr("apiInterface", rpcEndpoint.ApiInterface),
-			)
-			return
-		}
-
-		utils.LavaFormatInfo("Retrying failed providers",
-			utils.LogAttr("chain", rpcEndpoint.ChainID),
-			utils.LogAttr("apiInterface", rpcEndpoint.ApiInterface),
-			utils.LogAttr("failedStatic", len(failedStatic)),
-			utils.LogAttr("failedBackup", len(failedBackup)),
-		)
-
-		recoveredStatic, stillFailedStatic := rpsr.revalidateTier(ctx, failedStatic, chainParser, rpcEndpoint, reverifyTierStatic)
-		recoveredBackup, stillFailedBackup := rpsr.revalidateTier(ctx, failedBackup, chainParser, rpcEndpoint, reverifyTierBackup)
-
-		rpsr.readmitRecoveredProviders(
-			sessionManagerKey, rpcEndpoint, convertProvidersToSessions,
-			recoveredStatic, stillFailedStatic, recoveredBackup, stillFailedBackup)
-
-		if rpsr.chainIsDark(sessionManagerKey) {
-			darkBackoff *= 2
-			if darkBackoff > retryMaxInterval {
-				darkBackoff = retryMaxInterval
-			}
-			timer.Reset(darkBackoff)
-		} else {
-			timer.Reset(retryMaxInterval)
-			darkBackoff = retryDarkBaseInterval
-		}
-	}
-}
-
-// retryValidateFn is the probe retryFailedProviders runs against a failed
-// provider: the per-collection admission boot and the epoch pass use, so a
+// retryValidateFn is the probe the retry loop runs against a provider out of the
+// pairing: the per-collection admission boot and the epoch pass use, so a
 // provider comes back as soon as a path it serves has a url again. A
 // package-level var purely so tests can substitute a fake without standing up
 // upstreams — production never reassigns it. Mirrors the
-// chainReverifyInputs.validateFn seam applyReverification uses.
-var retryValidateFn = func(ctx context.Context, provider *lavasession.RPCStaticProviderEndpoint, chainParser chainlib.ChainParser) (chainlib.ProviderAdmission, error) {
-	return validateProviderCollections(ctx, provider, chainParser, BootValidateTimeout)
-}
-
-// noteVerificationFailure records the check a provider failed on the retry loop,
-// which runs without the router lock.
-func (rpsr *RPCSmartRouter) noteVerificationFailure(chainKey string, tier reverifyTier, name string, err error) {
-	rpsr.mu.Lock()
-	defer rpsr.mu.Unlock()
-	if inputs := rpsr.reverifyInputs[chainKey]; inputs != nil {
-		inputs.noteFailure(tier, name, err)
-	}
+// chainReverifyInputs.validateFn seam applyReverification uses. With only, it re-runs
+// only those checks and keeps the other verdicts from previous, the pass that refused
+// the provider (MAG-3950).
+var retryValidateFn = func(ctx context.Context, provider *routersession.RPCStaticProviderEndpoint, chainParser chainlib.ChainParser, previous chainlib.ProviderAdmission, only []chainlib.CheckID) (chainlib.ProviderAdmission, error) {
+	return revalidateProviderCollections(ctx, provider, chainParser, BootValidateTimeout, previous, only, nil)
 }
 
 // revalidateTier re-runs verification over one tier's failed providers, returning
-// the recovered and still-failing partitions in configured order.
+// the recovered and still-failing partitions in configured order. A provider named in
+// only re-runs only those checks, keeping its other verdicts from the pass that refused
+// it (chainReverifyInputs.lastPass); one not named in it is verified whole. Each
+// verdict moves the provider's checks on the retry schedule; with countAttempt false,
+// a whole pass does not push back the checks already waiting.
+//
+// The probes run in parallel, capped by SpecReVerifyConcurrency, so one provider that
+// hangs does not hold every other provider's retry back by its timeout. Their verdicts
+// are applied under the router lock, against what other passes applied while they ran:
+// a provider whose probe an epoch pass overtook is in neither partition, since that
+// pass's verdict, newer, already stands (chainReverifyInputs.verdictAt). The retry waits
+// for an epoch pass in flight on the chain before it reads the verdicts it keeps, and
+// one that starts while it probes leaves every provider in neither partition
+// (lockBetweenEpochPasses).
 func (rpsr *RPCSmartRouter) revalidateTier(
 	ctx context.Context,
-	failed []*lavasession.RPCStaticProviderEndpoint,
+	failed []*routersession.RPCStaticProviderEndpoint,
 	chainParser chainlib.ChainParser,
-	rpcEndpoint *lavasession.RPCEndpoint,
+	rpcEndpoint *routersession.RPCEndpoint,
 	tier reverifyTier,
-) (recovered, stillFailed []*lavasession.RPCStaticProviderEndpoint) {
-	// The admission is recorded before the provider is readmitted, so the session
-	// it is readmitted with leaves out what this pass refused.
-	var record func(*lavasession.RPCStaticProviderEndpoint, chainlib.ProviderAdmission) bool
-	rpsr.mu.Lock()
+	only map[string][]chainlib.CheckID,
+	countAttempt bool,
+) (recovered, stillFailed []*routersession.RPCStaticProviderEndpoint) {
+	type probe struct {
+		admission chainlib.ProviderAdmission
+		err       error
+		started   time.Time
+		ran       []chainlib.CheckID
+	}
+	previous := make([]chainlib.ProviderAdmission, len(failed))
+	passes, ok := rpsr.lockBetweenEpochPasses(ctx, rpcEndpoint.Key())
+	if !ok {
+		return nil, nil
+	}
 	if inputs := rpsr.reverifyInputs[rpcEndpoint.Key()]; inputs != nil {
-		record = inputs.recordAdmission
+		for i, provider := range failed {
+			previous[i] = inputs.lastPass[retryKey(tier, provider.Name)]
+		}
 	}
 	rpsr.mu.Unlock()
-	for _, provider := range failed {
-		admission, err := retryValidateFn(ctx, provider, chainParser)
-		if err != nil {
+	probes := make([]probe, len(failed))
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, SpecReVerifyConcurrency)
+	for i, provider := range failed {
+		sem <- struct{}{}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			started := time.Now()
+			ran := only[provider.Name]
+			admission, err := retryValidateFn(ctx, provider, chainParser, previous[i], ran)
+			probes[i] = probe{admission: admission, err: err, started: started, ran: ran}
+		}()
+	}
+	wg.Wait()
+
+	// The admission is recorded before the provider is readmitted, so the session
+	// it is readmitted with leaves out what this pass refused.
+	rpsr.mu.Lock()
+	defer rpsr.mu.Unlock()
+	inputs := rpsr.reverifyInputs[rpcEndpoint.Key()]
+	if inputs.epochPassSince(passes) {
+		return nil, nil
+	}
+	for i, provider := range failed {
+		result := probes[i]
+		if inputs != nil {
+			if inputs.superseded(tier, provider.Name, result.started) {
+				continue
+			}
+			inputs.appliedVerdict(tier, provider.Name, result.started, result.err)
+		}
+		if result.err != nil {
 			stillFailed = append(stillFailed, provider)
-			rpsr.noteVerificationFailure(rpcEndpoint.Key(), tier, provider.Name, err)
-			utils.LavaFormatWarning("retry: provider verification still failing", err,
+			if inputs != nil {
+				inputs.noteFailure(tier, provider.Name, result.err)
+				inputs.rescheduleFailed(tier, provider, result.ran, result.admission, result.err, countAttempt)
+			}
+			utils.FormatWarning("retry: provider verification still failing", result.err,
 				utils.LogAttr("chain", rpcEndpoint.ChainID),
 				utils.LogAttr("tier", tier.String()),
 				utils.LogAttr("provider", provider.Name),
 			)
 			continue
 		}
-		if record != nil {
-			record(provider, admission)
+		if inputs != nil {
+			if inputs.recordAdmission != nil {
+				inputs.recordAdmission(provider, result.admission)
+			}
+			inputs.countRefusals(tier, provider, result.admission)
+			delete(inputs.lastPass, retryKey(tier, provider.Name))
+			// One back with something still failing, a url still refused, stays on the
+			// schedule for what still fails.
+			inputs.retries.reconcile(tier, provider.Name, result.ran, inputs.retriesOf(provider, result.admission, nil),
+				heldOffUntil(inputs.rateLimitHoldoff, provider, inputs.chainParser), countAttempt)
 		}
-		rpsr.mu.Lock()
-		if inputs := rpsr.reverifyInputs[rpcEndpoint.Key()]; inputs != nil {
-			inputs.countRefusals(tier, provider, admission)
-		}
-		rpsr.mu.Unlock()
 		recovered = append(recovered, provider)
-		utils.LavaFormatInfo("[+] provider recovered and passed verification",
+		utils.FormatInfo("[+] provider recovered and passed verification",
 			utils.LogAttr("chain", rpcEndpoint.ChainID),
 			utils.LogAttr("tier", tier.String()),
 			utils.LogAttr("provider", provider.Name),
@@ -4462,7 +4751,11 @@ func (rpsr *RPCSmartRouter) revalidateTier(
 }
 
 // readmitRecoveredProviders merges recovered providers of both tiers back into the
-// live pairing and pushes the result to the session manager in one call.
+// live pairing and pushes the result to the session manager in one call. Only what
+// recovered leaves the failed lists: a retry probes the providers that are due, not the
+// whole list. One an epoch pass promoted while the retry probed is already in the
+// pairing and is not built again: a second session would double its selection weight
+// and leak the first one's connections.
 //
 // The merge is copy-on-write: the old maps may still be referenced by goroutines
 // (cleanupStaleTrackers) that iterate them without the lock.
@@ -4472,15 +4765,16 @@ func (rpsr *RPCSmartRouter) revalidateTier(
 // recovered providers until the next epoch.
 func (rpsr *RPCSmartRouter) readmitRecoveredProviders(
 	sessionManagerKey string,
-	rpcEndpoint *lavasession.RPCEndpoint,
-	convertProvidersToSessions func([]*lavasession.RPCStaticProviderEndpoint) map[uint64]*lavasession.ConsumerSessionsWithProvider,
-	recoveredStatic, stillFailedStatic []*lavasession.RPCStaticProviderEndpoint,
-	recoveredBackup, stillFailedBackup []*lavasession.RPCStaticProviderEndpoint,
+	rpcEndpoint *routersession.RPCEndpoint,
+	convertProvidersToSessions func([]*routersession.RPCStaticProviderEndpoint) map[uint64]*routersession.ConsumerSessionsWithProvider,
+	recoveredStatic, recoveredBackup []*routersession.RPCStaticProviderEndpoint,
 ) {
 	rpsr.mu.Lock()
 
-	rpsr.failedStaticProviders[sessionManagerKey] = stillFailedStatic
-	rpsr.failedBackupProviders[sessionManagerKey] = stillFailedBackup
+	pruneRestoredFromFailed(rpsr.failedStaticProviders, sessionManagerKey, endpointNames(recoveredStatic))
+	pruneRestoredFromFailed(rpsr.failedBackupProviders, sessionManagerKey, endpointNames(recoveredBackup))
+	recoveredStatic = notIn(rpsr.providerSessions[sessionManagerKey], recoveredStatic)
+	recoveredBackup = notIn(rpsr.backupProviderSessions[sessionManagerKey], recoveredBackup)
 
 	if len(recoveredStatic) == 0 && len(recoveredBackup) == 0 {
 		// Nothing moved in the pairing, but a provider still out may now be
@@ -4494,30 +4788,52 @@ func (rpsr *RPCSmartRouter) readmitRecoveredProviders(
 	mergedStatic := mergeRecoveredSessions(rpsr.providerSessions[sessionManagerKey], recoveredStatic, convertProvidersToSessions, currentEpoch)
 	mergedBackup := mergeRecoveredSessions(rpsr.backupProviderSessions[sessionManagerKey], recoveredBackup, convertProvidersToSessions, currentEpoch)
 
-	err := rpsr.pushPairingLocked(sessionManagerKey, rpsr.sessionManagers[sessionManagerKey], currentEpoch, mergedStatic, mergedBackup)
+	after, err := rpsr.commitPairingLocked(sessionManagerKey, currentEpoch, mergedStatic, mergedBackup, nil)
 	rpsr.mu.Unlock()
+	after()
 
 	if err != nil {
-		utils.LavaFormatWarning("retry: failed to re-register recovered providers", err,
+		utils.FormatWarning("retry: failed to re-register recovered providers", err,
 			utils.LogAttr("chain", rpcEndpoint.ChainID),
 		)
 		return
 	}
 	for _, tier := range []struct {
 		name      reverifyTier
-		recovered []*lavasession.RPCStaticProviderEndpoint
+		recovered []*routersession.RPCStaticProviderEndpoint
 	}{
 		{reverifyTierStatic, recoveredStatic},
 		{reverifyTierBackup, recoveredBackup},
 	} {
 		for _, p := range tier.recovered {
-			utils.LavaFormatInfo("[+] provider re-registered successfully",
+			utils.FormatInfo("[+] provider re-registered successfully",
 				utils.LogAttr("chain", rpcEndpoint.ChainID),
 				utils.LogAttr("tier", tier.name.String()),
 				utils.LogAttr("provider", p.Name),
 			)
 		}
 	}
+}
+
+// endpointNames is the set of the providers' names, as pruneRestoredFromFailed wants it.
+func endpointNames(providers []*routersession.RPCStaticProviderEndpoint) map[string]struct{} {
+	names := make([]string, 0, len(providers))
+	for _, p := range providers {
+		names = append(names, p.Name)
+	}
+	return nameSet(names)
+}
+
+// notIn is the providers that have no session in sessions.
+func notIn(sessions map[uint64]*routersession.ConsumerSessionsWithProvider, providers []*routersession.RPCStaticProviderEndpoint) []*routersession.RPCStaticProviderEndpoint {
+	active := byName(sessions)
+	var out []*routersession.RPCStaticProviderEndpoint
+	for _, p := range providers {
+		if _, isActive := active[p.Name]; !isActive {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // nameSet turns a provider-name slice into the set pruneRestoredFromFailed wants.
@@ -4535,7 +4851,7 @@ func nameSet(names []string) map[string]struct{} {
 // pruneRestoredFromFailed removes providers named in `restored` from one chain's
 // failed list, deleting the entry entirely once nothing is left pending.
 func pruneRestoredFromFailed(
-	failedByChain map[string][]*lavasession.RPCStaticProviderEndpoint,
+	failedByChain map[string][]*routersession.RPCStaticProviderEndpoint,
 	chainKey string,
 	restored map[string]struct{},
 ) {
@@ -4543,7 +4859,7 @@ func pruneRestoredFromFailed(
 	if len(failed) == 0 {
 		return
 	}
-	var kept []*lavasession.RPCStaticProviderEndpoint
+	var kept []*routersession.RPCStaticProviderEndpoint
 	for _, p := range failed {
 		if _, ok := restored[p.Name]; !ok {
 			kept = append(kept, p)
@@ -4559,16 +4875,16 @@ func pruneRestoredFromFailed(
 // mergeRecoveredSessions returns a new map holding `existing` plus freshly built
 // sessions for `recovered`, appended at indices past the current maximum.
 func mergeRecoveredSessions(
-	existing map[uint64]*lavasession.ConsumerSessionsWithProvider,
-	recovered []*lavasession.RPCStaticProviderEndpoint,
-	convertProvidersToSessions func([]*lavasession.RPCStaticProviderEndpoint) map[uint64]*lavasession.ConsumerSessionsWithProvider,
+	existing map[uint64]*routersession.ConsumerSessionsWithProvider,
+	recovered []*routersession.RPCStaticProviderEndpoint,
+	convertProvidersToSessions func([]*routersession.RPCStaticProviderEndpoint) map[uint64]*routersession.ConsumerSessionsWithProvider,
 	currentEpoch uint64,
-) map[uint64]*lavasession.ConsumerSessionsWithProvider {
+) map[uint64]*routersession.ConsumerSessionsWithProvider {
 	if len(recovered) == 0 {
 		return existing
 	}
 	recoveredSessions := convertProvidersToSessions(recovered)
-	merged := make(map[uint64]*lavasession.ConsumerSessionsWithProvider, len(existing)+len(recoveredSessions))
+	merged := make(map[uint64]*routersession.ConsumerSessionsWithProvider, len(existing)+len(recoveredSessions))
 	maps.Copy(merged, existing)
 	appendSessions(merged, recoveredSessions, currentEpoch)
 	return merged
@@ -4579,7 +4895,7 @@ func mergeRecoveredSessions(
 // so its keys would collide with the pairing's; only the values are taken. pairing is
 // written in place, so callers hand it a map no lock-free reader holds (the pairing
 // maps are copy-on-write: cleanupStaleTrackers iterates the old ones without rpsr.mu).
-func appendSessions(pairing, sessions map[uint64]*lavasession.ConsumerSessionsWithProvider, epoch uint64) {
+func appendSessions(pairing, sessions map[uint64]*routersession.ConsumerSessionsWithProvider, epoch uint64) {
 	next := uint64(0)
 	for idx := range pairing {
 		if idx >= next {
@@ -4606,7 +4922,7 @@ func appendSessions(pairing, sessions map[uint64]*lavasession.ConsumerSessionsWi
 // behaviour in the tests this serves, so verification is unnecessary. Only absent
 // providers are converted (which opens fresh DirectRPCConnections); already-active
 // sessions are reused untouched, so healthy providers are not churned. Mirrors
-// retryFailedProviders' copy-on-write merge. Returns the restored provider
+// the retry loop's copy-on-write merge. Returns the restored provider
 // names per chainKey (chains needing no restore are omitted).
 func (rpsr *RPCSmartRouter) rebuildPairingFromConfig() map[string][]string {
 	restored := make(map[string][]string)
@@ -4624,6 +4940,9 @@ func (rpsr *RPCSmartRouter) rebuildPairingFromConfig() map[string][]string {
 		if sessionManager == nil || inputs == nil {
 			continue
 		}
+		// An epoch pass probing this chain now drops its verdicts, whether or not anything
+		// is restored: they were probed before this reset (chainReverifyInputs.pairingResets).
+		inputs.pairingResets++
 
 		mergedStatic, restoredStatic := mergeAbsentProviders(
 			rpsr.providerSessions[chainKey], inputs.configuredStatic, inputs.convertProvidersToSessions, currentEpoch)
@@ -4635,9 +4954,9 @@ func (rpsr *RPCSmartRouter) rebuildPairingFromConfig() map[string][]string {
 		}
 
 		// A re-admitted provider supersedes any pending failed-init retry: drop it
-		// from the failed lists so retryFailedProviders won't later merge a duplicate
+		// from the failed lists so the retry loop won't later merge a duplicate
 		// session for the same name (and can self-terminate once both are empty).
-		// Both tiers are pruned — retryFailedProviders now retries backups too.
+		// Both tiers are pruned — the retry loop retries backups too.
 		restoredSet := make(map[string]struct{}, len(restoredStatic)+len(restoredBackup))
 		for _, n := range restoredStatic {
 			restoredSet[n] = struct{}{}
@@ -4649,13 +4968,13 @@ func (rpsr *RPCSmartRouter) rebuildPairingFromConfig() map[string][]string {
 		pruneRestoredFromFailed(rpsr.failedBackupProviders, chainKey, restoredSet)
 
 		if err := rpsr.pushPairingLocked(chainKey, sessionManager, currentEpoch, mergedStatic, mergedBackup); err != nil {
-			utils.LavaFormatError("reset-pairing: failed to push rebuilt pairing to session manager", err,
+			utils.FormatError("reset-pairing: failed to push rebuilt pairing to session manager", err,
 				utils.LogAttr("chainKey", chainKey))
 			continue
 		}
 
 		restored[chainKey] = append(restoredStatic, restoredBackup...)
-		utils.LavaFormatInfo("reset-pairing: restored providers from config",
+		utils.FormatInfo("reset-pairing: restored providers from config",
 			utils.LogAttr("chainKey", chainKey),
 			utils.LogAttr("restored", restored[chainKey]),
 			utils.LogAttr("epoch", currentEpoch),
@@ -4672,17 +4991,17 @@ func (rpsr *RPCSmartRouter) rebuildPairingFromConfig() map[string][]string {
 // skipped by convert and so are not reported restored. Present providers are reused
 // untouched. Returns (current, nil) when nothing is absent.
 func mergeAbsentProviders(
-	current map[uint64]*lavasession.ConsumerSessionsWithProvider,
-	configured []*lavasession.RPCStaticProviderEndpoint,
-	convert func([]*lavasession.RPCStaticProviderEndpoint) map[uint64]*lavasession.ConsumerSessionsWithProvider,
+	current map[uint64]*routersession.ConsumerSessionsWithProvider,
+	configured []*routersession.RPCStaticProviderEndpoint,
+	convert func([]*routersession.RPCStaticProviderEndpoint) map[uint64]*routersession.ConsumerSessionsWithProvider,
 	epoch uint64,
-) (map[uint64]*lavasession.ConsumerSessionsWithProvider, []string) {
+) (map[uint64]*routersession.ConsumerSessionsWithProvider, []string) {
 	active := make(map[string]struct{}, len(current))
 	for _, s := range current {
-		active[s.PublicLavaAddress] = struct{}{}
+		active[s.PublicAddress] = struct{}{}
 	}
 
-	var absent []*lavasession.RPCStaticProviderEndpoint
+	var absent []*routersession.RPCStaticProviderEndpoint
 	for _, p := range configured {
 		if _, ok := active[p.Name]; !ok {
 			absent = append(absent, p)
@@ -4694,13 +5013,13 @@ func mergeAbsentProviders(
 
 	// Copy-on-write: cleanupStaleTrackers may iterate the old map
 	// without the lock, so never mutate it in place.
-	merged := make(map[uint64]*lavasession.ConsumerSessionsWithProvider, len(current)+len(absent))
+	merged := make(map[uint64]*routersession.ConsumerSessionsWithProvider, len(current)+len(absent))
 	maps.Copy(merged, current)
 	sessions := convert(absent)
 	appendSessions(merged, sessions, epoch)
 	converted := make(map[string]struct{}, len(sessions))
 	for _, session := range sessions {
-		converted[session.PublicLavaAddress] = struct{}{}
+		converted[session.PublicAddress] = struct{}{}
 	}
 
 	var restored []string
@@ -4717,8 +5036,8 @@ func mergeAbsentProviders(
 func (rpsr *RPCSmartRouter) cleanupStaleTrackers(
 	chainKey string,
 	server *RPCSmartRouterServer,
-	providerSessions map[uint64]*lavasession.ConsumerSessionsWithProvider,
-	backupSessions map[uint64]*lavasession.ConsumerSessionsWithProvider,
+	providerSessions map[uint64]*routersession.ConsumerSessionsWithProvider,
+	backupSessions map[uint64]*routersession.ConsumerSessionsWithProvider,
 ) {
 	if server.endpointChainTrackerManager == nil {
 		return
@@ -4742,7 +5061,7 @@ func (rpsr *RPCSmartRouter) cleanupStaleTrackers(
 	removedCount := 0
 	for _, trackedURL := range trackedEndpoints {
 		if !currentEndpoints[trackedURL] {
-			utils.LavaFormatInfo("removing stale ChainTracker on epoch update",
+			utils.FormatInfo("removing stale ChainTracker on epoch update",
 				utils.LogAttr("endpoint", trackedURL),
 				utils.LogAttr("chainKey", chainKey),
 			)
@@ -4758,7 +5077,7 @@ func (rpsr *RPCSmartRouter) cleanupStaleTrackers(
 	}
 
 	if removedCount > 0 {
-		utils.LavaFormatInfo("epoch update: cleaned up stale ChainTrackers",
+		utils.FormatInfo("epoch update: cleaned up stale ChainTrackers",
 			utils.LogAttr("chainKey", chainKey),
 			utils.LogAttr("removed", removedCount),
 			utils.LogAttr("remaining", server.endpointChainTrackerManager.GetEndpointCount()),
@@ -4767,7 +5086,7 @@ func (rpsr *RPCSmartRouter) cleanupStaleTrackers(
 }
 
 func testModeWarn(desc string) {
-	utils.LavaFormatWarning("------------------------------test mode --------------------------------\n\t\t\t"+
+	utils.FormatWarning("------------------------------test mode --------------------------------\n\t\t\t"+
 		desc+"\n\t\t\t"+
 		"------------------------------test mode --------------------------------\n", nil)
 }
@@ -4775,14 +5094,14 @@ func testModeWarn(desc string) {
 // subscriptionTransport is what collectEndpoints picks node urls for: the WebSocket
 // urls of any provider, or every url of a gRPC provider.
 type subscriptionTransport struct {
-	servesProvider func(*lavasession.RPCStaticProviderEndpoint) bool
+	servesProvider func(*routersession.RPCStaticProviderEndpoint) bool
 	servesURL      func(url string) bool
 	foundMessage   string
 }
 
 var (
 	wsSubscriptions = subscriptionTransport{
-		servesProvider: func(*lavasession.RPCStaticProviderEndpoint) bool { return true },
+		servesProvider: func(*routersession.RPCStaticProviderEndpoint) bool { return true },
 		servesURL: func(url string) bool {
 			url = strings.ToLower(url)
 			return strings.HasPrefix(url, "ws://") || strings.HasPrefix(url, "wss://")
@@ -4790,7 +5109,7 @@ var (
 		foundMessage: "Found WebSocket endpoint for direct subscriptions",
 	}
 	grpcSubscriptions = subscriptionTransport{
-		servesProvider: func(provider *lavasession.RPCStaticProviderEndpoint) bool {
+		servesProvider: func(provider *routersession.RPCStaticProviderEndpoint) bool {
 			return provider.ApiInterface == spectypes.APIInterfaceGrpc
 		},
 		servesURL:    func(string) bool { return true },
@@ -4804,7 +5123,7 @@ var (
 // endpoint came from; an empty tierLabel suppresses that per-endpoint line. Boot wants
 // the full inventory, but the republish path runs on every pairing change and would
 // otherwise re-log every endpoint of every chain each epoch — it logs deltas instead.
-func collectEndpoints(transport subscriptionTransport, providers []*lavasession.RPCStaticProviderEndpoint, admissionFor func(*lavasession.RPCStaticProviderEndpoint) chainlib.ProviderAdmission, tierLabel string) []*common.NodeUrl {
+func collectEndpoints(transport subscriptionTransport, providers []*routersession.RPCStaticProviderEndpoint, admissionFor func(*routersession.RPCStaticProviderEndpoint) chainlib.ProviderAdmission, tierLabel string) []*common.NodeUrl {
 	var endpoints []*common.NodeUrl
 	for _, provider := range providers {
 		if !transport.servesProvider(provider) {
@@ -4819,7 +5138,7 @@ func collectEndpoints(transport subscriptionTransport, providers []*lavasession.
 			if tierLabel == "" {
 				continue
 			}
-			utils.LavaFormatInfo(transport.foundMessage,
+			utils.FormatInfo(transport.foundMessage,
 				utils.LogAttr("tier", tierLabel),
 				utils.LogAttr("url", provider.NodeUrls[i].UrlStr()),
 				utils.LogAttr("provider", provider.Name),
@@ -4830,12 +5149,15 @@ func collectEndpoints(transport subscriptionTransport, providers []*lavasession.
 	return endpoints
 }
 
-// urlRefusal reports, per node-url position, whether the provider's admission refused it.
-func urlRefusal(provider *lavasession.RPCStaticProviderEndpoint, admissionFor func(*lavasession.RPCStaticProviderEndpoint) chainlib.ProviderAdmission) func(int) bool {
+// urlRefusal reports, per configured node-url position, whether the provider's
+// admission refused it. Admission positions are into the dialed list, so the url
+// is looked up by value.
+func urlRefusal(provider *routersession.RPCStaticProviderEndpoint, admissionFor func(*routersession.RPCStaticProviderEndpoint) chainlib.ProviderAdmission) func(int) bool {
 	if admissionFor == nil {
 		return func(int) bool { return false }
 	}
-	return admissionFor(provider).URLRefused
+	admission := admissionFor(provider)
+	return func(i int) bool { return admission.RefusesURL(provider.NodeUrls[i]) }
 }
 
 // admittedServicesFor is what the endpoint built for url may serve, and whether one is
@@ -4845,21 +5167,23 @@ func urlRefusal(provider *lavasession.RPCStaticProviderEndpoint, admissionFor fu
 func admittedServicesFor(chainParser chainlib.ChainParser, admission chainlib.ProviderAdmission, url common.NodeUrl) ([]string, bool) {
 	served, err := chainlib.ServedAs(chainParser, url)
 	if err != nil {
-		served = url
+		// A standalone-addons url that declares no add-on the spec defines keeps
+		// nothing, as verification and the serving check read it.
+		return nil, false
 	}
 	return admission.AdmittedServices(served)
 }
 
-// admittedNodeUrls is a provider's configured urls minus the ones its admission
-// refused, in configured order.
-func admittedNodeUrls(provider *lavasession.RPCStaticProviderEndpoint, admission chainlib.ProviderAdmission) []common.NodeUrl {
+// admittedNodeUrls is urls, the provider's dialed urls, minus the ones its
+// admission refused, in order.
+func admittedNodeUrls(provider *routersession.RPCStaticProviderEndpoint, urls []common.NodeUrl, admission chainlib.ProviderAdmission) []common.NodeUrl {
 	if !admission.Any() {
-		return provider.NodeUrls
+		return urls
 	}
-	kept := make([]common.NodeUrl, 0, len(provider.NodeUrls))
-	for i, url := range provider.NodeUrls {
-		if admission.URLRefused(i) {
-			utils.LavaFormatWarning("dropping node url: it failed verification", nil,
+	kept := make([]common.NodeUrl, 0, len(urls))
+	for _, url := range urls {
+		if admission.RefusesURL(url) {
+			utils.FormatWarning("dropping node url: it failed verification", nil,
 				utils.LogAttr("url", url.UrlStr()),
 				utils.LogAttr("provider", provider.Name),
 			)
@@ -4870,8 +5194,27 @@ func admittedNodeUrls(provider *lavasession.RPCStaticProviderEndpoint, admission
 	return kept
 }
 
+// unservedInternalPaths lists the internal paths a provider dials a url for but
+// built no endpoint on — every url there was refused, or could not be connected.
+// Session selection passes the provider over for those paths' apis instead of
+// sending them to a url of another path, where no node serves them (MAG-4214).
+// Nil when every path has an endpoint.
+func unservedInternalPaths(dialed []common.NodeUrl, endpoints []*routersession.Endpoint) map[string]struct{} {
+	var unserved map[string]struct{}
+	for _, url := range dialed {
+		if slices.ContainsFunc(endpoints, func(e *routersession.Endpoint) bool { return e.InternalPath == url.InternalPath }) {
+			continue
+		}
+		if unserved == nil {
+			unserved = map[string]struct{}{}
+		}
+		unserved[url.InternalPath] = struct{}{}
+	}
+	return unserved
+}
+
 // debugStateReasons renders an endpoint's state reasons for /debug/endpoint-state.
-func debugStateReasons(entries []lavasession.StateReasonRecord) []map[string]any {
+func debugStateReasons(entries []routersession.StateReasonRecord) []map[string]any {
 	out := make([]map[string]any, 0, len(entries))
 	for _, r := range entries {
 		out = append(out, map[string]any{

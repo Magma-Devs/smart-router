@@ -117,7 +117,7 @@ curl -s http://localhost:7779/metrics | grep smartrouter_cache_success_total
 
 Both compose caches start empty, so a secondary hit needs the secondary seeded
 by another writer. The bare-metal two-zone lane
-(`scripts/pre_setups/init_smartrouter_eth_secondary_cache.sh`) does exactly
+(`scripts/pre_setups/cache/init_smartrouter_eth_secondary_cache.sh`) does exactly
 that: a second "internal-zone" router warms the shared cache, and the
 "external-zone" router demonstrates secondary-hit → primary-backfill →
 primary-hit end to end (`RUN_DEMO=1` runs and checks the flow).
@@ -172,8 +172,10 @@ the cache overlay (see [Enabling the cache](#enabling-the-cache)).
 ### `smartrouter_solana.yml` / `smartrouter_bitcoin.yml` / `smartrouter_hyperliquid.yml` / `smartrouter_aptos.yml`
 
 Single-chain JSON-RPC (Solana, Bitcoin, Hyperliquid) or REST (Aptos) examples,
-each on port `3360` and HTTP-only — run with `--skip-websocket-verification`
-(the compose command already passes it). Upstreams are PublicNode and each
+each on port `3360` and HTTP-only. The compose command passes
+`--skip-websocket-verification`, which only matters for ws(s) urls: since MAG-3950 an
+HTTP-only provider serves without subscriptions whatever the flag says, and on a chain
+that subscribes (Solana) it publishes `service=websocket`, `check=missing-url`. Upstreams are PublicNode and each
 chain's official/community endpoint; no Lava endpoints.
 
 ### `smartrouter_cosmos.yml` — Cosmos Hub (REST + gRPC + Tendermint RPC)
@@ -205,9 +207,10 @@ import closure), all sourced from
 [`Magma-Devs/lava-specs`](https://github.com/Magma-Devs/lava-specs) and already
 bundled in `specs/`.
 
-> Only ETH1 requires websocket support (its providers pair an `http` url with a
-> `wss` one). Solana, Bitcoin, Hyperliquid (jsonrpc) and Aptos (rest) are
-> HTTP-only, so the compose command runs with `--skip-websocket-verification`.
+> Only the ETH1 example pairs an `http` url with a `wss` one, so only it serves
+> subscriptions. Solana, Bitcoin, Hyperliquid (jsonrpc) and Aptos (rest) are
+> HTTP-only; Solana's spec subscribes, so its providers publish the websocket's
+> `missing-url` alarm.
 
 ### `smartrouter_multichain_cached.yml` — multi-chain with cache
 

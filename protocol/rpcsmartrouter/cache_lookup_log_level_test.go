@@ -13,9 +13,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// hitCountingCache answers every lookup with a hit and counts the lookups. It serves as the
-// primary (CacheBackend) or the secondary (CacheReader).
-type hitCountingCache struct{ gets atomic.Int64 }
+// hitCountingCache answers every lookup with a hit and counts the lookups and the writes. It serves
+// as the primary (CacheBackend) or the secondary (CacheReader).
+type hitCountingCache struct{ gets, sets atomic.Int64 }
 
 func (c *hitCountingCache) CacheActive() bool { return true }
 
@@ -24,7 +24,10 @@ func (c *hitCountingCache) GetEntry(context.Context, *pairingtypes.RelayCacheGet
 	return &pairingtypes.CacheRelayReply{Reply: &pairingtypes.RelayReply{Data: []byte(`{"jsonrpc":"2.0","id":1,"result":"0xcac4e"}`)}}, nil
 }
 
-func (c *hitCountingCache) SetEntry(context.Context, *pairingtypes.RelayCacheSet) error { return nil }
+func (c *hitCountingCache) SetEntry(context.Context, *pairingtypes.RelayCacheSet) error {
+	c.sets.Add(1)
+	return nil
+}
 
 func (c *hitCountingCache) Flush(context.Context) error { return nil }
 

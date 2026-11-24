@@ -9,9 +9,10 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	relaycoretest "github.com/magma-Devs/smart-router/protocol/relaycoretest"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
+	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 )
@@ -26,11 +27,11 @@ import (
 // protocol error instead, which changes the very counters under test.
 func newWriteOutcomeProcessor(t *testing.T, msg chainlib.ProtocolMessage, dispatched int) *relaycore.RelayProcessor {
 	t.Helper()
-	usedProviders := lavasession.NewUsedProviders(nil)
+	usedProviders := routersession.NewUsedProviders(nil)
 	if dispatched > 0 {
-		sessions := lavasession.ConsumerSessionsMap{}
+		sessions := routersession.ConsumerSessionsMap{}
 		for i := 0; i < dispatched; i++ {
-			sessions["lava@"+string(rune('a'+i))] = &lavasession.SessionInfo{}
+			sessions["provider@"+string(rune('a'+i))] = &routersession.SessionInfo{}
 		}
 		usedProviders.AddUsed(sessions, nil)
 	}
@@ -74,9 +75,9 @@ func TestSendParsedRelay_ExpiredBeforeWriteDispatch(t *testing.T) {
 	defer cancel()
 	msg := expiredWriteProtocolMessage{writeMessage(common.CONSISTENCY_SELECT_ALL_PROVIDERS)}
 	server := &RPCSmartRouterServer{
-		listenEndpoint: &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		listenEndpoint: &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 		chainParser:    expiredWriteChainParser{},
-		sessionManager: &lavasession.ConsumerSessionManager{},
+		sessionManager: &routersession.ConsumerSessionManager{},
 	}
 
 	// The real state machine can report a timeout without dispatching an endpoint.
@@ -87,8 +88,12 @@ func TestSendParsedRelay_ExpiredBeforeWriteDispatch(t *testing.T) {
 
 	// Preserve that error through the client-facing path: no node could hold this write.
 	result, err := server.SendParsedRelay(ctx, nil, msg)
-	require.Nil(t, result)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
+	// The reply carries the request's headers and no verdict of its own (MAG-5076).
+	require.NotNil(t, result)
+	require.Zero(t, result.StatusCode)
+	require.Nil(t, result.ClientFacing)
+	require.Contains(t, result.GetReply().GetMetadata(), pairingtypes.Metadata{Name: common.USER_REQUEST_TYPE, Value: "eth_sendRawTransaction"})
 }
 
 func TestWriteOutcomeIsUnknown_Wrapper(t *testing.T) {
@@ -125,7 +130,7 @@ func TestWriteOutcomeIsUnknown_Wrapper(t *testing.T) {
 		msg := writeMessage(common.CONSISTENCY_SELECT_ALL_PROVIDERS)
 		processor := newWriteOutcomeProcessor(t, msg, 1)
 		processor.SetStopReason(relaycore.StopReasonProcessingTimeout)
-		relaycoretest.SendNodeError(processor, "lava@a", 0)
+		relaycoretest.SendNodeError(processor, "provider@a", 0)
 		drain(t, processor)
 		require.False(t, writeOutcomeIsUnknown(msg, processor),
 			"an endpoint served the write, so that answer is the result and nothing is unknown")
@@ -137,7 +142,7 @@ func TestWriteOutcomeIsUnknown_Wrapper(t *testing.T) {
 		processor.SetStopReason(relaycore.StopReasonProcessingTimeout)
 		// Refused proves nothing was sent to THAT endpoint, so this isolates the silence clause:
 		// the answer must come from the second endpoint never reporting, not from the first.
-		relaycoretest.SendProtocolError(processor, "lava@a", 0, errors.New("connection refused"))
+		relaycoretest.SendProtocolError(processor, "provider@a", 0, errors.New("connection refused"))
 		drain(t, processor)
 		require.True(t, writeOutcomeIsUnknown(msg, processor),
 			"a sibling's proven non-delivery must not settle this while another endpoint is silent")
@@ -151,7 +156,7 @@ func TestWriteOutcomeIsUnknown_Wrapper(t *testing.T) {
 		msg.repliesAreNodeErrors = true
 		processor := newWriteOutcomeProcessor(t, msg, 2)
 		processor.SetStopReason(relaycore.StopReasonProcessingTimeout)
-		relaycoretest.SendNodeError(processor, "lava@a", 0)
+		relaycoretest.SendNodeError(processor, "provider@a", 0)
 		drain(t, processor)
 		require.True(t, writeOutcomeIsUnknown(msg, processor),
 			"one endpoint replying with an error settles only itself; the silent sibling may have broadcast")
@@ -165,7 +170,7 @@ func TestWriteOutcomeIsUnknown_Wrapper(t *testing.T) {
 		msg.repliesAreNodeErrors = true
 		processor := newWriteOutcomeProcessor(t, msg, 2)
 		processor.SetStopReason(relaycore.StopReasonProcessingTimeout)
-		relaycoretest.SendNodeError(processor, "lava@a", 0)
+		relaycoretest.SendNodeError(processor, "provider@a", 0)
 		drain(t, processor)
 
 		result, err := processor.ProcessingResult()
@@ -182,7 +187,7 @@ func TestWriteOutcomeIsUnknown_Wrapper(t *testing.T) {
 		processor.SetStopReason(relaycore.StopReasonProcessingTimeout)
 		// EOF classifies as PROTOCOL_CONNECTION_CLOSED, which carries MayHaveReachedNode: an
 		// established connection died after the request was already on the wire.
-		relaycoretest.SendProtocolError(processor, "lava@a", 0, io.EOF)
+		relaycoretest.SendProtocolError(processor, "provider@a", 0, io.EOF)
 		drain(t, processor)
 		require.True(t, writeOutcomeIsUnknown(msg, processor),
 			"nobody is silent, but a connection that died mid-delivery settles nothing")
@@ -248,12 +253,12 @@ func TestWriteOutcomeIsUnknown_SecondBatchWithASilentEndpoint(t *testing.T) {
 	// Refusals on purpose: a refused connection proves nothing was delivered to THAT endpoint, so
 	// neither the silence clause nor the mid-delivery clause can be what produces the answer. Only
 	// the count of endpoints still owing one can.
-	relaycoretest.SendProtocolError(processor, "lava@a", 0, errors.New("connection refused"))
-	relaycoretest.SendProtocolError(processor, "lava@b", 0, errors.New("connection refused"))
+	relaycoretest.SendProtocolError(processor, "provider@a", 0, errors.New("connection refused"))
+	relaycoretest.SendProtocolError(processor, "provider@b", 0, errors.New("connection refused"))
 	drain(t, processor)
 
 	// The retry lands on a third endpoint, which never answers.
-	processor.GetUsedProviders().AddUsed(lavasession.ConsumerSessionsMap{"lava@c": &lavasession.SessionInfo{}}, nil)
+	processor.GetUsedProviders().AddUsed(routersession.ConsumerSessionsMap{"provider@c": &routersession.SessionInfo{}}, nil)
 	processor.SetStopReason(relaycore.StopReasonProcessingTimeout)
 
 	require.Equal(t, 1, processor.GetUsedProviders().SessionsLatestBatch(),

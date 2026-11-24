@@ -51,21 +51,25 @@ services:
       # absent from the bundled specs/ (e.g. LAV1) still resolve. The router
       # accepts a local dir OR a GitHub/GitLab URL here.
       - "${SR_SPEC:-specs/}"
-      # --cors-headers "*" is really only needed when the dashboard overlay is in
-      # play: its browser live-test panel preflights cross-origin POSTs carrying
-      # Content-Type: application/json, and an empty Access-Control-Allow-Headers
-      # blocks the call. It's harmless for router-only / cache runs (no browser
-      # calling), so we keep it unconditionally rather than fork the command.
+      # --cors-headers "*" is only needed when a browser calls the router, such as
+      # the smart-router-dashboard live test sent from the browser
+      # (ROUTER_RELAY_ENABLED=false in that repo): it preflights cross-origin POSTs
+      # carrying Content-Type: application/json, and an empty
+      # Access-Control-Allow-Headers blocks the call. It's harmless for router-only
+      # / cache runs (no browser calling), so we keep it unconditionally rather
+      # than fork the command.
       - "--cors-headers"
       - "*"
       - "--log-level"
       - "${SR_LOG_LEVEL:-info}"
       - "--log-format"
       - "${SR_LOG_FORMAT:-json}"
-      # Some bundled examples have HTTP-only listeners (e.g. SOLANA in the solana
-      # and multichain configs). Skip the startup websocket reachability check so
-      # those boot cleanly; ws subscriptions still work at runtime where a wss url
-      # is configured (the EVM examples pair https + wss).
+      # Dial ws(s) node urls without running the spec's checks over them, as the
+      # helm chart does. HTTP-only listeners (e.g. SOLANA in the solana and
+      # multichain configs) boot with or without it since MAG-3950: they serve
+      # without subscriptions and publish the websocket's missing-url. ws
+      # subscriptions work where a wss url is configured (the EVM examples pair
+      # https + wss).
       - "--skip-websocket-verification"
     ports:
       - "3360:3360" # ETH1 jsonrpc

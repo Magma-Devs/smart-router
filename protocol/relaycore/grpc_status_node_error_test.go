@@ -73,6 +73,7 @@ func (grpcChainMessage) SetExtension(*spectypes.Extension)              {}
 func (grpcChainMessage) GetUsedDefaultValue() bool                      { return false }
 func (grpcChainMessage) GetParseDirective() *spectypes.ParseDirective   { return nil }
 func (grpcChainMessage) IsBatch() bool                                  { return false }
+func (grpcChainMessage) HasBlocklessElement() bool                      { return false }
 
 func grpcProtocolMessage() chainlib.ProtocolMessage {
 	return chainlib.NewProtocolMessage(
@@ -173,9 +174,9 @@ func TestResultsManager_ClassifiesOnTheNodesBodyWhenTheMessageIsEmpty(t *testing
 	require.True(t, ok)
 	require.Len(t, inst.nodeResponseErrors.RelayErrors, 1)
 
-	classified := inst.nodeResponseErrors.RelayErrors[0].LavaError
+	classified := inst.nodeResponseErrors.RelayErrors[0].RouterError
 	require.NotNil(t, classified)
-	require.Equal(t, common.LavaErrorNodeRateLimited.Code, classified.Code,
+	require.Equal(t, common.RouterErrorNodeRateLimited.Code, classified.Code,
 		"the message-based row must be reachable here; on the empty string this was UNKNOWN_ERROR")
 }
 

@@ -29,7 +29,7 @@ type baseChainMessageContainer struct {
 	msg                    updatableRPCInput
 	apiCollection          *spectypes.ApiCollection
 	extensions             []*spectypes.Extension
-	// unavailableExtensions are extensions the caller asked for (lava-extension) that the spec
+	// unavailableExtensions are extensions the caller asked for (router-extension) that the spec
 	// knows but no node on this router offers. The request is served without them; they are kept
 	// so the reply can say so (MAG-3935).
 	unavailableExtensions []string
@@ -37,6 +37,9 @@ type baseChainMessageContainer struct {
 	forceCacheRefresh     bool
 	parseDirective        *spectypes.ParseDirective // setting the parse directive related to the api, can be nil
 	usedDefaultValue      bool
+	// blocklessElement is set when an element of the request names no block and so took no part
+	// in its requested block (requestedBlockFold, MAG-4650).
+	blocklessElement bool
 
 	// resultErrorParsingMethod passed by each api interface message to parse the result of the message
 	// and validate it doesn't contain a node error
@@ -102,7 +105,7 @@ func (pm *baseChainMessageContainer) GetRawRequestHash() ([]byte, error) {
 // not necessary for base chain message.
 func (bcnc *baseChainMessageContainer) CheckResponseError(data []byte, httpStatusCode int) (hasError bool, errorMessage string) {
 	if bcnc.resultErrorParsingMethod == nil {
-		utils.LavaFormatError("tried calling resultErrorParsingMethod when it is not set", nil)
+		utils.FormatError("tried calling resultErrorParsingMethod when it is not set", nil)
 		return false, ""
 	}
 	return bcnc.resultErrorParsingMethod(data, httpStatusCode)
@@ -148,6 +151,12 @@ func (bcnc baseChainMessageContainer) GetRPCMessage() rpcInterfaceMessages.Gener
 	return bcnc.msg
 }
 
+// HasBlocklessElement reports whether an element of the request names no block and so took no
+// part in its requested block (MAG-4650).
+func (bcnc baseChainMessageContainer) HasBlocklessElement() bool {
+	return bcnc.blocklessElement
+}
+
 // IsBatch returns true if this is a batch request (e.g., JSON-RPC batch)
 func (bcnc baseChainMessageContainer) IsBatch() bool {
 	_, isBatch := bcnc.msg.(*rpcInterfaceMessages.JsonrpcBatchMessage)
@@ -168,11 +177,11 @@ func (bcnc *baseChainMessageContainer) UpdateLatestBlockInMessage(latestBlock in
 }
 
 func (bcnc *baseChainMessageContainer) GetExtensions() []*spectypes.Extension {
-	utils.LavaFormatTrace("[Archive Debug] GetExtensions called", utils.LogAttr("extensions", len(bcnc.extensions)))
+	utils.FormatTrace("[Archive Debug] GetExtensions called", utils.LogAttr("extensions", len(bcnc.extensions)))
 	return bcnc.extensions
 }
 
-// OverrideExtensions adds the extensions the request's lava-extension directive names. One that
+// OverrideExtensions adds the extensions the request's router-extension directive names. One that
 // no node on this router offers is recorded, so the reply can tell the caller it was dropped.
 func (bcnc *baseChainMessageContainer) OverrideExtensions(extensionNames []string, extensionParser *extensionslib.ExtensionParser) {
 	bcnc.addExtensions(extensionNames, extensionParser, true)
@@ -188,7 +197,7 @@ func (bcnc *baseChainMessageContainer) addRouterExtensions(extensionNames []stri
 // adds the following extensions. callerRequested says whether the caller asked for them; only
 // then is one that no node offers recorded as unavailable.
 func (bcnc *baseChainMessageContainer) addExtensions(extensionNames []string, extensionParser *extensionslib.ExtensionParser, callerRequested bool) {
-	utils.LavaFormatTrace("[Archive Debug] OverrideExtensions called", utils.LogAttr("extensionNames", extensionNames), utils.LogAttr("existingExtensions", len(bcnc.extensions)))
+	utils.FormatTrace("[Archive Debug] OverrideExtensions called", utils.LogAttr("extensionNames", extensionNames), utils.LogAttr("existingExtensions", len(bcnc.extensions)))
 	existingExtensions := map[string]struct{}{}
 	for _, extension := range bcnc.extensions {
 		existingExtensions[extension.Name] = struct{}{}
@@ -207,12 +216,12 @@ func (bcnc *baseChainMessageContainer) addExtensions(extensionNames []string, ex
 				InternalPath:   bcnc.apiCollection.CollectionData.InternalPath,
 				Addon:          bcnc.apiCollection.CollectionData.AddOn,
 			}
-			utils.LavaFormatTrace("[Archive Debug] Looking for extension", utils.LogAttr("extensionKey", extensionKey), utils.LogAttr("configuredExtensions", extensionParser.GetConfiguredExtensions()))
+			utils.FormatTrace("[Archive Debug] Looking for extension", utils.LogAttr("extensionKey", extensionKey), utils.LogAttr("configuredExtensions", extensionParser.GetConfiguredExtensions()))
 			extension := extensionParser.GetExtension(extensionKey)
 			if extension != nil {
 				bcnc.extensions = append(bcnc.extensions, extension)
 				bcnc.updateCUForApi(extension)
-				utils.LavaFormatTrace("[Archive Debug] Extension added", utils.LogAttr("extensionName", extensionName), utils.LogAttr("totalExtensions", len(bcnc.extensions)))
+				utils.FormatTrace("[Archive Debug] Extension added", utils.LogAttr("extensionName", extensionName), utils.LogAttr("totalExtensions", len(bcnc.extensions)))
 			} else {
 				if callerRequested {
 					// Readers of this list keep the name past the request (the warn-once register's
@@ -222,13 +231,13 @@ func (bcnc *baseChainMessageContainer) addExtensions(extensionNames []string, ex
 					// through would have the next keep-alive request rewrite the name in place.
 					bcnc.unavailableExtensions = append(bcnc.unavailableExtensions, strings.Clone(extensionName))
 				}
-				utils.LavaFormatTrace("[Archive Debug] Extension not found", utils.LogAttr("extensionName", extensionName), utils.LogAttr("extensionKey", extensionKey))
+				utils.FormatTrace("[Archive Debug] Extension not found", utils.LogAttr("extensionName", extensionName), utils.LogAttr("extensionKey", extensionKey))
 			}
 		} else {
-			utils.LavaFormatTrace("[Archive Debug] Extension already exists", utils.LogAttr("extensionName", extensionName))
+			utils.FormatTrace("[Archive Debug] Extension already exists", utils.LogAttr("extensionName", extensionName))
 		}
 	}
-	utils.LavaFormatTrace("[Archive Debug] OverrideExtensions completed", utils.LogAttr("finalExtensions", len(bcnc.extensions)))
+	utils.FormatTrace("[Archive Debug] OverrideExtensions completed", utils.LogAttr("finalExtensions", len(bcnc.extensions)))
 }
 
 // GetUnavailableExtensions returns the extensions the caller requested that no node on this

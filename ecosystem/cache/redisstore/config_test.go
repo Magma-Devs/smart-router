@@ -178,7 +178,7 @@ func listenLocal(t *testing.T) net.Listener {
 // connections — including sentinels DISCOVERED at runtime (SENTINEL sentinels
 // reports peers as IPs, so no exclude list built from configured hostnames can
 // name them) — and sentinels re-dial at arbitrary times. That would make
-// Lava-Cache-Backend, the header a failover is observed through,
+// Router-Cache-Backend, the header a failover is observed through,
 // nondeterministic. The fix discriminates by which CLIENT dials: the failover
 // client's hook chain (markDataDialsHook, installed by buildClient) stamps
 // data-path dials, and the sentinel tracker records marked dials only. This
@@ -191,7 +191,7 @@ func TestSentinelTrackerRecordsOnlyMarkedDataDials(t *testing.T) {
 	sentinelAddr, masterAddr := discoveredSentinel.Addr().String(), master.Addr().String()
 
 	tracker := &endpointTracker{}
-	dial := trackingDialerMarkedOnly(nil, time.Second, tracker)
+	dial := sentinelDialer(nil, time.Second, tracker)
 	markedDial := markDataDialsHook{}.DialHook(dial)
 
 	dialOnce := func(dialFunc func(context.Context, string, string) (net.Conn, error), addr string) {

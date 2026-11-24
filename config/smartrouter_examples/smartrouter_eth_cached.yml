@@ -1,5 +1,5 @@
 # Smart Router Direct RPC Configuration — Ethereum WITH cache
-# Mode: Direct connections to Ethereum JSON-RPC endpoints (no Lava providers!)
+# Mode: Direct connections to Ethereum JSON-RPC endpoints (no provider-relay network — direct upstreams)
 #
 # Same as smartrouter_eth.yml, but with the external cache-be address baked
 # into the config (cache-be: below). Demonstrates config-file-driven caching —
@@ -11,8 +11,8 @@
 #     docker compose -f docker/docker-compose.yml \
 #                    -f docker/docker-compose.cache.yml up --build
 #
-# 2 upstreams, each HTTP + WebSocket (the ETH1 spec requires ws for
-# subscriptions; http-only providers are excluded at startup):
+# 2 upstreams, each HTTP + WebSocket. The ETH1 spec subscribes: an http-only
+# provider serves everything but subscriptions and publishes missing-url:
 #   1. PublicNode
 #   2. Tenderly public gateway
 
