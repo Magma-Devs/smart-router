@@ -171,6 +171,29 @@ func TestSetLatestBlock_ProvisionalOnlyWhenNothingCheckedTheBlock(t *testing.T) 
 	require.False(t, cs.provisional, "an advance under the baseline's guard was checked")
 }
 
+// TestRecompute_AMajorityEndsAProvisionalTip: a fresh majority that agrees with the tip has checked it,
+// even when it leaves the tip where it is. A url far below that tip and moving forward is a url that lags,
+// so it must not take the tip down, nor be reported as a regression.
+func TestRecompute_AMajorityEndsAProvisionalTip(t *testing.T) {
+	cs, clk, got := newRegressionState(t) // OutlierThreshold 100, StalenessWindow 10 s
+	cs.SetLatestBlock(1000)               // the first observation: provisional
+	now := clk.now()
+	cs.Recompute([]BlockObservation{
+		{URL: "a", Block: 1000, ObservedAt: now},
+		{URL: "c", Block: 1000, ObservedAt: now},
+		{URL: "b", Block: 500, ObservedAt: now},
+	})
+	require.Equal(t, int64(1000), cs.GetLatestBlockAllowStale(), "precondition: the majority left the tip where it was")
+	require.False(t, cs.provisional, "a fresh majority checked the tip")
+
+	clk.advance(time.Second)
+	cs.NoteAnswer("b", 500) // a url far behind
+	clk.advance(time.Second)
+	cs.NoteAnswer("b", 501) // that moves forward
+	require.Equal(t, int64(1000), cs.GetLatestBlockAllowStale(), "a url that lags does not take a tip the majority confirmed")
+	require.Empty(t, *got)
+}
+
 // TestReset_ForgetsTheFallRuns: a run counted before Reset must not move the tip after it.
 func TestReset_ForgetsTheFallRuns(t *testing.T) {
 	cs, clk := newTestState(t)

@@ -244,7 +244,7 @@ type ChainState struct {
 	// advanced since (MAG-5450). A load balancer's bad backend may have given it, and its repeats would
 	// keep it fresh for ever while the url's tip store drops the good backend's lower answers. While it
 	// holds, NoteAnswer replaces the tip with a url's head far below it once that head moves forward
-	// (fallRuns). Any guarded advance, and every tip Recompute sets, clears it.
+	// (fallRuns). Any guarded advance, every tip Recompute sets, and a fresh majority baseline clear it.
 	provisional bool
 	// fallRuns holds, per url, the run of answers that url has given more than OutlierThreshold below
 	// a provisional tip, fed by NoteAnswer (MAG-5450). Empty whenever the tip is not provisional.
@@ -813,7 +813,6 @@ func (cs *ChainState) Recompute(snapshots []BlockObservation) {
 			cs.lastObservedAt = nowReal
 			cs.latestSince = nowReal
 			cs.initialized = true
-			cs.setProvisionalLocked(false)
 		case cs.latestBlock < baseline:
 			// Pull UP: the majority is ahead of the tip. Without this the tip could sit below
 			// consensus indefinitely — every consumer now reads the tip (D1/D4), so a trailing
@@ -827,8 +826,11 @@ func (cs *ChainState) Recompute(snapshots []BlockObservation) {
 			// "latestBlock > 0 ⟹ initialized", so SetLatestBlock's guards and the cold-start
 			// fallbacks cannot mistake a consensus-seeded tip for "never observed anything".
 			cs.initialized = true
-			cs.setProvisionalLocked(false)
 		}
+		// The majority has checked the tip, whether it moved it or left it inside the band, so the tip
+		// is not provisional (MAG-5450). A url's head far below a tip the majority confirmed is a url
+		// that lags, not the good backend of a balancer whose bad backend answered first.
+		cs.setProvisionalLocked(false)
 	} else if since := cs.rejectedSinceLocked(evalNow); !since.IsZero() && sole.ObservedAt.After(since) && sole.Block > cs.latestBlock &&
 		cs.jumpHeldLocked(sole.URL, evalNow) {
 		// Sole-voter pull-up (MAG-4964). With one fresh voter there is no majority to lift the tip past
