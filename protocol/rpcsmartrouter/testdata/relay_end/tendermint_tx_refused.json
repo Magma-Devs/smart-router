@@ -4,18 +4,19 @@
   "attempts": [
     {
       "batch": 0,
-      "error_code": "",
+      "error_code": "CHAIN_INSUFFICIENT_FUNDS",
       "latency_ms": "<ms>",
-      "message": "",
-      "outcome": "ok",
+      "message": "cosmos tx refused: code 5, codespace sdk: insufficient funds: 10uatom is smaller than 20uatom",
+      "outcome": "node_error",
+      "retryable": false,
       "returned_to_client": true,
       "sent_ms": "<ms>",
       "upstream": "node-a"
     }
   ],
-  "chain": "LAVA",
-  "error": "",
-  "error_code": "",
+  "chain": "COSMOSHUB",
+  "error": "cosmos tx refused: code 5, codespace sdk: insufficient funds: 10uatom is smaller than 20uatom",
+  "error_code": "CHAIN_INSUFFICIENT_FUNDS",
   "event": "relay_end",
   "has_reply": true,
   "is_batch": false,
@@ -23,7 +24,7 @@
   "level": "info",
   "message": "relay_end",
   "method": "broadcast_tx_sync",
-  "outcome": "ok",
+  "outcome": "node_error",
   "reply_bytes": 150,
   "request_bytes": 80,
   "schema": 2,
@@ -31,8 +32,8 @@
   "served_by": "node-a",
   "stateful": true,
   "status": 200,
-  "stop_reason": "Success",
+  "stop_reason": "Stateful",
   "tx_code": 5,
   "tx_codespace": "sdk",
-  "tx_log": "insufficient funds: 10ulava is smaller than 20ulava"
+  "tx_log": "insufficient funds: 10uatom is smaller than 20uatom"
 }

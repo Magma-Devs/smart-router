@@ -81,7 +81,7 @@ func (s *State) overrideRel() string {
 
 // specArg is the value passed to the router's --use-static-spec (via SR_SPEC):
 // the bundled "specs/" dir when the catalog came from local, otherwise the
-// lava-specs GitHub URL so chains absent from the image (e.g. LAV1) resolve.
+// lava-specs GitHub URL so chains absent from the image (e.g. OSMOSIS) resolve.
 // This mirrors syncHealthSpecs on the wizard's own health prober.
 func (s *State) specArg() string {
 	if s.Source == "local" || s.Source == "" {

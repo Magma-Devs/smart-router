@@ -75,11 +75,11 @@ func failedReplyInterfaces() []failedReplyInterface {
 			method: http.MethodPost, path: "/", body: `{"jsonrpc":"2.0","id":77,"method":"eth_blockNumber","params":[]}`, jsonRpcShape: true,
 		},
 		{
-			name: "rest", chainID: "LAVA", apiInterface: spectypes.APIInterfaceRest, parser: mockParser("LAVA", spectypes.APIInterfaceRest),
+			name: "rest", chainID: "COSMOSHUB", apiInterface: spectypes.APIInterfaceRest, parser: mockParser("COSMOSHUB", spectypes.APIInterfaceRest),
 			method: http.MethodGet, path: "/cosmos/base/tendermint/v1beta1/blocks/17",
 		},
 		{
-			name: "tendermintrpc", chainID: "LAVA", apiInterface: spectypes.APIInterfaceTendermintRPC, parser: mockParser("LAVA", spectypes.APIInterfaceTendermintRPC),
+			name: "tendermintrpc", chainID: "COSMOSHUB", apiInterface: spectypes.APIInterfaceTendermintRPC, parser: mockParser("COSMOSHUB", spectypes.APIInterfaceTendermintRPC),
 			method: http.MethodPost, path: "/", body: `{"jsonrpc":"2.0","id":77,"method":"status","params":[]}`, jsonRpcShape: true,
 		},
 		{

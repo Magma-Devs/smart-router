@@ -15,7 +15,7 @@ import (
 
 // The slot-already-used replies of writeInterfaceCases' chains (PRD §5.2, MAG-5593): the EVM node's
 // "nonce too low" on ETH1 (and, as a text row, on Sui's GraphQL), the Cosmos SDK's sequence mismatch
-// on LAVA. Each is what a node answers the second copy of a transaction it already holds.
+// on COSMOSHUB. Each is what a node answers the second copy of a transaction it already holds.
 var slotAlreadyUsedBodies = map[string]string{
 	"jsonrpc": `{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"nonce too low"}}`,
 	"rest":    `{"code":32,"message":"account sequence mismatch, expected 5, got 3: incorrect account sequence","details":[]}`,

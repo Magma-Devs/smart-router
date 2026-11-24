@@ -30,7 +30,7 @@ func TestStateMachine_NonPositiveAttemptWindowDoesNotEndTheProcess(t *testing.T)
 		t.Run(window.String(), func(t *testing.T) {
 			ctx := context.Background()
 			chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(
-				ctx, "LAVA", spectypes.APIInterfaceRest,
+				ctx, "COSMOSHUB", spectypes.APIInterfaceRest,
 				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }),
 				nil, "../../", nil)
 			if closeServer != nil {
