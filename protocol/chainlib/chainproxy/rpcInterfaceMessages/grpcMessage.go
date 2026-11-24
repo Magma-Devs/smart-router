@@ -33,6 +33,9 @@ type GrpcMessage struct {
 	Registry *dyncodec.Registry
 	Codec    *dyncodec.Codec
 	chainproxy.BaseMessage
+
+	// chainRows is the chain's gRPC list (MAG-5186), nil on a chain without one (SetChainFamily).
+	chainRows *grpcChainRows
 }
 
 // get msg hash byte array containing all the relevant information for a unique request. (headers / api / params)
