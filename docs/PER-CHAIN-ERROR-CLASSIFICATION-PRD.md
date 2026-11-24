@@ -1,4 +1,4 @@
-# Per-chain error classification in lava-specs (MAG-4910, revision 12)
+# Per-chain error classification in lava-specs (MAG-4910, revision 13)
 
 Implementation spec. Approval, by Nimrod or Tom: the **contract**, which freezes `schema_version` 1
 so MAG-4898 can start on it: the `errors` section, rows, shapes, classes and reasons, write verdicts
@@ -14,11 +14,14 @@ yields (§10 lists those lines), and a later rulebook edit reaches this spec onl
 revision of it. The full reasoning and revision history are in this file's git history
 (`861d71a2`).
 
-**Decisions that depart from the ticket** (MAG-4910 updated 17 Nov 2026):
+**Must-haves 1 and 2 stay in scope** (Omer, 17 Nov 2026): MAG-2673 (Nimrod, in the epic) delivers
+the tags, the change log per tag, pinned loading of a tenant's own source and the dashboard view of
+the loaded version; this spec delivers the compatibility file, the release pair, the bundled commit
+and the loaded-source log and gauge (§6), and MAG-2673 is done before spec rows act on live traffic
+(§7 Step 2).
 
-- Must-have 1 (spec versioning: tags, change log, source pinning) is out of scope. Routers load
-  whatever source they're given, and a release is tied to the lava-specs commit it bundles; the
-  router logs and exports the source and commit it loaded (§6).
+**Decisions that depart from the ticket** (MAG-4910 updated 17 and 24 Nov 2026):
+
 - Status rules are the rulebook's (Part I §1; here §3.2): the status alone decides HTTP 401, 402,
   403 and 429 and gRPC PERMISSION_DENIED and UNAUTHENTICATED, and gRPC RESOURCE_EXHAUSTED by its
   own rule; any other well-formed error is decided by its row, a chain's row included, whatever the
@@ -703,6 +706,9 @@ keep the connection rules.
   `make specs` fills `specs/` from it; CI compares byte-for-byte. Router CI runs the validator over
   every bundled section. `grpctest.json` moves to a test fixture directory. Release notes name the
   pair.
+- Tags, the change log per tag, pinned loading of a tenant's own source and the dashboard view of
+  the loaded version are MAG-2673's (Nimrod, in the epic). Once it lands, `SPEC_COMMIT` is the
+  commit of the tag the release names, and the release notes name the tag.
 - No `--use-static-spec` → bundled specs (today the router refuses to start,
   `CreateSmartRouterEndpoint`). `--use-static-spec` still takes any URL or folder, unpinned: its api
   definitions load as today under the write-method lock (§5.3), and its `errors` sections are
@@ -802,8 +808,8 @@ coverage at the family stage as well as the final verdict, per interface.
 | tables deleted (next release) | prefix, spec rows and router-owned XRP rows (§3.2 step 4), transport | same |
 
 `all` decides which rows classify; it is not `write_rows`, which alone switches on write verdicts
-read from a body (§2.1). Before `reads`: the docs (§10) are out, and MAG-2673's prerequisite for
-rows on live traffic is settled (§10). Record the bundled commit, window start/end and observed
+read from a body (§2.1). Before `reads`: the docs (§10) are out, and MAG-2673 is done (§6; Omer,
+17 Nov). Record the bundled commit, window start/end and observed
 coverage per chain, interface and scope (denominators: `smartrouter_requests_read_total` and
 `smartrouter_requests_write_total`, summed by `spec` and `apiInterface`); a new bundle or a
 mismatch restarts the window; exercise unused rows with fixtures. Rollback before deletion =
@@ -1055,14 +1061,14 @@ description names the rule (`stateful`).
 | Source evidence and production examples for migrated rows; the R&D owners team for verdict, class, reason and shape review | Step 1 |
 | Signing, so a policy can act from any source (§5.4): MAG-5612, a later ticket | rows must reach routers faster than releases |
 | The Helm default's fleet rollout (§6), MAG-5601's chart and infra steps: the chart-bump cadence, and the serving-probe catalog built at the bundled commit | Step 0's bundled specs reach the fleet |
-| MAG-2673 (lava-specs versioning) makes tags, a change log and a pinned version a prerequisite for rows acting on live traffic; this spec meets the need with the bundled commit, the release pair and `smartrouter_spec_source_info` (§6), and leaves tags out. Nimrod confirms or keeps tags as the prerequisite | Step 2 `reads` |
+| MAG-2673 (Nimrod, in the epic): tags, a change log per tag, pinned loading of a tenant's own source and the dashboard view of the loaded version; a prerequisite for rows acting on live traffic (Omer, 17 Nov; §6) | Step 2 `reads` |
 | `source="client"` in infra's `docs/SLA-QUERIES.md` and `scripts/investigate.py` and in the dashboard's error pivots (§7 Step 0): MAG-5598's infra and dashboard steps, before its router step | Step 0's `source` label ships |
 | Signature, duplicate and shape candidates per interface (§5.2, §2.4): MAG-4898's evidence for each | each ships |
 | create-spec agent keeps unknown keys in update modes by construction; new-chain mode needs a template (MAG-4898 part 3); add a test in `scripts/test_*.sh` | Step 3 |
 | Effort: ticket said 6–8 engineer-weeks; revision 2 split ≈9; bundled-only (§5.4) drops the approval pipeline; the prefix, chain-defined verdicts, shapes, answer rows and write verdicts, and interface parity (record, per-interface fixtures) add to it | R&D sizes the epic |
 
 Later: customer overrides as an overlay file (read rows, same validator, own approval path; Q229: an
-override may only make a write reply safer); spec versioning if picked up again.
+override may only make a write reply safer).
 
 ## Appendix A. Code map (smart-router `b1712ee8`, by file and symbol)
 
