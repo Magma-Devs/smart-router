@@ -3244,9 +3244,9 @@ func (m *cvGuardStateMachine) GetCrossValidationParams() *common.CrossValidation
 func (m *cvGuardStateMachine) GetUsedProviders() *routersession.UsedProviders   { return m.usedProviders }
 func (m *cvGuardStateMachine) SetResultsChecker(rc relaycore.ResultsCheckerInf) {}
 
-// lavaRESTMetrics is a no-op MetricsInterface + ChainIdAndApiInterfaceGetter for the relay
-// processors these tests build by hand, on LAVA's REST interface.
-var lavaRESTMetrics = &relaycoretest.RelayProcessorMetricsMock{ChainID: "LAVA", APIInterface: "rest"}
+// hubRESTMetrics is a no-op MetricsInterface + ChainIdAndApiInterfaceGetter for the relay
+// processors these tests build by hand, on COSMOSHUB's REST interface.
+var hubRESTMetrics = &relaycoretest.RelayProcessorMetricsMock{ChainID: "COSMOSHUB", APIInterface: "rest"}
 
 // TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesAllSessions is the
 // regression catch for commit 97266e4. When filterEndpointsByConsistency drops
@@ -3272,7 +3272,7 @@ func TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesAllSessions(t *t
 		w.WriteHeader(http.StatusOK)
 	})
 	chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(
-		ctx, "LAVA", spectypes.APIInterfaceRest, noopHandler, nil, "../../", nil)
+		ctx, "COSMOSHUB", spectypes.APIInterfaceRest, noopHandler, nil, "../../", nil)
 	if closeServer != nil {
 		defer closeServer()
 	}
@@ -3333,7 +3333,7 @@ func TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesAllSessions(t *t
 	// CrossValidation, AgreementThreshold=2. Filter drops 2 of 3 → guard fires (1 < 2).
 	cvParams := &common.CrossValidationParams{MaxParticipants: 3, AgreementThreshold: 2}
 	sm := &cvGuardStateMachine{usedProviders: usedProviders, cvParams: cvParams}
-	metricsStub := lavaRESTMetrics
+	metricsStub := hubRESTMetrics
 	relayProcessor := relaycore.NewRelayProcessor(
 		ctx, cvParams, metricsStub, metricsStub,
 		sm)

@@ -95,7 +95,7 @@ func startCacheServerWithNonFinalizedTTLForTest(t *testing.T, nonFinalized time.
 func buildRestProtocolMessage(t *testing.T, ctx context.Context, seenBlock int64) (chainlib.ChainParser, chainlib.ProtocolMessage) {
 	t.Helper()
 	serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
-	chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, "LAVA", spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
+	chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, "COSMOSHUB", spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 	if closeServer != nil {
 		t.Cleanup(closeServer)
 	}

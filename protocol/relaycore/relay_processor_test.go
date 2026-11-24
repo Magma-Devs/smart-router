@@ -93,7 +93,7 @@ func TestRelayProcessorHappyFlow(t *testing.T) {
 			// Handle the incoming request and provide the desired response
 			w.WriteHeader(http.StatusOK)
 		})
-		specId := "LAVA"
+		specId := "COSMOSHUB"
 		chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 		if closeServer != nil {
 			defer closeServer()
@@ -143,7 +143,7 @@ func TestRelayProcessorTimeout(t *testing.T) {
 			// Handle the incoming request and provide the desired response
 			w.WriteHeader(http.StatusOK)
 		})
-		specId := "LAVA"
+		specId := "COSMOSHUB"
 		chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 		if closeServer != nil {
 			defer closeServer()
@@ -196,7 +196,7 @@ func TestRelayProcessorRetry(t *testing.T) {
 			// Handle the incoming request and provide the desired response
 			w.WriteHeader(http.StatusOK)
 		})
-		specId := "LAVA"
+		specId := "COSMOSHUB"
 		chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 		if closeServer != nil {
 			defer closeServer()
@@ -244,7 +244,7 @@ func TestRelayProcessorExhaustedTransportErrors(t *testing.T) {
 		serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 		})
-		specId := "LAVA"
+		specId := "COSMOSHUB"
 		chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 		if closeServer != nil {
 			defer closeServer()
@@ -290,7 +290,7 @@ func TestRelayProcessorRetryNodeError(t *testing.T) {
 			// Handle the incoming request and provide the desired response
 			w.WriteHeader(http.StatusOK)
 		})
-		specId := "LAVA"
+		specId := "COSMOSHUB"
 		chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 		if closeServer != nil {
 			defer closeServer()
@@ -338,7 +338,7 @@ func TestRelayProcessorStatefulApi(t *testing.T) {
 			// Handle the incoming request and provide the desired response
 			w.WriteHeader(http.StatusOK)
 		})
-		specId := "LAVA"
+		specId := "COSMOSHUB"
 		chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 		if closeServer != nil {
 			defer closeServer()
@@ -393,7 +393,7 @@ func TestRelayProcessorStatefulApiErr(t *testing.T) {
 			// Handle the incoming request and provide the desired response
 			w.WriteHeader(http.StatusOK)
 		})
-		specId := "LAVA"
+		specId := "COSMOSHUB"
 		chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 		if closeServer != nil {
 			defer closeServer()
@@ -441,7 +441,7 @@ func TestRelayProcessorLatest(t *testing.T) {
 			// Handle the incoming request and provide the desired response
 			w.WriteHeader(http.StatusOK)
 		})
-		specId := "LAVA"
+		specId := "COSMOSHUB"
 		chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 		if closeServer != nil {
 			defer closeServer()
@@ -582,7 +582,7 @@ func TestHasRequiredNodeResultsCrossValidationScenarios(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
 			// Create a minimal protocol message to avoid nil pointer panic
-			chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, "LAVA", spectypes.APIInterfaceRest, nil, nil, "../../", nil)
+			chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, "COSMOSHUB", spectypes.APIInterfaceRest, nil, nil, "../../", nil)
 			if closeServer != nil {
 				defer closeServer()
 			}
@@ -666,7 +666,7 @@ func TestStatelessReturnsFirstNodeError(t *testing.T) {
 		serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 		})
-		specId := "LAVA"
+		specId := "COSMOSHUB"
 		chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 		if closeServer != nil {
 			defer closeServer()
@@ -728,7 +728,7 @@ func TestStatelessReturnsTheNonRetryableNodeError_MAG2771(t *testing.T) {
 	serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, "LAVA", spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
+	chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, "COSMOSHUB", spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 	if closeServer != nil {
 		defer closeServer()
 	}
@@ -786,7 +786,7 @@ func TestNodeErrorCrossValidationNotMet(t *testing.T) {
 		serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 		})
-		specId := "LAVA"
+		specId := "COSMOSHUB"
 		chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 		if closeServer != nil {
 			defer closeServer()
@@ -845,7 +845,7 @@ func TestStatelessReturnsNodeErrorOverProtocolError(t *testing.T) {
 		serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 		})
-		specId := "LAVA"
+		specId := "COSMOSHUB"
 		chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 		if closeServer != nil {
 			defer closeServer()
@@ -908,7 +908,7 @@ func TestNodeErrorPrioritizedOverProtocolErrors(t *testing.T) {
 		serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 		})
-		specId := "LAVA"
+		specId := "COSMOSHUB"
 		chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 		if closeServer != nil {
 			defer closeServer()
@@ -973,7 +973,7 @@ func TestNodeErrorPrioritizedOverProtocolErrors(t *testing.T) {
 		serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 		})
-		specId := "LAVA"
+		specId := "COSMOSHUB"
 		chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 		if closeServer != nil {
 			defer closeServer()
@@ -1047,7 +1047,7 @@ func TestSuccessCrossValidationTakesPriorityOverNodeError(t *testing.T) {
 		serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 		})
-		specId := "LAVA"
+		specId := "COSMOSHUB"
 		chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 		if closeServer != nil {
 			defer closeServer()
@@ -1116,7 +1116,7 @@ func TestNodeErrorCrossValidationWhenSuccessInsufficient(t *testing.T) {
 		serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 		})
-		specId := "LAVA"
+		specId := "COSMOSHUB"
 		chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 		if closeServer != nil {
 			defer closeServer()
@@ -1183,7 +1183,7 @@ func TestSuccessCrossValidationIgnoresNodeErrors(t *testing.T) {
 		serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 		})
-		specId := "LAVA"
+		specId := "COSMOSHUB"
 		chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 		if closeServer != nil {
 			defer closeServer()
@@ -1258,7 +1258,7 @@ func TestSuccessCrossValidationFailsWhenCrossValidationDisabled(t *testing.T) {
 		serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 		})
-		specId := "LAVA"
+		specId := "COSMOSHUB"
 		chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 		if closeServer != nil {
 			defer closeServer()
@@ -1619,7 +1619,7 @@ func TestGetResultsSummary_NonRetryableFlag(t *testing.T) {
 			serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(http.StatusOK)
 			})
-			chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, "LAVA", spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
+			chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, "COSMOSHUB", spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 			if closeServer != nil {
 				defer closeServer()
 			}
@@ -1687,7 +1687,7 @@ func TestCrossValidationEmptyArrayResponse(t *testing.T) {
 	serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	specId := "LAVA"
+	specId := "COSMOSHUB"
 	chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 	if closeServer != nil {
 		defer closeServer()
@@ -1745,7 +1745,7 @@ func TestCrossValidationEmptyObjectResponse(t *testing.T) {
 	serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	specId := "LAVA"
+	specId := "COSMOSHUB"
 	chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 	if closeServer != nil {
 		defer closeServer()
@@ -1814,7 +1814,7 @@ func TestCrossValidationUniformBehaviorDeterministicAndNonDeterministic(t *testi
 			serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(http.StatusOK)
 			})
-			specId := "LAVA"
+			specId := "COSMOSHUB"
 			chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 			if closeServer != nil {
 				defer closeServer()
@@ -1876,7 +1876,7 @@ func TestCrossValidationUniformBehaviorDeterministicAndNonDeterministic(t *testi
 			serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(http.StatusOK)
 			})
-			specId := "LAVA"
+			specId := "COSMOSHUB"
 			chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 			if closeServer != nil {
 				defer closeServer()
@@ -1948,7 +1948,7 @@ func TestCrossValidationMaxParticipantsFanOut(t *testing.T) {
 	serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	specId := "LAVA"
+	specId := "COSMOSHUB"
 	chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 	if closeServer != nil {
 		defer closeServer()
@@ -2018,7 +2018,7 @@ func TestCrossValidationRequiresNonNilParams(t *testing.T) {
 	serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	specId := "LAVA"
+	specId := "COSMOSHUB"
 	chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 	if closeServer != nil {
 		defer closeServer()
@@ -2088,7 +2088,7 @@ func TestHasRequiredNodeResults_RelayRetryLimit(t *testing.T) {
 			serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(http.StatusOK)
 			})
-			specId := "LAVA"
+			specId := "COSMOSHUB"
 			chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 			if closeServer != nil {
 				defer closeServer()
@@ -2170,7 +2170,7 @@ func TestHasRequiredNodeResults_RelayRetryLimitProtocolError(t *testing.T) {
 			serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(http.StatusOK)
 			})
-			specId := "LAVA"
+			specId := "COSMOSHUB"
 			chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 			if closeServer != nil {
 				defer closeServer()
@@ -2256,7 +2256,7 @@ func TestHasRequiredNodeResults_RelayRetryLimitMixed(t *testing.T) {
 			serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(http.StatusOK)
 			})
-			specId := "LAVA"
+			specId := "COSMOSHUB"
 			chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 			if closeServer != nil {
 				defer closeServer()
@@ -2310,7 +2310,7 @@ func TestCrossValidationAgreesOnDifferentKeyOrder(t *testing.T) {
 	serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	specId := "LAVA"
+	specId := "COSMOSHUB"
 	chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 	if closeServer != nil {
 		defer closeServer()

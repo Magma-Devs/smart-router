@@ -37,7 +37,7 @@ func TestRelayProcessor_CountsEachNodeErrorInTheRoutersOwnTally(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
 			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
-			chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, "LAVA", spectypes.APIInterfaceRest, handler, nil, "../../", nil)
+			chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, "COSMOSHUB", spectypes.APIInterfaceRest, handler, nil, "../../", nil)
 			if closeServer != nil {
 				defer closeServer()
 			}

@@ -110,7 +110,7 @@ func TestDirectRelay_CountsTheRelayOnTheURLItWentTo(t *testing.T) {
 	const provider = "provider@mag4204Relays"
 	const path = "/cosmos/base/tendermint/v1beta1/blocks/17"
 	parser, _, _, closeServer, endpoint, err := chainlibtest.CreateChainLibMocks(
-		ctx, "LAVA", spectypes.APIInterfaceRest, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx, "COSMOSHUB", spectypes.APIInterfaceRest, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"block":{"header":{"height":"17"}}}`))
 		}), nil, "../../", nil)

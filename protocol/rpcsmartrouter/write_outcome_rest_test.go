@@ -81,7 +81,7 @@ func TestRESTListener_WriteOutcome(t *testing.T) {
 			}
 			var requests atomic.Int32
 			parser, _, _, closeServer, endpoint, err := chainlibtest.CreateChainLibMocks(
-				ctx, "LAVA", spectypes.APIInterfaceRest, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				ctx, "COSMOSHUB", spectypes.APIInterfaceRest, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					requests.Add(1)
 					assert.Equal(t, tc.method, r.Method)
 					assert.Equal(t, path, r.URL.Path)

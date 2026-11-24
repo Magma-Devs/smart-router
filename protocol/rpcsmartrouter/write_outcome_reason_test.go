@@ -93,7 +93,7 @@ func sendRESTWriteThroughListener(t *testing.T, upstreams []restWriteUpstream) r
 	}
 
 	parser, _, _, closeServer, endpoint, err := chainlibtest.CreateChainLibMocks(
-		ctx, "LAVA", spectypes.APIInterfaceRest, handlerFor(upstreams[0]), nil, "../../", nil)
+		ctx, "COSMOSHUB", spectypes.APIInterfaceRest, handlerFor(upstreams[0]), nil, "../../", nil)
 	require.NoError(t, err)
 	t.Cleanup(closeServer)
 

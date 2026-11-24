@@ -366,7 +366,7 @@ func TestRESTListener_HedgedLoserCountsAsARetry(t *testing.T) {
 	markLoserCancelled := sync.OnceFunc(func() { close(loserCancelled) })
 
 	parser, _, _, closeServer, slowNode, err := chainlibtest.CreateChainLibMocks(
-		ctx, "LAVA", spectypes.APIInterfaceRest, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx, "COSMOSHUB", spectypes.APIInterfaceRest, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path != path {
 				w.WriteHeader(http.StatusNotFound)
 				return

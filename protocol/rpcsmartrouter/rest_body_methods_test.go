@@ -46,7 +46,7 @@ func TestRESTListener_PutAndPatchBodiesReachTheNode(t *testing.T) {
 
 			received := make(chan nodeRequest, 1)
 			parser, _, _, closeServer, endpoint, err := chainlibtest.CreateChainLibMocks(
-				ctx, "LAVA", spectypes.APIInterfaceRest, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				ctx, "COSMOSHUB", spectypes.APIInterfaceRest, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					data, readErr := io.ReadAll(r.Body)
 					assert.NoError(t, readErr)
 					select {

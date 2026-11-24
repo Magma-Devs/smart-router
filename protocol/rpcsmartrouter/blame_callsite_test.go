@@ -64,7 +64,7 @@ func TestBlameAtCallSite(t *testing.T) {
 			defer close(release)
 
 			chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(
-				ctx, "LAVA", spectypes.APIInterfaceRest,
+				ctx, "COSMOSHUB", spectypes.APIInterfaceRest,
 				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }),
 				nil, "../../", nil)
 			if closeServer != nil {
@@ -104,7 +104,7 @@ func TestBlameAtCallSite(t *testing.T) {
 			require.NoError(t, session.SetUsageForSession(0, nil, usedProviders, routersession.NewRouterKey(nil)))
 
 			sm := &budgetCallSiteStateMachine{usedProviders: usedProviders, protocolMessage: protocolMsg}
-			relayProcessor := relaycore.NewRelayProcessor(ctx, nil, lavaRESTMetrics, lavaRESTMetrics,
+			relayProcessor := relaycore.NewRelayProcessor(ctx, nil, hubRESTMetrics, hubRESTMetrics,
 				sm)
 			// The dispatcher reads this to decide, exactly as ProcessRelaySend sets it before the
 			// deferred cancel that releases the goroutines.

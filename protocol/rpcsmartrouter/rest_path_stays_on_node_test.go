@@ -35,7 +35,7 @@ func TestRESTRelay_ClientPathNeverChangesTheUpstreamHost(t *testing.T) {
 	type upstreamRequest struct{ host, requestURI string }
 	received := make(chan upstreamRequest, 1)
 	chainParser, _, _, closeServer, endpoint, err := chainlibtest.CreateChainLibMocks(
-		ctx, "LAVA", spectypes.APIInterfaceRest,
+		ctx, "COSMOSHUB", spectypes.APIInterfaceRest,
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			received <- upstreamRequest{host: r.Host, requestURI: r.RequestURI}
 			w.Header().Set("Content-Type", "application/json")

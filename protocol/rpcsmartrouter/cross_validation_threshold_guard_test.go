@@ -45,7 +45,7 @@ func TestSendRelayToEndpoint_ThresholdGuardReleasesGatheredSessions(t *testing.T
 		w.WriteHeader(http.StatusOK)
 	})
 	chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(
-		ctx, "LAVA", spectypes.APIInterfaceRest, noopHandler, nil, "../../", nil)
+		ctx, "COSMOSHUB", spectypes.APIInterfaceRest, noopHandler, nil, "../../", nil)
 	if closeServer != nil {
 		defer closeServer()
 	}
@@ -96,7 +96,7 @@ func TestSendRelayToEndpoint_ThresholdGuardReleasesGatheredSessions(t *testing.T
 	cvParams := &common.CrossValidationParams{MaxParticipants: 3, AgreementThreshold: 3}
 	usedProviders := routersession.NewUsedProviders(nil)
 	sm := &cvGuardStateMachine{usedProviders: usedProviders, cvParams: cvParams, protocolMessage: protocolMsg}
-	metricsStub := lavaRESTMetrics
+	metricsStub := hubRESTMetrics
 	relayProcessor := relaycore.NewRelayProcessor(
 		ctx, cvParams, metricsStub, metricsStub, sm)
 
@@ -159,7 +159,7 @@ func TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesASessionlessEntr
 		w.WriteHeader(http.StatusOK)
 	})
 	chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(
-		ctx, "LAVA", spectypes.APIInterfaceRest, noopHandler, nil, "../../", nil)
+		ctx, "COSMOSHUB", spectypes.APIInterfaceRest, noopHandler, nil, "../../", nil)
 	if closeServer != nil {
 		defer closeServer()
 	}
@@ -172,7 +172,7 @@ func TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesASessionlessEntr
 
 	cvParams := &common.CrossValidationParams{MaxParticipants: 2, AgreementThreshold: 2}
 	sm := &cvGuardStateMachine{usedProviders: usedProviders, cvParams: cvParams}
-	metricsStub := lavaRESTMetrics
+	metricsStub := hubRESTMetrics
 	relayProcessor := relaycore.NewRelayProcessor(
 		ctx, cvParams, metricsStub, metricsStub, sm)
 
@@ -208,7 +208,7 @@ func TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesADegradedSession
 		w.WriteHeader(http.StatusOK)
 	})
 	chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(
-		ctx, "LAVA", spectypes.APIInterfaceRest, noopHandler, nil, "../../", nil)
+		ctx, "COSMOSHUB", spectypes.APIInterfaceRest, noopHandler, nil, "../../", nil)
 	if closeServer != nil {
 		defer closeServer()
 	}
@@ -238,7 +238,7 @@ func TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesADegradedSession
 
 	cvParams := &common.CrossValidationParams{MaxParticipants: 2, AgreementThreshold: 2}
 	sm := &cvGuardStateMachine{usedProviders: usedProviders, cvParams: cvParams}
-	metricsStub := lavaRESTMetrics
+	metricsStub := hubRESTMetrics
 	relayProcessor := relaycore.NewRelayProcessor(ctx, cvParams, metricsStub, metricsStub, sm)
 
 	rpcss := &RPCSmartRouterServer{

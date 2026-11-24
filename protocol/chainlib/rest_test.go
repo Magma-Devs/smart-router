@@ -74,7 +74,7 @@ func TestRestChainProxy(t *testing.T) {
 }
 
 func TestParsingRequestedBlocksHeadersRest(t *testing.T) {
-	requireLatestInMetadataSetsTheRequestedBlock(t, "LAVA", spectypes.APIInterfaceRest, func(headerName *string) http.HandlerFunc {
+	requireLatestInMetadataSetsTheRequestedBlock(t, "COSMOSHUB", spectypes.APIInterfaceRest, func(headerName *string) http.HandlerFunc {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 			if r.Header.Get(*headerName) != "" {
