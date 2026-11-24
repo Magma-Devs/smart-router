@@ -839,3 +839,52 @@ One finding for MAG-5254: the REST rows give a 404 two verdicts by which input c
 as the code reads `NODE_DATA_NOT_HELD` (`httpStatusCodeMappings`), the status in the text reads
 `NODE_ENDPOINT_NOT_FOUND` (`httpStatusMessageMappings`). The record carries the status in its own
 field and so reads the first, as the live REST sender does.
+
+## 11. The matching order: the prefix ahead of spec rows, and the XRP rows that stay in code (MAG-5597, PRD §3.2, §5.1, §5.5)
+
+`common.ClassifyInOrder` runs the PRD's order on a reply's record, first match wins, and says which
+stage decided (`Verdict.Stage`):
+
+| Stage | PRD step | What decides |
+|---|---|---|
+| `no_reply` | 1 | a connection-level fault the caller found (`DetectConnectionError`, `DetectConnectionErrorInReplyText`) |
+| `write_row` | 2 | on a write copy, once the chain's `write_rows` names the interface, its success and duplicate rows (`write: took_it`); a success row with `at` reads the body under any status, a plain success beats a duplicate; `Verdict.TookIt` |
+| `status` | 3 | HTTP 429 → `NODE_RATE_LIMITED`, whatever the body, on every interface; on gRPC RESOURCE_EXHAUSTED the chain's over-limit row (`class: C2, reason: over_limit`) first |
+| `xrp_first` | 4.1 | the router-owned XRP rows that come first: `tooBusy`/`slowDown`, `tefALREADY`, `noPermission`/`forbidden` (`xrpFirstRows`) |
+| `spec_row` | 4.2 | the chain's rows (`common.MatchErrorRow`), filtered by interface, method and scope, every match key holding |
+| `router_rows` | 4.3, 6 | the router's own tables through `ClassifyRecord`: the XRP catch-all and the family rows, then the transport rows with their status rows |
+
+**The prefix** (steps 1 to 3, §5.1) is router code ahead of every spec row, whatever a row's text says,
+with the two exceptions the rulebook sets as hooks: the write rows at step 2 and the over-limit row at
+step 3. `common.ClassifyPrefix` is the prefix alone; the results manager runs it on every node error
+and then, when it leaves the reply to the rows, today's `ClassifyError` with the inputs those rows
+read today. What the prefix decides today is main's verdict: no direct sender files a 429 as a node
+error (MAG-3030: the attempt fails on the status alone), so a 429 reaching the rows is a rate limit on
+every interface already. The rulebook's other status rules, 401, 402 and 403 and gRPC
+PERMISSION_DENIED and UNAUTHENTICATED as `C6` whatever the body, are MAG-5248 item 1's (JSON-RPC),
+MAG-5254 item 3's (REST) and MAG-5132's (gRPC) to add to `ClassifyPrefix`; until they land those
+replies reach the rows, text first, as on main. The status a stage reads is the record's `Status`,
+never a number in the body: the `HTTPStatusContains` text rows (`httpStatusMessageMappings`) are
+transport rows at `router_rows`, where `evm_http_429` and `evm_http_503` keep their verdicts, and a
+body text beginning `HTTP 503: ` under a 200 is read there, not at `status`.
+
+**Error rows** (`MatchErrorRow`) match the record: `status` as a number is the HTTP status (on gRPC
+only a gateway's, D12), as a name the gRPC status (`GRPCStatusCodeNamed`); `code` by JSON type and
+value; `contains` case-insensitively and `regex` (RE2) on the text, or on the detail with `field:
+detail` (a null or absent detail matches nothing); `path` on GraphQL as false, true or a root field.
+A row with no match key is inert. A row's `error` names a registry error (`RouterErrorByName`); a row
+with only a class leaves `Verdict.RouterError` nil (`Classified()` says `UNKNOWN_ERROR`), and what the
+router does with a chain's own class is MAG-5606's.
+
+**The XRP rows** (§5.5): `xrpFirstRows` run ahead of the family table in `ClassifyError` and at
+`xrp_first` in `ClassifyInOrder`; the `te[fmlr]…` catch-all stays in the family table, after the spec
+rows, so a spec row for `tefPAST_SEQ` or `terPRE_SEQ` decides before it. Each first row's token is its
+own, so the split changes no verdict. With no policy at all (reduced coverage, whole-source fallback,
+PRD §8.3) `tefPAST_SEQ` still reaches the family row and the §5.2 signature, and `tooBusy` the rate
+limit.
+
+**Tests.** `TestClassificationOrder` is the PRD §8.2 "Order" table, each case tagged `rulebook` where
+main already gives that verdict or with the ticket that changes it and the case asserted in main's
+form; `TestClassificationOrderKeepsTodaysVerdicts` holds Bitcoin's `-26` fee text, Agave's
+`-32005` "behind by 429 slots" and a rate-limit phrase inside gRPC 3/5/10/11/12 to their code rows;
+`TestClassificationOrderXRPRows` the XRP rows at their stages.
