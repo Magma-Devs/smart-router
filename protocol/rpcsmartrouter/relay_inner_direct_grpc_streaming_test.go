@@ -96,6 +96,7 @@ func TestRelayInnerDirect_RefusesAServerStreamingMethodTheSpecDoesNotDeclare(t *
 	h := newGRPCRelayHarness(t, startGRPCTestNode(t))
 	relayResult, err := h.relayGRPC("grpc.testing.TestService/StreamingOutputCall")
 	require.ErrorContains(t, err, "is server-streaming upstream")
+	require.ErrorIs(t, err, common.UnservedGRPCCallError, "the call type's refusal: never retried, no provider blamed (MAG-5133)")
 	require.Nil(t, relayResult.GetReply(), "a refused call is never sent")
 }
 
