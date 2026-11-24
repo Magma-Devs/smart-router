@@ -872,3 +872,28 @@ func TestCheckResponseError_CosmosRefusal_EmptyLogKeepsCode(t *testing.T) {
 	require.True(t, hasError)
 	require.Equal(t, "out of gas", message, "a read keeps the raw_log")
 }
+
+// TestRestMessage_BlockModeOutcomeIsNoRefusal: BROADCAST_MODE_BLOCK, which Cosmos SDK served before
+// v0.47, answers the broadcast once the transaction is in a block, with the block's height and the
+// execution's code. A non-zero code there is the transaction's outcome, not the node refusing it: it
+// keeps its raw_log message and is not flagged. A refusal at CheckTx has height 0, in every mode, and
+// still is one. The gateway writes the int64 height as a string; a number is read too.
+func TestRestMessage_BlockModeOutcomeIsNoRefusal(t *testing.T) {
+	broadcast := RestMessage{SpecPath: "/cosmos/tx/v1beta1/txs", Path: "/cosmos/tx/v1beta1/txs"}
+	const ranAndFailed = "out of gas in location: ReadFlat; gasWanted: 200000, gasUsed: 200345: out of gas"
+
+	for _, height := range []string{`"1234"`, `1234`} {
+		ran := `{"tx_response":{"height":` + height + `,"txhash":"5C504ED4","codespace":"sdk","code":11,"raw_log":"` + ranAndFailed + `"}}`
+		require.False(t, broadcast.RefusesTransaction([]byte(ran)), "height %s: the transaction ran", height)
+		hasError, message := broadcast.CheckResponseError([]byte(ran), 200)
+		require.True(t, hasError, "height %s: the outcome keeps its old flag", height)
+		require.Equal(t, ranAndFailed, message, "height %s: the outcome keeps its raw_log", height)
+	}
+
+	for _, height := range []string{`"0"`, `0`, `null`} {
+		refused := `{"tx_response":{"height":` + height + `,"txhash":"5C504ED4","codespace":"sdk","code":32,"raw_log":"account sequence mismatch, expected 7, got 6: incorrect account sequence"}}`
+		require.True(t, broadcast.RefusesTransaction([]byte(refused)), "height %s: refused at CheckTx", height)
+		_, message := broadcast.CheckResponseError([]byte(refused), 200)
+		require.Equal(t, "cosmos tx refused: code 32, codespace sdk: account sequence mismatch, expected 7, got 6: incorrect account sequence", message)
+	}
+}

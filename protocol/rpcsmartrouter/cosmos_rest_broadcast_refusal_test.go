@@ -25,6 +25,9 @@ const (
 	cosmosRefusedSequence = `{"tx_response":{"height":"0","txhash":"5C504ED4","codespace":"sdk","code":32,"raw_log":"account sequence mismatch, expected 7, got 6: incorrect account sequence"}}`
 	cosmosRefusedMempool  = `{"tx_response":{"height":"0","txhash":"5C504ED4","codespace":"sdk","code":19,"raw_log":""}}`
 	cosmosAccepted        = `{"tx_response":{"height":"0","txhash":"5C504ED4","codespace":"","code":0,"raw_log":"[]"}}`
+	// BROADCAST_MODE_BLOCK, before Cosmos SDK v0.47: the transaction is in block 1234 and ran out of
+	// gas there. That is its outcome, not a refusal.
+	cosmosRanAndFailed = `{"tx_response":{"height":"1234","txhash":"5C504ED4","codespace":"sdk","code":11,"raw_log":"out of gas in location: WriteFlat; gasWanted: 200000, gasUsed: 200345: out of gas"}}`
 )
 
 // TestRESTListener_CosmosBroadcastRefusal drives MAG-5451 end to end, through the REST listener,
@@ -45,6 +48,9 @@ func TestRESTListener_CosmosBroadcastRefusal(t *testing.T) {
 		laterReply      string
 		wantReply       string
 		wantNodeErrFlag bool
+		// servedProvesHealth: the refuser's reply is no refusal, so it resets the count as any
+		// answer does.
+		servedProvesHealth bool
 	}{
 		{
 			// The control: a refusal first does not end the broadcast, the acceptance wins.
@@ -55,6 +61,12 @@ func TestRESTListener_CosmosBroadcastRefusal(t *testing.T) {
 			// Everyone refuses: the first refusal goes out unchanged, flagged as the node's error.
 			name: "every node refuses", refuserReply: cosmosRefusedSequence, laterReply: cosmosRefusedMempool,
 			wantReply: cosmosRefusedSequence, wantNodeErrFlag: true,
+		},
+		{
+			// A transaction that ran: its outcome is not flagged, as on gRPC, and stays a node error
+			// to the relay processor with its raw_log, as before.
+			name: "every node answers the outcome of a transaction that ran (BROADCAST_MODE_BLOCK)", refuserReply: cosmosRanAndFailed,
+			laterReply: cosmosRanAndFailed, wantReply: cosmosRanAndFailed, servedProvesHealth: true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -152,6 +164,10 @@ func TestRESTListener_CosmosBroadcastRefusal(t *testing.T) {
 			}
 			// The refuser answered before the later node, so its health outcome was recorded before
 			// the reply went out: no writer is left to race this read.
+			if tc.servedProvesHealth {
+				require.Zero(t, refuserEndpoint.ConnectionRefusals, "an answer that is no refusal resets the count")
+				return
+			}
 			require.Equal(t, uint64(3), refuserEndpoint.ConnectionRefusals,
 				"a refusal about the transaction neither resets nor adds to the refuser's failure count")
 		})

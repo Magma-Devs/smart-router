@@ -798,6 +798,11 @@ never `UNKNOWN_ERROR`, which is retried and scored. A GET of a transaction that 
 failed answers the same shape; it is no refusal, and it keeps its old flag and its `raw_log`
 message (MAG-5326).
 
+A refusal is a non-zero code at height 0. `BROADCAST_MODE_BLOCK`, served before Cosmos SDK v0.47,
+answers once the transaction is in a block, with the block's height and the execution's code. That
+transaction ran, and a failure there is its outcome, not a refusal: it keeps its old flag and its
+`raw_log` message too.
+
 | Refusal | Code | At fault |
 | --- | --- | --- |
 | `sdk` 32 | `CHAIN_INVALID_SEQUENCE` | no |
