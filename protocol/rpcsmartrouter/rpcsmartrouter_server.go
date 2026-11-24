@@ -4006,7 +4006,7 @@ type probeLoopStats struct {
 	reEnabledCount   int       // endpoints the probe re-enabled in the last cycle (F1)
 	syncOmittedCount int       // providers whose last-cycle QoS sample fed no sync evidence (F5)
 	// qosFeedPausedIdle is whether the last cycle withheld its QoS feed (qosFeedPaused), and
-	// headStallPausedIdle whether it skipped the head-stall step (headStallPaused). Two fields
+	// headStallPausedIdle whether it ran the head-stall step remove-only (headStallAddPaused). Two fields
 	// because they are two decisions: today both follow idle mode, but either may gain a reason
 	// of its own.
 	qosFeedPausedIdle   bool
@@ -4164,7 +4164,7 @@ func (rpcss *RPCSmartRouterServer) runProbeCycle(appender probeQoSAppender, cfg 
 	startedAt := time.Now()
 	endpoints := rpcss.sessionManager.GetAllDirectRPCEndpoints()
 	feedPaused := rpcss.qosFeedPaused(startedAt)
-	stallPaused := rpcss.headStallPaused(startedAt)
+	stallAddPaused := rpcss.headStallAddPaused(startedAt)
 	rpcss.publishChainIdle(startedAt)
 	scored, reEnabled, syncOmitted := runProbeCycleCore(
 		probeScoredEndpoints(endpoints, rpcss.endpointChainTrackerManager.IsUntrackedByDesign),
@@ -4173,13 +4173,11 @@ func (rpcss *RPCSmartRouterServer) runProbeCycle(appender probeQoSAppender, cfg 
 		rpcss.sessionManager.RestoreRecoveredProvider,
 	)
 	// MAG-3986: after the re-enable pass, so an endpoint the probe just returned to rotation is
-	// counted as usable by never-empty.
-	if !stallPaused {
-		rpcss.runHeadStall(endpoints, startedAt)
-	}
+	// counted as usable by never-empty. While idle it still runs, removing only (MAG-5742).
+	rpcss.runHeadStall(endpoints, startedAt, stallAddPaused)
 	// MAG-5244: last, so the per-url gauge shows what the re-enable pass and the head-stall step left.
 	rpcss.publishURLsOutOfRotation(endpoints)
-	rpcss.probeStats.recordCycle(startedAt, time.Since(startedAt), scored, reEnabled, syncOmitted, feedPaused, stallPaused)
+	rpcss.probeStats.recordCycle(startedAt, time.Since(startedAt), scored, reEnabled, syncOmitted, feedPaused, stallAddPaused)
 }
 
 // probeScoredEndpoints is the endpoint list the probe cycle judges: all of them except the urls
@@ -4225,23 +4223,28 @@ func probeScoredEndpoints(endpoints []*routersession.EndpointWithDirectConnectio
 // re-score providers at 4x the probe weight the moment traffic returns.
 //
 // Its own function, not a shared flag: a future reason to pause scoring belongs here and must not
-// pause the head-stall step (headStallPaused).
+// pause adding head-stall (headStallAddPaused).
 func (rpcss *RPCSmartRouterServer) qosFeedPaused(now time.Time) bool {
 	return rpcss.endpointChainTrackerManager.IdleOrWaking(now)
 }
 
-// headStallPaused is the probe loop's decision to skip the head-stall step (MAG-3986) this cycle.
-// Idle mode: while idle and until the wake burst has re-polled, the endpoints' blocks show when
-// each was last polled, not whether it is stuck. During the burst (or idle heartbeats, which poll
-// one url at a time) the first url to answer raises the chain's highest block while the others
-// still hold their pre-idle block, and a url that carried SameBlockCycles >= N into the idle period
-// (every url of a chain that was quiet before it went idle) would be marked head-stalled for not
-// having answered yet. Head-stall resumes on the first cycle after the burst, with fresh evidence:
-// a url that is really frozen answered its wake poll with the same block and is marked then.
+// headStallAddPaused is the probe loop's decision to run only the remove half of the head-stall step
+// (MAG-3986) this cycle. Idle mode: while idle and until the wake burst has re-polled, the endpoints'
+// blocks show when each was last polled, not whether it is stuck. During the burst (or idle
+// heartbeats, which poll one url at a time) the first url to answer raises the chain's highest block
+// while the others still hold their pre-idle block, and a url that carried SameBlockCycles >= N into
+// the idle period (every url of a chain that was quiet before it went idle) would be marked
+// head-stalled for not having answered yet. Adding resumes on the first cycle after the burst, with
+// fresh evidence: a url that is really frozen answered its wake poll with the same block and is
+// marked then.
+//
+// Removing keeps running (MAG-5742): a url whose highest block went above the one it was stuck on has
+// moved, however late it was polled. Pausing that too held a url that recovered during idle out of
+// rotation until the next client request, while the heartbeat polls already showed it moving.
 //
 // Its own function, not a shared flag: it must not follow reasons that pause scoring
 // (qosFeedPaused), which have nothing to do with whether an endpoint is stuck.
-func (rpcss *RPCSmartRouterServer) headStallPaused(now time.Time) bool {
+func (rpcss *RPCSmartRouterServer) headStallAddPaused(now time.Time) bool {
 	return rpcss.endpointChainTrackerManager.IdleOrWaking(now)
 }
 

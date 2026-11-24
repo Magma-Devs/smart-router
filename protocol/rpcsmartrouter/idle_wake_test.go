@@ -335,7 +335,7 @@ func TestProbeCycle_HeadStallWaitsForTheWakeBurst(t *testing.T) {
 
 	f.server.runProbeCycle(nil, cfg)
 	require.False(t, stalledURL(nodeB.URL), "a url still being re-polled by the wake is not head-stalled")
-	require.True(t, f.server.probeStats.snapshot().HeadStallPausedIdle, "/debug/probe-loop shows the step was skipped")
+	require.True(t, f.server.probeStats.snapshot().HeadStallPausedIdle, "/debug/probe-loop shows adding was paused")
 
 	require.Eventually(t, func() bool { return !f.monitor.IdleOrWaking(time.Now()) }, 15*time.Second, 50*time.Millisecond)
 	obsB, _ = f.monitor.GetObservation(nodeB.URL)
@@ -363,11 +363,79 @@ func TestProbeGates_FollowIdleModeOnly(t *testing.T) {
 
 	off := newServer(0)
 	require.False(t, off.qosFeedPaused(later))
-	require.False(t, off.headStallPaused(later), "idle mode off: head-stall runs every cycle, as before idle mode")
+	require.False(t, off.headStallAddPaused(later), "idle mode off: head-stall adds every cycle, as before idle mode")
 
 	on := newServer(endpointstate.MinIdleAfter)
 	require.False(t, on.qosFeedPaused(now))
-	require.False(t, on.headStallPaused(now), "active chain")
+	require.False(t, on.headStallAddPaused(now), "active chain")
 	require.True(t, on.qosFeedPaused(later))
-	require.True(t, on.headStallPaused(later), "idle chain")
+	require.True(t, on.headStallAddPaused(later), "idle chain")
+}
+
+// TestProbeCycle_IdleReleasesARecoveredStalledURL (MAG-5742): the probe loop still runs the remove
+// half of the head-stall step while the chain is idle. A url held head-stalled since before the idle
+// period, which the idle heartbeat then polls above its stuck block, is back in rotation after the
+// next probe cycle, with no client relay to wake the chain.
+func TestProbeCycle_IdleReleasesARecoveredStalledURL(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var headA, headB atomic.Int64
+	headA.Store(1100)
+	headB.Store(1000)
+	nodeA, nodeB := blockNode(&headA), blockNode(&headB)
+	defer nodeA.Close()
+	defer nodeB.Close()
+
+	f := newReconcileFixtureWith(t, ctx, func(cfg *endpointstate.EndpointChainTrackerConfig) {
+		cfg.IdleAfter = endpointstate.MinIdleAfter
+		cfg.PollIntervalDivisor = 0.25 // the trackers' own timer stays minutes away
+	})
+	f.admit(t, ctx, nodeA.URL, nodeB.URL)
+	go f.server.initializeChainTrackers(ctx)
+	for _, url := range []string{nodeA.URL, nodeB.URL} {
+		require.Eventually(t, func() bool {
+			state, _, _ := f.monitor.GetTrackerState(url)
+			return state == endpointstate.EndpointChainTrackerPolling
+		}, 10*time.Second, 20*time.Millisecond)
+		_, _, err := f.monitor.PollNow(ctx, url)
+		require.NoError(t, err)
+	}
+	endpointOf := func(url string) *routersession.Endpoint {
+		for _, e := range f.csm.GetAllDirectRPCEndpoints() {
+			if e.Endpoint.NetworkAddress == url {
+				return e.Endpoint
+			}
+		}
+		t.Fatalf("no endpoint for %s", url)
+		return nil
+	}
+	stalledURL := func(url string) bool {
+		_, held := endpointOf(url).StateReason(routersession.EndpointDisableHeadStalled)
+		return held
+	}
+
+	// B was marked head-stalled at 1000 before the chain went idle.
+	require.True(t, endpointOf(nodeB.URL).AddStateReason(routersession.EndpointDisableHeadStalled, time.Now(), 1000))
+	require.False(t, endpointOf(nodeB.URL).IsUsable())
+
+	// The last client relay was an hour ago: the chain is idle, and no relay will wake it.
+	require.Nil(t, f.monitor.NoteClientRelay(time.Now().Add(-time.Hour)))
+	require.True(t, f.monitor.IsIdle(time.Now()))
+
+	cfg := probeVerdictConfigFor(30*time.Second, nil)
+	f.server.runProbeCycle(nil, cfg)
+	require.True(t, stalledURL(nodeB.URL), "no poll above the stuck block yet")
+
+	// B recovers, and an idle heartbeat polls it.
+	headB.Store(1100)
+	_, _, err := f.monitor.PollNow(ctx, nodeB.URL)
+	require.NoError(t, err)
+	require.True(t, f.monitor.IsIdle(time.Now()), "a heartbeat poll is not a client relay")
+
+	f.server.runProbeCycle(nil, cfg)
+	require.False(t, stalledURL(nodeB.URL), "released while idle, without a wake")
+	require.True(t, endpointOf(nodeB.URL).IsUsable())
+	require.True(t, f.server.probeStats.snapshot().HeadStallPausedIdle, "adding is still paused")
+	require.Equal(t, uint64(1), f.server.probeStats.snapshot().StalledRemoved)
 }

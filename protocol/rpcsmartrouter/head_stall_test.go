@@ -55,7 +55,18 @@ func newStallHarness() *stallHarness {
 
 func (h *stallHarness) step(t *testing.T, now time.Time, endpoints ...*routersession.EndpointWithDirectConnection) headStallResult {
 	t.Helper()
-	return runHeadStallStep(endpoints, h.obs.get, stallN, h.grace, now,
+	return h.run(t, now, false, endpoints...)
+}
+
+// stepIdle runs the step the way the probe loop does while the chain is idle or waking: remove only.
+func (h *stallHarness) stepIdle(t *testing.T, now time.Time, endpoints ...*routersession.EndpointWithDirectConnection) headStallResult {
+	t.Helper()
+	return h.run(t, now, true, endpoints...)
+}
+
+func (h *stallHarness) run(t *testing.T, now time.Time, addPaused bool, endpoints ...*routersession.EndpointWithDirectConnection) headStallResult {
+	t.Helper()
+	return runHeadStallStep(endpoints, h.obs.get, stallN, h.grace, now, addPaused,
 		func(p string) { h.recovered = append(h.recovered, p) },
 		&h.state, nil)
 }
@@ -618,4 +629,63 @@ func TestHeadStall_InsideTheGraceIsNotKeptByNeverEmpty(t *testing.T) {
 
 	require.Equal(t, headStallResult{}, h.step(t, stallNow, primary, deadBackup))
 	require.Equal(t, headStallResult{kept: 1}, h.step(t, stallNow.Add(20*time.Second), primary, deadBackup), "kept once the grace has passed")
+}
+
+// MAG-5742, the production case: a url went head-stalled, the chain went idle, the url recovered
+// during idle and the idle heartbeat recorded it above its stuck block. It comes back on that cycle,
+// and its provider returns to the valid list, instead of waiting for the next client request.
+func TestHeadStall_Idle_RecoveredURLComesBackWithoutAWake(t *testing.T) {
+	h := newStallHarness()
+	primary := ep("https://primary", "tatum", true)
+	backup := backupEp("https://backup", "blockdaemon")
+	h.obs["https://backup"] = stuckAt(25934760, 0)
+	h.obs["https://primary"] = stuckAt(25934737, stallN)
+	require.Equal(t, headStallResult{added: 1}, h.step(t, stallNow, primary, backup))
+	require.True(t, stalled(t, primary))
+
+	// Idle, and the heartbeat has not reached the url yet: nothing to release on.
+	require.Equal(t, headStallResult{}, h.stepIdle(t, stallNow.Add(5*time.Second), primary, backup))
+	require.True(t, stalled(t, primary))
+
+	// The heartbeat polls it: it answers above the block it was stuck on.
+	h.obs["https://primary"] = stuckAt(25934790, 0)
+	require.Equal(t, headStallResult{removed: 1}, h.stepIdle(t, stallNow.Add(5*time.Minute), primary, backup))
+	require.False(t, stalled(t, primary))
+	require.True(t, primary.Endpoint.IsUsable())
+	require.Equal(t, []string{"tatum"}, h.recovered)
+	require.False(t, h.state.isStalled("https://primary"), "the tip-vote filter forgets it too")
+}
+
+// While idle the step never adds: a url that only looks behind because the heartbeat has not polled
+// it yet keeps its place. The same evidence marks it on the first cycle after the wake.
+func TestHeadStall_Idle_AddsNothing(t *testing.T) {
+	h := newStallHarness()
+	a := ep("https://a", "vendor-a", true)
+	b := backupEp("https://b", "vendor-b")
+	h.obs["https://a"] = stuckAt(1000, stallN)
+	h.obs["https://b"] = stuckAt(1100, 0)
+	require.Equal(t, headStallResult{}, h.stepIdle(t, stallNow, a, b))
+	require.False(t, stalled(t, a))
+	require.False(t, h.state.isStalled("https://a"))
+
+	require.Equal(t, headStallResult{added: 1}, h.step(t, stallNow.Add(5*time.Second), a, b))
+	require.True(t, stalled(t, a))
+}
+
+// While idle never-empty does not act either: it judges the current pool, which is only as fresh as
+// each url's last heartbeat. It resumes with add on the first cycle after the wake.
+func TestHeadStall_Idle_NeverEmptyWaitsForTheWake(t *testing.T) {
+	h := newStallHarness()
+	a := ep("https://a", "pa", true)
+	c := backupEp("https://c", "pc")
+	h.obs["https://a"] = stuckAt(1000, stallN)
+	h.obs["https://c"] = stuckAt(9000, 0)
+	require.Equal(t, headStallResult{added: 1}, h.step(t, stallNow, a, c))
+
+	c.Endpoint.Enabled = false // the pool empties during idle
+	require.Equal(t, headStallResult{}, h.stepIdle(t, stallNow.Add(5*time.Second), a, c))
+	require.True(t, stalled(t, a))
+
+	require.Equal(t, headStallResult{released: 1}, h.step(t, stallNow.Add(10*time.Second), a, c))
+	require.True(t, a.Endpoint.IsUsable())
 }

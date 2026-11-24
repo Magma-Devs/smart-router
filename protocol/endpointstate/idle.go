@@ -172,7 +172,7 @@ func (m *EndpointMonitor) wakeInProgress() bool {
 // polled, not how healthy it is: idle polls are paused, and a relay ends the idle period the
 // instant it is stamped, before the burst's polls land. It is a fact about idle mode only; each
 // consumer that must not judge endpoints on it gates on it under its own name (the probe loop's
-// qosFeedPaused and headStallPaused). False whenever idle mode is off.
+// qosFeedPaused and headStallAddPaused). False whenever idle mode is off.
 func (m *EndpointMonitor) IdleOrWaking(now time.Time) bool {
 	return m.IsIdle(now) || m.wakeInProgress()
 }
