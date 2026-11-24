@@ -5067,8 +5067,9 @@ func (rpcss *RPCSmartRouterServer) adoptSharedStateTip(ctx context.Context, peer
 //
 // GraphQL adds a third: a root field whose answer differs from provider to provider because
 // each runs its own server version, such as introspection or Sui's serviceConfig
-// (graphQLNeverCacheRootFields, MAG-5123). It is read on both gates too, so an entry an
-// older router wrote for such a field is not served either.
+// (graphQLNeverCacheRootFields, MAG-5123), and gRPC a method of the same kind, such as Sui's
+// SimulateTransaction (grpcNeverCacheMethods, MAG-5186). They are read on both gates too, so an
+// entry an older router wrote for such a request is not served either.
 func cacheExclusionReason(protocolMessage chainlib.ProtocolMessage) string {
 	if chainlib.GetStateful(protocolMessage) == common.CONSISTENCY_SELECT_ALL_PROVIDERS {
 		return "stateful"
@@ -5076,20 +5077,23 @@ func cacheExclusionReason(protocolMessage chainlib.ProtocolMessage) string {
 	if nodeBoundReason(protocolMessage.GetApi().Name) != "" {
 		return "node-bound"
 	}
-	if graphQLNeverCacheReason(protocolMessage) != "" {
+	if graphQLNeverCacheReason(protocolMessage) != "" || grpcNeverCacheReason(protocolMessage) != "" {
 		return "never-cache"
 	}
 	return ""
 }
 
 // cacheExclusionWhy is the detail behind cacheExclusionReason for the log: which method is
-// node-bound or which GraphQL field is never cached, and why. "" for a stateful request,
-// whose reason says it all.
+// node-bound, or which GraphQL field or gRPC method is never cached, and why. "" for a stateful
+// request, whose reason says it all.
 func cacheExclusionWhy(protocolMessage chainlib.ProtocolMessage) string {
 	if why := nodeBoundReason(protocolMessage.GetApi().Name); why != "" {
 		return why
 	}
-	return graphQLNeverCacheReason(protocolMessage)
+	if why := graphQLNeverCacheReason(protocolMessage); why != "" {
+		return why
+	}
+	return grpcNeverCacheReason(protocolMessage)
 }
 
 // cacheAnsweredEarlierAttempt reports whether the cache answered an earlier attempt of this relay.

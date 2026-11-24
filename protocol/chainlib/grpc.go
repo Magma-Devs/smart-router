@@ -303,6 +303,8 @@ func (apip *GrpcChainParser) ParseMsg(url string, data []byte, connectionType st
 		Registry:    apip.registry,
 		BaseMessage: chainproxy.BaseMessage{Headers: metadata, LatestBlockHeaderSetter: settingHeaderDirective},
 	}
+	// The chain's list reads the replies to its write (MAG-5186): what a Sui status means is Sui's to say.
+	grpcMessage.SetChainFamily(apip.chainFamily())
 
 	// // Fetch requested block, it is used for data reliability
 	// // Extract default block parser
