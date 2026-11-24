@@ -98,7 +98,7 @@ func TestResponsesCrossValidation_GroupDiversity(t *testing.T) {
 func TestRelayProcessor_CrossValidationOutlierRealPath(t *testing.T) {
 	ctx := context.Background()
 	serverHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
-	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, "LAVA", spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
+	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, "COSMOSHUB", spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 	if closeServer != nil {
 		defer closeServer()
 	}
@@ -234,7 +234,7 @@ func TestResponsesCrossValidation_PerGroupQuorum(t *testing.T) {
 func TestRelayProcessor_CrossValidationFailureRealPath(t *testing.T) {
 	ctx := context.Background()
 	serverHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
-	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, "LAVA", spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
+	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, "COSMOSHUB", spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 	if closeServer != nil {
 		defer closeServer()
 	}
@@ -487,7 +487,7 @@ func TestResponsesCrossValidation_LegacyNilFallback(t *testing.T) {
 func TestRelayProcessor_PerGroupNilReplyRealPath(t *testing.T) {
 	ctx := context.Background()
 	serverHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
-	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, "LAVA", spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
+	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, "COSMOSHUB", spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 	if closeServer != nil {
 		defer closeServer()
 	}

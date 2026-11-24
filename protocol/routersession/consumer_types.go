@@ -730,7 +730,7 @@ type ConsumerSessionsWithProvider struct {
 	MaxComputeUnits  uint64
 	UsedComputeUnits uint64
 	PairingEpoch     uint64
-	stakeSize        int64 // the stake size the provider staked (ulava)
+	stakeSize        int64 // the stake size the provider staked
 
 	// blocked provider recovery status if 0 currently not used, if 1 a session has tried resume communication with this provider
 	// if the provider is not blocked at all this field is irrelevant
@@ -871,14 +871,14 @@ func (cswp *ConsumerSessionsWithProvider) addUsedComputeUnits(cu, virtualEpoch u
 	return nil
 }
 
-// getProviderStakeSize returns the stake size (in ulava) for this provider.
+// getProviderStakeSize returns the stake size for this provider.
 func (cswp *ConsumerSessionsWithProvider) getProviderStakeSize() int64 {
 	cswp.Lock.RLock()
 	defer cswp.Lock.RUnlock()
 	return cswp.stakeSize
 }
 
-// GetProviderStakeSize returns the provider stake (in ulava) used for selection weighting.
+// GetProviderStakeSize returns the provider stake used for selection weighting.
 // Exported for cross-package callers (e.g., rpcsmartrouter) that need to copy sessions.
 func (cswp *ConsumerSessionsWithProvider) GetProviderStakeSize() int64 {
 	return cswp.getProviderStakeSize()

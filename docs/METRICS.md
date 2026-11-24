@@ -78,7 +78,7 @@ name and the `disabled` sentinel live in
   `1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000`.
 - **Attempt histograms** (`retry_attempts`, `hedge_attempts`) use integer buckets `1…10`.
 - **Common labels**:
-  - `spec` — chain spec id (e.g. `ETH1`, `LAV1`).
+  - `spec` — chain spec id (e.g. `ETH1`, `COSMOSHUB`).
   - `apiInterface` — `jsonrpc`, `tendermintrpc`, `rest`, `grpc`.
   - `endpoint_id` — the configured upstream RPC endpoint.
   - `provider_address` — provider the relay was routed to.

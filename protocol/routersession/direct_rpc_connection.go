@@ -750,7 +750,7 @@ func NewDirectRPCConnection(
 //
 // Bare host:port is treated as gRPC for the "grpc" interface, HTTPS otherwise.
 func DetectProtocol(urlStr string, apiInterface string) (DirectRPCProtocol, error) {
-	// Handle bare host:port URLs (e.g. "lava-grpc.publicnode.com:443") before url.Parse.
+	// Handle bare host:port URLs (e.g. "cosmos-grpc.publicnode.com:443") before url.Parse.
 	// Go's url.Parse treats "word:" as scheme:opaque, so "host.com:443" becomes
 	// scheme="host.com", opaque="443" — the scheme == "" branch below is never reached.
 	// Checking for "://" is sufficient: all valid scheme URLs contain it.
