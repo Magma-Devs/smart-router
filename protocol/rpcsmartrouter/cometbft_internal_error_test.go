@@ -166,7 +166,7 @@ func TestCometBFTInternalErrorIsNotTheEndpointsFault(t *testing.T) {
 // A GET URI request CometBFT fails is answered with HTTP 500 and the same body (MAG-5267 sends a
 // client's GET that way). The sender reads a 5xx as a status error, and the endpoint's health is
 // judged by its body, so the data must keep that strike off too. The session's own score for a 5xx
-// is MAG-5674's.
+// is not this test's: it still fails until #789 lands.
 func TestCometBFTInternalErrorUnderA500IsNotTheEndpointsFault(t *testing.T) {
 	rand.InitRandomSeed()
 	for _, tc := range []struct {
