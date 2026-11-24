@@ -7,11 +7,11 @@ import (
 )
 
 // MAG-5324. The shared HTTP status rows read any number in a node's error text as a status, so a
-// failed Cosmos transaction's "500ulava" blamed the endpoint and its "channel-429" held every
+// failed Cosmos transaction's "500uatom" blamed the endpoint and its "channel-429" held every
 // provider off. Each case is a node's own text, on the transport and code it reaches the
 // classifier with, and the verdict it got before the fix.
 func TestHTTPStatusRows_NodeTextIsNotAStatus(t *testing.T) {
-	const balance = "spendable balance 100ulava is smaller than 500ulava: insufficient funds"
+	const balance = "spendable balance 100uatom is smaller than 500uatom: insufficient funds"
 	for _, tc := range []struct {
 		name      string
 		family    ChainFamily

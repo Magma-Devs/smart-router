@@ -621,7 +621,7 @@ func CodeAndMessage(code int, substring string) ErrorMatcher {
 }
 
 // HTTPStatusContains matches an HTTP status in an error message where the router wrote it, and
-// nowhere else. A number inside the node's own text is not a status: a Cosmos log's "500ulava" or
+// nowhere else. A number inside the node's own text is not a status: a Cosmos log's "500uatom" or
 // "channel-429", a sequence number or a height read as one blamed the endpoint or held every
 // provider off (MAG-5324). Prefer structured status codes (CodeEquals) when the HTTP status is
 // available as an int.
@@ -675,7 +675,7 @@ func (m httpStatusMatcher) matchesLowered(_ int, loweredMessage string) bool {
 }
 
 // startsWithStatus reports whether text opens with the status as a whole word: "503", "503:" or
-// "503 Service Unavailable", never "5030" or "500ulava".
+// "503 Service Unavailable", never "5030" or "500uatom".
 func (m httpStatusMatcher) startsWithStatus(text string) bool {
 	rest, ok := strings.CutPrefix(text, m.status)
 	if !ok || rest == "" {

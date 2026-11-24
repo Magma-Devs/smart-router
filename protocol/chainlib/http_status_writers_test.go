@@ -51,7 +51,7 @@ func TestHTTPStatusRows_ReadEveryStatusTheRouterWrites(t *testing.T) {
 
 // The same rows on a node's own gRPC status, whose text carries a balance: no status there.
 func TestHTTPStatusRows_ANodesGRPCTextIsNotAStatus(t *testing.T) {
-	err := status.Error(codes.Unknown, "spendable balance 100ulava is smaller than 500ulava: insufficient funds")
+	err := status.Error(codes.Unknown, "spendable balance 100uatom is smaller than 500uatom: insufficient funds")
 	got := ClassifyNodeError(err, common.ChainFamilyCosmosSDK, common.TransportGRPC)
 	require.NotSame(t, common.RouterErrorNodeInternalError, got)
 	require.False(t, got.EndpointAtFault())

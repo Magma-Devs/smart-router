@@ -15,15 +15,15 @@ import (
 )
 
 // MAG-5324, end to end. A Cosmos REST broadcast refused with a raw_log that carries numbers is the
-// node's answer about the transaction. The shared HTTP status rows read "500ulava" in it as a 500,
+// node's answer about the transaction. The shared HTTP status rows read "500uatom" in it as a 500,
 // so each such reply added to the endpoint's refusal count and --bench-after of them switched a
 // healthy endpoint off; "channel-429" held the provider off as a rate limit.
 func TestRelayInnerDirect_NumbersInACosmosLogAreNotAStatus(t *testing.T) {
-	for _, chainID := range []string{"LAVA", "AKASH"} { // a Cosmos family, and none
+	for _, chainID := range []string{"COSMOSHUB", "AKASH"} { // a Cosmos family, and none
 		t.Run(chainID, func(t *testing.T) {
 			benchAfter(t, 50)
 			h := newRESTBenchHarness(t, chainID, http.StatusOK,
-				`{"tx_response":{"height":"0","txhash":"5C504ED4","codespace":"sdk","code":5,"raw_log":"spendable balance 100ulava is smaller than 500ulava: insufficient funds"}}`)
+				`{"tx_response":{"height":"0","txhash":"5C504ED4","codespace":"sdk","code":5,"raw_log":"spendable balance 100uatom is smaller than 500uatom: insufficient funds"}}`)
 			for i := 0; i < 50; i++ {
 				result, refusals, enabled := h.relay(t)
 				require.False(t, result.IsNodeAtFault, "reply #%d", i)
@@ -43,7 +43,7 @@ func TestRelayInnerDirect_NumbersInACosmosLogAreNotAStatus(t *testing.T) {
 // The harness's control: a reply the endpoint is at fault for still counts.
 func TestRelayInnerDirect_RESTBenchHarnessCountsAFault(t *testing.T) {
 	benchAfter(t, 50)
-	h := newRESTBenchHarness(t, "LAVA", http.StatusInternalServerError, `{"message":"database connection lost"}`)
+	h := newRESTBenchHarness(t, "COSMOSHUB", http.StatusInternalServerError, `{"message":"database connection lost"}`)
 	_, refusals, _ := h.relay(t)
 	require.Equal(t, uint64(1), refusals)
 }
@@ -61,7 +61,7 @@ func newRESTBenchHarness(t *testing.T, chainID string, status int, body string) 
 	t.Helper()
 	ctx := context.Background()
 	chainParser, _, _, closeServer, mockEndpoint, err := chainlib.CreateChainLibMocks(
-		ctx, "LAVA", spectypes.APIInterfaceRest,
+		ctx, "COSMOSHUB", spectypes.APIInterfaceRest,
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(status)
