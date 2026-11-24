@@ -705,7 +705,7 @@ caller's bad request instead of going to another provider.
 | `413` | `USER_REQUEST_TOO_LARGE` | no | no |
 | `422` | `USER_INVALID_PARAMS` | no | no |
 | `429` | `NODE_RATE_LIMITED` | yes | no (capacity) |
-| `500` `503` `520`–`530`, otherwise | `NODE_INTERNAL_ERROR` / `NODE_SERVICE_UNAVAILABLE` / `NODE_SERVER_ERROR` | yes | **yes** |
+| `500` `503` `520`–`527` `530`, otherwise | `NODE_INTERNAL_ERROR` / `NODE_SERVICE_UNAVAILABLE` / `NODE_SERVER_ERROR` | yes | **yes** |
 | `501` | `NODE_UNIMPLEMENTED` | yes | no (node-capability) |
 | `502` `504` | `NODE_BAD_GATEWAY` / `NODE_GATEWAY_TIMEOUT` | yes | yes |
 | any other `5xx` (`505`–`511`, `528`, `529`, `531`–`599`) | `NODE_UNLISTED_SERVER_ERROR` (2022) | yes | yes |
