@@ -14,8 +14,7 @@ type ChainRequirement struct {
 }
 
 // Policy describes the consumer's subscription policy for a set of chains.
-// It is the standalone replacement for the protobuf-generated type of the
-// same name in the lavanet.lava.plans module.
+// It is a standalone type, not a protobuf-generated one.
 type Policy struct {
 	// ChainPolicies maps chain IDs to their per-chain requirements.
 	ChainPolicies []ChainPolicy `json:"chain_policies"`

@@ -2,7 +2,7 @@ package common
 
 // ---------------------------------------------------------------------------
 // Layer A: Protocol Errors (Internal) — range 1000-1999
-// Errors raised from within the Lava protocol itself — not from nodes or chains.
+// Errors raised from within the router itself — not from nodes or chains.
 // ---------------------------------------------------------------------------
 
 var (
@@ -95,7 +95,7 @@ var (
 	RouterErrorRateLimited = registerError(&RouterError{
 		Code: 1020, Name: "PROTOCOL_RATE_LIMITED", Category: CategoryInternal,
 		SubCategory: SubCategoryRateLimit,
-		Description: "Lava-side rate limit exceeded", Retryable: false,
+		Description: "Router-side rate limit exceeded", Retryable: false,
 	})
 	RouterErrorMaxCUExceeded = registerError(&RouterError{
 		Code: 1021, Name: "PROTOCOL_MAX_CU_EXCEEDED", Category: CategoryInternal,
@@ -370,7 +370,7 @@ var (
 	// The only node known to send it is Sui, and only when a transaction is submitted
 	// (sui-rpc-api maps the transaction driver's Aborted category to it, plus one direct case,
 	// "already finalized but with different user signatures"). Cosmos SDK, CometBFT, ibc-go,
-	// wasmd, Lava and Concordium never send it. Sui's own definition, in sui-core's
+	// wasmd and Concordium never send it. Sui's own definition, in sui-core's
 	// transaction_driver/error.rs, is "transient failure during transaction processing that
 	// prevents the transaction from finalization. Retriable with new transaction submission",
 	// and the message a client receives starts "Transaction processing aborted (retriable with

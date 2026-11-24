@@ -78,11 +78,11 @@ func TestUpdateEpoch_FreshSessions(t *testing.T) {
 
 	// 2. Setup dependencies for SessionManager
 	rpcEndpoint := &routersession.RPCEndpoint{
-		ChainID:        "LAVA",
+		ChainID:        "COSMOSHUB",
 		ApiInterface:   "tendermintrpc",
 		NetworkAddress: "127.0.0.1:3333",
 	}
-	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "LAVA")
+	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "COSMOSHUB")
 
 	chainKey := rpcEndpoint.Key()
 	sessionManager := routersession.NewConsumerSessionManager(rpcEndpoint, optimizer, nil, "test-router", routersession.NewActiveSubscriptionProvidersStorage())
@@ -141,8 +141,8 @@ func TestUpdateEpoch_PreservesGroupLabel(t *testing.T) {
 		providerSessions:       make(map[string]map[uint64]*routersession.ConsumerSessionsWithProvider),
 		backupProviderSessions: make(map[string]map[uint64]*routersession.ConsumerSessionsWithProvider),
 	}
-	rpcEndpoint := &routersession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "tendermintrpc", NetworkAddress: "127.0.0.1:3333"}
-	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "LAVA")
+	rpcEndpoint := &routersession.RPCEndpoint{ChainID: "COSMOSHUB", ApiInterface: "tendermintrpc", NetworkAddress: "127.0.0.1:3333"}
+	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "COSMOSHUB")
 	chainKey := rpcEndpoint.Key()
 	rpsr.sessionManagers[chainKey] = routersession.NewConsumerSessionManager(rpcEndpoint, optimizer, nil, "test-router", routersession.NewActiveSubscriptionProvidersStorage())
 
@@ -184,11 +184,11 @@ func TestUpdateEpoch_ResetsDisabledEndpoints(t *testing.T) {
 	}
 
 	rpcEndpoint := &routersession.RPCEndpoint{
-		ChainID:        "LAVA",
+		ChainID:        "COSMOSHUB",
 		ApiInterface:   "tendermintrpc",
 		NetworkAddress: "127.0.0.1:3334",
 	}
-	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "LAVA")
+	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "COSMOSHUB")
 	chainKey := rpcEndpoint.Key()
 	sessionManager := routersession.NewConsumerSessionManager(rpcEndpoint, optimizer, nil, "test-router", routersession.NewActiveSubscriptionProvidersStorage())
 	rpsr.sessionManagers[chainKey] = sessionManager
@@ -246,7 +246,7 @@ func TestUpdateEpoch_NilListenEndpointDoesNotPanic(t *testing.T) {
 	rand.InitRandomSeed()
 
 	rpcEndpoint := &routersession.RPCEndpoint{
-		ChainID:        "LAVA",
+		ChainID:        "COSMOSHUB",
 		ApiInterface:   "tendermintrpc",
 		NetworkAddress: "127.0.0.1:3336",
 	}
@@ -296,8 +296,8 @@ func TestGracefulFailure_AllProvidersHealthy_NoRetryLaunched(t *testing.T) {
 	rand.InitRandomSeed()
 	rpsr := createTestRPCSmartRouter()
 
-	chainKey := "LAV1-tendermintrpc"
-	sm, _ := createTestSessionManager("LAV1", "tendermintrpc")
+	chainKey := "COSMOSHUB-tendermintrpc"
+	sm, _ := createTestSessionManager("COSMOSHUB", "tendermintrpc")
 	rpsr.sessionManagers[chainKey] = sm
 
 	// Two healthy providers, no failures
@@ -326,8 +326,8 @@ func TestGracefulFailure_EpochDoesNotResurrectFailedProviders(t *testing.T) {
 	rand.InitRandomSeed()
 	rpsr := createTestRPCSmartRouter()
 
-	chainKey := "LAV1-tendermintrpc"
-	sm, _ := createTestSessionManager("LAV1", "tendermintrpc")
+	chainKey := "COSMOSHUB-tendermintrpc"
+	sm, _ := createTestSessionManager("COSMOSHUB", "tendermintrpc")
 	rpsr.sessionManagers[chainKey] = sm
 
 	// Only healthy providers in sessions (B was excluded at startup)
@@ -338,7 +338,7 @@ func TestGracefulFailure_EpochDoesNotResurrectFailedProviders(t *testing.T) {
 
 	// B is in the failed list (excluded at startup, awaiting retry)
 	rpsr.failedStaticProviders[chainKey] = []*routersession.RPCStaticProviderEndpoint{
-		createTestStaticProviderEndpoint("providerB", "LAV1", "tendermintrpc"),
+		createTestStaticProviderEndpoint("providerB", "COSMOSHUB", "tendermintrpc"),
 	}
 
 	// Trigger epoch update
@@ -364,9 +364,9 @@ func TestGracefulFailure_EpochDoesNotResurrectFailedProviders(t *testing.T) {
 func TestGracefulFailure_FilteringLogic(t *testing.T) {
 	// Simulate the filtering that happens in CreateSmartRouterEndpoint after Phase 1
 	relevantStaticProviderList := []*routersession.RPCStaticProviderEndpoint{
-		createTestStaticProviderEndpoint("providerA", "LAV1", "tendermintrpc"),
-		createTestStaticProviderEndpoint("providerB", "LAV1", "tendermintrpc"),
-		createTestStaticProviderEndpoint("providerC", "LAV1", "tendermintrpc"),
+		createTestStaticProviderEndpoint("providerA", "COSMOSHUB", "tendermintrpc"),
+		createTestStaticProviderEndpoint("providerB", "COSMOSHUB", "tendermintrpc"),
+		createTestStaticProviderEndpoint("providerC", "COSMOSHUB", "tendermintrpc"),
 	}
 
 	// B failed validation
@@ -390,8 +390,8 @@ func TestGracefulFailure_FilteringLogic(t *testing.T) {
 // Scenario 4: All static providers fail — filtering produces empty list.
 func TestGracefulFailure_AllFailedFiltering(t *testing.T) {
 	relevantStaticProviderList := []*routersession.RPCStaticProviderEndpoint{
-		createTestStaticProviderEndpoint("providerA", "LAV1", "tendermintrpc"),
-		createTestStaticProviderEndpoint("providerB", "LAV1", "tendermintrpc"),
+		createTestStaticProviderEndpoint("providerA", "COSMOSHUB", "tendermintrpc"),
+		createTestStaticProviderEndpoint("providerB", "COSMOSHUB", "tendermintrpc"),
 	}
 
 	// Both failed
@@ -448,13 +448,13 @@ func TestGracefulFailure_SingleProviderFails(t *testing.T) {
 // Scenario 9: Mixed static + backup failures — both filtered independently.
 func TestGracefulFailure_MixedStaticAndBackupFiltering(t *testing.T) {
 	staticProviders := []*routersession.RPCStaticProviderEndpoint{
-		createTestStaticProviderEndpoint("staticA", "LAV1", "tendermintrpc"),
-		createTestStaticProviderEndpoint("staticB", "LAV1", "tendermintrpc"),
-		createTestStaticProviderEndpoint("staticC", "LAV1", "tendermintrpc"),
+		createTestStaticProviderEndpoint("staticA", "COSMOSHUB", "tendermintrpc"),
+		createTestStaticProviderEndpoint("staticB", "COSMOSHUB", "tendermintrpc"),
+		createTestStaticProviderEndpoint("staticC", "COSMOSHUB", "tendermintrpc"),
 	}
 	backupProviders := []*routersession.RPCStaticProviderEndpoint{
-		createTestStaticProviderEndpoint("backupX", "LAV1", "tendermintrpc"),
-		createTestStaticProviderEndpoint("backupY", "LAV1", "tendermintrpc"),
+		createTestStaticProviderEndpoint("backupX", "COSMOSHUB", "tendermintrpc"),
+		createTestStaticProviderEndpoint("backupY", "COSMOSHUB", "tendermintrpc"),
 	}
 
 	failedStaticNames := map[string]struct{}{"staticB": {}}
@@ -490,11 +490,11 @@ func TestGracefulFailure_MixedStaticAndBackupFiltering(t *testing.T) {
 func TestGracefulFailure_DuplicateNameCollision(t *testing.T) {
 	providers := []*routersession.RPCStaticProviderEndpoint{
 		{
-			Name: "my-node", ChainID: "LAV1", ApiInterface: "tendermintrpc",
+			Name: "my-node", ChainID: "COSMOSHUB", ApiInterface: "tendermintrpc",
 			NodeUrls: []common.NodeUrl{{Url: "http://healthy:8080"}},
 		},
 		{
-			Name: "my-node", ChainID: "LAV1", ApiInterface: "tendermintrpc",
+			Name: "my-node", ChainID: "COSMOSHUB", ApiInterface: "tendermintrpc",
 			NodeUrls: []common.NodeUrl{{Url: "http://dead:8080"}},
 		},
 	}
@@ -521,8 +521,8 @@ func TestGracefulFailure_RetryLoopIdlesAndExitsOnCancel(t *testing.T) {
 	rand.InitRandomSeed()
 	rpsr := createTestRPCSmartRouter()
 
-	chainKey := "LAV1-tendermintrpc"
-	sm, rpcEndpoint := createTestSessionManager("LAV1", "tendermintrpc")
+	chainKey := "COSMOSHUB-tendermintrpc"
+	sm, rpcEndpoint := createTestSessionManager("COSMOSHUB", "tendermintrpc")
 	rpsr.sessionManagers[chainKey] = sm
 
 	rpsr.providerSessions[chainKey] = map[uint64]*routersession.ConsumerSessionsWithProvider{
@@ -564,8 +564,8 @@ func TestGracefulFailure_ConcurrentEpochAndRetry(t *testing.T) {
 	rand.InitRandomSeed()
 	rpsr := createTestRPCSmartRouter()
 
-	chainKey := "LAV1-tendermintrpc"
-	sm, _ := createTestSessionManager("LAV1", "tendermintrpc")
+	chainKey := "COSMOSHUB-tendermintrpc"
+	sm, _ := createTestSessionManager("COSMOSHUB", "tendermintrpc")
 	rpsr.sessionManagers[chainKey] = sm
 
 	rpsr.providerSessions[chainKey] = map[uint64]*routersession.ConsumerSessionsWithProvider{
@@ -656,8 +656,8 @@ func TestGracefulFailure_EpochBeforeRetry_OnlyHealthyProviders(t *testing.T) {
 	rand.InitRandomSeed()
 	rpsr := createTestRPCSmartRouter()
 
-	chainKey := "LAV1-tendermintrpc"
-	sm, _ := createTestSessionManager("LAV1", "tendermintrpc")
+	chainKey := "COSMOSHUB-tendermintrpc"
+	sm, _ := createTestSessionManager("COSMOSHUB", "tendermintrpc")
 	rpsr.sessionManagers[chainKey] = sm
 
 	// Startup result: only A is healthy, B failed
@@ -665,7 +665,7 @@ func TestGracefulFailure_EpochBeforeRetry_OnlyHealthyProviders(t *testing.T) {
 		0: createTestProviderSession("providerA", 1),
 	}
 	rpsr.failedStaticProviders[chainKey] = []*routersession.RPCStaticProviderEndpoint{
-		createTestStaticProviderEndpoint("providerB", "LAV1", "tendermintrpc"),
+		createTestStaticProviderEndpoint("providerB", "COSMOSHUB", "tendermintrpc"),
 	}
 
 	// Epoch fires multiple times before retry runs

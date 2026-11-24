@@ -32,7 +32,7 @@ type RPCStaticProviderEndpoint struct {
 	ApiInterface   string             `yaml:"api-interface,omitempty" json:"api-interface,omitempty" mapstructure:"api-interface"`
 	NodeUrls       []common.NodeUrl   `yaml:"node-urls,omitempty" json:"node-urls,omitempty" mapstructure:"node-urls"`
 	Name           string             `yaml:"name,omitempty" json:"name,omitempty" mapstructure:"name,omitempty"`
-	// Stake is an optional stake amount (in ulava) used for provider selection scoring in static-provider tests.
+	// Stake is an optional stake amount used for provider selection scoring in static-provider tests.
 	// If omitted, it is treated as 0 so the weight calculator can apply the legacy
 	// "static provider boost" behavior (instead of using an explicit stake value).
 	Stake int64 `yaml:"stake,omitempty" json:"stake,omitempty" mapstructure:"stake,omitempty"`

@@ -95,7 +95,7 @@ func TestResultsManager_GRPCStatusResponseIsANodeError(t *testing.T) {
 	errorBody := []byte(`{"error_message":"invalid address: decoding bech32 failed","error_code":3}`)
 
 	t.Run("status code carried through is filed as a node error", func(t *testing.T) {
-		rm := NewResultsManager(1, "LAVA")
+		rm := NewResultsManager(1, "COSMOSHUB")
 
 		nodeErr := rm.SetResponse(&RelayResponse{
 			RelayResult: common.RelayResult{
@@ -121,7 +121,7 @@ func TestResultsManager_GRPCStatusResponseIsANodeError(t *testing.T) {
 	// comment: if someone drops StatusCode from the RelayResult again, the test
 	// above goes red and this one explains what changed.
 	t.Run("REGRESSION: a zero status code is filed as a success", func(t *testing.T) {
-		rm := NewResultsManager(1, "LAVA")
+		rm := NewResultsManager(1, "COSMOSHUB")
 
 		nodeErr := rm.SetResponse(&RelayResponse{
 			RelayResult: common.RelayResult{
@@ -154,7 +154,7 @@ func TestResultsManager_GRPCStatusResponseIsANodeError(t *testing.T) {
 // RESOURCE_EXHAUSTED is the witness because code 8 deliberately has NO registry row
 // of its own: NODE_RATE_LIMITED here can only come from the body surviving.
 func TestResultsManager_ClassifiesOnTheNodesBodyWhenTheMessageIsEmpty(t *testing.T) {
-	rm := NewResultsManager(1, "LAVA")
+	rm := NewResultsManager(1, "COSMOSHUB")
 
 	body := []byte(`{"error_message":"rate limit exceeded, retry after 1s","error_code":8}`)
 	nodeErr := rm.SetResponse(&RelayResponse{

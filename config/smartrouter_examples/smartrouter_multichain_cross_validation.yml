@@ -1,5 +1,5 @@
 # Smart Router Direct RPC Configuration — multi-chain + CROSS-VALIDATION
-# Mode: Direct connections to public endpoints (no Lava providers!)
+# Mode: Direct connections to public endpoints (no provider-relay network — direct upstreams)
 #
 # Same upstream layout as smartrouter_multichain.yml — every bundled example
 # chain on its own port — but this variant ALSO enables per-method

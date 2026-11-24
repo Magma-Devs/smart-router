@@ -351,7 +351,7 @@ func TestSpecAggregation_FullReplacement(t *testing.T) {
 					"allowed_block_lag_for_qos_sync": 2,
 					"shares": 1,
 					"min_stake_provider": {
-						"denom": "ulava",
+						"denom": "uatom",
 						"amount": "5000000000"
 					},
 					"api_collections": [
@@ -404,7 +404,7 @@ func TestSpecAggregation_FullReplacement(t *testing.T) {
 					"average_block_time": 12000,
 					"shares": 5,
 					"min_stake_provider": {
-						"denom": "ulava",
+						"denom": "uatom",
 						"amount": "1000000"
 					},
 					"api_collections": [
