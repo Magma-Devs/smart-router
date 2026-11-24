@@ -20,12 +20,12 @@ func restProtocolMessage(t *testing.T) chainlib.ProtocolMessage {
 	t.Helper()
 	ctx := context.Background()
 	serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
-	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, "LAVA", spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
+	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, "COSMOSHUB", spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 	if closeServer != nil {
 		t.Cleanup(closeServer)
 	}
 	require.NoError(t, err)
-	chainMsg, err := chainParser.ParseMsg("/cosmos/bank/v1beta1/balances/lava@1x", nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
+	chainMsg, err := chainParser.ParseMsg("/cosmos/bank/v1beta1/balances/cosmos1x", nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 	require.NoError(t, err)
 	return chainlib.NewProtocolMessage(chainMsg, nil, nil, "", "")
 }
@@ -35,7 +35,7 @@ func restProtocolMessage(t *testing.T) chainlib.ProtocolMessage {
 func TestResultsManagerRunsThePrefixAheadOfTheRows(t *testing.T) {
 	fileNodeError := func(t *testing.T, protocolMessage chainlib.ProtocolMessage, status int, body string) *common.RouterError {
 		t.Helper()
-		rm := NewResultsManager(1, "LAVA")
+		rm := NewResultsManager(1, "COSMOSHUB")
 		nodeErr := rm.SetResponse(&RelayResponse{
 			RelayResult: common.RelayResult{
 				Reply:       &pairingtypes.RelayReply{Data: []byte(body)},
