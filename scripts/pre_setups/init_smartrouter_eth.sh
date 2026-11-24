@@ -93,8 +93,8 @@ export ETH_RPC_URL_4="${ETH_RPC_URL_4:-}"
 #   export ETH_WS_URL_1="wss://mainnet.infura.io/ws/v3/YOUR_INFURA_KEY"
 #   export ETH_WS_URL_2="wss://eth-mainnet.g.alchemy.com/v2/YOUR_ALCHEMY_KEY"
 #   export ETH_WS_URL_3="wss://ethereum-rpc.publicnode.com"
-export ETH_WS_URL_1="${ETH_WS_URL_1:-wss://g.w.lavanet.xyz:443/gateway/eth/rpc/YOUR_LAVA_GATEWAY_KEY}"
-export ETH_WS_URL_2="${ETH_WS_URL_2:-wss://g.w.lavanet.xyz:443/gateway/eth/rpc/YOUR_LAVA_GATEWAY_KEY}"
+export ETH_WS_URL_1="${ETH_WS_URL_1:-wss://mainnet.infura.io/ws/v3/YOUR_INFURA_KEY}"
+export ETH_WS_URL_2="${ETH_WS_URL_2:-wss://eth-mainnet.g.alchemy.com/v2/YOUR_ALCHEMY_KEY}"
 export ETH_WS_URL_3="${ETH_WS_URL_3:-wss://ethereum-rpc.publicnode.com}"
 
 # Validate that real URLs are set (not placeholders)
