@@ -74,6 +74,15 @@ func TestRESTStatusRows(t *testing.T) {
 			require.Equal(t, want.dataScope, got.SubCategory.IsDataScope(), "data scope")
 		})
 	}
+
+	// The status decides, never a status number in the node's own text (MAG-5490): the row for a 5xx
+	// no status row names comes before the rows that read a status out of the message, so a 529
+	// whose message opens with another status is still the provider fault, not a rate limit.
+	t.Run("REST 529 saying 429 Too Many Requests", func(t *testing.T) {
+		got := ClassifyError(nil, ChainFamilyUnknown, TransportREST, 529, "429 Too Many Requests")
+		require.Same(t, RouterErrorNodeUnlistedServerError, got, "REST 529 maps to %s", got.Name)
+		require.False(t, got.IsRateLimited(), "not a rate limit")
+	})
 }
 
 // TestRESTStatusRowsDoNotReachOtherTransports: the REST rows must not change JSON-RPC or gRPC.
