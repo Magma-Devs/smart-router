@@ -644,6 +644,13 @@ type httpStatusMatcher struct {
 //     Service Unavailable: <body>").
 var httpStatusLeads = []string{"http status ", "http ", GRPCGatewayStatusText + ": ", "disallowed status code error (", ""}
 
+// grpcNodeErrorRecordLead opens the JSON the direct gRPC sender keeps as the reply to a node's status
+// (routersession.GRPCNodeErrorResponse), lowercase. The results manager classifies that JSON as the
+// reply's text, since a gRPC node error carries no message of its own. The status message follows
+// it, so the leads above apply after it as they do at the start of the message the sender
+// classifies: a gateway's HTTP 500 is read as a 500 in the record too, not only by the sender.
+const grpcNodeErrorRecordLead = `{"error_message":"`
+
 // httpStatusInnerLeads are what the router writes before a status it adds in parentheses to an
 // error it wraps: a refused WebSocket handshake ("websocket: bad handshake (HTTP status 503)"), a
 // relay's failure ("upstream returned a node error (HTTP 503)"). Lowercase.
@@ -654,8 +661,9 @@ func (m httpStatusMatcher) Matches(errorCode int, errorMessage string) bool {
 }
 
 func (m httpStatusMatcher) matchesLowered(_ int, loweredMessage string) bool {
+	start := strings.TrimPrefix(loweredMessage, grpcNodeErrorRecordLead)
 	for _, lead := range httpStatusLeads {
-		if rest, ok := strings.CutPrefix(loweredMessage, lead); ok && m.startsWithStatus(rest) {
+		if rest, ok := strings.CutPrefix(start, lead); ok && m.startsWithStatus(rest) {
 			return true
 		}
 	}
