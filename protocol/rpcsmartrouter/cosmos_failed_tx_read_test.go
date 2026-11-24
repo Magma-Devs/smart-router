@@ -3,15 +3,19 @@ package rpcsmartrouter
 import (
 	"context"
 	"net/http"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/magma-Devs/smart-router/protocol/chainlib"
+	"github.com/magma-Devs/smart-router/protocol/chainstate"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
+	specutils "github.com/magma-Devs/smart-router/utils/keeper"
 	"github.com/magma-Devs/smart-router/utils/rand"
 	"github.com/stretchr/testify/require"
 )
@@ -108,4 +112,84 @@ func TestCosmosFailedTxRead_BroadcastRefusalStaysANodeError_MAG5326(t *testing.T
 	result := sendCosmosREST(t, server, 5_326_006, http.MethodPost, "/cosmos/tx/v1beta1/txs", `{"tx_bytes":"CpIBCo8B","mode":"BROADCAST_MODE_SYNC"}`)
 	require.JSONEq(t, accepted, string(result.Reply.Data), "the first refusal does not end the broadcast")
 	require.Equal(t, "accepts", result.ProviderInfo.ProviderAddress)
+}
+
+// cosmosHubWithoutBroadcastParser is COSMOSHUB's REST parser with POST /cosmos/tx/v1beta1/txs taken
+// out of the spec, as THORCHAIN's spec lists no broadcast today: the router relays it as an unlisted
+// read, to one provider.
+func cosmosHubWithoutBroadcastParser(t *testing.T) chainlib.ChainParser {
+	t.Helper()
+	catalog, err := specutils.GetAllSpecsFromLocalDir("../../specs/")
+	require.NoError(t, err)
+	common.RegisterChainFamilies(catalog)
+	spec, err := specutils.GetSpecFromLocalDirs([]string{"../../specs/"}, "COSMOSHUB")
+	require.NoError(t, err)
+	dropped := 0
+	for _, collection := range spec.ApiCollections {
+		if collection.CollectionData.ApiInterface != spectypes.APIInterfaceRest || collection.CollectionData.Type != http.MethodPost {
+			continue
+		}
+		collection.Apis = slices.DeleteFunc(collection.Apis, func(api *spectypes.Api) bool {
+			if api.Name == "/cosmos/tx/v1beta1/txs" {
+				dropped++
+				return true
+			}
+			return false
+		})
+	}
+	require.Equal(t, 1, dropped)
+	parser, err := chainlib.NewChainParser(spectypes.APIInterfaceRest)
+	require.NoError(t, err)
+	parser.SetSpec(spec)
+	return parser
+}
+
+// On a chain whose spec does not list the broadcast, a refusal is still the node's error, as on
+// main: the other provider is asked, and a refusal left in the cache is not served as the answer.
+// Read as the answer, the client got a refusal while another node would take the transaction.
+func TestCosmosFailedTxRead_UnlistedBroadcastRefusalStaysANodeError_MAG5326(t *testing.T) {
+	rand.InitRandomSeed()
+	const body = `{"tx_bytes":"CpIBCo8B","mode":"BROADCAST_MODE_SYNC"}`
+	parser := cosmosHubWithoutBroadcastParser(t)
+	countingNode := func(name, reply string, calls *atomic.Int32) relayEndNode {
+		answer := relayEndReply(http.StatusOK, reply, 0)
+		return relayEndNode{name: name, handler: func(w http.ResponseWriter, r *http.Request) {
+			calls.Add(1)
+			answer(w, r)
+		}}
+	}
+
+	t.Run("a refusal is retried on another provider", func(t *testing.T) {
+		// The mempool is full: CometBFT's refusal as the SDK passes it on, with an empty raw_log.
+		full := `{"tx_response":{"height":"0","txhash":"ABCDEFABCDEFABCD","codespace":"sdk","code":20,"raw_log":""}}`
+		calls := &atomic.Int32{}
+		server := newRelayEndServer(t, "COSMOSHUB", spectypes.APIInterfaceRest, parser, countingNode("full-a", full, calls), countingNode("full-b", full, calls))
+		sendCosmosREST(t, server, 5_326_101, http.MethodPost, "/cosmos/tx/v1beta1/txs", body)
+		require.GreaterOrEqual(t, calls.Load(), int32(2), "the first refusal does not end the request")
+	})
+
+	t.Run("a refusal in the cache is not served as the answer", func(t *testing.T) {
+		refused := `{"tx_response":{"height":"0","txhash":"ABCDEFABCDEFABCD","codespace":"sdk","code":32,"raw_log":"account sequence mismatch, expected 379, got 392: incorrect account sequence"}}`
+		calls := &atomic.Int32{}
+		primary, rcs := startCacheServerForTest(t)
+		server := newRelayEndServer(t, "COSMOSHUB", spectypes.APIInterfaceRest, parser, countingNode("refuses", refused, calls))
+		server.cache = primary
+		const tip = int64(25_000_000)
+		withTip := chainstate.New("COSMOSHUB", chainstate.DefaultConfig(12*time.Second))
+		withTip.SetLatestBlock(tip)
+		server.chainState = withTip
+
+		sendCosmosREST(t, server, 5_326_102, http.MethodPost, "/cosmos/tx/v1beta1/txs", body)
+		parsed, err := server.ParseRelay(context.Background(), "/cosmos/tx/v1beta1/txs", body, http.MethodPost, relayEndNoCustomerID, "", nil)
+		require.NoError(t, err)
+		key, _, err := parsed.HashCacheRequest("COSMOSHUB")
+		require.NoError(t, err)
+		// The entry is written, on main too. Read back, it is the node's error again.
+		require.Eventually(t, func() bool { return directGetOn(rcs, "COSMOSHUB", key, tip, tip).GetReply() != nil },
+			3*time.Second, 20*time.Millisecond, "the first send's reply is in the cache")
+
+		second := sendCosmosREST(t, server, 5_326_103, http.MethodPost, "/cosmos/tx/v1beta1/txs", body)
+		require.EqualValues(t, 2, calls.Load(), "the second send reaches the node")
+		require.Equal(t, "refuses", second.ProviderInfo.ProviderAddress)
+	})
 }

@@ -30,7 +30,8 @@ type RestMessage struct {
 	Path     string
 	SpecPath string
 	// Broadcast is set when the request matched an api the spec marks stateful
-	// (CONSISTENCY_SELECT_ALL_PROVIDERS): a write, sent to every provider. Only its reply's
+	// (CONSISTENCY_SELECT_ALL_PROVIDERS), a write sent to every provider, or is a POST to Cosmos SDK's
+	// broadcast path, which a spec may not list (chainlib.isRESTBroadcast). Only its reply's
 	// tx_response.code is the node's verdict on the request. A read of a transaction that was
 	// included and failed carries the same non-zero code in its correct answer (MAG-5326).
 	Broadcast bool
