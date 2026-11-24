@@ -43,7 +43,7 @@ type httpRelaySpec struct {
 	answerError func(ctx context.Context, fiberCtx *fiber.Ctx, err error, reply *pairingtypes.RelayReply) (handled bool, sendErr error)
 	// refusal answers a request the router declined by one of its own limits (MAG-4577): the
 	// status, the body, the reply text for the failure line, and the headers the reply carries
-	// beside Lava-Guid (Lava-Write-Outcome on a refused write, MAG-5120); ok false falls through.
+	// beside Router-Guid (Router-Write-Outcome on a refused write, MAG-5120); ok false falls through.
 	// Unlike answerError, relayHTTP writes the failure line for it, with the cut body (MAG-4454).
 	refusal func(err error, msgSeed string) (status int, body []byte, loggedReply string, headers map[string]string, ok bool)
 	// noAnswer is the shape of the router's own 502/504 when no node answered (MAG-4481).
@@ -158,7 +158,7 @@ func (apil *chainListenerBase) relayHTTP(spec httpRelaySpec) fiber.Handler {
 
 // refusedRequestMessage reports whether err is a refusal of the request itself that every
 // interface answers as a client error, and the one sentence the caller is given for it: a
-// lava-select-provider name that none of the router's providers carries (MAG-3800), and on gRPC a
+// router-select-provider name that none of the router's providers carries (MAG-3800), and on gRPC a
 // binary request that is not a protobuf message (MAG-5421) or a JSON request that is not JSON the
 // method's message reads (MAG-5676).
 func refusedRequestMessage(err error) (message string, ok bool) {

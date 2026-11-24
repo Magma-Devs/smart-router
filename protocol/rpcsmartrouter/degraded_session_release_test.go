@@ -46,7 +46,7 @@ func sendToEveryEndpointStale(t *testing.T, msg archiveRequest) (*relaycore.Rela
 		w.WriteHeader(http.StatusOK)
 	})
 	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(
-		ctx, "LAVA", spectypes.APIInterfaceRest, noopHandler, nil, "../../", nil)
+		ctx, "COSMOSHUB", spectypes.APIInterfaceRest, noopHandler, nil, "../../", nil)
 	if closeServer != nil {
 		t.Cleanup(closeServer)
 	}
@@ -55,9 +55,9 @@ func sendToEveryEndpointStale(t *testing.T, msg archiveRequest) (*relaycore.Rela
 	chainTip := seedChainTip(200)
 	endpointtip.Default().Reset()
 	staleEp1 := &routersession.Endpoint{NetworkAddress: "http://stale1:8545"}
-	seedEndpointTip("LAVA", "rest", "http://stale1:8545", 50)
+	seedEndpointTip("COSMOSHUB", "rest", "http://stale1:8545", 50)
 	staleEp2 := &routersession.Endpoint{NetworkAddress: "http://stale2:8545"}
-	seedEndpointTip("LAVA", "rest", "http://stale2:8545", 50)
+	seedEndpointTip("COSMOSHUB", "rest", "http://stale2:8545", 50)
 
 	mkSession := func(addr string, ep *routersession.Endpoint) *routersession.SingleConsumerSession {
 		return &routersession.SingleConsumerSession{
@@ -91,8 +91,8 @@ func sendToEveryEndpointStale(t *testing.T, msg archiveRequest) (*relaycore.Rela
 
 	sm := &budgetCallSiteStateMachine{usedProviders: usedProviders, protocolMessage: msg}
 	relayProcessor := relaycore.NewRelayProcessor(ctx, nil, cvGuardMetrics{}, cvGuardMetrics{}, sm)
-	rpcEndpoint := &routersession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "rest"}
-	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "LAVA")
+	rpcEndpoint := &routersession.RPCEndpoint{ChainID: "COSMOSHUB", ApiInterface: "rest"}
+	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "COSMOSHUB")
 	rpcss := &RPCSmartRouterServer{
 		listenEndpoint:    rpcEndpoint,
 		chainParser:       chainParser,
@@ -111,7 +111,7 @@ func sendToEveryEndpointStale(t *testing.T, msg archiveRequest) (*relaycore.Rela
 // A session the consistency filter rejects was never asked, so it must leave the request's
 // dispatch history. UsedProviders filed it under the key it was taken with, and on the degraded
 // path that is the plain key, not the request's. A release under the request's key found nothing,
-// so the provider stayed in the history, and Lava-Retries then counted an attempt at a node that
+// so the provider stayed in the history, and Router-Retries then counted an attempt at a node that
 // never received the request (MAG-3762).
 func TestSendRelayToDirectEndpoints_ReleasesADegradedSessionUnderItsOwnKey(t *testing.T) {
 	relayProcessor := rejectEveryDegradedSession(t, archiveRequest{&MockProtocolMessage{
@@ -122,7 +122,7 @@ func TestSendRelayToDirectEndpoints_ReleasesADegradedSessionUnderItsOwnKey(t *te
 
 	usedProviders := relayProcessor.GetUsedProviders()
 	require.Empty(t, usedProviders.DispatchedProviders(),
-		"a rejected session was never asked, so it must not stay in the history Lava-Retries counts")
+		"a rejected session was never asked, so it must not stay in the history Router-Retries counts")
 	require.Equal(t, 0, usedProviders.SessionsLatestBatch())
 	require.Equal(t, 0, usedProviders.CurrentlyUsed())
 }

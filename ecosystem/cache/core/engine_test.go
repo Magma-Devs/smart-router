@@ -398,8 +398,8 @@ func TestGetRelaySeenBlockValidity(t *testing.T) {
 
 	t.Run("stored seen block meeting expectations serves", func(t *testing.T) {
 		store := newFakeStore()
-		seedEntry(store, false, "LAV1", hash, 100, 100, []byte(`ok`))
-		reply, hit, err := testEngine(store).GetRelay(context.Background(), getReq("LAV1", hash, 100, 100, false))
+		seedEntry(store, false, "COSMOSHUB", hash, 100, 100, []byte(`ok`))
+		reply, hit, err := testEngine(store).GetRelay(context.Background(), getReq("COSMOSHUB", hash, 100, 100, false))
 		require.NoError(t, err)
 		require.True(t, hit)
 		require.NotNil(t, reply.Reply)
@@ -408,8 +408,8 @@ func TestGetRelaySeenBlockValidity(t *testing.T) {
 
 	t.Run("stale stored seen block is rejected but still counts as a found entry", func(t *testing.T) {
 		store := newFakeStore()
-		seedEntry(store, false, "LAV1", hash, 100, 99, []byte(`stale`))
-		reply, hit, err := testEngine(store).GetRelay(context.Background(), getReq("LAV1", hash, 100, 100, false))
+		seedEntry(store, false, "COSMOSHUB", hash, 100, 99, []byte(`stale`))
+		reply, hit, err := testEngine(store).GetRelay(context.Background(), getReq("COSMOSHUB", hash, 100, 100, false))
 		require.Error(t, err)
 		require.Nil(t, reply.Reply, "rejected entry must not be served")
 		require.True(t, hit, "the entry was found before rejection — server-side accounting counts it as a hit")
@@ -417,18 +417,18 @@ func TestGetRelaySeenBlockValidity(t *testing.T) {
 
 	t.Run("caller with a lower seen block is served by an older entry", func(t *testing.T) {
 		store := newFakeStore()
-		seedEntry(store, false, "LAV1", hash, 100, 99, []byte(`old-but-valid`))
-		reply, _, err := testEngine(store).GetRelay(context.Background(), getReq("LAV1", hash, 100, 50, false))
+		seedEntry(store, false, "COSMOSHUB", hash, 100, 99, []byte(`old-but-valid`))
+		reply, _, err := testEngine(store).GetRelay(context.Background(), getReq("COSMOSHUB", hash, 100, 50, false))
 		require.NoError(t, err)
 		require.NotNil(t, reply.Reply)
 	})
 
 	t.Run("adopted shared-state tip raises expectations and rejects", func(t *testing.T) {
 		store := newFakeStore()
-		seedEntry(store, false, "LAV1", hash, 100, 99, []byte(`stale`))
-		store.int64s[SharedTipKey("LAV1", "fleet")] = 100
+		seedEntry(store, false, "COSMOSHUB", hash, 100, 99, []byte(`stale`))
+		store.int64s[SharedTipKey("COSMOSHUB", "fleet")] = 100
 
-		req := getReq("LAV1", hash, 100, 50, false)
+		req := getReq("COSMOSHUB", hash, 100, 50, false)
 		req.SharedStateId = "fleet"
 		reply, _, err := testEngine(store).GetRelay(context.Background(), req)
 		require.Error(t, err, "the fleet's seen block, not the caller's, sets the validity floor")
@@ -438,10 +438,10 @@ func TestGetRelaySeenBlockValidity(t *testing.T) {
 
 	t.Run("reply seen block is lifted to the caller's expectation", func(t *testing.T) {
 		store := newFakeStore()
-		seedEntry(store, false, "LAV1", hash, 100, 150, []byte(`fresh`))
-		store.int64s[SharedTipKey("LAV1", "fleet")] = 200
+		seedEntry(store, false, "COSMOSHUB", hash, 100, 150, []byte(`fresh`))
+		store.int64s[SharedTipKey("COSMOSHUB", "fleet")] = 200
 
-		req := getReq("LAV1", hash, 100, 100, false)
+		req := getReq("COSMOSHUB", hash, 100, 100, false)
 		req.SharedStateId = "fleet"
 		reply, _, err := testEngine(store).GetRelay(context.Background(), req)
 		require.NoError(t, err, "min(seen, requested) = 100 <= 150: entry is valid")
@@ -460,13 +460,13 @@ func TestGetRelayHashValidation(t *testing.T) {
 
 	seedWithBlockHash := func(store *fakeStore) {
 		env := NewEnvelope(&relaytypes.RelayReply{Data: []byte(`hashed`)}, blockHash, false, nil, 100, false, 0)
-		_ = store.SetEntry(context.Background(), RelayKey(false, "LAV1", hash, 100), &env, time.Minute)
+		_ = store.SetEntry(context.Background(), RelayKey(false, "COSMOSHUB", hash, 100), &env, time.Minute)
 	}
 
 	t.Run("matching block hash serves", func(t *testing.T) {
 		store := newFakeStore()
 		seedWithBlockHash(store)
-		req := getReq("LAV1", hash, 100, 100, false)
+		req := getReq("COSMOSHUB", hash, 100, 100, false)
 		req.BlockHash = blockHash
 		reply, hit, err := testEngine(store).GetRelay(context.Background(), req)
 		require.NoError(t, err)
@@ -479,9 +479,9 @@ func TestGetRelayHashValidation(t *testing.T) {
 		seedWithBlockHash(store)
 		// A finalized variant also exists — but validation applies to the first
 		// entry found in precedence order; there is no second candidate.
-		seedEntry(store, true, "LAV1", hash, 100, 100, []byte(`finalized`))
+		seedEntry(store, true, "COSMOSHUB", hash, 100, 100, []byte(`finalized`))
 
-		req := getReq("LAV1", hash, 100, 100, false)
+		req := getReq("COSMOSHUB", hash, 100, 100, false)
 		req.BlockHash = []byte("0xother")
 		reply, hit, err := testEngine(store).GetRelay(context.Background(), req)
 		require.Error(t, err)
@@ -491,8 +491,8 @@ func TestGetRelayHashValidation(t *testing.T) {
 
 	t.Run("finalized entry with nil hash serves without hash validation", func(t *testing.T) {
 		store := newFakeStore()
-		seedEntry(store, true, "LAV1", hash, 100, 100, []byte(`finalized`))
-		req := getReq("LAV1", hash, 100, 100, true)
+		seedEntry(store, true, "COSMOSHUB", hash, 100, 100, []byte(`finalized`))
+		req := getReq("COSMOSHUB", hash, 100, 100, true)
 		req.BlockHash = []byte("0xwhatever")
 		reply, _, err := testEngine(store).GetRelay(context.Background(), req)
 		require.NoError(t, err)
@@ -510,9 +510,9 @@ func TestGetRelayLatestResolution(t *testing.T) {
 	t.Run("fresh chain tip resolves LATEST to a concrete key", func(t *testing.T) {
 		store := newFakeStore()
 		store.tipBlock, store.tipFresh = 100, true
-		seedEntry(store, false, "LAV1", hash, 100, 100, []byte(`latest`))
+		seedEntry(store, false, "COSMOSHUB", hash, 100, 100, []byte(`latest`))
 
-		req := getReq("LAV1", hash, spectypes.LATEST_BLOCK, 100, false)
+		req := getReq("COSMOSHUB", hash, spectypes.LATEST_BLOCK, 100, false)
 		reply, hit, err := testEngine(store).GetRelay(context.Background(), req)
 		require.NoError(t, err)
 		require.True(t, hit)
@@ -523,10 +523,10 @@ func TestGetRelayLatestResolution(t *testing.T) {
 	t.Run("unknown or stale tip degrades LATEST to a miss", func(t *testing.T) {
 		store := newFakeStore()
 		store.tipFresh = false
-		seedEntry(store, false, "LAV1", hash, 100, 100, []byte(`latest`))
-		store.heights[HeightKey("LAV1", "0xh")] = 42
+		seedEntry(store, false, "COSMOSHUB", hash, 100, 100, []byte(`latest`))
+		store.heights[HeightKey("COSMOSHUB", "0xh")] = 42
 
-		req := getReq("LAV1", hash, spectypes.LATEST_BLOCK, 100, false)
+		req := getReq("COSMOSHUB", hash, spectypes.LATEST_BLOCK, 100, false)
 		req.BlocksHashesToHeights = []*relaytypes.BlockHashToHeight{{Hash: "0xh"}}
 		reply, hit, err := testEngine(store).GetRelay(context.Background(), req)
 		require.Error(t, err)
@@ -548,7 +548,7 @@ func TestSetRelayWrites(t *testing.T) {
 
 	err := engine.SetRelay(context.Background(), &relaytypes.RelayCacheSet{
 		RequestHash:      hash,
-		ChainId:          "LAV1",
+		ChainId:          "COSMOSHUB",
 		RequestedBlock:   100,
 		SeenBlock:        90,
 		SharedStateId:    "fleet",
@@ -562,16 +562,16 @@ func TestSetRelayWrites(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	entryKey := RelayKey(false, "LAV1", hash, 100)
+	entryKey := RelayKey(false, "COSMOSHUB", hash, 100)
 	require.NotNil(t, store.entries[entryKey], "entry lands in the temp namespace")
 	require.Equal(t, 2*time.Second, store.ttls[entryKey], "non-finalized TTL = averageBlockTime/8")
 	require.Equal(t, int64(100), store.entries[entryKey].SeenBlock, "stored seen block = max(reply latest, set seen)")
 
-	require.Equal(t, int64(100), store.int64s[SharedTipKey("LAV1", "fleet")], "shared tip published")
-	require.Equal(t, 160*time.Second, store.ttls[SharedTipKey("LAV1", "fleet")], "shared tip TTL = 10x block time")
+	require.Equal(t, int64(100), store.int64s[SharedTipKey("COSMOSHUB", "fleet")], "shared tip published")
+	require.Equal(t, 160*time.Second, store.ttls[SharedTipKey("COSMOSHUB", "fleet")], "shared tip TTL = 10x block time")
 	require.Equal(t, []int64{100}, store.tipSets, "chain tip advanced")
-	require.Equal(t, int64(100), store.heights[HeightKey("LAV1", "0xh")], "known height stored")
-	_, unknownStored, _ := store.GetHeight(context.Background(), HeightKey("LAV1", "0xunknown"))
+	require.Equal(t, int64(100), store.heights[HeightKey("COSMOSHUB", "0xh")], "known height stored")
+	_, unknownStored, _ := store.GetHeight(context.Background(), HeightKey("COSMOSHUB", "0xunknown"))
 	require.False(t, unknownStored, "NOT_APPLICABLE heights are never stored")
 }
 
@@ -581,14 +581,14 @@ func TestSetRelayDoesNotPublishAZeroChainTip(t *testing.T) {
 
 	err := engine.SetRelay(context.Background(), &relaytypes.RelayCacheSet{
 		RequestHash:      []byte{0x05},
-		ChainId:          "LAV1",
+		ChainId:          "COSMOSHUB",
 		RequestedBlock:   100,
 		SeenBlock:        0,
 		AverageBlockTime: int64(16 * time.Second),
 		Response:         &relaytypes.RelayReply{Data: []byte(`stored`), LatestBlock: 0},
 	})
 	require.NoError(t, err)
-	require.NotNil(t, store.entries[RelayKey(false, "LAV1", []byte{0x05}, 100)], "the entry itself is stored")
+	require.NotNil(t, store.entries[RelayKey(false, "COSMOSHUB", []byte{0x05}, 100)], "the entry itself is stored")
 	require.Empty(t, store.tipSets, "a write that knew no block publishes no tip: it would say nothing, and a stale tip now yields to any write")
 }
 
@@ -596,7 +596,7 @@ func TestSetRelayRejectsNegativeBlock(t *testing.T) {
 	store := newFakeStore()
 	err := testEngine(store).SetRelay(context.Background(), &relaytypes.RelayCacheSet{
 		RequestHash:    []byte{0x05},
-		ChainId:        "LAV1",
+		ChainId:        "COSMOSHUB",
 		RequestedBlock: spectypes.LATEST_BLOCK,
 		Response:       &relaytypes.RelayReply{Data: []byte(`x`)},
 	})

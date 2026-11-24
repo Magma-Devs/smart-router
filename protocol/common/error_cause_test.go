@@ -23,10 +23,10 @@ func TestRouterErrorWrapping_AllPathsResolve(t *testing.T) {
 	t.Run("cause sentinel is reachable", func(t *testing.T) {
 		assert.True(t, errors.Is(wrapped, context.Canceled))
 	})
-	t.Run("lava error still matches by code", func(t *testing.T) {
+	t.Run("router error still matches by code", func(t *testing.T) {
 		assert.True(t, errors.Is(wrapped, RouterErrorContextCanceled))
 	})
-	t.Run("lava error still resolves via As", func(t *testing.T) {
+	t.Run("router error still resolves via As", func(t *testing.T) {
 		var le *RouterError
 		require.True(t, errors.As(wrapped, &le))
 		assert.Equal(t, RouterErrorContextCanceled.Code, le.Code)

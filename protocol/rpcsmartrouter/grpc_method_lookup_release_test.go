@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
 )
 
@@ -145,5 +147,98 @@ func TestGRPCListener_JSONRequestsForAMethodNoProviderDescribesLeaveEveryProvide
 		require.Eventually(t, func() bool { return providerReports(server, 1)[0] != reports[0] }, 5*time.Second, 20*time.Millisecond,
 			"a scored node error moves the provider's report")
 		require.Positive(t, endpoints[0].ConnectionRefusals, "and counts against the endpoint")
+	})
+}
+
+// endpointRelayCount sums the per-endpoint relay counter name (rpc_endpoint_total_errored or
+// rpc_endpoint_total_cancelled) over the test chain's endpoints for method. The default registry
+// keeps counting across tests, so callers compare a before and an after.
+func endpointRelayCount(t *testing.T, name, method string) float64 {
+	t.Helper()
+	families, err := prometheus.DefaultGatherer.Gather()
+	require.NoError(t, err)
+	var total float64
+	for _, family := range families {
+		if family.GetName() != name {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			labels := map[string]string{}
+			for _, label := range metric.GetLabel() {
+				labels[label.GetName()] = label.GetValue()
+			}
+			if labels["spec"] == "GRPCTEST" && labels["function"] == method {
+				total += metric.GetCounter().GetValue()
+			}
+		}
+	}
+	return total
+}
+
+// The per-endpoint relay metric agrees with the release (MAG-5675): a JSON request no provider
+// describes was never sent, so each attempt counts as cancelled, as a race loser's does, and not in
+// rpc_endpoint_total_errored or a provider's failed requests. A node's own error still counts.
+func TestGRPCListener_JSONRequestsForAMethodNoProviderDescribesAreNotCountedAsEndpointErrors(t *testing.T) {
+	mm := metrics.NewSmartRouterMetricsManager(metrics.SmartRouterMetricsManagerOptions{})
+	withMetrics := func(server *RPCSmartRouterServer) { server.smartRouterEndpointMetrics = mm }
+
+	for _, tc := range []struct {
+		name  string
+		start func(t *testing.T) (string, *atomic.Int32)
+	}{
+		{"nodes that serve no reflection", startDecodingNode},
+		{"nodes whose reflection does not describe the method", startReflectingNode},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var addrs []string
+			for range 3 {
+				addr, _ := tc.start(t)
+				addrs = append(addrs, addr)
+			}
+			client, _, _ := startProtobufCheckRouterConfigured(t, withMetrics, undescribedReadMethod, undescribedWriteMethod, addrs...)
+
+			for _, method := range []string{undescribedReadMethod, undescribedWriteMethod} {
+				errored := endpointRelayCount(t, "rpc_endpoint_total_errored", method)
+				cancelled := endpointRelayCount(t, "rpc_endpoint_total_cancelled", method)
+				for range 3 {
+					_, _, err := invokeRaw(t, client, method, []byte(`{"id":"7"}`))
+					require.Error(t, err)
+				}
+				require.Eventually(t, func() bool {
+					return endpointRelayCount(t, "rpc_endpoint_total_cancelled", method) >= cancelled+3
+				}, 5*time.Second, 20*time.Millisecond, "%s: each attempt counts as cancelled", method)
+				require.Equal(t, errored, endpointRelayCount(t, "rpc_endpoint_total_errored", method), "%s: no attempt counts as an endpoint error", method)
+			}
+		})
+	}
+
+	// The harness sees an endpoint error: once the node has gone away, a binary request fails with
+	// no reply, and that counts.
+	t.Run("control: a node that went away counts as an endpoint error", func(t *testing.T) {
+		lis, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+		node := grpc.NewServer(grpc.ForceServerCodec(stalledReflectionCodec{}), grpc.UnknownServiceHandler(func(_ any, stream grpc.ServerStream) error {
+			if method, _ := grpc.MethodFromServerStream(stream); strings.Contains(method, "ServerReflection") {
+				return status.Error(codes.Unimplemented, "no reflection")
+			}
+			var body []byte
+			if err := stream.RecvMsg(&body); err != nil {
+				return err
+			}
+			return stream.SendMsg([]byte{0x08, 0x01})
+		}))
+		go func() { _ = node.Serve(lis) }()
+		t.Cleanup(node.Stop)
+		client, _, _ := startProtobufCheckRouterConfigured(t, withMetrics, undescribedReadMethod, undescribedWriteMethod, lis.Addr().String())
+		_, _, err = invokeRaw(t, client, undescribedReadMethod, []byte{0x08, 0x01})
+		require.NoError(t, err, "the router reaches the node")
+		node.Stop()
+
+		errored := endpointRelayCount(t, "rpc_endpoint_total_errored", undescribedReadMethod)
+		_, _, err = invokeRaw(t, client, undescribedReadMethod, []byte{0x08, 0x01})
+		require.Error(t, err)
+		require.Eventually(t, func() bool {
+			return endpointRelayCount(t, "rpc_endpoint_total_errored", undescribedReadMethod) > errored
+		}, 5*time.Second, 20*time.Millisecond)
 	})
 }

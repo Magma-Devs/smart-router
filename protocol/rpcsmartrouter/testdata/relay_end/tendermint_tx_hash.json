@@ -13,7 +13,7 @@
       "upstream": "node-a"
     }
   ],
-  "chain": "LAVA",
+  "chain": "COSMOSHUB",
   "error": "",
   "error_code": "",
   "event": "relay_end",
