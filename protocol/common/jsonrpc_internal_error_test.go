@@ -30,7 +30,8 @@ func TestJSONRPCErrorText(t *testing.T) {
 }
 
 // cometBFTInternalErrorCases are CometBFT's -32603 answers by the data it sends (cometbft v0.38.21
-// mempool/errors.go, rpc/core/mempool.go, env.go, tx.go), each with the verdict MAG-5325 gives it.
+// mempool/errors.go, mempool/mempool.go, rpc/core/mempool.go, env.go, tx.go), each with the verdict
+// MAG-5325 gives it.
 var cometBFTInternalErrorCases = []struct {
 	name string
 	data string
@@ -42,6 +43,8 @@ var cometBFTInternalErrorCases = []struct {
 	{"broadcast_tx_commit, mempool full", "error on broadcastTxCommit: mempool is full: number of txs 5000 (max: 5000), total txs bytes 429 (max: 1073741824)", RouterErrorChainMempoolFull},
 	{"mempool rechecking", "mempool is still rechecking after a new committed block, so it is considered as full", RouterErrorChainMempoolFull},
 	{"tx too large", "Tx too large. Max size is 1048576, but got 2000000", RouterErrorChainTxTooLarge},
+	{"tx pre check, too big for a block", "tx pre check: tx size is too big: 2000000, max: 1048576", RouterErrorChainTxTooLarge},
+	{"broadcast_tx_commit, tx pre check", "error on broadcastTxCommit: tx pre check: tx size is too big: 2000000, max: 1048576", RouterErrorChainTxTooLarge},
 	{"commit timeout", "timed out waiting for tx to be included in a block", RouterErrorNodeAborted},
 	{"tx not found", "tx (ABCDEF0123456789) not found", RouterErrorChainTxNotFound},
 	{"pruned height", "height 5 is not available, lowest height is 1000", RouterErrorChainStatePruned},

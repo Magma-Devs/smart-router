@@ -348,6 +348,7 @@ A gRPC status needs the wrapper because grpc-go words a connection it could not 
    | `tx already exists in cache` | 3007 `CHAIN_TX_ALREADY_KNOWN` |
    | `mempool is full: …`, `mempool is still rechecking …` | 3009 `CHAIN_MEMPOOL_FULL` |
    | `Tx too large. Max size is …` | 3010 `CHAIN_TX_TOO_LARGE` |
+   | `tx pre check: tx size is too big: …` | 3010 `CHAIN_TX_TOO_LARGE` |
    | `height N is not available, lowest height is M` | 3204 `CHAIN_STATE_PRUNED` |
    | `height N must be less than or equal to the current blockchain height M` | 3201 `CHAIN_BLOCK_NOT_FOUND` |
    | `tx (HASH) not found` | 3202 `CHAIN_TX_NOT_FOUND` |

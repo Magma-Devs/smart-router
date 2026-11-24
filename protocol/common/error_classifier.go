@@ -223,6 +223,9 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 		{cometBFTInternalError(`tx already exists in cache`), RouterErrorChainTxAlreadyKnown},
 		{cometBFTInternalError(`mempool is (?:full|still rechecking)`), RouterErrorChainMempoolFull},
 		{cometBFTInternalError(`Tx too large\. Max size is`), RouterErrorChainTxTooLarge},
+		// The mempool's pre-check against the block's data size (mempool.PreCheckMaxBytes, set from the
+		// consensus params, so every node of the chain says the same).
+		{cometBFTInternalError(`tx pre check: tx size is too big`), RouterErrorChainTxTooLarge},
 		{cometBFTInternalError(`height \d+ is not available, lowest height is`), RouterErrorChainStatePruned},
 		{cometBFTInternalError(`height \d+ must be less than or equal to the current blockchain height`), RouterErrorChainBlockNotFound},
 		{cometBFTInternalError(`tx \([0-9A-Fa-f]*\) not found`), RouterErrorChainTxNotFound},
