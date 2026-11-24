@@ -289,7 +289,7 @@ func TestFetchEndpointConnection_InternalPath(t *testing.T) {
 	}
 	fetchAll := func(cswp *ConsumerSessionsWithProvider, internalPath *string) []*EndpointAndChosenConnection {
 		connected, endpoints, _, err := cswp.fetchEndpointConnectionFromConsumerSessionWithProvider(
-			ctx, endpointPickSkipDisabled, true, "", nil, internalPath, nil)
+			ctx, endpointPickSkipDisabled, true, "", nil, newRelayRoute(internalPath, ""), nil)
 		require.NoError(t, err)
 		require.True(t, connected)
 		return endpoints
@@ -368,7 +368,7 @@ func TestFetchEndpointConnection_InternalPath(t *testing.T) {
 		lost.UnservedInternalPaths = map[string]struct{}{"/v2": {}}
 
 		connected, endpoints, _, err := lost.fetchEndpointConnectionFromConsumerSessionWithProvider(
-			ctx, endpointPickSkipDisabled, true, "", nil, path("/v2"), nil)
+			ctx, endpointPickSkipDisabled, true, "", nil, newRelayRoute(path("/v2"), ""), nil)
 		require.NoError(t, err, "passed over, not blocked: its /v3 endpoint is healthy")
 		require.False(t, connected)
 		require.Empty(t, endpoints)

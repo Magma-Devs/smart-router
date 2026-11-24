@@ -49,7 +49,7 @@ func urlPickCSM(reg *holdoff.Registry, chainID, apiInterface string, providers .
 
 func pickedURL(t *testing.T, csm *ConsumerSessionManager, address string, internalPath *string) string {
 	t.Helper()
-	connected, endpoints, _, err := csm.pairing[address].fetchEndpointConnectionFromConsumerSessionWithProvider(context.Background(), endpointPickSkipDisabled, false, "", nil, internalPath, csm.urlHeldOff(address))
+	connected, endpoints, _, err := csm.pairing[address].fetchEndpointConnectionFromConsumerSessionWithProvider(context.Background(), endpointPickSkipDisabled, false, "", nil, newRelayRoute(internalPath, ""), csm.urlHeldOff(address))
 	require.NoError(t, err)
 	require.True(t, connected)
 	return endpoints[0].endpoint.NetworkAddress
@@ -132,8 +132,8 @@ func TestHoldoff_AHeldPathURLHoldsOnlyThatPath(t *testing.T) {
 	reg.RecordRateLimit(csm.holdoffKey("ton"), "https://ton.example/v2", time.Minute)
 
 	v2, v3 := "/v2", "/v3"
-	_, held := csm.providerHeldOff("ton", "", nil, &v2)
+	_, held := csm.providerHeldOff("ton", "", nil, newRelayRoute(&v2, ""))
 	require.True(t, held, "the only url serving /v2 is held")
-	_, held = csm.providerHeldOff("ton", "", nil, &v3)
+	_, held = csm.providerHeldOff("ton", "", nil, newRelayRoute(&v3, ""))
 	require.False(t, held, "the /v3 url never answered 429")
 }

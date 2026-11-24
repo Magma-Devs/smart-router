@@ -5943,6 +5943,9 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 		resolvedInternalPath := apiCollection.CollectionData.InternalPath
 		sessionOpts.InternalPath = &resolvedInternalPath
 	}
+	// Which api this is, so selection keeps it off a url restricted to other methods and sends
+	// it to the urls restricted to it (a node url's `methods` list, MAG-5667).
+	sessionOpts.Method = protocolMessage.GetApi().GetName()
 	if cvp := relayProcessor.GetCrossValidationParams(); cvp != nil {
 		if cvp.MinGroups > 1 {
 			sessionOpts.MinGroups = cvp.MinGroups
