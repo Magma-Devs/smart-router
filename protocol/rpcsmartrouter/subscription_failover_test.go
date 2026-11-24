@@ -14,6 +14,7 @@ import (
 	rpcclient "github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
+	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils/rand"
 	"github.com/stretchr/testify/require"
@@ -25,8 +26,8 @@ import (
 // A primary that refused connections but was still in the tier failed new subscriptions while
 // a healthy second primary and the backup tier went untried, until re-verification demoted it
 // about two epochs later; HTTP relays had failed over long before. Within one subscribe the
-// router now skips every endpoint it already tried, cascades primary → backup, and answers
-// with an error only once every endpoint failed.
+// router now skips every endpoint it already tried and cascades primary → backup, up to the
+// relay retry limit, and answers with an error once every endpoint it could try failed.
 //
 // The upstreams are real servers dialed for real. The tiers are handed to the manager
 // directly, which is the runtime state between two re-verify ticks.
@@ -456,4 +457,100 @@ func TestSelectEndpoint_HeldOffEndpointIsTriedOnceTheReadyOneFailed(t *testing.T
 			require.Equal(t, heldOff, ep.Url, "with the ready primary tried, the held-off primary is next")
 		})
 	}
+}
+
+// A subscribe stops at the relay retry limit, as an HTTP relay does, primaries and backups alike:
+// the first attempt and at most --set-relay-retry-limit more (Omer on MAG-4730, the rule MAG-5092
+// set for relays). With every endpoint failing, the walk asks limit+1 of them, primaries first,
+// and the client gets the last one's error. It used to ask every endpoint, so one subscribe could
+// reach every paid backup, and a client whose endpoints drop packets waited a connect timeout for
+// each of them.
+func TestSubscribeWithFailover_StopsAtTheRelayRetryLimit(t *testing.T) {
+	primary := []*common.NodeUrl{{Url: "wss://primary-1"}, {Url: "wss://primary-2"}, {Url: "wss://primary-3"}}
+	backup := []*common.NodeUrl{{Url: "wss://backup-1"}, {Url: "wss://backup-2"}, {Url: "wss://backup-3"}}
+	var cascade []string
+	for _, ep := range append(append([]*common.NodeUrl{}, primary...), backup...) {
+		cascade = append(cascade, ep.Url)
+	}
+	limit := func(n int) func() int { return func() int { return n } }
+	for _, tc := range []struct {
+		name string
+		// retryLimit overrides the flag; nil reads it.
+		retryLimit func() int
+		asked      []string
+	}{
+		{"no retries: the first endpoint only", limit(0), cascade[:1]},
+		{"a negative limit gives no retries, as it gives a relay none", limit(-2), cascade[:1]},
+		{"one retry: the second primary, no backup", limit(1), cascade[:2]},
+		{"three retries: the primaries, then the first backup", limit(3), cascade[:4]},
+		{"a limit past the endpoints: every endpoint once", limit(10), cascade},
+		{"the flag's value", nil, cascade[:min(relaycore.RelayRetryLimit+1, len(cascade))]},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withFreshRelayHoldoff(t)
+			endpoints := newSubscriptionEndpoints("test", "no endpoints", wsFailoverChainID, primary, backup, nil)
+			endpoints.relayRetryLimit = tc.retryLimit
+
+			first, err := endpoints.selectEndpoint(context.Background(), "client-1")
+			require.NoError(t, err)
+			var asked []string
+			ep, err := endpoints.subscribeWithFailover(context.Background(), "client-1", first, func(endpoint *common.NodeUrl) error {
+				asked = append(asked, endpoint.Url)
+				return fmt.Errorf("failed to get WebSocket connection: %w on %s", errors.New("websocket: bad handshake (HTTP status 503 Service Unavailable)"), endpoint.Url)
+			})
+			require.Nil(t, ep)
+			require.Equal(t, tc.asked, asked, "the endpoints asked, in order")
+			require.ErrorContains(t, err, asked[len(asked)-1], "the client gets the last endpoint's error")
+		})
+	}
+}
+
+// The limit holds end to end on both managers, and it bounds the backup tier too: with one
+// retry and both primaries refusing, the subscribe fails without the backup being asked. It also
+// bounds a refusal every node gives that the registry rates retryable (a method no node offers):
+// limit+1 endpoints are asked and charged, not every one (Anna's note 677-2 on #677).
+func TestWSSubscribe_StopsAtTheRelayRetryLimit(t *testing.T) {
+	t.Run("dial refusals", func(t *testing.T) {
+		manager, nodes := newWSFailoverManager(t, nil)
+		manager.relayRetryLimit = func() int { return 1 }
+		nodes.primary1.setRefusing(true)
+		nodes.primary2.setRefusing(true)
+
+		require.Error(t, wsSubscribeLogs(t, manager, "ws-1", "0x01"), "the retry was spent on the second primary")
+		require.Equal(t, int32(1), nodes.primary1.refusedDials.Load(), "the first primary is asked once")
+		require.Equal(t, int32(1), nodes.primary2.refusedDials.Load(), "the second primary is the one retry")
+		require.Zero(t, subscribesSeen(nodes.backup), "the backup is past the limit")
+		require.Zero(t, nodes.backup.liveSubscriptions())
+	})
+
+	t.Run("a retryable refusal every node gives", func(t *testing.T) {
+		optimizer := &chargingOptimizer{charged: map[string]int{}}
+		manager, nodes := newWSFailoverManager(t, optimizer)
+		manager.relayRetryLimit = func() int { return 1 }
+		refusal := rpcclient.JsonError{Code: -32601, Message: `no "typo" subscription in eth namespace`}
+		require.False(t, common.ClassifyNodeErrorForRetry(common.GetChainFamilyOrDefault(wsFailoverChainID), common.TransportJsonRPC, refusal.Code, refusal.Message).IsNonRetryable,
+			"precondition: the registry rates the refusal retryable, so it does not end the walk on its own")
+		for _, node := range []*mockSubscriptionServer{nodes.primary1, nodes.primary2, nodes.backup} {
+			node.subscribeRefusal.Store(&refusal)
+		}
+
+		require.Error(t, wsSubscribeLogs(t, manager, "ws-1", "0x01"))
+		require.Equal(t, 1, subscribesSeen(nodes.primary1))
+		require.Equal(t, 1, subscribesSeen(nodes.primary2))
+		require.Zero(t, subscribesSeen(nodes.backup), "the backup is past the limit")
+		require.Equal(t, map[string]int{nodes.primary1.URL(): 1, nodes.primary2.URL(): 1}, optimizer.failures(),
+			"only the endpoints asked are charged")
+	})
+}
+
+func TestGRPCSubscribe_StopsAtTheRelayRetryLimit(t *testing.T) {
+	refusing1, refusing2 := startRefusingGRPCEndpoint(t), startRefusingGRPCEndpoint(t)
+	backup := startRestoreUpstream(t)
+	manager := newGRPCFailoverManager(t, []string{refusing1.addr, refusing2.addr}, []string{backup.addr})
+	manager.relayRetryLimit = func() int { return 1 }
+
+	require.Equal(t, 1, grpcOpenFailoverSubscribes(t, manager, 1), "the retry was spent on the second primary")
+	require.Positive(t, refusing1.dials.Load(), "the first primary is asked")
+	require.Positive(t, refusing2.dials.Load(), "the second primary is the one retry")
+	require.Zero(t, backup.totalOpened(), "the backup is past the limit")
 }

@@ -12,6 +12,7 @@ import (
 	rpcclient "github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/holdoff"
+	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/magma-Devs/smart-router/utils"
 	"golang.org/x/time/rate"
@@ -206,6 +207,11 @@ type subscriptionEndpoints struct {
 	// manager is built.
 	chainID string
 
+	// relayRetryLimit is the retry limit a new subscription's walk stops at
+	// (subscribeWithFailover). Nil reads relaycore.RelayRetryLimit, the
+	// --set-relay-retry-limit flag, at the time of the call.
+	relayRetryLimit func() int
+
 	optimizer   WebSocketEndpointOptimizer // can be nil: first-available selection
 	stickyStore *routersession.StickySessionStore
 
@@ -356,9 +362,9 @@ func (snapshot endpointsSnapshot) without(tried map[string]struct{}) endpointsSn
 // recovered primary back into tier 1 (MAG-2525).
 //
 // Callers pass only endpoints that are live in the pairing. A configured-but-dead entry
-// would cost new subscriptions a failed attempt before subscribeWithFailover moves past
-// it, and where the endpoint drops packets rather than refusing them, that attempt lasts
-// the whole connect timeout.
+// would cost a new subscription one of the few attempts the retry limit gives it before
+// subscribeWithFailover moves past it, and where the endpoint drops packets rather than
+// refusing them, that attempt lasts the whole connect timeout.
 //
 // Existing upstream pools are not torn down here. A pool keyed by a URL that just left
 // the tiers still serves its live subscriptions until they close; tearing it down here
@@ -513,22 +519,20 @@ func (se *subscriptionEndpoints) selectFromTiers(ctx context.Context, primary, b
 // subscribeWithFailover opens a new subscription with subscribe on endpoint, the one
 // selectEndpoint chose for clientKey, and while subscribe fails, on the next endpoint the
 // cascade selects with every endpoint already tried left out: past a dead sticky endpoint,
-// through the rest of the primary tier, then the backup tier. It returns the endpoint
-// subscribe succeeded on, or, once no endpoint is left, the error of the last one tried. A
-// node's refusal that every endpoint would repeat ends the walk at once, as it ends an HTTP
-// relay's retries (everyEndpointWouldRefuse).
+// through the rest of the primary tier, then the backup tier. It stops at the relay retry
+// limit, as an HTTP relay does, primaries and backups alike: the first attempt and at most
+// --set-relay-retry-limit more (MAG-5092). It returns the endpoint subscribe succeeded on, or
+// the error of the last one tried. A node's refusal that every endpoint would repeat ends the
+// walk at once, as it ends an HTTP relay's retries (everyEndpointWouldRefuse).
 //
 // A subscribe used to try the one endpoint only, so a single refused connect failed it while
 // a healthy primary or backup went untried, until re-verification demoted the dead endpoint
 // about two epochs later, long after HTTP relays had failed over (MAG-4730). subscribe records
 // each failure against its own endpoint, as it did when it was the only attempt.
 func (se *subscriptionEndpoints) subscribeWithFailover(ctx context.Context, clientKey string, endpoint *common.NodeUrl, subscribe func(*common.NodeUrl) error) (*common.NodeUrl, error) {
-	// An endpoint gets one attempt per subscribe, so a subscribe never makes more attempts than
-	// there are endpoints. The tried set alone already ends the walk; the bound is for an
-	// optimizer that hands back an endpoint it was told to ignore.
-	maxAttempts := len(se.endpointsSnapshot().byURL)
-	tried := make(map[string]struct{}, maxAttempts)
-	for attempt := 1; ; attempt++ {
+	retries := se.retryLimit()
+	tried := make(map[string]struct{}, retries+1)
+	for attempt := 0; ; attempt++ {
 		err := subscribe(endpoint)
 		if err == nil {
 			return endpoint, nil
@@ -536,8 +540,10 @@ func (se *subscriptionEndpoints) subscribeWithFailover(ctx context.Context, clie
 		// A client that left, or ran out of time, is served by no endpoint, and the next one
 		// would be charged with a failure it did not cause. So would every endpoint asked
 		// again with a request the node refused for good: one malformed subscribe would cost
-		// each of them a round trip and a failure in its score.
-		if ctx.Err() != nil || attempt >= maxAttempts || se.everyEndpointWouldRefuse(err) {
+		// each of them a round trip and a failure in its score. The retry limit bounds the
+		// rest: without it one subscribe could reach every paid backup, and a client whose
+		// endpoints drop packets would wait a connect timeout for each of them.
+		if ctx.Err() != nil || attempt >= retries || se.everyEndpointWouldRefuse(err) {
 			return nil, err
 		}
 		tried[endpoint.Url] = struct{}{}
@@ -550,9 +556,21 @@ func (se *subscriptionEndpoints) subscribeWithFailover(ctx context.Context, clie
 		utils.FormatWarning(se.logPrefix+": subscribe failed on an endpoint, trying the next", err,
 			utils.LogAttr("endpoint", sanitizeEndpointURL(endpoint.Url)),
 			utils.LogAttr("next", sanitizeEndpointURL(next.Url)),
+			utils.LogAttr("retry", attempt+1),
+			utils.LogAttr("retryLimit", retries),
 		)
 		endpoint = next
 	}
+}
+
+// retryLimit is the number of retries a new subscription gets after its first attempt fails.
+// A negative limit gives none, as it gives a relay none.
+func (se *subscriptionEndpoints) retryLimit() int {
+	limit := relaycore.RelayRetryLimit
+	if se.relayRetryLimit != nil {
+		limit = se.relayRetryLimit()
+	}
+	return max(limit, 0)
 }
 
 // everyEndpointWouldRefuse reports whether err, a failed subscribe attempt, carries the node's

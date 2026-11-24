@@ -205,7 +205,8 @@ any relay, and its fields from what the subscription manager did:
 
 A new subscription that fails over to the next endpoint (MAG-4730) still has one attempt in its
 event: the last one, on the endpoint that took the subscription, or on the last endpoint tried when
-every endpoint failed. Its `sent_ms` includes the time the earlier attempts took. Those earlier
+the subscribe failed: every endpoint it could try failed, or it reached the relay retry limit
+(`--set-relay-retry-limit`). Its `sent_ms` includes the time the earlier attempts took. Those earlier
 attempts are in the router's warning log ("subscribe failed on an endpoint, trying the next"), not
 in the event.
 
