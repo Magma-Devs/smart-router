@@ -878,13 +878,14 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 	//
 	// A 2xx that is the node refusing a broadcast transaction (Tron's, MAG-5323) is a node error, as
 	// on JSON-RPC and gRPC: the reply says the node answered with an error, and it is no proof the
-	// endpoint is healthy.
+	// endpoint is healthy. So is an HTML page answering a write (MAG-3971): it is not the node's
+	// answer at all, and must not count as proof the endpoint served.
 	var isNodeError bool
 	switch {
 	case response.StatusCode == 429:
 		isNodeError = false
 	case response.StatusCode == 0 || (response.StatusCode >= 200 && response.StatusCode < 300):
-		isNodeError = hasError && restMessage.RefusesTransaction(response.Body)
+		isNodeError = hasError && (restMessage.RefusesTransaction(response.Body) || restMessage.IsHTMLPageInPlaceOfAWriteReply(response.Body))
 	default:
 		isNodeError = hasError
 	}

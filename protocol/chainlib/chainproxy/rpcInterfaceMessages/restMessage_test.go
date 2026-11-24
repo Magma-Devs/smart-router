@@ -824,3 +824,46 @@ func TestServerErrorIsNodeReply(t *testing.T) {
 		})
 	}
 }
+
+// TestCheckResponseError_WriteReplyIsHTMLPage pins MAG-3971: on a write, a 2xx whose body is an HTML
+// page is a node error. Every other 2xx body stays a success, an empty one included (the normal
+// success of Ethereum Beacon's writes and Algorand's async submit), and a read is not affected.
+func TestCheckResponseError_WriteReplyIsHTMLPage(t *testing.T) {
+	cases := []struct {
+		name      string
+		status    int
+		body      string
+		writeErr  bool
+		readError bool
+	}{
+		{"empty 200 (Beacon, Algorand async success)", 200, "", false, false},
+		{"empty 201", 201, "", false, false},
+		{"empty 202", 202, "", false, false},
+		{"whitespace 200", 200, " \n\t ", false, false},
+		{"html 200", 200, "<html><body>Please enable cookies.</body></html>", true, false},
+		{"doctype 200", 200, "<!DOCTYPE html><title>Just a moment...</title>", true, false},
+		{"html after whitespace", 200, "\r\n <html></html>", true, false},
+		{"plain text OK (Arweave)", 200, "OK", false, false},
+		{"plain text txid (Esplora)", 200, "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b", false, false},
+		{"bare JSON string (Stacks, Tezos, Cardano)", 202, `"0x5a3e"`, false, false},
+		{"JSON object", 201, `{"tx_status":"PENDING","hash":"ab"}`, false, false},
+		{"binary (Aptos BCS)", 202, "\x00\x01\xff", false, false},
+		{"status 0 empty (not set: cache entry, fixture)", 0, "", false, false},
+		{"cosmos code 5 is still an error", 200, `{"tx_response":{"code":5,"raw_log":"insufficient funds"}}`, true, true},
+		{"non-2xx keeps its own rule", 503, "", true, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			write := RestMessage{IsWrite: true}
+			hasError, message := write.CheckResponseError([]byte(tc.body), tc.status)
+			require.Equal(t, tc.writeErr, hasError, "write")
+			if hasError {
+				require.NotEmpty(t, message)
+			}
+
+			read := RestMessage{}
+			hasError, _ = read.CheckResponseError([]byte(tc.body), tc.status)
+			require.Equal(t, tc.readError, hasError, "read")
+		})
+	}
+}

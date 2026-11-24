@@ -665,7 +665,9 @@ node answering "no". Investigation evidence is recorded in MAG-3972, MAG-3974 an
 
 So `RestMessage.CheckResponseError` treats **every status outside 2xx as a node error** (a 429
 keeps its rate-limit handling; a 2xx is a success unless its body carries a Cosmos transaction
-error; a status of 0 is "not set" and reads as a success). The body travels to the caller
+error, Tron refusing a broadcast (§10), or the request is a write and the body is an HTML page
+(§9.5); a status of 0 is
+"not set" and reads as a success). The body travels to the caller
 unchanged. What "node error" changes is the same as on JSON-RPC:
 
 - A write broadcast keeps waiting for a sibling's success instead of taking the first refusal
@@ -782,13 +784,59 @@ reading was the wrong one.
   broadcast refusal (`{"code":"SIGERROR"}` on `/wallet/broadcasttransaction` and
   `/wallet/broadcasthex`) is read since MAG-5323 (§10); `{"Error":…}` and TON's `{"ok":false}` are
   not. TON's `/sendBoc` refuses with a 500, which this section already reads.
-- An empty or non-JSON **2xx** is still served as the answer and still ends a broadcast
-  (MAG-3971). The fix site is the sender's existing malformed-2xx guard, not
-  `CheckResponseError`, which cannot see whether the request is a write.
+- An **empty 2xx** to a write is still served as the answer and still ends a broadcast, as is a
+  plain-text or binary 2xx. §9.5 explains why only HTML is read today.
 - A 5xx whose body is the JSON literal `null` passes `json.Valid` and reaches the client as the
   node's reply (MAG-4060).
 - Cross-validation counts only successes toward a quorum, so on a REST interface under a CV
   policy identical not-found answers no longer form one. No tenant runs CV on REST today.
+
+### 9.5 An HTML page in place of a write's reply (MAG-3971)
+
+A write is sent to every provider at once, and the first success ends the broadcast. A CDN or
+WAF in front of a node can answer with a 200 that is not the node's answer: an HTML page such as
+a Cloudflare challenge or a maintenance page. Read as a success, it arrived first and became the
+client's reply, while a sibling that answered the real result (Horizon's `201 PENDING` with the
+hash) was cut off.
+
+So on a **write** (an api the spec marks stateful), `RestMessage.CheckResponseError` treats a
+2xx as a node error when its body is an **HTML page**: the first byte after any whitespace is
+`<`. No chain answers a write with HTML.
+
+The REST parser sets `RestMessage.IsWrite` from the spec, so the one check that the sender, the
+results manager and cross-validation all call gives the same verdict. The sender flags the reply
+as a node error as well, so the health gate never counts it as proof the endpoint served. The
+registry reads it as retryable and not the endpoint's fault, so the provider is not scored. When
+every provider answers the same, a provider's reply goes back unchanged, with
+`router-identified-node-error: true`.
+
+**An empty 2xx is not read, on purpose.** A gateway can send one, but it is also the normal
+success of real writes:
+
+| Chain, endpoint | Success reply |
+|---|---|
+| Ethereum Beacon `POST /eth/v2/beacon/blocks`, `POST /eth/v2/beacon/pool/attestations` (two of the 25 Beacon endpoints the spec marks as writes) | 200, no body |
+| Algorand `POST /v2/transactions/async` | 200, no body |
+
+As a node error, an empty 2xx made those writes wait for every sibling, and beside a sibling
+that hung or failed it turned an accepted write into an "unclear" reply at the end of the write
+budget (measured: 200 at 0.01 s on main, 500 "unclear" at 60 s with the empty rule). Telling a
+gateway's empty 200 from a node's needs the spec to say which write endpoints always answer
+with a body; that is a separate change.
+
+Every other 2xx body also stays a success, because real chains answer a write with it:
+
+| Chain, endpoint | Success reply |
+|---|---|
+| Bitcoin Esplora `POST /tx` | 200, `text/plain`, the bare txid |
+| Arweave `POST /tx` | 200, the text `OK` |
+| Aptos `POST /transactions` | 202, BCS binary when the client asks for it |
+| Stacks, Tezos, Cardano submit | a bare JSON string, `"<txid>"` |
+
+The response headers (`Content-Type: text/html`, Cloudflare's `cf-mitigated`) are not read: the
+shared check receives only the body and the status, and an HTML page starts with `<`.
+
+A read's 2xx is not affected.
 
 ## 10. A broadcast refused inside a success (MAG-5323)
 

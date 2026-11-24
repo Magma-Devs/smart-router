@@ -221,6 +221,13 @@ func TestRESTRelay_404_NotFound(t *testing.T) {
 // every request with the given status and body, for a POST to a stateful path.
 func sendRESTThroughMockUpstream(t *testing.T, status int, body string) *common.RelayResult {
 	t.Helper()
+	return sendRESTThroughMockUpstreamAt(t, http.MethodPost, "/cosmos/tx/v1beta1/txs", []byte("data"), status, body)
+}
+
+// sendRESTThroughMockUpstreamAt is sendRESTThroughMockUpstream for any method and path of the
+// LAVA spec: POST /cosmos/tx/v1beta1/txs is a write (stateful), a GET of a block is a read.
+func sendRESTThroughMockUpstreamAt(t *testing.T, method, path string, requestBody []byte, status int, body string) *common.RelayResult {
+	t.Helper()
 	ctx := context.Background()
 	chainParser, _, _, closeServer, endpoint, err := chainlib.CreateChainLibMocks(
 		ctx,
@@ -239,7 +246,7 @@ func sendRESTThroughMockUpstream(t *testing.T, status int, body string) *common.
 	require.NoError(t, err)
 	t.Cleanup(closeServer)
 
-	chainMessage, err := chainParser.ParseMsg("/cosmos/tx/v1beta1/txs", []byte("data"), http.MethodPost, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
+	chainMessage, err := chainParser.ParseMsg(path, requestBody, method, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 	require.NoError(t, err)
 
 	directConn, err := routersession.NewDirectRPCConnection(ctx, endpoint.NodeUrls[0], 5, "")
@@ -250,6 +257,90 @@ func sendRESTThroughMockUpstream(t *testing.T, status int, body string) *common.
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	return result
+}
+
+// sendRESTWriteAndCheck sends a write through the mock upstream and also returns the chain
+// message's own verdict on the reply. The results manager files a reply with that check, apart
+// from the sender's flag; for an HTML 2xx the two must agree, or a broadcast would end on a reply
+// the sender called a node error.
+func sendRESTWriteAndCheck(t *testing.T, status int, body string) (*common.RelayResult, bool) {
+	t.Helper()
+	result := sendRESTThroughMockUpstream(t, status, body)
+	ctx := context.Background()
+	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, "LAVA", spectypes.APIInterfaceRest, http.HandlerFunc(http.NotFound), nil, "../../", nil)
+	require.NoError(t, err)
+	t.Cleanup(closeServer)
+	chainMessage, err := chainParser.ParseMsg("/cosmos/tx/v1beta1/txs", []byte("data"), http.MethodPost, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
+	require.NoError(t, err)
+	hasError, _ := chainMessage.CheckResponseError(result.Reply.Data, result.StatusCode)
+	return result, hasError
+}
+
+// TestRESTRelay_Write_HTML200_IsANodeError pins MAG-3971: a 2xx that answers a write with an HTML
+// page (a CDN or WAF in front of the node) is not the node's answer. It is a node error, so a
+// broadcast keeps waiting for a sibling's real reply. It is not the endpoint's fault and never
+// proves the endpoint healthy. The body travels unchanged.
+func TestRESTRelay_Write_HTML200_IsANodeError(t *testing.T) {
+	for name, body := range map[string]string{
+		"html":             "<html><body>Please enable cookies. Cloudflare Ray ID: 123</body></html>",
+		"doctype":          "<!DOCTYPE html><html><title>Just a moment...</title></html>",
+		"html after space": "\n  <html><body>maintenance</body></html>",
+	} {
+		t.Run(name, func(t *testing.T) {
+			result, checkSaysError := sendRESTWriteAndCheck(t, http.StatusOK, body)
+
+			assert.Equal(t, http.StatusOK, result.StatusCode)
+			assert.True(t, result.IsNodeError)
+			assert.True(t, checkSaysError, "the results manager must file it as a node error too")
+			assert.False(t, result.IsNonRetryable)
+			assert.False(t, result.IsNodeAtFault)
+			assert.False(t, relayProvesEndpointHealthy(result), "no answer must not prove the endpoint healthy")
+			assert.Equal(t, body, string(result.Reply.Data), "the node's reply travels unchanged")
+		})
+	}
+}
+
+// TestRESTRelay_Write_OtherBodies200_AreSuccesses: every other 2xx body to a write stays a success,
+// because real chains answer a write with it: no body (Ethereum Beacon's block publish and
+// attestations, Algorand's async submit), plain text (Esplora's bare txid, Arweave's OK), a bare
+// JSON string (Stacks, Tezos, Cardano), a JSON object, or binary (Aptos BCS).
+func TestRESTRelay_Write_OtherBodies200_AreSuccesses(t *testing.T) {
+	for name, body := range map[string]string{
+		"empty":            "",
+		"whitespace":       " \r\n\t",
+		"text OK":          "OK",
+		"text txid":        "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b",
+		"json string":      `"0x5a3e2b4c1d"`,
+		"json object":      `{"tx_response":{"code":0,"txhash":"ABC"}}`,
+		"binary":           "\x00\x01\x02\xff",
+		"text then a less": "OK <done>",
+	} {
+		t.Run(name, func(t *testing.T) {
+			result, checkSaysError := sendRESTWriteAndCheck(t, http.StatusOK, body)
+
+			assert.Equal(t, http.StatusOK, result.StatusCode)
+			assert.False(t, result.IsNodeError)
+			assert.False(t, checkSaysError)
+			assert.True(t, relayProvesEndpointHealthy(result))
+			assert.Equal(t, body, string(result.Reply.Data))
+		})
+	}
+}
+
+// TestRESTRelay_Read_EmptyOrHTML200_StaysASuccess: the MAG-3971 rule is for writes only. A read's
+// HTML 2xx is read as today, and so is its empty 2xx.
+func TestRESTRelay_Read_EmptyOrHTML200_StaysASuccess(t *testing.T) {
+	for name, body := range map[string]string{
+		"empty": "",
+		"html":  "<html><body>Please enable cookies.</body></html>",
+	} {
+		t.Run(name, func(t *testing.T) {
+			result := sendRESTThroughMockUpstreamAt(t, http.MethodGet, "/cosmos/base/tendermint/v1beta1/blocks/17", nil, http.StatusOK, body)
+
+			assert.Equal(t, http.StatusOK, result.StatusCode)
+			assert.False(t, result.IsNodeError)
+		})
+	}
 }
 
 // TestRESTRelay_404_EmptyBody_IsANodeError pins the sender's side of MAG-3974: an empty 404
