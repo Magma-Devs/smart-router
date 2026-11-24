@@ -859,6 +859,9 @@ func TestRelayEnd_MethodNeverStartsWithASlash(t *testing.T) {
 	require.Equal(t, "status&Default-not_a_method", relayEndMethod("status&Default-not_a_method", inRequest), "a batch is a body")
 	require.Equal(t, "Default-REDACTED", relayEndMethod("Default-/v1/AbC123SecretKey/status", byURL))
 	require.Equal(t, "Default-REDACTED", relayEndMethod("Default-AbC123SecretKey", byURL), "a single-segment URI path has no slash")
+	// A request named by URL is one request: its unlisted name is withheld whole, whatever the path holds.
+	require.Equal(t, "Default-REDACTED", relayEndMethod("Default-/v1/x&AbC123SecretKey/status", byURL))
+	require.Equal(t, "Default-REDACTED", relayEndMethod("Default-x&AbC123SecretKey", byURL), "a URI path")
 
 	capped := relayEndMethod(strings.Repeat("eth_getBalance&", 200), inRequest)
 	require.LessOrEqual(t, len(capped), relayEndMethodLimit+len("...truncated..."))

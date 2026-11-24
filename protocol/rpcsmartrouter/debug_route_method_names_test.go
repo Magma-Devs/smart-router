@@ -72,6 +72,9 @@ func TestDebugRelayErrors_NameARequestAsRelayEndDoes(t *testing.T) {
 		{"a node error on an unlisted path", debugRouteUnlistedPath, relayEndNode{"node-a", relayEndReply(400, `{"code":3,"message":"bad request"}`, 0)}, "Default-REDACTED", true},
 		{"a protocol error on an unlisted path", debugRouteUnlistedPath, relayEndNode{name: "node-a"}, "Default-REDACTED", false},
 		{"a node error on a listed path", debugRouteListedPath, relayEndNode{"node-a", relayEndReply(400, `{"code":3,"message":"bad request"}`, 0)}, "cosmos/base/tendermint/v1beta1/blocks/latest", true},
+		// The whole path is withheld, whatever characters it holds, as sent or escaped.
+		{"a node error on an unlisted path with a separator", "/v1/x&" + debugRouteSecret + "/status", relayEndNode{"node-a", relayEndReply(400, `{"code":3,"message":"bad request"}`, 0)}, "Default-REDACTED", true},
+		{"a protocol error on an unlisted path with an escaped separator", "/v1/x%26" + debugRouteSecret + "/status", relayEndNode{name: "node-a"}, "Default-REDACTED", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			server := newRelayEndServer(t, "COSMOSHUB", spectypes.APIInterfaceRest, chainParser, tc.node)

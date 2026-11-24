@@ -694,15 +694,13 @@ const relayEndMethodLimit = 256
 // a value that starts with "/" as /REDACTED, which would erase every REST path. A listed name is the
 // spec's. An unlisted one is what the client sent. When the request named its api by URL, that is
 // the client's path and query, which may carry a credential the "Default-" prefix would carry past
-// the collector, so it is withheld.
+// the collector, so it is withheld, and withheld whole: a request named by URL is one request, so no
+// part of its name is another api's.
 func relayEndMethod(apiName string, namedByURL bool) string {
-	members := strings.Split(apiName, chainlib.SEP)
-	for i, member := range members {
-		if namedByURL && strings.HasPrefix(member, chainlib.DefaultApiName) {
-			members[i] = chainlib.DefaultApiName + "REDACTED"
-		}
+	if namedByURL && strings.Contains(apiName, chainlib.DefaultApiName) {
+		return chainlib.DefaultApiName + "REDACTED"
 	}
-	method := strings.TrimLeft(strings.Join(members, chainlib.SEP), "/")
+	method := strings.TrimLeft(apiName, "/")
 	if method == "" && apiName != "" {
 		// The root path. The collector rewrites a slash only when something follows it, so a lone
 		// "/" survives, and "" stays reserved for a request that did not parse.
