@@ -35,6 +35,13 @@ type replyStatusClassifier interface {
 	ReplyVerdict(data []byte, httpStatusCode int) (hasError bool, errorMessage string, classificationStatus int, classified *common.RouterError)
 }
 
+// chainRowVerdictReader is a request whose chain's list files some node errors under a verdict of its
+// own (rpcInterfaceMessages.GrpcMessage, a copy of the chain's write: MAG-5186). The sender applied
+// the same verdict to the attempt, so the record and the endpoint's health agree.
+type chainRowVerdictReader interface {
+	ChainRowVerdict(data []byte) *common.RouterError
+}
+
 type ResultsManager interface {
 	String() string
 	NodeResults() []common.RelayResult
@@ -240,6 +247,9 @@ func (rp *ResultsManagerInst) setValidResponse(response *RelayResponse, protocol
 		chainFamily := common.GetChainFamilyOrDefault(rp.chainID)
 		// err is the node's reply text, so the transport-only rows stay out of it (MAG-4242).
 		nodeClassified := ownClassification
+		if rowReader, ok := protocolMessage.GetRPCMessage().(chainRowVerdictReader); ok && nodeClassified == nil {
+			nodeClassified = rowReader.ChainRowVerdict(response.RelayResult.Reply.Data)
+		}
 		if nodeClassified == nil {
 			nodeClassified = common.ClassifyError(common.DetectConnectionErrorInReplyText(errorMessage), chainFamily, transport, errorCode, err.Error())
 		}

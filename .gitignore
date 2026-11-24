@@ -25,6 +25,10 @@ testutil/e2e/protocolLogs/
 debugging/
 testutil/e2e/logs/
 
+# Python
+__pycache__/
+*.pyc
+
 # Misc
 scripts/vars/
 rpcprovider.yml

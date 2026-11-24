@@ -1,5 +1,5 @@
 # Smart Router Direct RPC Configuration — multi-chain (all bundled example chains)
-# Mode: Direct connections to public endpoints (no Lava providers!)
+# Mode: Direct connections to public endpoints (no provider-relay network — direct upstreams)
 #
 # Serves every chain that ships with a standalone example, each on its own port:
 #   3360  ETH1        jsonrpc        ethereum-rpc.publicnode.com + mainnet.gateway.tenderly.co

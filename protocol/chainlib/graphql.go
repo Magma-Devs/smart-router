@@ -385,12 +385,12 @@ func (apil *GraphQLChainListener) Serve(ctx context.Context, cmdFlags common.Con
 		// the token its parser stopped at, never a decoder's error text (MAG-4351).
 		//
 		// A refused write's shape (check Q8: a mutation beside another operation, or a mutation
-		// with more than one root field) also says Lava-Write-Outcome: not_sent, so the caller
+		// with more than one root field) also says Router-Write-Outcome: not_sent, so the caller
 		// knows for certain the write never ran and can send it again fixed (MAG-5120).
 		refusal: func(err error, msgSeed string) (int, []byte, string, map[string]string, bool) {
-			// A refusal of the request itself made after parsing, such as a lava-select-provider
+			// A refusal of the request itself made after parsing, such as a router-select-provider
 			// name no provider of the router carries (MAG-3800): the same refusal document, with
-			// REQUEST_REFUSED. A refused write's Lava-Write-Outcome: not_sent comes on the relay
+			// REQUEST_REFUSED. A refused write's Router-Write-Outcome: not_sent comes on the relay
 			// reply's headers, which relayHTTP sends with this document: the router sets it there,
 			// since only it knows the request was a mutation.
 			if message, ok := refusedRequestMessage(err); ok {
@@ -424,7 +424,7 @@ func (apil *GraphQLChainListener) Serve(ctx context.Context, cmdFlags common.Con
 // chapter's method check). OPTIONS keeps the shared listener's 204, and a POST is served.
 //
 // The reply is 405 with Allow: POST, which tells the caller the one method that is served, and the
-// router's own GraphQL error with the code REQUEST_REFUSED, its guid in extensions and in Lava-Guid,
+// router's own GraphQL error with the code REQUEST_REFUSED, its guid in extensions and in Router-Guid,
 // like every other refusal (MAG-4351). No provider is asked. A HEAD gets the status and the headers,
 // since a HEAD reply has no body. A DELETE used to get 204 with nothing done, so a client bug read
 // as success; a GET, a PUT and a PATCH got a body with no errors list, which no GraphQL client can

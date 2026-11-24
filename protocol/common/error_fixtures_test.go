@@ -50,7 +50,7 @@ var transportFromString = map[string]TransportType{
 // and verifies that ClassifyError produces the expected RouterError code for each.
 //
 // To add a new fixture: add an entry to testdata/error_fixtures.json with the
-// actual error code/message from the node and the expected Lava error code.
+// actual error code/message from the node and the expected router error code.
 // This is the primary mechanism for catching classification regressions when
 // new node client variants surface in production as UNKNOWN_ERROR.
 func TestErrorFixtures(t *testing.T) {
