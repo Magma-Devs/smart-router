@@ -21,7 +21,7 @@ type restWireRequest struct {
 	body                             []byte
 }
 
-// restWireFixture is a LAVA REST parser over an upstream that records every request, and a direct
+// restWireFixture is a COSMOSHUB REST parser over an upstream that records every request, and a direct
 // sender to it. The spec is loaded so a test can change it before the parser reads it.
 type restWireFixture struct {
 	parser   chainlib.ChainParser
@@ -35,7 +35,7 @@ func newRESTWireFixture(t *testing.T) *restWireFixture {
 	ctx := t.Context()
 	received := make(chan restWireRequest, 1)
 	parser, _, _, closeServer, endpoint, err := chainlib.CreateChainLibMocks(
-		ctx, "LAVA", spectypes.APIInterfaceRest, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx, "COSMOSHUB", spectypes.APIInterfaceRest, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			data, readErr := io.ReadAll(r.Body)
 			assert.NoError(t, readErr)
 			select {
@@ -49,7 +49,7 @@ func newRESTWireFixture(t *testing.T) *restWireFixture {
 		t.Cleanup(closeServer)
 	}
 	require.NoError(t, err)
-	spec, err := specutils.GetSpecFromLocalDirs([]string{"../../specs/"}, "LAVA")
+	spec, err := specutils.GetSpecFromLocalDirs([]string{"../../specs/"}, "COSMOSHUB")
 	require.NoError(t, err)
 	conn, err := routersession.NewDirectRPCConnection(ctx, endpoint.NodeUrls[0], 5, spectypes.APIInterfaceRest)
 	require.NoError(t, err)
@@ -76,7 +76,7 @@ func (f *restWireFixture) addCollection(method, apiName string) {
 	f.parser.SetSpec(f.spec)
 }
 
-// latestBlockDirective is the LAVA spec's REST GET latest-block directive, the one craftRelay builds
+// latestBlockDirective is the COSMOSHUB spec's REST GET latest-block directive, the one craftRelay builds
 // the health check from. A test changes its template, then hands the spec back to the parser.
 func (f *restWireFixture) latestBlockDirective(t *testing.T) *spectypes.ParseDirective {
 	t.Helper()
@@ -90,7 +90,7 @@ func (f *restWireFixture) latestBlockDirective(t *testing.T) *spectypes.ParseDir
 			}
 		}
 	}
-	t.Fatal("premise: the LAVA spec has a REST GET latest-block directive")
+	t.Fatal("premise: the COSMOSHUB spec has a REST GET latest-block directive")
 	return nil
 }
 
@@ -119,11 +119,11 @@ func TestCraftRelay_RESTGetSendsItsTemplateAsTheURL(t *testing.T) {
 	f := newRESTWireFixture(t)
 	const template = latestBlockApiName + "?limit=1&order=desc"
 	directive := f.latestBlockDirective(t)
-	require.Equal(t, latestBlockApiName, directive.ApiName, "premise: the LAVA spec's REST latest-block directive")
+	require.Equal(t, latestBlockApiName, directive.ApiName, "premise: the COSMOSHUB spec's REST latest-block directive")
 	directive.FunctionTemplate = template
 	f.parser.SetSpec(f.spec)
 
-	_, rpcEndpoint := createTestSessionManager("LAVA", spectypes.APIInterfaceRest)
+	_, rpcEndpoint := createTestSessionManager("COSMOSHUB", spectypes.APIInterfaceRest)
 	server := &RPCSmartRouterServer{chainParser: f.parser, listenEndpoint: rpcEndpoint}
 	ok, relay, chainMessage, err := server.craftRelay(t.Context())
 	require.NoError(t, err)
@@ -145,11 +145,11 @@ func TestCraftRelay_RESTGetSendsItsTemplateAsTheURL(t *testing.T) {
 func TestCraftRelay_RESTGetWithNoTemplateUsesTheApiName(t *testing.T) {
 	f := newRESTWireFixture(t)
 	directive := f.latestBlockDirective(t)
-	require.Equal(t, latestBlockApiName, directive.ApiName, "premise: the LAVA spec's REST latest-block directive")
+	require.Equal(t, latestBlockApiName, directive.ApiName, "premise: the COSMOSHUB spec's REST latest-block directive")
 	directive.FunctionTemplate = ""
 	f.parser.SetSpec(f.spec)
 
-	_, rpcEndpoint := createTestSessionManager("LAVA", spectypes.APIInterfaceRest)
+	_, rpcEndpoint := createTestSessionManager("COSMOSHUB", spectypes.APIInterfaceRest)
 	server := &RPCSmartRouterServer{chainParser: f.parser, listenEndpoint: rpcEndpoint}
 	ok, relay, chainMessage, err := server.craftRelay(t.Context())
 	require.NoError(t, err)

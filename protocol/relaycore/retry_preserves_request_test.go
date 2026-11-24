@@ -32,13 +32,13 @@ func (s *stubRelaySender) GetProcessingTimeout(chainlib.ChainMessage) (time.Dura
 	return 30 * time.Second, time.Second
 }
 
-func (s *stubRelaySender) GetChainIdAndApiInterface() (string, string) { return "LAVA", "rest" }
+func (s *stubRelaySender) GetChainIdAndApiInterface() (string, string) { return "COSMOSHUB", "rest" }
 
 func newRetryTestProtocolMessage(t *testing.T, extensions []string, directiveHeaders map[string]string) chainlib.ProtocolMessage {
 	t.Helper()
 	ctx := context.Background()
 	serverHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
-	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, "LAVA", spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
+	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, "COSMOSHUB", spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 	if closeServer != nil {
 		t.Cleanup(closeServer)
 	}

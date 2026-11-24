@@ -269,7 +269,7 @@ func TestSendRelayToDirectEndpoints_RecordsTheCrossValidationGroupLayout(t *test
 
 			noopHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 			chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(
-				ctx, "LAVA", spectypes.APIInterfaceRest, noopHandler, nil, "../../", nil)
+				ctx, "COSMOSHUB", spectypes.APIInterfaceRest, noopHandler, nil, "../../", nil)
 			if closeServer != nil {
 				t.Cleanup(closeServer)
 			}
@@ -329,8 +329,8 @@ func TestSendRelayToDirectEndpoints_RecordsTheCrossValidationGroupLayout(t *test
 			metricsStub := cvGuardMetrics{}
 			relayProcessor := relaycore.NewRelayProcessor(ctx, cvParams, metricsStub, metricsStub, sm)
 
-			rpcEndpoint := &routersession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "rest"}
-			optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "LAVA")
+			rpcEndpoint := &routersession.RPCEndpoint{ChainID: "COSMOSHUB", ApiInterface: "rest"}
+			optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "COSMOSHUB")
 			rpcss := &RPCSmartRouterServer{
 				listenEndpoint:    rpcEndpoint,
 				chainParser:       chainParser,

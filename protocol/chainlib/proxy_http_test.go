@@ -72,7 +72,7 @@ func TestRpcClientSenders_NullifiedHeaderIsDropped(t *testing.T) {
 			node := &headerRecorder{body: tc.nodeReply}
 			specIndex := "ETH1"
 			if tc.apiInterface == spectypes.APIInterfaceTendermintRPC {
-				specIndex = "LAVA"
+				specIndex = "COSMOSHUB"
 			}
 			chainParser, chainRouter, _, closeServer, _, err := CreateChainLibMocks(ctx, specIndex, tc.apiInterface, node.handler(), nil, "../../", nil)
 			require.NoError(t, err)
@@ -113,7 +113,7 @@ func TestRpcClientSenders_NullifiedHeaderIsDropped(t *testing.T) {
 func TestHTTPProxies_ConcurrentFirstSendsShareOneClient(t *testing.T) {
 	ctx := context.Background()
 	node := &headerRecorder{body: `{"block":{}}`}
-	chainParser, chainRouter, _, closeServer, _, err := CreateChainLibMocks(ctx, "LAVA", spectypes.APIInterfaceRest, node.handler(), nil, "../../", nil)
+	chainParser, chainRouter, _, closeServer, _, err := CreateChainLibMocks(ctx, "COSMOSHUB", spectypes.APIInterfaceRest, node.handler(), nil, "../../", nil)
 	require.NoError(t, err)
 	if closeServer != nil {
 		defer closeServer()
@@ -145,8 +145,8 @@ func TestHTTPProxies_ReplyStatusAndHeaders(t *testing.T) {
 		name, specIndex, apiInterface, url, body, connectionType string
 		wantNodeHeader                                           bool
 	}{
-		{"rest", "LAVA", spectypes.APIInterfaceRest, "/cosmos/base/tendermint/v1beta1/blocks/latest", "", http.MethodGet, true},
-		{"tendermintrpc uri", "LAVA", spectypes.APIInterfaceTendermintRPC, "status", "", "", false},
+		{"rest", "COSMOSHUB", spectypes.APIInterfaceRest, "/cosmos/base/tendermint/v1beta1/blocks/latest", "", http.MethodGet, true},
+		{"tendermintrpc uri", "COSMOSHUB", spectypes.APIInterfaceTendermintRPC, "status", "", "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()

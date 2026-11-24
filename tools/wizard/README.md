@@ -76,7 +76,7 @@ The base compose passes `--use-static-spec ${SR_SPEC:-specs/}`. Two valid values
 | `SR_SPEC` | Meaning |
 | --- | --- |
 | `specs/` *(default)* | The lava-specs snapshot **bundled into the image**. Covers the chains in the repo's `specs/` dir (the bundled examples). |
-| `https://github.com/magma-Devs/lava-specs/tree/main` | The **live lava-specs GitHub repo**. Resolves every chain in the catalog, including ones not bundled (e.g. `LAV1`). The router fetches + caches these at startup. |
+| `https://github.com/magma-Devs/lava-specs/tree/main` | The **live lava-specs GitHub repo**. Resolves every chain in the catalog, including ones not bundled (e.g. `OSMOSIS`). The router fetches + caches these at startup. |
 
 The wizard sets it automatically: `specs/` when its chain catalog came from the
 local source, the GitHub URL when it came from remote. You can override it by
