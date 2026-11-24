@@ -10,6 +10,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
 )
 
@@ -111,4 +112,38 @@ func TestGRPCListener_AJSONWriteNoProviderDescribesIsNotPossiblySubmitted(t *tes
 	events := newRelayEndsSince(read, seen)
 	require.Len(t, events, 1)
 	require.NotEqual(t, relayOutcomeWriteUnknown, relayEndField(t, events[0], "outcome"))
+}
+
+// The per-endpoint relay metric agrees with the release (MAG-5676): a JSON request whose value does
+// not convert to the method's message is found when it is sent, after a provider is picked, and
+// nothing is sent. Each attempt counts as cancelled, as one with no method definition does, and not
+// in rpc_endpoint_total_errored or a provider's failed requests.
+func TestGRPCListener_JSONRequestsTheConversionCannotReadAreNotCountedAsEndpointErrors(t *testing.T) {
+	mm := metrics.NewSmartRouterMetricsManager(metrics.SmartRouterMetricsManagerOptions{})
+	withMetrics := func(server *RPCSmartRouterServer) { server.smartRouterEndpointMetrics = mm }
+	var addrs []string
+	for range 3 {
+		addr, _ := startReflectingNode(t)
+		addrs = append(addrs, addr)
+	}
+	client, _, _ := startProtobufCheckRouterConfigured(t, withMetrics, reflectedReadMethod, reflectedWriteMethod, addrs...)
+
+	for _, method := range []string{reflectedReadMethod, reflectedWriteMethod} {
+		for name, body := range map[string][]byte{
+			"a value of the wrong type": []byte(`{"inner":5}`),
+			"an array":                  []byte(`[{"id":"7"}]`),
+		} {
+			errored := endpointRelayCount(t, "rpc_endpoint_total_errored", method)
+			cancelled := endpointRelayCount(t, "rpc_endpoint_total_cancelled", method)
+			for range 3 {
+				_, _, err := invokeRaw(t, client, method, body)
+				require.Equal(t, codes.InvalidArgument, status.Code(err), "%s %s: %v", method, name, err)
+			}
+			require.Eventually(t, func() bool {
+				return endpointRelayCount(t, "rpc_endpoint_total_cancelled", method) >= cancelled+3
+			}, 5*time.Second, 20*time.Millisecond, "%s %s: each attempt counts as cancelled", method, name)
+			require.Equal(t, errored, endpointRelayCount(t, "rpc_endpoint_total_errored", method),
+				"%s %s: no attempt counts as an endpoint error", method, name)
+		}
+	}
 }
