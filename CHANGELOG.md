@@ -8,6 +8,245 @@ Versions follow [Semantic Versioning](https://semver.org/). Commit hashes
 in `### Changes` link to the canonical commit on GitHub via reference-style
 links collected at the bottom of each section.
 
+## v1.7.0 — 2026-11-23
+
+### Highlights
+
+> [!WARNING]
+> **Breaking: a hard cut with no compatibility alias.** Every `Lava-*` / `lava-*` name the router owns on the wire has a new name, and so do `Smart-Router-Version`, `smartrouter-internal-probe` and the default health path `/lava/health`. A router of this version understands only the new names; every earlier router understands only the old ones. No name is accepted in both spellings, in either direction. A request that still carries an old directive header gets no error: the router does not recognise the header, does not apply it and does not forward it to the node. A client that still reads an old reply header finds it absent. A probe on the old health path no longer reaches the health handler. Rename every name listed under "Breaking changes: what to change before you upgrade" on the client, gateway and monitoring side in the same window as the router upgrade.
+
+Version 1.7.0 is version 1.6.9 plus one change, [#693]: the router's wire surface moves off the `Lava-*` / `lava-*` names. Reply headers become `Router-*`, directive headers become `router-*`, `Smart-Router-Version` becomes `Router-Version`, `smartrouter-internal-probe` becomes `router-internal-probe`, and the default health path moves from `/lava/health` to `/router/health`. The gRPC metadata keys, the websocket limit headers, the header the chain fetcher sends upstream, the internal gRPC trailers, the cache-key salt for explicit extension requests, the gRPC proxy codec name and one JSON field of `RelaySession` and `Badge` move with them. Only names change: the header values, the statuses and the reply bodies are the ones 1.6.9 sends, apart from the text listed under "Text that changes with the names". The `smartrouter` binary, its flag names, its config keys and its `smartrouter_*` metric names keep their names. An upgrade from 1.6.8 or earlier also takes every change of 1.6.9, including its 18 breaking changes; see "Upgrading from v1.6.8" below.
+
+### Breaking changes: what to change before you upgrade
+
+Each table lists every renamed name, old on the left and new on the right, in the spelling of the router's code. HTTP header names are case-insensitive, and the HTTP listeners write each name with every word capitalized (`router-user-request-type` is sent as `Router-User-Request-Type`), so match them without regard to case. On the gRPC interface the same names travel as metadata keys, which gRPC lowercases (`router-guid`, `router-provider-address`).
+
+#### Reply headers
+
+Headers the router adds to a reply. 28 names.
+
+| Old name | New name | Sent |
+|---|---|---|
+| `Lava-Provider-Address` | `Router-Provider-Address` | the provider that answered, `Cached` on a cache hit, or the comma-separated list of the providers tried |
+| `Lava-Retries` | `Router-Retries` | when the request was retried at least once |
+| `Lava-Guid` | `Router-Guid` | the request id, on replies and on the router's own refusals |
+| `Lava-Relay-Protocol` | `Router-Relay-Protocol` | the protocol of the upstream connection that served the request |
+| `Lava-Write-Outcome` | `Router-Write-Outcome` | the verdict of a GraphQL write |
+| `Lava-Extension-Unavailable` | `Router-Extension-Unavailable` | when the request asked for an extension no node offers |
+| `Lava-Relay-Timeout-Applied` | `Router-Relay-Timeout-Applied` | when the request carried `router-relay-timeout` |
+| `Lava-Cache-Tier` | `Router-Cache-Tier` | when the request carried `router-debug-relay` |
+| `Lava-Cache-Outcome` | `Router-Cache-Outcome` | when the request carried `router-debug-relay` |
+| `Lava-Cache-Backend` | `Router-Cache-Backend` | on a cache hit, under `--debug-relays` |
+| `Lava-Errored-Providers` | `Router-Errored-Providers` | when the request carried `router-debug-relay` and a provider errored |
+| `Lava-Node-Errors-providers` | `Router-Node-Errors-Providers` | when the request carried `router-debug-relay` and a node returned an error |
+| `Lava-Reported-Providers` | `Router-Reported-Providers` | the constant is renamed; no code path sends it |
+| `lava-user-request-type` | `router-user-request-type` | the API name of the request, on every relayed reply |
+| `lava-stateful-api` | `router-stateful-api` | on a stateful API |
+| `lava-fast-tx-participants` | `router-fast-tx-participants` | on a stateful API, the providers that received the request |
+| `lava-parsed-requested-block` | `router-parsed-requested-block` | when the request carried `router-debug-relay` |
+| `lava-identified-node-error` | `router-identified-node-error` | when the reply is the node's own error |
+| `lava-hedge-triggered` | `router-hedge-triggered` | when a hedge attempt was sent |
+| `lava-selection-stats` | `router-selection-stats` | under `--enable-selection-stats` |
+| `lava-cross-validation-status` | `router-cross-validation-status` | on a cross-validated request |
+| `lava-cross-validation-all-providers` | `router-cross-validation-all-providers` | on a cross-validated request |
+| `lava-cross-validation-agreeing-providers` | `router-cross-validation-agreeing-providers` | on a cross-validated request |
+| `lava-cross-validation-disagreeing-providers` | `router-cross-validation-disagreeing-providers` | on a cross-validated request |
+| `lava-cross-validation-pending-providers` | `router-cross-validation-pending-providers` | on a cross-validated request |
+| `lava-cross-validation-failure-reason` | `router-cross-validation-failure-reason` | on a failed cross-validation |
+| `lava-cross-validation-plurality-size` | `router-cross-validation-plurality-size` | on a failed cross-validation |
+| `lava-cross-validation-plurality-providers` | `router-cross-validation-plurality-providers` | on a failed cross-validation |
+
+`Provider-Latest-Block` keeps its name.
+
+#### Directive headers
+
+Request headers a client sends to steer one request. 10 names. The router strips a directive before the request reaches the node and before the cache key is built. Under the old name the header is not a directive: it does not apply, and the request is handled as if the header were absent.
+
+| Old name | New name |
+|---|---|
+| `lava-select-provider` | `router-select-provider` |
+| `lava-select-provider-strict` | `router-select-provider-strict` |
+| `lava-stickiness` | `router-stickiness` |
+| `lava-providers-block` | `router-providers-block` |
+| `lava-extension` | `router-extension` |
+| `lava-relay-timeout` | `router-relay-timeout` |
+| `lava-force-cache-refresh` | `router-force-cache-refresh` |
+| `lava-debug-relay` | `router-debug-relay` |
+| `lava-cross-validation-max-participants` | `router-cross-validation-max-participants` |
+| `lava-cross-validation-agreement-threshold` | `router-cross-validation-agreement-threshold` |
+
+#### Other router headers
+
+The two headers that carried neither prefix join the same family. 2 names.
+
+| Old name | New name | Kind |
+|---|---|---|
+| `Smart-Router-Version` | `Router-Version` | reply header, sent when the request carried `router-debug-relay` |
+| `smartrouter-internal-probe` | `router-internal-probe` | directive header that marks monitoring traffic, so that it does not count as activity for idle mode |
+
+The router treats every reply header whose name starts with `router-` as its own: a node's reply header with that prefix never reaches the client, whatever the chain spec declares. That rule covered the `lava-` prefix and `Smart-Router-Version` before.
+
+#### Health path default
+
+1 name.
+
+| Old default | New default |
+|---|---|
+| `/lava/health` | `/router/health` |
+
+The default applies to every listener whose endpoint sets no `health-check-path`. An endpoint that sets `health-check-path` keeps the path it sets. A GET on `/lava/health` is no longer the health route: the listener handles it like any other request path.
+
+#### gRPC metadata
+
+4 names.
+
+| Old name | New name | Use |
+|---|---|---|
+| `x-lava-grpc-sub-id` | `x-router-grpc-sub-id` | sent to the client on a gRPC streaming subscription: the router's subscription id |
+| `x-lava-grpc-stream-seq` | `x-router-grpc-stream-seq` | sent to the client with each stream message: its sequence number |
+| `x-lava-grpc-client-id` | `x-router-grpc-client-id` | the constant is renamed; no code path reads or sends it |
+| `lava-lb-unique-id` | `router-lb-unique-id` | outgoing metadata on the router's gRPC `Probe` call to a provider |
+
+#### Websocket limit headers
+
+Request headers a gateway in front of the router sets on a websocket upgrade. 2 names.
+
+| Old name | New name |
+|---|---|
+| `x-lava-websocket-rate-limit` | `x-router-websocket-rate-limit` |
+| `x-lava-websocket-open-connections-limit` | `x-router-websocket-open-connections-limit` |
+
+#### Header sent upstream by the chain fetcher
+
+1 name.
+
+| Old name | New name |
+|---|---|
+| `X-LAVA-Provider` | `X-Router-Provider` |
+
+#### Internal gRPC trailers
+
+2 names.
+
+| Old name | New name |
+|---|---|
+| `Lava-Provider-Node-Address-Hash` | `Router-Provider-Node-Address-Hash` |
+| `Lava-Provider-Node-Extension` | `Router-Provider-Node-Extension` |
+
+#### Cache-key salt
+
+The bytes the router appends to a cache key when the request names an extension with the extension directive. 1 name.
+
+| Old salt | New salt |
+|---|---|
+| `\x00lava-extension=` | `\x00router-extension=` |
+
+#### gRPC proxy codec name
+
+1 name.
+
+| Old name | New name |
+|---|---|
+| `lava/grpc-proxy-codec` | `router/grpc-proxy-codec` |
+
+#### `RelaySession` and `Badge` JSON field
+
+1 JSON field, on both types.
+
+| Old field | New field |
+|---|---|
+| `lava_chain_id` | `network_id` |
+
+In Go, the field `LavaChainId` is `NetworkId` and the method `GetLavaChainId()` is `GetNetworkId()`, on both types.
+
+#### Text that changes with the names
+
+Not names, but text a log rule, an alert or a script can match on:
+
+- Log lines: `lava-relay-timeout ignored: not a duration`, `lava-relay-timeout ignored: not positive`, `lava-relay-timeout set by the caller` and `a caller's lava-extension names an extension no node offers, serving without it` read `router-relay-timeout ...` and `router-extension ...`. The two `max-caller-relay-timeout ...` startup warnings name `router-relay-timeout`.
+- `GET /debug/relay-end` without a guid answers 400 with `guid is required: the Router-Guid of a reply`.
+- The description of error `PROTOCOL_RATE_LIMITED` (1020) reads `Router-side rate limit exceeded`.
+- The HELP text of `smartrouter_extension_unavailable_total` names `router-extension` and `Router-Extension-Unavailable`. The metric name and labels are unchanged.
+- The help text of `--cors-expose-headers`, `--max-caller-relay-timeout` and `--shared-state` names the new headers. `smartrouter --help` opens with `Smart Router — centralized RPC routing engine`, and the gRPC listener's startup banner reads `Router's Grpc Server`.
+- The test spec `specs/grpctest.json` (`GRPCTEST`) names its API `routertest.v1.BlockService/GetLatestBlock`, where it was `lavatest.v1.BlockService/GetLatestBlock`.
+
+#### Who has to do what
+
+- **Clients that send directives** rename the 10 directive headers. A request that still carries an old name gets no error and no warning: the pin, the stickiness, the provider block list, the extension request, the timeout, the cache refresh, the debug output or the cross-validation knob does not apply, and the request is served as if the header were absent. The header is not forwarded to the node.
+- **Clients that read reply headers** rename the 28 reply headers and `Router-Version`. The old names are absent from every reply. This covers the request id (`Router-Guid`), the serving provider (`Router-Provider-Address`), the retry count (`Router-Retries`), the node-error flag (`router-identified-node-error`) and every `router-cross-validation-*` result header.
+- **Monitoring that marks its traffic** sends `router-internal-probe`. Under `smartrouter-internal-probe` its requests count as activity and keep idle chains awake. Log rules and alerts that match the log lines listed above follow the new text.
+- **Operators and probes on the health path** move from `/lava/health` to `/router/health`: Kubernetes probes, load-balancer health checks and uptime monitors. An endpoint with its own `health-check-path` keeps that path and needs no change. In a rolling upgrade, pods of the two versions answer different default paths.
+- **CORS allow-lists and gateways** allow the new names. A `--cors-headers` or `--cors-expose-headers` value that lists header names lists the new ones. A gateway, proxy or firewall rule that allows, strips, copies or sets these headers by name follows the tables above. A gateway that sets `x-lava-websocket-rate-limit` or `x-lava-websocket-open-connections-limit` sets the `x-router-websocket-*` names: under the old names the router reads no limit from the request, so the request rate limit falls back to `--rate-limit-websocket-requests-per-connection` and the connection limit to `--limit-parallel-websocket-connections-per-ip`. Both flags are unlimited by default, so a router that sets neither enforces no websocket limit until the gateway sends the new names.
+- **Caches** take one wave of misses for requests that name an extension with `router-extension`: their cache keys change with the salt. Keys of every other request are unchanged, and the cache format is unchanged. An old and a new router that share one cache during a rollout do not see each other's entries for such requests.
+- **Anyone who parses `RelaySession` or `Badge` JSON** reads and writes `network_id`. Go code that imports these types uses `NetworkId` and `GetNetworkId()`.
+- **Anything that reads gRPC metadata or trailers** follows the gRPC metadata and trailer tables: stream clients read `x-router-grpc-sub-id` and `x-router-grpc-stream-seq`, and a provider that reads the router's own metadata reads `router-lb-unique-id`. A node or proxy that keys on `X-LAVA-Provider` keys on `X-Router-Provider`.
+
+#### What does not change
+
+- The binary name, `smartrouter`, its subcommands and its arguments.
+- The wizard.
+- Metric names and labels, including every `smartrouter_*` metric.
+- Flag names. Only flag values that list header names change, as above.
+- Config keys. `health-check-path` keeps its key; only its default moves.
+- The `/debug/*` paths and the JSON fields of their replies.
+- Chain ids and the chain specs, apart from the test spec `GRPCTEST`.
+- The `Provider-Latest-Block` reply header and the headers a chain spec declares.
+- The Lava chain as data: `specs/lava.json`, the `LAVA` and `LAV1` chain ids, and the `lava-specs` repository name.
+
+#### Upgrading from v1.6.8
+
+Version 1.7.0 carries every change of 1.6.9, so an upgrade from 1.6.8 or earlier also takes the 18 breaking changes of 1.6.9. The [v1.6.9 release notes][v1.6.9] have the full notes; they name the headers as 1.6.9 sends them, and the list here uses the 1.7.0 names.
+
+- A rate-limit escalation holds off one provider entry (its name on one chain and api-interface), not the same name on every chain and interface; the `escalated` event of `smartrouter_rate_limit_holdoffs_total` no longer means every chain stopped ([#618]).
+- The recovery-probe replay is removed: `RelayProbeMethod` and `RelayProbeAttempts` leave `/debug/endpoint-state`, `EvidenceGatedCount` and the `Replays*` counters leave `/debug/probe-loop`, and the "relay probe ..." log lines are gone ([#687]).
+- A provider with no ws(s) url on a chain that subscribes is admitted, serves everything but subscriptions, and is reported on `smartrouter_provider_verification_failed` with `service=websocket`, `check=missing-url`, `severity=PartialFail`; a refused ws(s) url is published as `service=websocket`, `PartialFail` ([#602]).
+- A GraphQL request the router cannot read gets HTTP 400 with a GraphQL error document instead of HTTP 500, and every GraphQL refusal carries `Router-Guid` ([#685]).
+- Under an enabled cross-validation policy, `router-cross-validation-max-participants` and `router-cross-validation-agreement-threshold` are floored at their defaults (3 and 2) unless the policy writes its own floor ([#711]).
+- A GraphQL mutation with two or more root fields other than `__typename` is refused with HTTP 400, and the limit, repeated-key and mixed-document refusals carry `extensions.code` `REQUEST_REFUSED` ([#717]).
+- A GraphQL request in any method but POST and OPTIONS gets 405 with `Allow: POST`: a GET, PUT or PATCH gets a GraphQL error document with `Router-Guid`, a HEAD gets the status and the headers only, and a DELETE gets 405 instead of 204 ([#719]).
+- A GraphQL request no provider answered gets a GraphQL error document with the code `NO_PROVIDER_ANSWER` ([#721]).
+- The default relay retry limit is 3 instead of 2, so `Router-Retries` can read 3; `--set-relay-retry-limit=2` keeps the old limit ([#738]).
+- A DELETE to a JSON-RPC or Tendermint RPC listener gets 405 instead of 204, and a JSON-RPC PUT or PATCH answers `Allow: POST` ([#724]).
+- A cross-validated request whose quorum needs a blocked provider, or a block height no provider is known to hold, fails with 500 `insufficient-capacity` ([#728]).
+- A `router-select-provider` name the router does not have gets HTTP 400 (gRPC `INVALID_ARGUMENT`) instead of 500 ([#725]).
+- A GraphQL read whose 200 carries an error is not cached or served as a plain success: the caller's errors carry `router-identified-node-error`, and the others are retried on another provider ([#714]).
+- An HTML or text page that every provider sends inside a 2xx on a GraphQL read reaches the client as is with HTTP 200, flagged as a node error and never cached ([#729]).
+- `rpc_endpoint_overall_health` is removed; read `smartrouter_csm_provider_blocked`, whose provider label is `provider_address`, not `endpoint_id` ([#625]).
+- A GraphQL read's error is filed by GraphQL's own status table: `NODE_URL_REFUSED` (2021) for a 404, 405 or redirect, and `NODE_UNRECOGNIZED_ERROR` (2020) for a 400, 409, 410, 413, 415 or 422 read and for an error with no code or an unknown code ([#735]).
+- A binary gRPC request that is not a protobuf message gets `INVALID_ARGUMENT` from the router instead of the node's `INTERNAL` ([#770]).
+- On JSON-RPC and Tendermint RPC, `router-identified-node-error` is sent only when the body is the node's JSON-RPC reply ([#752]).
+
+### Changes
+
+#### ⚠ Breaking changes
+- refactor!: rename the router's wire surface off the Lava names (MAG-2972) ([#693]) [`276a71e1`]
+  - hard cut, no compatibility alias: reply headers `Lava-*` and `Smart-Router-Version` become `Router-*`, directive headers `lava-*` and `smartrouter-internal-probe` become `router-*`, gRPC metadata `x-lava-grpc-*` and the websocket limit headers `x-lava-websocket-*` become `x-router-*`, and the default health path `/lava/health` becomes `/router/health` (`health-check-path` still overrides it). An old directive gets no error and does not apply, an old reply header is absent, and a probe on `/lava/health` no longer reaches the health handler. Every name is listed under "Breaking changes: what to change before you upgrade" above.
+
+#### Bug fixes
+- refactor!: rename the router's wire surface off the Lava names (MAG-2972) ([#693]) [`276a71e1`]
+
+[#602]: https://github.com/magma-Devs/smart-router/pull/602
+[#618]: https://github.com/magma-Devs/smart-router/pull/618
+[#625]: https://github.com/magma-Devs/smart-router/pull/625
+[#685]: https://github.com/magma-Devs/smart-router/pull/685
+[#687]: https://github.com/magma-Devs/smart-router/pull/687
+[#693]: https://github.com/magma-Devs/smart-router/pull/693
+[#711]: https://github.com/magma-Devs/smart-router/pull/711
+[#714]: https://github.com/magma-Devs/smart-router/pull/714
+[#717]: https://github.com/magma-Devs/smart-router/pull/717
+[#719]: https://github.com/magma-Devs/smart-router/pull/719
+[#721]: https://github.com/magma-Devs/smart-router/pull/721
+[#724]: https://github.com/magma-Devs/smart-router/pull/724
+[#725]: https://github.com/magma-Devs/smart-router/pull/725
+[#728]: https://github.com/magma-Devs/smart-router/pull/728
+[#729]: https://github.com/magma-Devs/smart-router/pull/729
+[#735]: https://github.com/magma-Devs/smart-router/pull/735
+[#738]: https://github.com/magma-Devs/smart-router/pull/738
+[#752]: https://github.com/magma-Devs/smart-router/pull/752
+[#770]: https://github.com/magma-Devs/smart-router/pull/770
+[v1.6.9]: https://github.com/magma-Devs/smart-router/releases/tag/v1.6.9
+[`276a71e1`]: https://github.com/magma-Devs/smart-router/commit/276a71e191c60c1b9bd1a3cb52dd89e61467d629
+
 ## v1.6.9 — 2026-11-23
 
 ### Highlights

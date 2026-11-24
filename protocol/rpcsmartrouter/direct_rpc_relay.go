@@ -1232,6 +1232,12 @@ func (d *DirectRPCRelaySender) sendGRPCRelay(
 					common.ClassifyError(nil, d.chainFamily, common.TransportGRPC, response.StatusCode, errorMessage) == common.RouterErrorUnknown) {
 					result.ApplyRouterErrorClassification(common.RouterErrorNodeRateLimited)
 				}
+				// A copy of the chain's write is read by the chain's own list (MAG-5186), which files
+				// some statuses unlike the status table: on Sui, RESOURCE_EXHAUSTED is a throttle with
+				// or without a wait, and FAILED_PRECONDITION is a lock conflict the caller caused.
+				if copyReading, known := grpcMessage.WriteCopy(grpcErr.Code, grpcErr.Message); known && copyReading.Verdict != nil {
+					result.ApplyRouterErrorClassification(copyReading.Verdict)
+				}
 			}
 			return result, nil
 		}

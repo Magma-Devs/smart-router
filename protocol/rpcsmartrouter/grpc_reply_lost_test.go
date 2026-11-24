@@ -100,7 +100,11 @@ func startCuttingGRPCNode(t *testing.T, cut replyLostCut) (string, *cuttingNode)
 	raw, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	node := &cuttingNode{Listener: raw, cut: cut, conns: map[string]net.Conn{}}
-	srv := grpc.NewServer(grpc.ForceServerCodec(stalledReflectionCodec{}), grpc.UnknownServiceHandler(node.handle))
+	// A fixed window turns off the server's BDP ping on the request's data. With it on, an RST
+	// sometimes reached the client as a plain EOF: the client's answer to the ping can meet the
+	// reset first and take its error.
+	srv := grpc.NewServer(grpc.ForceServerCodec(stalledReflectionCodec{}), grpc.UnknownServiceHandler(node.handle),
+		grpc.InitialWindowSize(1<<20), grpc.InitialConnWindowSize(1<<20))
 	go func() { _ = srv.Serve(node) }()
 	t.Cleanup(srv.Stop)
 	return raw.Addr().String(), node

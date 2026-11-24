@@ -2,6 +2,7 @@ package chainlib
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"regexp"
@@ -186,6 +187,11 @@ func ShouldRetryError(err error) bool {
 // using chain family and transport for accurate Tier 2 classification.
 func ShouldRetryErrorWithContext(err error, chainFamily common.ChainFamily, transport common.TransportType) bool {
 	if err == nil {
+		return false
+	}
+
+	// A call type the router does not serve is refused the same by every provider (MAG-5133).
+	if errors.Is(err, common.UnservedGRPCCallError) {
 		return false
 	}
 
