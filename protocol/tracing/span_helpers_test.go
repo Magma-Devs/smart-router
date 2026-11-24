@@ -17,6 +17,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
 )
 
@@ -381,6 +382,7 @@ const (
 	keyRPCSystem                 = "rpc.system"
 	keyRPCService                = "rpc.service"
 	keyRPCMethod                 = "rpc.method"
+	keyRPCGRPCStatusCode         = "rpc.grpc.status_code"
 )
 
 func TestRecordHTTPRequest(t *testing.T) {
@@ -561,32 +563,55 @@ func TestRecordGRPCRequest(t *testing.T) {
 	}
 }
 
+// TestRecordGRPCResponse pins where a gRPC relay's status lands on its span. A failed
+// relay's DirectRPCResponse carries the gRPC code in StatusCode, and that code must go under
+// rpc.grpc.status_code only: under http.status_code, 14 or 5 read as an HTTP status, and a
+// filter on http.status_code >= 500 misses every failed gRPC relay (MAG-5444).
 func TestRecordGRPCResponse(t *testing.T) {
 	tests := []struct {
-		name                string
-		response            *routersession.DirectRPCResponse
-		expectResponseAttrs bool
-		expectStatus        int
-		expectSize          int
+		name             string
+		response         *routersession.DirectRPCResponse
+		expectHTTPStatus int // 0: no http.status_code
+		expectGRPCStatus int // -1: no rpc.grpc.status_code
+		expectSize       int // -1: no http.response_content_length
 	}{
 		{
-			name:                "200 with data",
-			response:            &routersession.DirectRPCResponse{StatusCode: 200, Data: []byte("hello world")},
-			expectResponseAttrs: true,
-			expectStatus:        200,
-			expectSize:          11,
+			name:             "reply with data",
+			response:         &routersession.DirectRPCResponse{StatusCode: 200, Data: []byte("hello world")},
+			expectHTTPStatus: 200,
+			expectGRPCStatus: 0,
+			expectSize:       11,
 		},
 		{
-			name:                "200 with empty data",
-			response:            &routersession.DirectRPCResponse{StatusCode: 200, Data: nil},
-			expectResponseAttrs: true,
-			expectStatus:        200,
-			expectSize:          0,
+			name:             "reply with empty data",
+			response:         &routersession.DirectRPCResponse{StatusCode: 200, Data: nil},
+			expectHTTPStatus: 200,
+			expectGRPCStatus: 0,
+			expectSize:       0,
 		},
 		{
-			name:                "nil response",
-			response:            nil,
-			expectResponseAttrs: false,
+			name:             "node error UNAVAILABLE",
+			response:         &routersession.DirectRPCResponse{StatusCode: 14},
+			expectGRPCStatus: 14,
+			expectSize:       0,
+		},
+		{
+			name:             "node error NOT_FOUND",
+			response:         &routersession.DirectRPCResponse{StatusCode: 5, Data: []byte("details")},
+			expectGRPCStatus: 5,
+			expectSize:       7,
+		},
+		{
+			name:             "error that carried no status",
+			response:         &routersession.DirectRPCResponse{StatusCode: common.GRPCStatusCodeOnFailedMessages},
+			expectGRPCStatus: 2, // UNKNOWN, as status.Code reads an error with no status
+			expectSize:       0,
+		},
+		{
+			name:             "nil response",
+			response:         nil,
+			expectGRPCStatus: -1,
+			expectSize:       -1,
 		},
 	}
 
@@ -596,11 +621,22 @@ func TestRecordGRPCResponse(t *testing.T) {
 				RecordGRPCResponse(span, tc.response)
 			})
 
-			if tc.expectResponseAttrs {
-				require.Equal(t, int64(tc.expectStatus), attrs[keyHTTPStatusCode].AsInt64())
+			if tc.expectHTTPStatus != 0 {
+				require.Contains(t, attrs, keyHTTPStatusCode)
+				require.Equal(t, int64(tc.expectHTTPStatus), attrs[keyHTTPStatusCode].AsInt64())
+			} else {
+				require.NotContains(t, attrs, keyHTTPStatusCode, "a gRPC code must not land in http.status_code")
+			}
+			if tc.expectGRPCStatus >= 0 {
+				require.Contains(t, attrs, keyRPCGRPCStatusCode)
+				require.Equal(t, int64(tc.expectGRPCStatus), attrs[keyRPCGRPCStatusCode].AsInt64())
+			} else {
+				require.NotContains(t, attrs, keyRPCGRPCStatusCode)
+			}
+			if tc.expectSize >= 0 {
+				require.Contains(t, attrs, keyHTTPResponseContentLength)
 				require.Equal(t, int64(tc.expectSize), attrs[keyHTTPResponseContentLength].AsInt64())
 			} else {
-				require.NotContains(t, attrs, keyHTTPStatusCode)
 				require.NotContains(t, attrs, keyHTTPResponseContentLength)
 			}
 		})
