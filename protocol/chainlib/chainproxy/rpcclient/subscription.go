@@ -200,6 +200,9 @@ type ClientSubscription struct {
 	channel   reflect.Value
 	namespace string
 	subid     string
+	// requestID is the id of the subscribe request that opened this subscription, as the
+	// handler's subsByRequestID keys it. Only the dispatch goroutine reads or writes it.
+	requestID string
 
 	// The in channel receives notification values from client dispatcher.
 	in chan *JsonrpcMessage
