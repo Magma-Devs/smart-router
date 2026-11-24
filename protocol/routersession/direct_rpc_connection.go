@@ -585,6 +585,13 @@ var ErrGRPCConnectionClosed = errors.New("gRPC connection is closed")
 // about it (MAG-5675).
 var ErrNoMethodDescriptor = errors.New("no definition of the gRPC method from this node")
 
+// ErrGRPCRequestNotValidJSON is a JSON gRPC request that is not JSON the method's message reads: it
+// does not parse, it is cut short, or a value has the wrong type for its field. Every node refuses it
+// the same way, so it is the caller's to fix, and the listener answers INVALID_ARGUMENT with this
+// sentence. The chain parser refuses the first kinds before a provider is picked; the conversion at
+// send time finds the rest, and then nothing was sent to the node (MAG-5676).
+var ErrGRPCRequestNotValidJSON = errors.New("the request message is not valid JSON for the method")
+
 // DirectRPCPrewarmBudget bounds the readiness step that endpoint setup runs
 // before publishing connections.
 //
@@ -2074,7 +2081,13 @@ func (g *GRPCDirectRPCConnection) parseInputMessage(
 		}
 
 		if err := rp.Next(msg); err != nil {
-			return fmt.Errorf("failed to parse JSON input: %w", err)
+			// A conversion the relay's own context ended is left as that cancellation.
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return fmt.Errorf("failed to parse JSON input: %w", ctxErr)
+			}
+			// The caller's mistake (MAG-5676). The parser's error is kept as text only: a cut-short
+			// body's io.ErrUnexpectedEOF must not read as a connection the node dropped.
+			return fmt.Errorf("%w: %v", ErrGRPCRequestNotValidJSON, err)
 		}
 	} else {
 		// Binary proto input

@@ -212,7 +212,47 @@ func TestGrpcParseMsg_RefusesABodyThatIsNotAProtobufMessage(t *testing.T) {
 	require.NoError(t, parseGrpcRequest(parser, cosmosBalanceRequest))
 	require.NoError(t, parseGrpcRequest(parser, nil), "the empty message")
 	require.NoError(t, parseGrpcRequest(parser, []byte(`{"host": "x"}`)), "a JSON body is left to its conversion")
-	require.NoError(t, parseGrpcRequest(parser, []byte(`[`)), "even an unfinished one")
+	require.ErrorIs(t, parseGrpcRequest(parser, []byte(`[`)), routersession.ErrGRPCRequestNotValidJSON,
+		"but not an unfinished one, which no conversion reads (MAG-5676)")
+}
+
+// MAG-5676: a body that starts with { or [ is JSON to the router, and its first value is read while
+// the request is parsed, as the conversion that sends it reads it. One that does not read is refused
+// before a provider is picked, with an error the listeners answer as the caller's: not JSON, cut
+// short, or a leading { or [ in front of binary bytes. A value of the wrong type for its field is
+// valid JSON, and is left to the conversion, which has the method's descriptor.
+func TestGrpcParseMsg_RefusesAJSONBodyTheConversionCannotRead(t *testing.T) {
+	parser := grpcRequestCheckParser(t, nil)
+
+	for name, body := range map[string][]byte{
+		"cut short":                       []byte(`{"id":`),
+		"a syntax error":                  []byte(`{"id" 7}`),
+		"an unclosed array":               []byte(`[1,`),
+		"a { in front of binary bytes":    {'{', 0x00, 0x01, 0xff},
+		"a [ in front of binary bytes":    {'[', 0x00, 0x01, 0xff},
+		"a [ in front of a protobuf body": append([]byte{'['}, cosmosBalanceRequest...),
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := parseGrpcRequest(parser, body)
+			require.ErrorIs(t, err, routersession.ErrGRPCRequestNotValidJSON)
+			message, refused := refusedRequestMessage(err)
+			require.True(t, refused, "the listeners answer it as the caller's")
+			require.Equal(t, routersession.ErrGRPCRequestNotValidJSON.Error(), message)
+		})
+	}
+
+	for name, body := range map[string][]byte{
+		"an object":                        []byte(`{"host": "x"}`),
+		"the empty object":                 []byte(`{}`),
+		"a value of the wrong type":        []byte(`{"host": 5}`),
+		"an array":                         []byte(`[{"host": "x"}]`),
+		"a second value after the first":   []byte(`{"host": "x"} {"host": "y"}`),
+		"whitespace after the first value": []byte("{\"host\": \"x\"}\n"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.NoError(t, parseGrpcRequest(parser, body), "left to the conversion that sends it")
+		})
+	}
 }
 
 // With the method's descriptor held, the body is also decoded with it, which reads inside a

@@ -1521,6 +1521,12 @@ func unclearWriteOutcomeFor(protocolMessage chainlib.ProtocolMessage, relayProce
 	cutOffMidDelivery := false
 	var cutOffs writeCutOffs
 	for _, protocolError := range protocolErrors {
+		// A request the router gave up on before it reached the node settles that endpoint: it
+		// cannot hold the transaction (MAG-5676). Read by the error itself, since the text it is
+		// classified by below names no cause and would read UNKNOWN_ERROR.
+		if requestNeverSent(protocolError.Err) {
+			continue
+		}
 		// Unmatched errors classify as UNKNOWN_ERROR, which carries the flag for the same reason,
 		// so a nil check here would be dead code rather than a safety net.
 		if protocolError.RouterError != nil && protocolError.RouterError.MayHaveReachedNode {
@@ -3296,10 +3302,11 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 			// A gRPC call type the router does not serve, found in this attempt (MAG-5133): the
 			// call's, not the endpoint's, so the endpoint is released with no score, as a cancel is.
 			unservedCall := err != nil && errors.Is(err, common.UnservedGRPCCallError)
-			// A JSON gRPC request this node's lookup gave no method definition for was never sent
-			// (MAG-5675): the endpoint is released with no score below, and the metric does not count
-			// it as the endpoint's error either.
-			noMethodDescriptor := err != nil && errors.Is(err, routersession.ErrNoMethodDescriptor)
+			// A JSON gRPC request the router could not convert for this node was never sent: the
+			// node's lookup gave no method definition, or the request is not JSON the method's
+			// message reads (MAG-5676). The endpoint is released with no score below, and the metric
+			// does not count it as the endpoint's error either. One flag decides both.
+			neverSent := err != nil && requestNeverSent(err)
 
 			if rpcss.smartRouterEndpointMetrics != nil {
 				// analytics is read-only here (classification flags set once pre-launch, Success set
@@ -3311,7 +3318,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 					// Silent when the budget ran out. Cancelled would keep it out of the error and
 					// latency series, which is right for a race loser and wrong for a hang.
 					outcome = metrics.RelayOutcomeError
-				case isClientCancel, unservedCall, noMethodDescriptor:
+				case isClientCancel, unservedCall, neverSent:
 					outcome = metrics.RelayOutcomeCancelled
 				case err != nil:
 					outcome = metrics.RelayOutcomeError
@@ -3407,13 +3414,14 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 						utils.LogAttr("GUID", goroutineCtx),
 					)
 				}
-			} else if noMethodDescriptor {
-				// The node's lookup gave no definition of the gRPC method to convert the JSON request
-				// with, so nothing was sent and the endpoint's availability was never tested
-				// (MAG-5675). The failure arm below would score it 0 and count a consecutive error
+			} else if neverSent {
+				// The JSON request could not be converted for this node, for want of the gRPC
+				// method's definition (MAG-5675) or because it is not JSON the method's message
+				// reads (MAG-5676), so nothing was sent and the endpoint's availability was never
+				// tested. The failure arm below would score it 0 and count a consecutive error
 				// against an endpoint that was never asked. Released like a session that was
 				// selected and not used. A cancelled relay keeps its own release: the error carries
-				// this only when the lookup ended with the relay's context still live.
+				// either only when the conversion ended with the relay's context still live.
 				if errSession := rpcss.sessionManager.OnSessionDiscarded(singleConsumerSession, err); errSession != nil {
 					utils.FormatWarning("OnSessionDiscarded failed for direct RPC", errSession,
 						utils.LogAttr("GUID", goroutineCtx),

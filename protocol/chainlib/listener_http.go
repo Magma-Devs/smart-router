@@ -159,13 +159,16 @@ func (apil *chainListenerBase) relayHTTP(spec httpRelaySpec) fiber.Handler {
 // refusedRequestMessage reports whether err is a refusal of the request itself that every
 // interface answers as a client error, and the one sentence the caller is given for it: a
 // router-select-provider name that none of the router's providers carries (MAG-3800), and on gRPC a
-// binary request that is not a protobuf message (MAG-5421).
+// binary request that is not a protobuf message (MAG-5421) or a JSON request that is not JSON the
+// method's message reads (MAG-5676).
 func refusedRequestMessage(err error) (message string, ok bool) {
 	switch {
 	case errors.Is(err, routersession.SelectedProviderNotConfiguredError):
 		return routersession.SelectedProviderNotConfiguredError.Error(), true
 	case errors.Is(err, GrpcRequestNotProtobufError):
 		return GrpcRequestNotProtobufError.Error(), true
+	case errors.Is(err, routersession.ErrGRPCRequestNotValidJSON):
+		return routersession.ErrGRPCRequestNotValidJSON.Error(), true
 	}
 	return "", false
 }
