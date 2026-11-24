@@ -2733,7 +2733,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	}
 
 	// Filter the relevant static providers.
-	// IMPORTANT: filter on both ChainID *and* ApiInterface. A single chain (e.g. LAVA)
+	// IMPORTANT: filter on both ChainID *and* ApiInterface. A single chain (e.g. COSMOSHUB)
 	// can expose several api-interfaces (rest, grpc, tendermintrpc); selecting only by
 	// ChainID would let, say, the grpc endpoint pick a rest provider as its chain
 	// tracker source. The chain tracker would then craft a grpc-shaped GET_BLOCKNUM
@@ -3006,7 +3006,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 			}
 
 			// Create provider session with static configuration.
-			// If stake is specified in the static provider config, use it (ulava).
+			// If stake is specified in the static provider config, use it.
 			// Otherwise keep stake=0 so CalcWeightsByStake applies the legacy static-provider boost.
 			stake := provider.Stake
 			if stake < 0 {

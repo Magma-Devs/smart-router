@@ -40,7 +40,7 @@ func TestAssignListeners(t *testing.T) {
 // per-interface step — it's asked once per round in collectForChain — so pDone is
 // the anchor for "the last applicable step of an interface".)
 func TestPrevStep(t *testing.T) {
-	httpURL := "https://x.lava.build"
+	httpURL := "https://x.example.com"
 
 	// subscription interface (jsonrpc) WITH addons → both pAddons and pWSAsk apply.
 	sub := Listener{Chain: catalog.Chain{Index: "ETH1", Addons: []string{"archive", "debug"}}, Iface: "jsonrpc"}
@@ -56,7 +56,7 @@ func TestPrevStep(t *testing.T) {
 
 	// non-subscription interface (rest) with NO addons → both pAddons and pWSAsk
 	// are skipped; pDone falls straight back to pAuthAsk.
-	plain := Listener{Chain: catalog.Chain{Index: "LAVA"}, Iface: "rest"}
+	plain := Listener{Chain: catalog.Chain{Index: "COSMOSHUB"}, Iface: "rest"}
 	if got := prevStep(pDone, plain, httpURL); got != pAuthAsk {
 		t.Errorf("plain: prevStep(pDone) = %d, want pAuthAsk(%d)", got, pAuthAsk)
 	}
@@ -75,8 +75,8 @@ func TestPrevStep(t *testing.T) {
 // false-failing every healthy ws url at the pWSURL gate.
 func TestWSProbeConfig(t *testing.T) {
 	l := Listener{Chain: catalog.Chain{Index: "ETH1"}, Iface: "jsonrpc"}
-	base := "https://eth1.lava.build"
-	ws := "wss://eth1.lava.build/websocket"
+	base := "https://eth1.example.com"
+	ws := "wss://eth1.example.com/websocket"
 
 	cfg := wsProbeConfig(l, base, ws)
 	if n := len(cfg.Primary); n != 1 {
@@ -102,7 +102,7 @@ func TestWSProbeConfig(t *testing.T) {
 	// The rendered YAML carries BOTH urls — proof the router sees the base
 	// collection alongside the ws url (the whole point of the fix).
 	y := cfg.YAML()
-	for _, sub := range []string{`- url: "https://eth1.lava.build"`, `- url: "wss://eth1.lava.build/websocket"`} {
+	for _, sub := range []string{`- url: "https://eth1.example.com"`, `- url: "wss://eth1.example.com/websocket"`} {
 		if !strings.Contains(y, sub) {
 			t.Errorf("probe YAML missing %q\n---\n%s", sub, y)
 		}
@@ -113,7 +113,7 @@ func TestWSProbeConfig(t *testing.T) {
 // subscription interface — an addon is verified over the http endpoint itself.
 func TestAddonProbeConfigIsHTTPOnly(t *testing.T) {
 	l := Listener{Chain: catalog.Chain{Index: "ETH1"}, Iface: "jsonrpc"}
-	base := "https://eth1.lava.build"
+	base := "https://eth1.example.com"
 
 	cfg := addonProbeConfig(l, base, "archive")
 	if n := len(cfg.Primary); n != 1 {
@@ -145,7 +145,7 @@ func TestNameTaken(t *testing.T) {
 	s := &State{
 		Primary: []emit.Upstream{
 			{Name: "lav1-1-jsonrpc", ChainID: "LAV1", Iface: "jsonrpc"},
-			{Name: "lava-1-rest", ChainID: "LAVA", Iface: "rest"},
+			{Name: "cosmoshub-1-rest", ChainID: "COSMOSHUB", Iface: "rest"},
 		},
 		Backup: []emit.Upstream{
 			{Name: "lav1-bak-jsonrpc", ChainID: "LAV1", Iface: "jsonrpc"},

@@ -130,9 +130,9 @@ func TestDefaultMethodShapeCollapsesConcreteIDs(t *testing.T) {
 		// Hex addresses, whatever their length.
 		"/accounts/0x1/resources":                                     "/accounts/{}/resources",
 		"/accounts/0xd85fd8b6d0f1b1a1c6c6e0d6b6f6a6d6e6f6a6b6/events": "/accounts/{}/events",
-		// Opaque hashes: Tezos block hash (51), cosmos bech32 with the lava@ prefix (45).
-		"/chains/main/blocks/BKiHLREqU3JkXfzEDYAkmmfX48gBDtYqbugTxCcv9YrK1H1EAy/header":    "/chains/main/blocks/{}/header",
-		"/cosmos/staking/v1beta1/delegations/lava@17ym998u666u8w2qgjd5m7w7ydjqmu3mlgl7ua2": "/cosmos/staking/v1beta1/delegations/{}",
+		// Opaque hashes: Tezos block hash (51), cosmos bech32 address (46).
+		"/chains/main/blocks/BKiHLREqU3JkXfzEDYAkmmfX48gBDtYqbugTxCcv9YrK1H1EAy/header":     "/chains/main/blocks/{}/header",
+		"/cosmos/staking/v1beta1/delegations/cosmos17ym998u666u8w2qgjd5m7w7ydjqmu3mlgl7ua2": "/cosmos/staking/v1beta1/delegations/{}",
 		// Several values in one path all collapse.
 		"/blocks/123/operations/0/4": "/blocks/{}/operations/{}/{}",
 	} {

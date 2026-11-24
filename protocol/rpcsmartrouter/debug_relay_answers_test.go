@@ -178,12 +178,12 @@ func TestDebugRelayAnswers_AnUnlistedMethodIsCapped(t *testing.T) {
 	rand.InitRandomSeed()
 	useRelayAnswerRecording(t)
 	noop := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
-	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(context.Background(), "LAVA", spectypes.APIInterfaceTendermintRPC, noop, nil, "../../", nil)
+	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(context.Background(), "COSMOSHUB", spectypes.APIInterfaceTendermintRPC, noop, nil, "../../", nil)
 	if closeServer != nil {
 		t.Cleanup(closeServer)
 	}
 	require.NoError(t, err)
-	server := newRelayEndServer(t, "LAVA", spectypes.APIInterfaceTendermintRPC, chainParser,
+	server := newRelayEndServer(t, "COSMOSHUB", spectypes.APIInterfaceTendermintRPC, chainParser,
 		relayEndNode{"node-a", relayEndReply(200, `{"jsonrpc":"2.0","id":1,"result":{}}`, 0)})
 	const guid = 4360
 	long := "not_a_method_" + strings.Repeat("x", 64*1024)

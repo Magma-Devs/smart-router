@@ -78,11 +78,11 @@ func TestUpdateEpoch_FreshSessions(t *testing.T) {
 
 	// 2. Setup dependencies for SessionManager
 	rpcEndpoint := &routersession.RPCEndpoint{
-		ChainID:        "LAVA",
+		ChainID:        "COSMOSHUB",
 		ApiInterface:   "tendermintrpc",
 		NetworkAddress: "127.0.0.1:3333",
 	}
-	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "LAVA")
+	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "COSMOSHUB")
 
 	chainKey := rpcEndpoint.Key()
 	sessionManager := routersession.NewConsumerSessionManager(rpcEndpoint, optimizer, nil, "test-router", routersession.NewActiveSubscriptionProvidersStorage())
@@ -141,8 +141,8 @@ func TestUpdateEpoch_PreservesGroupLabel(t *testing.T) {
 		providerSessions:       make(map[string]map[uint64]*routersession.ConsumerSessionsWithProvider),
 		backupProviderSessions: make(map[string]map[uint64]*routersession.ConsumerSessionsWithProvider),
 	}
-	rpcEndpoint := &routersession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "tendermintrpc", NetworkAddress: "127.0.0.1:3333"}
-	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "LAVA")
+	rpcEndpoint := &routersession.RPCEndpoint{ChainID: "COSMOSHUB", ApiInterface: "tendermintrpc", NetworkAddress: "127.0.0.1:3333"}
+	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "COSMOSHUB")
 	chainKey := rpcEndpoint.Key()
 	rpsr.sessionManagers[chainKey] = routersession.NewConsumerSessionManager(rpcEndpoint, optimizer, nil, "test-router", routersession.NewActiveSubscriptionProvidersStorage())
 
@@ -184,11 +184,11 @@ func TestUpdateEpoch_ResetsDisabledEndpoints(t *testing.T) {
 	}
 
 	rpcEndpoint := &routersession.RPCEndpoint{
-		ChainID:        "LAVA",
+		ChainID:        "COSMOSHUB",
 		ApiInterface:   "tendermintrpc",
 		NetworkAddress: "127.0.0.1:3334",
 	}
-	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "LAVA")
+	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "COSMOSHUB")
 	chainKey := rpcEndpoint.Key()
 	sessionManager := routersession.NewConsumerSessionManager(rpcEndpoint, optimizer, nil, "test-router", routersession.NewActiveSubscriptionProvidersStorage())
 	rpsr.sessionManagers[chainKey] = sessionManager
@@ -246,7 +246,7 @@ func TestUpdateEpoch_NilListenEndpointDoesNotPanic(t *testing.T) {
 	rand.InitRandomSeed()
 
 	rpcEndpoint := &routersession.RPCEndpoint{
-		ChainID:        "LAVA",
+		ChainID:        "COSMOSHUB",
 		ApiInterface:   "tendermintrpc",
 		NetworkAddress: "127.0.0.1:3336",
 	}
