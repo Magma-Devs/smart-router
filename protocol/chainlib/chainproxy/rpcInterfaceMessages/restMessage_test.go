@@ -61,8 +61,8 @@ func TestRestMessageGetParamsTrailingSlash(t *testing.T) {
 		{
 			name:     "several placeholders with a trailing slash",
 			specPath: "/cosmos/gov/v1/proposals/{proposal_id}/votes/{voter}",
-			path:     "/cosmos/gov/v1/proposals/7/votes/lava@1abc/",
-			expected: map[string]interface{}{"proposal_id": "7", "voter": "lava@1abc"},
+			path:     "/cosmos/gov/v1/proposals/7/votes/cosmos1abc/",
+			expected: map[string]interface{}{"proposal_id": "7", "voter": "cosmos1abc"},
 		},
 		{
 			name:     "a query string survives the trailing slash",
@@ -401,7 +401,7 @@ func TestCheckResponseError_NonTransactionCalls(t *testing.T) {
 			name: "Query Balance - Success",
 			response: `{
 				"balances": [
-					{"denom": "ulava", "amount": "1000000"}
+					{"denom": "uatom", "amount": "1000000"}
 				],
 				"pagination": {}
 			}`,
@@ -555,7 +555,7 @@ func TestCheckResponseError_RealWorldScenarios(t *testing.T) {
 					"codespace": "",
 					"code": 0,
 					"data": "0A1E0A1C2F636F736D6F732E62616E6B2E763162657461312E4D736753656E64",
-					"raw_log": "[{\"events\":[{\"type\":\"coin_spent\",\"attributes\":[{\"key\":\"spender\",\"value\":\"lava1...\"},{\"key\":\"amount\",\"value\":\"1000ulava\"}]}]}]",
+					"raw_log": "[{\"events\":[{\"type\":\"coin_spent\",\"attributes\":[{\"key\":\"spender\",\"value\":\"cosmos1...\"},{\"key\":\"amount\",\"value\":\"1000uatom\"}]}]}]",
 					"logs": [{"msg_index": 0, "log": "", "events": [{"type": "coin_spent"}]}],
 					"info": "",
 					"gas_wanted": "200000",

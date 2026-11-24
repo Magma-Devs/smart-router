@@ -393,9 +393,9 @@ func TestPreflightValidateCrossValidationConfig(t *testing.T) {
 		require.NoError(t, preflight(t, policyFor("eth1", "JSONRPC", "      enabled: true\n")))
 	})
 	t.Run("a policy for another configured endpoint is accepted", func(t *testing.T) {
-		lava := &routersession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "rest"}
-		require.NoError(t, preflightFor(t, policyFor("LAVA", "rest", "      enabled: true\n"), ethEndpoint, lava))
-		require.ErrorContains(t, preflightFor(t, policyFor("LAVA", "rest", "      enabled: true\n"), ethEndpoint), "no endpoint serves",
+		hub := &routersession.RPCEndpoint{ChainID: "COSMOSHUB", ApiInterface: "rest"}
+		require.NoError(t, preflightFor(t, policyFor("COSMOSHUB", "rest", "      enabled: true\n"), ethEndpoint, hub))
+		require.ErrorContains(t, preflightFor(t, policyFor("COSMOSHUB", "rest", "      enabled: true\n"), ethEndpoint), "no endpoint serves",
 			"the same policy with its endpoint absent from the config")
 	})
 

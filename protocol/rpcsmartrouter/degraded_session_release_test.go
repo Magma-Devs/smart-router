@@ -46,7 +46,7 @@ func sendToEveryEndpointStale(t *testing.T, msg archiveRequest) (*relaycore.Rela
 		w.WriteHeader(http.StatusOK)
 	})
 	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(
-		ctx, "LAVA", spectypes.APIInterfaceRest, noopHandler, nil, "../../", nil)
+		ctx, "COSMOSHUB", spectypes.APIInterfaceRest, noopHandler, nil, "../../", nil)
 	if closeServer != nil {
 		t.Cleanup(closeServer)
 	}
@@ -55,9 +55,9 @@ func sendToEveryEndpointStale(t *testing.T, msg archiveRequest) (*relaycore.Rela
 	chainTip := seedChainTip(200)
 	endpointtip.Default().Reset()
 	staleEp1 := &routersession.Endpoint{NetworkAddress: "http://stale1:8545"}
-	seedEndpointTip("LAVA", "rest", "http://stale1:8545", 50)
+	seedEndpointTip("COSMOSHUB", "rest", "http://stale1:8545", 50)
 	staleEp2 := &routersession.Endpoint{NetworkAddress: "http://stale2:8545"}
-	seedEndpointTip("LAVA", "rest", "http://stale2:8545", 50)
+	seedEndpointTip("COSMOSHUB", "rest", "http://stale2:8545", 50)
 
 	mkSession := func(addr string, ep *routersession.Endpoint) *routersession.SingleConsumerSession {
 		return &routersession.SingleConsumerSession{
@@ -91,8 +91,8 @@ func sendToEveryEndpointStale(t *testing.T, msg archiveRequest) (*relaycore.Rela
 
 	sm := &budgetCallSiteStateMachine{usedProviders: usedProviders, protocolMessage: msg}
 	relayProcessor := relaycore.NewRelayProcessor(ctx, nil, cvGuardMetrics{}, cvGuardMetrics{}, sm)
-	rpcEndpoint := &routersession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "rest"}
-	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "LAVA")
+	rpcEndpoint := &routersession.RPCEndpoint{ChainID: "COSMOSHUB", ApiInterface: "rest"}
+	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "COSMOSHUB")
 	rpcss := &RPCSmartRouterServer{
 		listenEndpoint:    rpcEndpoint,
 		chainParser:       chainParser,

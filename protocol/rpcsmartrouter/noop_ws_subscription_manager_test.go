@@ -48,7 +48,7 @@ func TestNoOpWSSubscriptionManager_StartSubscription(t *testing.T) {
 }
 
 func TestNoOpWSSubscriptionManager_Unsubscribe(t *testing.T) {
-	chainID := "LAVA"
+	chainID := "COSMOSHUB"
 	apiInterface := "tendermint"
 	manager := NewNoOpWSSubscriptionManager(chainID, apiInterface)
 
@@ -99,7 +99,7 @@ func TestNoOpWSSubscriptionManager_DifferentChains(t *testing.T) {
 		apiInterface string
 	}{
 		{"ETH", "jsonrpc"},
-		{"LAVA", "tendermint"},
+		{"COSMOSHUB", "tendermint"},
 		{"COSMOSHUB", "grpcweb"},
 		{"POLYGON", "jsonrpc"},
 	}
