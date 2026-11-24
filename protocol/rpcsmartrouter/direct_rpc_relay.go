@@ -28,7 +28,7 @@ import (
 )
 
 // DirectRPCRelaySender handles sending relay requests directly to RPC endpoints
-// (bypassing the Lava provider-relay protocol)
+// (bypassing the provider-relay protocol)
 type DirectRPCRelaySender struct {
 	directConnection    routersession.DirectRPCConnection
 	endpointName        string             // Sanitized endpoint name (no API keys)
@@ -659,14 +659,14 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 	latestBlockFromResponse := extractBlockHeightFromJSONResponse(responseData, chainMessage)
 
 	// Convert response headers to metadata (same as REST path)
-	// This enables Provider-Latest-Block, lava-identified-node-error, and upstream hints
+	// This enables Provider-Latest-Block, router-identified-node-error, and upstream hints
 	responseMetadata := convertHTTPHeadersToMetadata(response.Headers)
 
 	// A 429 is not a node error whatever its body says, as on REST and GraphQL: the upstream refused
 	// for rate before any node answered, and relayInnerDirect fails the attempt on the status alone.
 	// CheckResponseError reads the body only, as its other callers need, and finds a prose or HTML
 	// 429 a malformed reply, so the flag rode the failed relay out to the client as
-	// lava-identified-node-error: true on a request no node answered (MAG-3030). The classification
+	// router-identified-node-error: true on a request no node answered (MAG-3030). The classification
 	// below still runs on hasError, so the rate limit keeps its flags.
 	isNodeError := hasError && statusCode != http.StatusTooManyRequests
 
@@ -876,9 +876,9 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 	// carrying an application error in its body (a Cosmos tx_response.code) is a
 	// request/application error, not a node error at the transport level.
 	//
-	// A 2xx that is the node refusing the broadcast transaction the request sent (Cosmos's
-	// tx_response.code, MAG-5451) is a node error, as on JSON-RPC and gRPC: the reply says the
-	// node answered with an error, and it is no proof the endpoint is healthy.
+	// A 2xx that is the node refusing the broadcast transaction the request sent (Tron's, MAG-5323;
+	// a Cosmos tx_response.code, MAG-5451) is a node error, as on JSON-RPC and gRPC: the reply says
+	// the node answered with an error, and it is no proof the endpoint is healthy.
 	var isNodeError bool
 	switch {
 	case response.StatusCode == 429:
@@ -1149,12 +1149,10 @@ func (d *DirectRPCRelaySender) sendGRPCRelay(
 			// steps every other node-error path uses — CheckResponseError, StatusCode,
 			// ApplyNodeErrorClassification — rather than applying a separate rule here.
 			//
-			// Note this arm is the ONLY one that classifies a gRPC node error. The
-			// success path 40 lines below runs the same three steps, but its
-			// CheckResponseError can never report an error: it is reached only with
-			// StatusCode = http.StatusOK, which GrpcMessage.CheckResponseError treats
-			// as "no error" by definition. Its shape is the model to copy; its
-			// hasError branch is unreachable on this transport.
+			// The success path below runs the same three steps. It is reached only
+			// with StatusCode = http.StatusOK, which GrpcMessage.CheckResponseError
+			// treats as "no error" except on a BroadcastTx reply that refuses the
+			// transaction: the one node error a gRPC OK carries (MAG-5323).
 			//
 			// This arm previously left StatusCode at its 0 default and derived
 			// IsNodeError from `Code >= 13`. Both were wrong, independently:
@@ -1165,7 +1163,7 @@ func (d *DirectRPCRelaySender) sendGRPCRelay(
 			//     was served to the client as a success and was cacheable (MAG-2549).
 			//   - `Code >= 13` additionally left DeadlineExceeded (4) and every other
 			//     sub-13 code marked as not-a-node-error, which is what gates the
-			//     cache write and the lava-identified-node-error header.
+			//     cache write and the router-identified-node-error header.
 			//
 			// response.StatusCode is the same value the error carried (handleGRPCError
 			// builds both from one errorCode), so this loses nothing.
@@ -1223,6 +1221,12 @@ func (d *DirectRPCRelaySender) sendGRPCRelay(
 				if grpcErr.RateLimited() && common.ClassifyError(nil, d.chainFamily, common.TransportGRPC, response.StatusCode, errorMessage) == common.RouterErrorUnknown {
 					result.ApplyRouterErrorClassification(common.RouterErrorNodeRateLimited)
 				}
+				// A copy of the chain's write is read by the chain's own list (MAG-5186), which files
+				// some statuses unlike the status table: on Sui, RESOURCE_EXHAUSTED is a throttle with
+				// or without a wait, and FAILED_PRECONDITION is a lock conflict the caller caused.
+				if copyReading, known := grpcMessage.WriteCopy(grpcErr.Code, grpcErr.Message); known && copyReading.Verdict != nil {
+					result.ApplyRouterErrorClassification(copyReading.Verdict)
+				}
 				// The wait the node asked for rides on err, which this branch does not return, so the
 				// hold-off read 0 and held the endpoint off for its default whatever was asked: a vendor
 				// that asked for ten minutes was asked again after about 30 s (MAG-4914).
@@ -1241,7 +1245,8 @@ func (d *DirectRPCRelaySender) sendGRPCRelay(
 		utils.LogAttr("response_size", len(response.Data)),
 	)
 
-	// Check for errors in response using chainMessage
+	// Check for errors in response using chainMessage. Under gRPC OK that is a BroadcastTx refusing
+	// the transaction (MAG-5323), with its message, which the registry's refusal rows classify.
 	hasError, errorMessage := chainMessage.CheckResponseError(response.Data, response.StatusCode)
 	if hasError {
 		utils.FormatDebug("gRPC response contains error",

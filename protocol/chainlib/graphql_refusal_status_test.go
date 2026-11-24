@@ -244,7 +244,7 @@ func TestGraphQLListener_RefusalIsAClientErrorWithAGraphQLBody(t *testing.T) {
 			require.Empty(t, reply.header.Get(common.WRITE_OUTCOME_HEADER_NAME),
 				"a limit says nothing about a write: %s", body)
 			require.Equal(t, entry.Extensions["guid"], reply.header.Get(common.GUID_HEADER_NAME),
-				"the reply carries the request id in Lava-Guid too, as every relayed reply does")
+				"the reply carries the request id in Router-Guid too, as every relayed reply does")
 			require.NotContains(t, body, "Error_GUID",
 				"the reason must not be JSON inside a JSON string any more")
 			require.Equal(t, relayed, relay.relayed, "a refused request reaches no provider")
@@ -276,7 +276,7 @@ func TestGraphQLListener_RefusalIsAClientErrorWithAGraphQLBody(t *testing.T) {
 // The rows are the ticket's ten requests (PR-542-EXAMPLES-2026-10-19.md), then the rest of the
 // decision's list and the two more QA found (comment 30525). Each unreadable one gets HTTP 400, a
 // GraphQL error document with no data key, the code the decision names in extensions with the
-// request id beside it, the same id in Lava-Guid, and reaches no provider. The ticket's two controls
+// request id beside it, the same id in Router-Guid, and reaches no provider. The ticket's two controls
 // are readable, so they are still relayed: an unknown field is the node's to answer.
 func TestGraphQLListener_UnreadableRequestIsRefused(t *testing.T) {
 	relay := &parsingRelay{}
@@ -314,7 +314,7 @@ func TestGraphQLListener_UnreadableRequestIsRefused(t *testing.T) {
 			require.Equal(t, tc.wantCode, entry.Extensions["code"], "the decision's code: %s", reply.body)
 			require.Contains(t, entry.Message, tc.wantMessage)
 			require.Equal(t, entry.Extensions["guid"], reply.header.Get(common.GUID_HEADER_NAME),
-				"Lava-Guid carries the id the body's guid carries")
+				"Router-Guid carries the id the body's guid carries")
 			require.NotContains(t, reply.body, "Error_GUID", "the old 500 body")
 			require.NotContains(t, reply.body, "graphQLRequestEnvelope", "a decoder's text names the router's Go types")
 			require.Equal(t, relayed, relay.relayed, "an unreadable request reaches no provider")
@@ -402,7 +402,7 @@ func TestGraphQLListener_RefusalLogsTheBodyCutUnlessDebugRelays(t *testing.T) {
 // TestGraphQLListener_RefusedWriteShapeSaysNotSent is MAG-5120's check Q8: a document that holds a
 // mutation beside another operation, and a mutation that selects more than one root field, are
 // refused with 400 REQUEST_REFUSED and reach no provider, and the reply says
-// Lava-Write-Outcome: not_sent, so the caller knows for certain the write never ran. Before it the
+// Router-Write-Outcome: not_sent, so the caller knows for certain the write never ran. Before it the
 // router sent a two-root mutation to every primary as it was. A refusal that is not about a write's
 // shape says nothing about a write, and a write the router sends is not refused.
 func TestGraphQLListener_RefusedWriteShapeSaysNotSent(t *testing.T) {

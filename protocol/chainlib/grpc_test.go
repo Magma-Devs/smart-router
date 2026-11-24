@@ -41,7 +41,7 @@ func TestHydrateGrpcResponseParsing_Guards(t *testing.T) {
 			apiCollections: map[CollectionKey]*spectypes.ApiCollection{{ConnectionType: connectionType_test}: {Enabled: true, CollectionData: spectypes.CollectionData{ApiInterface: spectypes.APIInterfaceGrpc}}},
 		},
 	}
-	grpcMsg, err := grpcParser.ParseMsg("API1", []byte("x"), connectionType_test, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
+	grpcMsg, err := grpcParser.ParseMsg("API1", []byte{0x0a, 0x01, 'x'}, connectionType_test, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 	require.NoError(t, err)
 	_, ok := grpcMsg.GetRPCMessage().(*rpcInterfaceMessages.GrpcMessage)
 	require.True(t, ok, "crafted gRPC message must expose a *GrpcMessage for the helper to hydrate")
@@ -61,14 +61,16 @@ func TestGRPCParseMessage(t *testing.T) {
 		},
 	}
 
-	msg, err := apip.ParseMsg("API1", []byte("test message"), connectionType_test, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
+	// Field 1, the string "test message".
+	body := append([]byte{0x0a, 12}, "test message"...)
+	msg, err := apip.ParseMsg("API1", body, connectionType_test, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 
 	assert.Nil(t, err)
 	assert.Equal(t, msg.GetApi().Name, apip.serverApis[ApiKey{Name: "API1", ConnectionType: connectionType_test}].api.Name)
 	assert.Equal(t, msg.GetApiCollection().CollectionData.ApiInterface, spectypes.APIInterfaceGrpc)
 
 	grpcMessage := rpcInterfaceMessages.GrpcMessage{
-		Msg:         []byte("test message"),
+		Msg:         body,
 		Path:        "API1",
 		BaseMessage: chainproxy.BaseMessage{Headers: []pairingtypes.Metadata{}},
 	}
