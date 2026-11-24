@@ -59,7 +59,7 @@ Errors returned by the blockchain node itself (not execution/state errors).
 | 2002 | `NODE_METHOD_NOT_SUPPORTED` | Method exists but is DISABLED on this specific node (provider tier / policy / admin config), or a part of it is, such as the pending block tag (MAG-5021). Retryable on a different provider (SubCategoryNodeCapability) | Yes | JSON-RPC -32004 / MessageContains("method not supported" / "pending state is not supported") |
 | 2003 | `NODE_INTERNAL_ERROR` | Internal node error | Yes | JSON-RPC -32603 |
 | 2004 | `NODE_SERVER_ERROR` | Generic server error | Yes | JSON-RPC -32000 |
-| 2005 | `NODE_RATE_LIMITED` | Rate limited by node (SubCategoryRateLimit) | Yes | HTTP 429 / JSON-RPC code 429 / MessageContains("rate limit", "too many requests") |
+| 2005 | `NODE_RATE_LIMITED` | Rate limited by node (SubCategoryRateLimit) | Yes | HTTP 429 / JSON-RPC code 429 / MessageContains("rate limit", "too many requests") / Tron: the rate limiter's whole servlet-error message (§9.4) |
 | 2006 | `NODE_SERVICE_UNAVAILABLE` | Node temporarily unavailable | Yes | HTTP 503 |
 | 2007 | `NODE_SYNCING` | Node is syncing/catching up | Yes | MessageContains("node is syncing" / "catching up to the chain") |
 | 2008 | `NODE_UNIMPLEMENTED` | Method not implemented on this node; another provider may serve it (SubCategoryNodeCapability, MAG-2771) | Yes | gRPC 12, HTTP 501 |
@@ -659,7 +659,8 @@ node answering "no". Investigation evidence is recorded in MAG-3972, MAG-3974 an
 
 So `RestMessage.CheckResponseError` treats **every status outside 2xx as a node error** (a 429
 keeps its rate-limit handling; a 2xx is a success unless its body carries a Cosmos transaction
-error; a status of 0 is "not set" and reads as a success). The body travels to the caller
+error or, on java-tron's HTTP API paths, java-tron's servlet error (9.4); a status of 0 is "not
+set" and reads as a success). The body travels to the caller
 unchanged. What "node error" changes is the same as on JSON-RPC:
 
 - A write broadcast keeps waiting for a sibling's success instead of taking the first refusal
@@ -772,7 +773,13 @@ reading was the wrong one.
 ### 9.4 Not covered by this rule, on purpose
 
 - Tron and TON report errors inside a 200 body (`{"Error":…}`, `{"code":"SIGERROR"}`,
-  `{"ok":false}`) and need a body check per chain family — §5 step 2, a separate decision.
+  `{"ok":false}`) and need a body check per chain family — §5 step 2, a separate decision. Tron's
+  `{"Error": "<class> : <message>"}`, which java-tron's servlets answer every exception with, is
+  read since MAG-5449, on java-tron's HTTP API paths only (`/wallet/`, `/walletsolidity/`,
+  `/walletpbft/`): elsewhere a 2xx object whose one member is `Error` is that endpoint's answer.
+  It is a node error. The rate limiter's whole message,
+  `class java.lang.IllegalAccessException : lack of computing resources`, is `NODE_RATE_LIMITED`
+  (held off, not scored); every other message is `UNKNOWN_ERROR`, retried and scored.
 - An empty or non-JSON **2xx** is still served as the answer and still ends a broadcast
   (MAG-3971). The fix site is the sender's existing malformed-2xx guard, not
   `CheckResponseError`, which cannot see whether the request is a write.

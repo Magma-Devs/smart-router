@@ -873,7 +873,7 @@ func TestCheckResponseError_TronServletError(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			restMsg := RestMessage{}
+			restMsg := RestMessage{Path: "/wallet/getaccount", SpecPath: "/wallet/getaccount"}
 			hasError, errorMessage := restMsg.CheckResponseError([]byte(tc.response), tc.httpStatus)
 			require.Equal(t, tc.expectedError, hasError)
 			if tc.errorMessage != "" {
@@ -899,7 +899,40 @@ func TestRestMessage_IsTronServletError(t *testing.T) {
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			require.Equal(t, tc.want, RestMessage{}.IsTronServletError([]byte(tc.response)))
+			require.Equal(t, tc.want, RestMessage{Path: "/wallet/getaccount"}.IsTronServletError([]byte(tc.response)))
+		})
+	}
+}
+
+// TestTronServletErrorIsReadOnJavaTronPathsOnly: the shape is java-tron's on java-tron's HTTP API
+// paths only. Another chain's 2xx object whose one member is "Error" is that endpoint's answer, as
+// any other 2xx is.
+func TestTronServletErrorIsReadOnJavaTronPathsOnly(t *testing.T) {
+	const reply = `{"Error":"class java.lang.NullPointerException : null"}`
+	for _, tc := range []struct {
+		name          string
+		msg           RestMessage
+		wantNodeError bool
+	}{
+		{name: "full node", msg: RestMessage{Path: "/wallet/getaccount", SpecPath: "/wallet/getaccount"}, wantNodeError: true},
+		{name: "full node, with a query", msg: RestMessage{Path: "/wallet/getblockbynum?num=1&visible=true", SpecPath: "/wallet/getblockbynum"}, wantNodeError: true},
+		{name: "solidity node", msg: RestMessage{Path: "/walletsolidity/getaccount"}, wantNodeError: true},
+		{name: "PBFT interface", msg: RestMessage{Path: "/walletpbft/getnowblock"}, wantNodeError: true},
+		{name: "a path the spec does not list", msg: RestMessage{Path: "/wallet/getnewapi", SpecPath: "Default-/wallet/getnewapi"}, wantNodeError: true},
+		{name: "built from the spec api only", msg: RestMessage{SpecPath: "/wallet/getaccount"}, wantNodeError: true},
+		{name: "another chain's REST path", msg: RestMessage{Path: "/cosmos/bank/v1beta1/balances/cosmos1x", SpecPath: "/cosmos/bank/v1beta1/balances/{address}"}},
+		{name: "a path that only starts with wallet", msg: RestMessage{Path: "/walletInformation?address=x", SpecPath: "/walletInformation"}},
+		{name: "no path at all", msg: RestMessage{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hasError, message := tc.msg.CheckResponseError([]byte(reply), 200)
+			require.Equal(t, tc.wantNodeError, hasError)
+			require.Equal(t, tc.wantNodeError, tc.msg.IsTronServletError([]byte(reply)))
+			if tc.wantNodeError {
+				require.Equal(t, "class java.lang.NullPointerException : null", message)
+			} else {
+				require.Empty(t, message)
+			}
 		})
 	}
 }

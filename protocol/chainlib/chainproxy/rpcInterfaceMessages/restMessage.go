@@ -48,8 +48,8 @@ func (rm *RestMessage) GetRawRequestHash() ([]byte, error) {
 // it adds on JSON-RPC: a write broadcast keeps waiting for a sibling's success instead of taking
 // the first refusal as the result, and the error registry classifies the reply — its REST rows
 // decide whether a read is retried elsewhere and whether the endpoint is scored. A 2xx is a
-// success unless its body carries a Cosmos transaction error, or the single-member shape
-// java-tron's servlets answer every exception with (checkTronServletError, MAG-5449).
+// success unless its body carries a Cosmos transaction error, or, on java-tron's HTTP API paths, the
+// single-member shape its servlets answer every exception with (checkTronServletError, MAG-5449).
 //
 // A status of 0 is "not set" — a cache entry written before statuses were stored, a test
 // fixture, gRPC's codes.OK on the shared RelayResult — and reads as a success, the way the
@@ -59,12 +59,37 @@ func (jm RestMessage) CheckResponseError(data []byte, httpStatusCode int) (hasEr
 		if cosmosTxErr, errMsg := checkCosmosTxError(data); cosmosTxErr {
 			return cosmosTxErr, errMsg
 		}
-		if tronErr, errMsg := checkTronServletError(data); tronErr {
-			return tronErr, errMsg
+		if jm.onTronHTTPAPI() {
+			if tronErr, errMsg := checkTronServletError(data); tronErr {
+				return tronErr, errMsg
+			}
 		}
 		return false, ""
 	}
 	return true, extractErrorMessage(data, httpStatusCode)
+}
+
+// tronHTTPAPIPrefixes are the paths java-tron's HTTP API serves: the full node's /wallet, the solidity
+// node's /walletsolidity and the PBFT interface's /walletpbft.
+var tronHTTPAPIPrefixes = []string{"/wallet/", "/walletsolidity/", "/walletpbft/"}
+
+// onTronHTTPAPI reports whether the request is to one of java-tron's HTTP API paths: the client's
+// path without its query, or, on a message built without one, the spec api's. checkTronServletError
+// is read there only. On any other path a 2xx object whose one member is "Error" is whatever that
+// endpoint answers, such as a document a chain stores, and stays the answer (MAG-5449).
+func (jm RestMessage) onTronHTTPAPI() bool {
+	path := jm.Path
+	if path == "" {
+		path = jm.SpecPath
+	}
+	path, _, _ = strings.Cut(path, "?")
+	path = "/" + strings.TrimLeft(path, "/")
+	for _, prefix := range tronHTTPAPIPrefixes {
+		if strings.HasPrefix(path, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // checkTronServletError detects java-tron's answer to a request its servlet could not process: a
@@ -73,7 +98,8 @@ func (jm RestMessage) CheckResponseError(data []byte, httpStatusCode int) (hasEr
 // anything from a malformed request to the rate limiter's own IllegalAccessException — never a
 // status other than 200. A body with "Error" beside other members, or any other shape, is left to
 // the caller: among java-tron's own replies, /wallet/broadcasttransaction's result:false (no
-// "Error" member) is the broadcast-refusal shape, not this one.
+// "Error" member) is the broadcast-refusal shape, not this one. Callers read it on java-tron's
+// paths only (onTronHTTPAPI).
 func checkTronServletError(data []byte) (bool, string) {
 	var members map[string]json.RawMessage
 	if err := json.Unmarshal(data, &members); err != nil || len(members) != 1 {
@@ -90,11 +116,14 @@ func checkTronServletError(data []byte) (bool, string) {
 	return true, message
 }
 
-// IsTronServletError reports whether a 2xx reply is checkTronServletError's shape. The sender
-// marks such a reply a node error at the transport level, as it does any reply outside 2xx; a
-// Cosmos tx_response error on a 2xx keeps its old place, a node error to the relay processor and
-// the registry only (MAG-5449).
+// IsTronServletError reports whether a 2xx reply to a request on java-tron's HTTP API is
+// checkTronServletError's shape. The sender marks such a reply a node error at the transport level,
+// as it does any reply outside 2xx; a Cosmos tx_response error on a 2xx keeps its old place, a node
+// error to the relay processor and the registry only (MAG-5449).
 func (jm RestMessage) IsTronServletError(data []byte) bool {
+	if !jm.onTronHTTPAPI() {
+		return false
+	}
 	is, _ := checkTronServletError(data)
 	return is
 }
