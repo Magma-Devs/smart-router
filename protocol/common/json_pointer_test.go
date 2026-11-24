@@ -69,7 +69,8 @@ func TestDecodeJSONDocument(t *testing.T) {
 // A row's code and a shape's when match by JSON type and value (PRD §2.2, §2.4).
 func TestJSONValueEquals(t *testing.T) {
 	doc, _ := DecodeJSONDocument([]byte(`{"n": -32005, "f": 1.0, "s": "sdk/32", "s2": "-32005", "t": true, "z": null, "o": {"a": [1, 2]}}`))
-	m := doc.(map[string]any)
+	m, ok := doc.(map[string]any)
+	require.True(t, ok)
 	for name, tc := range map[string]struct {
 		value any
 		raw   string
@@ -99,7 +100,8 @@ func TestJSONValueEquals(t *testing.T) {
 // compact JSON; a null or absent detail matches nothing (PRD §2.2).
 func TestJSONValueText(t *testing.T) {
 	doc, _ := DecodeJSONDocument([]byte(`{"s": "reverted", "o": {"code": 3, "why": ["x"]}, "n": 7}`))
-	m := doc.(map[string]any)
+	m, ok := doc.(map[string]any)
+	require.True(t, ok)
 	require.Equal(t, "reverted", JSONValueText(m["s"]))
 	require.Equal(t, `{"code":3,"why":["x"]}`, JSONValueText(m["o"]))
 	require.Equal(t, "7", JSONValueText(m["n"]))
