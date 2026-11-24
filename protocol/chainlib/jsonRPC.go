@@ -13,6 +13,7 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/websocket/v2"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
+	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
@@ -467,6 +468,11 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 type JrpcChainProxy struct {
 	BaseChainProxy
 	conn *chainproxy.Connector
+	// flattenXRPLParams is set for an XRP Ledger node over a WebSocket url. rippled and Clio read a
+	// WebSocket request's fields from its top level and ignore a nested "params", so a call sends
+	// its one params object as top-level fields, as WebSocketDirectRPCConnection does (MAG-5452).
+	// Boot and epoch verification reach a node through this proxy, not through that connection.
+	flattenXRPLParams bool
 }
 
 func NewJrpcChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint routersession.RPCProviderEndpoint, chainParser ChainParser) (ChainProxy, error) {
@@ -485,7 +491,8 @@ func NewJrpcChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint rou
 			ErrorHandler:     newNodeErrorHandler(common.TransportJsonRPC, rpcProviderEndpoint.ChainID),
 			ChainID:          rpcProviderEndpoint.ChainID,
 		},
-		conn: nil,
+		conn:              nil,
+		flattenXRPLParams: common.GetChainFamilyOrDefault(rpcProviderEndpoint.ChainID) == common.ChainFamilyXRP && IsWebSocketURL(nodeUrl.Url),
 	}
 
 	validateEndpoints(rpcProviderEndpoint.NodeUrls, spectypes.APIInterfaceJsonRPC)
@@ -514,6 +521,18 @@ func (cp *JrpcChainProxy) start(ctx context.Context, nConns uint, nodeUrl common
 
 	cp.conn = conn
 	return nil
+}
+
+// callContext sends one call over rpc. On an XRP Ledger WebSocket url (flattenXRPLParams) a call
+// with one params object sends that object's fields at the top level of the message; every other
+// call goes out as CallContext builds it.
+func (cp *JrpcChainProxy) callContext(ctx context.Context, rpc *rpcclient.Client, id []byte, method string, params interface{}, isJsonRPC, strict bool) (*rpcclient.JsonrpcMessage, error) {
+	if cp.flattenXRPLParams {
+		if fields, ok := rpcInterfaceMessages.FlattenXRPLWebSocketParams(params); ok {
+			return rpc.CallContextFlat(ctx, id, method, fields)
+		}
+	}
+	return rpc.CallContext(ctx, id, method, params, isJsonRPC, strict)
 }
 
 func (cp *JrpcChainProxy) sendBatchMessage(ctx context.Context, nodeMessage *rpcInterfaceMessages.JsonrpcBatchMessage, chainMessage ChainMessageForSend) (relayReply *RelayReplyWrapper, err error) {
