@@ -3292,6 +3292,10 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 			// broadcast it is derived from a WithoutCancel parent, so a detached relay is correctly
 			// NOT seen as cancelled.
 			isClientCancel := err != nil && common.IsClientCancellation(err, goroutineCtx)
+			// A JSON gRPC request this node's lookup gave no method definition for was never sent
+			// (MAG-5675): the endpoint is released with no score below, and the metric does not count
+			// it as the endpoint's error either.
+			noMethodDescriptor := err != nil && errors.Is(err, routersession.ErrNoMethodDescriptor)
 
 			if rpcss.smartRouterEndpointMetrics != nil {
 				// analytics is read-only here (classification flags set once pre-launch, Success set
@@ -3303,7 +3307,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 					// Silent when the budget ran out. Cancelled would keep it out of the error and
 					// latency series, which is right for a race loser and wrong for a hang.
 					outcome = metrics.RelayOutcomeError
-				case isClientCancel:
+				case isClientCancel, noMethodDescriptor:
 					outcome = metrics.RelayOutcomeCancelled
 				case err != nil:
 					outcome = metrics.RelayOutcomeError
@@ -3393,7 +3397,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 						utils.LogAttr("GUID", goroutineCtx),
 					)
 				}
-			} else if errors.Is(err, routersession.ErrNoMethodDescriptor) {
+			} else if noMethodDescriptor {
 				// The node's lookup gave no definition of the gRPC method to convert the JSON request
 				// with, so nothing was sent and the endpoint's availability was never tested
 				// (MAG-5675). The failure arm below would score it 0 and count a consecutive error
