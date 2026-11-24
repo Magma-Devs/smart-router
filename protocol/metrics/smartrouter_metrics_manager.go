@@ -123,6 +123,7 @@ type SmartRouterMetricsManager struct {
 	csmBlockedProvidersByReason    *prometheus.GaugeVec   // smartrouter_csm_blocked_providers_by_reason
 	csmBlockedBackupProvidersCount *prometheus.GaugeVec   // smartrouter_csm_blocked_backup_providers
 	endpointServingTier            *prometheus.GaugeVec   // smartrouter_endpoint_serving_tier
+	specLockEnforced               *prometheus.GaugeVec   // smartrouter_spec_lock_enforced
 	providerVerificationFailed     *prometheus.GaugeVec   // smartrouter_provider_verification_failed
 	csmStickySessionsCount         *prometheus.GaugeVec   // smartrouter_csm_sticky_sessions
 	csmStickyClaims                *prometheus.CounterVec // smartrouter_csm_sticky_claims_total
@@ -646,6 +647,10 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		Name: "smartrouter_endpoint_serving_tier",
 		Help: "Which provider tier an endpoint is serving from: 2=primaries, 1=DEGRADED (backups only), 0=DARK (no healthy providers). Since MAG-2525 a dark chain no longer crash-loops, so this gauge — not pod restarts — is the signal that a chain cannot serve. While a chain is dark, at boot or after the epoch re-verifier demoted its last provider, its providers are retried from ~2s (doubling to a 3m ceiling). Size alert windows for the 3m ceiling.",
 	}, csmStateLabels))
+	m.specLockEnforced = registerOrReuse(prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "smartrouter_spec_lock_enforced",
+		Help: "How many of the chain's apis the router loaded under a rule the spec did not satisfy, as state since boot. rule=stateful: the write methods (eth_sendRawTransaction and its kin on every interface, utils/keeper/write_methods_table.go) the spec cleared or omitted stateful on, which the router relays stateful anyway (MAG-5593). Written at boot for every chain and interface, 0 included, so an alert reads the value rather than increase(): the enforcement happens before the first scrape. Non-zero means the spec is wrong: fix the spec and restart.",
+	}, []string{"spec", "apiInterface", "rule"}))
 	m.providerVerificationFailed = registerOrReuse(prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "smartrouter_provider_verification_failed",
 		Help: "While a configured provider is failing a verification: the unix time in seconds the failure started, labelled with the check it fails. A provider that moves to another check in the same scope and service keeps its start. scope=provider: the provider is out of the pairing (failed at boot, or demoted by the epoch re-verifier). scope=service: the provider still serves but lost one add-on or extension (service) to that check; service=websocket: it serves no subscriptions, every ws(s) url refused or none configured (check missing-url). scope=url: the provider still serves but one of its node urls was refused, whole (no service) or for one service another url still serves; a refused ws(s) url is service=websocket. scope=none: a check the spec gives severity Warning is failing, and nothing was switched off. severity: Fail when the failure takes an http(s) url or the provider out, PartialFail when it switches off only that service (a ws(s) url carries only the websocket), Warning when it switches off nothing. The series exists only while the failure lasts. check is the spec verification's name, or latest-block, unsupported-addon, connect, config, missing-url, not-run, rate-limited, unknown. A failing provider, service or url (not missing-url, which only a config change fixes) is retried from --verification-retry-delay (30s), doubling to --verification-retry-max-delay (15m), and from 2s doubling to 3m while its chain is dark; a Warning check is re-checked every 15m epoch. Size alert windows above 15m.",
@@ -1892,6 +1897,19 @@ func ServingTier(healthyStatic, healthyBackup int) int {
 	default:
 		return ServingTierDark
 	}
+}
+
+// SpecLockRuleStateful is the rule label of smartrouter_spec_lock_enforced for the write-method lock
+// (utils/keeper enforceWriteMethods).
+const SpecLockRuleStateful = "stateful"
+
+// SetSpecLockEnforced publishes how many apis the lock named by rule forced on the endpoint's spec, 0
+// included: the gauge is the value an alert reads, so every chain and interface has a series.
+func (m *SmartRouterMetricsManager) SetSpecLockEnforced(chainId, apiInterface, rule string, forced int) {
+	if m == nil {
+		return
+	}
+	setGauge(m.specLockEnforced, float64(forced), chainId, apiInterface, rule)
 }
 
 // SetEndpointServingTier publishes which provider tier an endpoint is serving
