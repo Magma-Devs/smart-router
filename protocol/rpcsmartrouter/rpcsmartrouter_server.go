@@ -3293,6 +3293,9 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 			// broadcast it is derived from a WithoutCancel parent, so a detached relay is correctly
 			// NOT seen as cancelled.
 			isClientCancel := err != nil && common.IsClientCancellation(err, goroutineCtx)
+			// A gRPC call type the router does not serve, found in this attempt (MAG-5133): the
+			// call's, not the endpoint's, so the endpoint is released with no score, as a cancel is.
+			unservedCall := err != nil && errors.Is(err, common.UnservedGRPCCallError)
 
 			if rpcss.smartRouterEndpointMetrics != nil {
 				// analytics is read-only here (classification flags set once pre-launch, Success set
@@ -3304,7 +3307,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 					// Silent when the budget ran out. Cancelled would keep it out of the error and
 					// latency series, which is right for a race loser and wrong for a hang.
 					outcome = metrics.RelayOutcomeError
-				case isClientCancel:
+				case isClientCancel, unservedCall:
 					outcome = metrics.RelayOutcomeCancelled
 				case err != nil:
 					outcome = metrics.RelayOutcomeError
@@ -3391,6 +3394,12 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 				)
 				if errSession := rpcss.sessionManager.OnSessionUnresponsive(singleConsumerSession, err); errSession != nil {
 					utils.FormatWarning("OnSessionUnresponsive failed for direct RPC", errSession,
+						utils.LogAttr("GUID", goroutineCtx),
+					)
+				}
+			} else if unservedCall {
+				if errSession := rpcss.sessionManager.OnSessionCancelled(singleConsumerSession, err); errSession != nil {
+					utils.FormatWarning("OnSessionCancelled failed for direct RPC", errSession,
 						utils.LogAttr("GUID", goroutineCtx),
 					)
 				}
@@ -6155,6 +6164,11 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	// message and then fails the response-must-be-single check, so the caller gets a
 	// truncated stream after waiting out the (typically generous, hanging_api) timeout.
 	// A refusal is a worse-looking but far more honest answer.
+	//
+	// The listener's gate refuses both before any provider is picked whenever the router
+	// already holds the method's definition (MAG-5133). What reaches here is a definition
+	// this attempt's own lookup found. The refusal is common.UnservedGRPCCallError: the
+	// call type's, not the endpoint's, so it is never retried and blames no one.
 	if directConnection.GetProtocol() == routersession.DirectRPCProtocolGRPC {
 		methodPath := chainMessage.GetApi().Name
 
@@ -6169,7 +6183,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 				utils.LogAttr("endpoint", singleConsumerSession.Parent.PublicAddress),
 				utils.LogAttr("GUID", ctx),
 			)
-			return 0, fmt.Errorf("gRPC streaming method %q must be served through the streaming listener, not as a unary relay", methodPath)
+			return 0, fmt.Errorf("%w: gRPC streaming method %q must be served through the streaming listener, not as a unary relay", common.UnservedGRPCCallError, methodPath)
 		}
 
 		// Second line of defence for methods the spec does not declare as
@@ -6183,7 +6197,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 					utils.LogAttr("endpoint", singleConsumerSession.Parent.PublicAddress),
 					utils.LogAttr("GUID", ctx),
 				)
-				return 0, fmt.Errorf("gRPC method %q is server-streaming upstream but the %s spec gives it no SUBSCRIBE parse directive; refusing to invoke it as a unary call", methodPath, rpcss.listenEndpoint.ChainID)
+				return 0, fmt.Errorf("%w: gRPC method %q is server-streaming upstream but the %s spec gives it no SUBSCRIBE parse directive; refusing to invoke it as a unary call", common.UnservedGRPCCallError, methodPath, rpcss.listenEndpoint.ChainID)
 			}
 		}
 	}
@@ -6223,6 +6237,13 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 			utils.LogAttr("latency", relayLatency),
 			utils.LogAttr("GUID", ctx),
 		)
+
+		// The node streamed its replies to a call the router made as a single-reply call: the
+		// router's mistake about the call type, not the endpoint's failure (MAG-5133). Nothing
+		// below applies to it.
+		if errors.Is(err, common.UnservedGRPCCallError) {
+			return relayLatency, err
+		}
 
 		// Classify error using the error registry and decide on health tracking. A status error
 		// is judged by its body here, while the verdict it carries decides retry (healthVerdict).

@@ -2258,6 +2258,19 @@ func (g *GRPCDirectRPCConnection) handleGRPCError(ctx context.Context, err error
 		return nil, fmt.Errorf("gRPC relay timed out: %w: %w", context.DeadlineExceeded, err)
 	}
 
+	// The node sent a second reply, or ended with OK and no reply at all, to a call the router made
+	// as a single-reply call: the method streams its replies, and no definition the router held
+	// said so. grpc-go ends such a call itself, with INTERNAL "cardinality violation". That is not
+	// the node's answer, nor its fault: the router asked the wrong way. So there is no response,
+	// and the error is the refusal the listener gives a stream it knows of (MAG-5133): never
+	// retried, no provider blamed. It is read before the call's reach: grpc-go ends the
+	// second-reply call without filling in the node's address, so it would otherwise pass for a
+	// call that never reached the node, and disable the endpoint. The empty stream does reach the
+	// node, and would otherwise be the node's INTERNAL, which counts toward --bench-after.
+	if singleReplyCallStreamed(err) {
+		return nil, fmt.Errorf("%w: %w", common.UnservedGRPCCallError, err)
+	}
+
 	// No stream to the node was ever opened: grpc-go refused the call itself, for a connection
 	// it could not use (a refused dial, a name that does not resolve, a failed TLS handshake),
 	// and worded it UNAVAILABLE, the code a node also sends when it is shutting down. The code
@@ -2314,6 +2327,25 @@ func (g *GRPCDirectRPCConnection) handleGRPCError(ctx context.Context, err error
 	// node failure (MAG-4915). The trailer is read here only: the response keeps the header block,
 	// so the wait stays the router's own, as an HTTP Retry-After does.
 	return response, NewGRPCStatusError(errorCode, errorMessage, err, metadata.Join(respHeaders, respTrailers))
+}
+
+// grpcStreamedReplyText begins the status text grpc-go gives a single-reply call whose server sent
+// a second message (clientStreamWrapper.RecvMsg in grpc-go's stream.go).
+const grpcStreamedReplyText = "cardinality violation: expected <EOF> for non server-streaming RPCs"
+
+// grpcEmptyStreamText is the status text grpc-go gives a single-reply call whose server ended with
+// OK and sent no message (csAttempt.recvMsg in grpc-go's stream.go): a server stream with no item.
+const grpcEmptyStreamText = "cardinality violation: received no response message from non-server-streaming RPC"
+
+// singleReplyCallStreamed reports whether err is grpc-go's own end of a single-reply call whose
+// server streamed: more than one reply, or none.
+func singleReplyCallStreamed(err error) bool {
+	statusErr, ok := status.FromError(err)
+	if !ok || statusErr.Code() != codes.Internal {
+		return false
+	}
+	message := statusErr.Message()
+	return strings.HasPrefix(message, grpcStreamedReplyText) || strings.HasPrefix(message, grpcEmptyStreamText)
 }
 
 // NewGRPCStatusError builds the error for a status a node sent. A corroborated rate limit — a
