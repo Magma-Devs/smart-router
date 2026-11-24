@@ -111,6 +111,56 @@ func TestNoteAnswer_ProvisionalTipKeepsOutAStuckBackend(t *testing.T) {
 	require.Empty(t, *got)
 }
 
+// TestNoteAnswer_ALaggingURLDoesNotTakeAnHonestFirstTip: the first answer was honest, and a second url
+// lags far behind and moves forward, as a node syncing at about chain speed does. Moving forward does not
+// tell it from the good backend, so its head must not take the tip before the tip has had
+// provisionalFallBlockTimes block times to advance. The honest head advances first, the tip stops being
+// provisional, and the url that lags moves nothing after that.
+func TestNoteAnswer_ALaggingURLDoesNotTakeAnHonestFirstTip(t *testing.T) {
+	cs, clk, got := newRegressionState(t) // OutlierThreshold 100, StalenessWindow 10 s: a 1 s block time
+	const head = int64(20_000)
+	cs.SetLatestBlock(head) // the honest url answers first: provisional
+	cs.NoteAnswer("a", head)
+	for i := int64(0); i < 3; i++ {
+		clk.advance(500 * time.Millisecond)
+		cs.NoteAnswer("b", head-5000+i) // a url 5,000 behind, moving forward
+		require.Equal(t, head, cs.GetLatestBlockAllowStale(), "answer %d: a url that lags took the tip before it could advance", i)
+	}
+	clk.advance(500 * time.Millisecond) // the chain's next block
+	cs.SetLatestBlock(head + 1)
+	cs.NoteAnswer("a", head+1)
+	require.False(t, cs.provisional, "the honest head advanced under the guard")
+	for i := int64(3); i < 10; i++ {
+		clk.advance(time.Second)
+		cs.NoteAnswer("a", head+1)
+		cs.NoteAnswer("b", head-5000+i)
+	}
+	require.Equal(t, head+1, cs.GetLatestBlockAllowStale())
+	require.Empty(t, *got)
+}
+
+// TestNoteAnswer_FallWaitsForTheTipToAge pins where the wait ends: a head far below a provisional tip
+// that moves forward takes it once the tip is provisionalFallBlockTimes block times old, and not a
+// moment before. A head within OutlierThreshold below the tip never does.
+func TestNoteAnswer_FallWaitsForTheTipToAge(t *testing.T) {
+	cs, clk, got := newRegressionState(t) // OutlierThreshold 100, StalenessWindow 10 s: a 1 s block time
+	const lie = int64(1_000_000)
+	cs.SetLatestBlock(lie) // the bad backend answers first: provisional
+	cs.NoteAnswer("lb", 5000)
+	cs.NoteAnswer("near", lie-100)
+
+	clk.advance(3*time.Second - time.Millisecond)
+	cs.NoteAnswer("lb", 5001) // moved forward, but the tip is 1 ms short of three block times old
+	require.Equal(t, lie, cs.GetLatestBlockAllowStale())
+
+	clk.advance(time.Millisecond)
+	cs.NoteAnswer("near", lie-99) // moved forward, but within OutlierThreshold of the tip
+	require.Equal(t, lie, cs.GetLatestBlockAllowStale())
+	cs.NoteAnswer("lb", 5002)
+	require.Equal(t, int64(5002), cs.GetLatestBlockAllowStale())
+	require.Equal(t, []regression{{lie, 5002, RegressionReasonUnconfirmedStart}}, *got)
+}
+
 // TestNoteAnswer_FallRunTakesOnlyAPlausibleStep: an answer more than OutlierThreshold past the run's
 // first is a node catching up, not the chain moving, and starts the run over; a lower answer keeps the
 // run without moving its first; a run with no answer for a StalenessWindow starts over. The answer that
@@ -207,7 +257,7 @@ func TestReset_ForgetsTheFallRuns(t *testing.T) {
 	require.Empty(t, cs.fallRuns)
 
 	cs.SetLatestBlock(lie) // the first observation after the reset
-	clk.advance(time.Second)
+	clk.advance(3 * time.Second)
 	cs.NoteAnswer("lb", 5001) // past the old run's first, but that run is gone: this one starts a new run
 	require.Equal(t, lie, cs.GetLatestBlockAllowStale())
 }

@@ -243,8 +243,9 @@ type ChainState struct {
 	// against — the first observation, or one over a stale tip with no baseline — and the tip has not
 	// advanced since (MAG-5450). A load balancer's bad backend may have given it, and its repeats would
 	// keep it fresh for ever while the url's tip store drops the good backend's lower answers. While it
-	// holds, NoteAnswer replaces the tip with a url's head far below it once that head moves forward
-	// (fallRuns). Any guarded advance, every tip Recompute sets, and a fresh majority baseline clear it.
+	// holds, NoteAnswer replaces the tip with a url's head far below it once that head moves forward and
+	// the tip has gone provisionalFallBlockTimes block times without advancing (fallRuns). Any guarded
+	// advance, every tip Recompute sets, and a fresh majority baseline clear it.
 	provisional bool
 	// fallRuns holds, per url, the run of answers that url has given more than OutlierThreshold below
 	// a provisional tip, fed by NoteAnswer (MAG-5450). Empty whenever the tip is not provisional.
@@ -277,6 +278,14 @@ type jumpRun struct {
 	firstAt time.Time // when the run's first answer came
 	lastAt  time.Time // when its latest answer came
 }
+
+// provisionalFallBlockTimes is how many block times a provisional tip must go without advancing before
+// a url's head far below it can take its place (noteFallLocked, MAG-5450). The block time is the one
+// StalenessWindow derives from: StalenessWindow / DefaultStalenessMultiplier. An honest first answer
+// advances under the guard within about one block time, so three leave room for the chain's own gaps;
+// an absurd block never advances, so it gives way about three block times after it was taken, inside
+// the one StalenessWindow the ticket allows.
+const provisionalFallBlockTimes = 3
 
 // fallRun is one url's run of answers far below a provisional tip (see ChainState.fallRuns).
 // lastAt is on the real base clock, like every stored ChainState timestamp.
@@ -404,13 +413,14 @@ func (cs *ChainState) Reset() {
 // (MAG-5450). The stale-tip re-adoption above drops it within one TTL only if nothing confirms it,
 // and a load balancer's bad backend keeps confirming its own block while the url's tip store drops
 // the good backend's lower answers. So while the tip is provisional, NoteAnswer makes a url's head
-// more than OutlierThreshold below it the tip once that head moves forward — about one block time
-// after the good backend first answers — and on a pod that forms a baseline Recompute snaps the lie
-// back. What remains: a lie that advances like a chain, or one no url answers below, holds until the
-// tip goes a TTL unconfirmed or an operator resets it. No consumer keeps a separate monotonic-max
-// copy of this value: the rpcsmartrouter bootstrap atomic, which turned a cold-start lie into a
-// process-lifetime one, is retired (T3), and every reader goes through this tip. Do not reintroduce
-// a ratcheting mirror of it without its own downward path.
+// more than OutlierThreshold below it the tip once that head moves forward and the tip has gone
+// provisionalFallBlockTimes block times without advancing — about three block times after the lie
+// was taken — and on a pod that forms a baseline Recompute snaps the lie back. What remains: a lie
+// that advances like a chain, or one no url answers below, holds until the tip goes a TTL
+// unconfirmed or an operator resets it. No consumer keeps a separate monotonic-max copy of this
+// value: the rpcsmartrouter bootstrap atomic, which turned a cold-start lie into a process-lifetime
+// one, is retired (T3), and every reader goes through this tip. Do not reintroduce a ratcheting
+// mirror of it without its own downward path.
 //
 // Returns the resulting tip, the time it was last confirmed, and whether this call moved the tip
 // UP. advanced is not an accept/reject signal: equal-block confirmations, downward re-adoptions,
@@ -507,7 +517,8 @@ func (cs *ChainState) setProvisionalLocked(provisional bool) {
 //     pull-up requires. An answer above the guard extends the run; any other answer ends it;
 //   - while the tip is provisional (MAG-5450), it keeps the url's run of answers more than
 //     OutlierThreshold below the tip (fallRuns), and makes the url's head the tip once it has moved
-//     forward (noteFallLocked). That is the good backend answering, when the bad one answered first.
+//     forward and the tip has gone provisionalFallBlockTimes block times without advancing
+//     (noteFallLocked). That is the good backend answering, when the bad one answered first.
 //
 // Returns whether the tip moved up.
 func (cs *ChainState) NoteAnswer(url string, block int64) (advanced bool) {
@@ -556,8 +567,9 @@ func (cs *ChainState) NoteAnswer(url string, block int64) (advanced bool) {
 }
 
 // noteFallLocked takes one of url's answers more than OutlierThreshold below a provisional tip
-// (MAG-5450). It keeps url's run of such answers and, once an answer is above the run's first, makes
-// that answer the tip and returns the tip it replaced; otherwise it returns 0.
+// (MAG-5450). It keeps url's run of such answers and, once an answer is above the run's first and the
+// tip has gone provisionalFallBlockTimes block times without advancing, makes that answer the tip and
+// returns the tip it replaced; otherwise it returns 0.
 //
 // Moving forward is what tells the good backend from a stuck one: a chain's head advances, and
 // neither a stuck backend nor the absurd block the tip came from does. Without that a backend stuck
@@ -565,7 +577,13 @@ func (cs *ChainState) NoteAnswer(url string, block int64) (advanced bool) {
 // StalenessWindow has ended, as the url's vote has aged out, and an answer more than OutlierThreshold
 // past the run's first starts it over: the guard's own premise is that the chain cannot move that far
 // between two looks, and a node catching up from far behind does. A lower answer keeps the run alive
-// but never moves its first. The caller holds cs.mu.
+// but never moves its first.
+//
+// Moving forward does not tell the good backend from a url that lags far behind and still advances, as
+// a node syncing at about chain speed does. What does is the tip itself: an honest first answer
+// advances under the guard about one block time after it was taken, which ends provisional, and an
+// absurd block never advances. So the answer takes the tip only once the tip is
+// provisionalFallBlockTimes block times old. The caller holds cs.mu.
 func (cs *ChainState) noteFallLocked(url string, block int64, nowReal time.Time) (replaced int64) {
 	run, ok := cs.fallRuns[url]
 	if !ok || nowReal.Add(cs.warpOffsetDuration()).Sub(run.lastAt) > cs.cfg.StalenessWindow ||
@@ -573,7 +591,8 @@ func (cs *ChainState) noteFallLocked(url string, block int64, nowReal time.Time)
 		run = fallRun{firstBlock: block}
 	}
 	run.lastAt = nowReal
-	if block > run.firstBlock {
+	tipAge := nowReal.Add(cs.warpOffsetDuration()).Sub(cs.latestSince)
+	if block > run.firstBlock && tipAge >= cs.cfg.StalenessWindow*provisionalFallBlockTimes/DefaultStalenessMultiplier {
 		replaced = cs.latestBlock
 		cs.latestBlock = block
 		cs.lastObservedAt = nowReal

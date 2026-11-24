@@ -821,7 +821,9 @@ func TestOnEndpointAnswer_ColdStartLieCountedAndGaugeFollows(t *testing.T) {
 	rpcss.onEndpointAnswer("https://lb", head)          // the good one: far below, not moving yet
 	require.Equal(t, before, readBlockRegressions(t, chainstate.RegressionReasonUnconfirmedStart))
 
-	rpcss.onEndpointAnswer("https://lb", head+1) // its head moved forward
+	// Three block times on: the absurd block has not advanced, and the good backend's head moved forward.
+	rpcss.chainState.SetDebugClockOffset(36 * time.Second)
+	rpcss.onEndpointAnswer("https://lb", head+1)
 	tip, fresh := rpcss.chainState.GetLatestBlock()
 	require.True(t, fresh)
 	require.Equal(t, head+1, tip)
