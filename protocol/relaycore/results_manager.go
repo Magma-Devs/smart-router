@@ -1,6 +1,7 @@
 package relaycore
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -10,16 +11,42 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	common "github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/parser"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 )
 
 // transportFromProtocolMessage derives the TransportType from the protocol message's API collection.
 func transportFromProtocolMessage(pm chainlib.ProtocolMessage) common.TransportType {
+	return common.ApiInterfaceToTransport(apiInterfaceOf(pm))
+}
+
+// apiInterfaceOf is the protocol message's api interface, "" when it has no collection.
+func apiInterfaceOf(pm chainlib.ProtocolMessage) string {
 	if collection := pm.GetApiCollection(); collection != nil {
-		return common.ApiInterfaceToTransport(collection.CollectionData.ApiInterface)
+		return collection.CollectionData.ApiInterface
 	}
-	return common.TransportJsonRPC
+	return ""
+}
+
+// isWrite reports whether protocolMessage is a stateful request: a write, relayed to every provider
+// at once and never again.
+func isWrite(protocolMessage chainlib.ProtocolMessage) bool {
+	return protocolMessage != nil && chainlib.GetStateful(protocolMessage) == common.CONSISTENCY_SELECT_ALL_PROVIDERS
+}
+
+// upstreamAnswerBody is the body an upstream answered a failed attempt with: the one the attempt's
+// error carries (routersession.HTTPStatusError, a 429 or 5xx the sender failed the attempt on), else
+// the result's own reply; nil when the attempt got no answer.
+func upstreamAnswerBody(response *RelayResponse) []byte {
+	var httpErr *routersession.HTTPStatusError
+	if errors.As(response.Err, &httpErr) && len(httpErr.Body) > 0 {
+		return httpErr.Body
+	}
+	if reply := response.RelayResult.Reply; reply != nil {
+		return reply.Data
+	}
+	return nil
 }
 
 // replyStatusClassifier is a request message whose interface answers its errors inside a 2xx and
@@ -66,7 +93,7 @@ func NewResultsManager(guid uint64, chainID string) ResultsManager {
 	}
 }
 
-func (rp *ResultsManagerInst) setErrorResponse(response *RelayResponse) {
+func (rp *ResultsManagerInst) setErrorResponse(response *RelayResponse, protocolMessage chainlib.ProtocolMessage) {
 	rp.lock.Lock()
 	defer rp.lock.Unlock()
 	// Protocol errors are plain Go errors (nothing in this fork carries an sdkerrors ABCI code any
@@ -75,6 +102,16 @@ func (rp *ResultsManagerInst) setErrorResponse(response *RelayResponse) {
 	var classified *common.RouterError
 	if response.Err != nil {
 		classified = common.ClassifyError(common.DetectConnectionError(response.Err), common.ChainFamilyUnknown, common.TransportGRPC, 0, response.Err.Error())
+	}
+	// A write's copy the sender failed on an upstream's status still carries the upstream's answer,
+	// and that answer is read for the slot-already-used signatures (PRD §5.2, MAG-5593): a gateway's
+	// 503 or a 429 can wrap the node's own "nonce too low", which says this very transaction may have
+	// landed. The code is the body's JSON-RPC error code when it has one; the text rows read the body
+	// wherever the words sit.
+	if isWrite(protocolMessage) {
+		if body := upstreamAnswerBody(response); len(body) > 0 {
+			response.RelayResult.IsSlotAlreadyUsed = common.IsSlotAlreadyUsed(common.GetChainFamilyOrDefault(rp.chainID), apiInterfaceOf(protocolMessage), common.ExtractJSONRPCErrorCode(body), string(body))
+		}
 	}
 	// This is a protocol-layer error (session not found, consumer blocked, etc.),
 	// not a node-side error. Pass "" as chainErrorMessage so the chain_error_message
@@ -213,6 +250,13 @@ func (rp *ResultsManagerInst) setValidResponse(response *RelayResponse, protocol
 		if nodeClassified == nil {
 			nodeClassified = common.ClassifyError(common.DetectConnectionErrorInReplyText(errorMessage), chainFamily, transport, errorCode, err.Error())
 		}
+		// A write's copy whose reply says the slot is already used may be this very transaction landed
+		// (PRD §5.2, MAG-5593). Read beside the row, not from it: whatever the row says, the copy is
+		// never refused and the write is not sent again (relaypolicy.Decide; the server's
+		// unclearWriteOutcomeFor says what the client gets).
+		if isWrite(protocolMessage) {
+			response.RelayResult.IsSlotAlreadyUsed = common.IsSlotAlreadyUsed(chainFamily, apiInterfaceOf(protocolMessage), errorCode, err.Error())
+		}
 		// ERROR only when the endpoint is to blame. A not-found, a pruned height, a rejected
 		// transaction is the node answering the question it was asked, and on REST those are
 		// routine — see LogCodedNodeAnswer. The metric fires either way.
@@ -318,7 +362,7 @@ func (rp *ResultsManagerInst) SetResponse(response *RelayResponse, protocolMessa
 		return nil
 	}
 	if response.Err != nil {
-		rp.setErrorResponse(response)
+		rp.setErrorResponse(response, protocolMessage)
 	} else {
 		return rp.setValidResponse(response, protocolMessage)
 	}

@@ -59,6 +59,14 @@ func (p *Policy) Decide(input relaycore.DecisionInput) relaycore.DecisionOutput 
 	if input.Selection == relaycore.Stateful && input.IsBatch && input.Summary.NodeErrors+input.Summary.SpecialNodeErrors > 0 {
 		rateLimitRetrySafe = false
 	}
+	// A copy whose reply says the write's nonce or sequence is already used may be this very
+	// transaction, landed through another provider's copy or an earlier send (PRD §5.2, MAG-5593).
+	// The write is not sent again, however the other copies answered, and even when the same reply
+	// also read as a rate limit: a second copy is the double-spend the carve-out above is careful to
+	// rule out.
+	if input.Selection == relaycore.Stateful && input.Summary.SlotAlreadyUsed {
+		rateLimitRetrySafe = false
+	}
 
 	if input.Selection == relaycore.Stateful && !rateLimitRetrySafe {
 		return relaycore.DecisionOutput{Action: relaycore.ActionStop, Reason: "Stateful"}

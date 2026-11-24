@@ -1469,6 +1469,12 @@ var (
 	// what leaves the outcome open is neither a timeout nor a broken connection: a cancellation, or
 	// an error nothing classifies. It claims neither a timeout nor a delivery.
 	errUnclearWriteNoAnswer = &unclearWriteError{reason: "a request to a node ended without an answer"}
+	// errUnclearWriteSlotAlreadyUsed: a copy answered under a 5xx with a reply that says the
+	// transaction's nonce or sequence is already used (common.RelayResult.IsSlotAlreadyUsed, PRD
+	// §5.2, MAG-5593). The slot may have been used by this very transaction, landed through another
+	// copy or an earlier send, so the copy may have run. A 2xx saying the same is the node's own
+	// answer and goes back as it came (Part IV decision 3, MAG-4748).
+	errUnclearWriteSlotAlreadyUsed = &unclearWriteError{reason: "a node reports the transaction's nonce or sequence as already used, so it may already be on chain"}
 )
 
 // writeOutcomeIsUnknown reports whether a failed request was a write whose outcome we do not know.
@@ -1529,9 +1535,37 @@ func unclearWriteOutcomeFor(protocolMessage chainlib.ProtocolMessage, relayProce
 	}
 
 	if !unknownWriteOutcome(len(successResults), answered, dispatched, ranOutOfRoad, cutOffMidDelivery) {
+		// Every copy came back and none was cut off, but a 5xx carrying a slot-already-used reply is
+		// not a settled refusal: that copy may have run (PRD §5.2, MAG-5593). An accepted sibling is
+		// the result, whatever another copy said about the slot.
+		if len(successResults) == 0 && slotAlreadyUsedUnderA5xx(nodeErrors, protocolErrors) {
+			return errUnclearWriteSlotAlreadyUsed
+		}
 		return nil
 	}
 	return unclearWriteReason(answered, dispatched, cutOffs)
+}
+
+// slotAlreadyUsedUnderA5xx reports whether a failed copy carries a slot-already-used signature under a
+// 5xx: a node error answered with that status, or an upstream's 5xx the attempt failed with
+// (routersession.HTTPStatusError). A 2xx with the same words is the node's answer, a 4xx is forwarded
+// as today, and both leave the outcome as the other copies decide it.
+func slotAlreadyUsedUnderA5xx(nodeErrors []common.RelayResult, protocolErrors []relaycore.RelayError) bool {
+	for _, nodeError := range nodeErrors {
+		if nodeError.IsSlotAlreadyUsed && nodeError.StatusCode >= http.StatusInternalServerError {
+			return true
+		}
+	}
+	for _, protocolError := range protocolErrors {
+		if protocolError.Response == nil || !protocolError.Response.RelayResult.IsSlotAlreadyUsed {
+			continue
+		}
+		var httpErr *routersession.HTTPStatusError
+		if errors.As(protocolError.Err, &httpErr) && httpErr.StatusCode >= http.StatusInternalServerError {
+			return true
+		}
+	}
+	return false
 }
 
 // withUnclearWriteStatus forces the HTTP status of an unclear-write reply to 500.

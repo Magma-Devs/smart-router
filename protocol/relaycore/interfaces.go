@@ -97,6 +97,11 @@ type ResultsSummary struct {
 	// an upstream rate limit — the one failure that is safe to retry even for a stateful
 	// relay or a batch, because the upstream refused before executing anything.
 	OnlyRateLimited bool
+	// SlotAlreadyUsed is true when a failed copy's reply says the write's nonce or sequence is
+	// already used (common.RelayResult.IsSlotAlreadyUsed; MAG-5593): this very transaction may be
+	// what used it, so the write is not sent again, whatever else the copies answered, and even
+	// when every one of them also read as a rate limit.
+	SlotAlreadyUsed bool
 }
 
 // Action represents the post-relay decision action.

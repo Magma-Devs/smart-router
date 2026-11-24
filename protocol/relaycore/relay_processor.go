@@ -673,6 +673,7 @@ func (rp *RelayProcessor) GetResultsSummary() ResultsSummary {
 		HasPermanentProtocolError: hasPermanentProtocolError,
 		HasEpochMismatch:          hasEpochMismatch,
 		OnlyRateLimited:           onlyRateLimited(nodeErrorResults, protocolErrorResults),
+		SlotAlreadyUsed:           slotAlreadyUsed(nodeErrorResults, protocolErrorResults),
 	}
 }
 
@@ -1555,6 +1556,23 @@ func onlyRateLimited(nodeErrorResults []common.RelayResult, protocolErrorResults
 		}
 	}
 	return true
+}
+
+// slotAlreadyUsed reports whether a failed copy's reply carries a slot-already-used signature
+// (common.RelayResult.IsSlotAlreadyUsed, set by the results manager on a write's node errors and on
+// the upstream answers its protocol errors carry). Pure over the slices, like onlyRateLimited.
+func slotAlreadyUsed(nodeErrorResults []common.RelayResult, protocolErrorResults []RelayError) bool {
+	for _, result := range nodeErrorResults {
+		if result.IsSlotAlreadyUsed {
+			return true
+		}
+	}
+	for _, protocolError := range protocolErrorResults {
+		if protocolError.Response != nil && protocolError.Response.RelayResult.IsSlotAlreadyUsed {
+			return true
+		}
+	}
+	return false
 }
 
 // buildFailureResult constructs an error result when no consensus can be reached. It returns the best

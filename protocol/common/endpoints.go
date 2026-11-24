@@ -662,6 +662,12 @@ type RelayResult struct {
 	// MAG-5121): the flags above are that verdict, read from the body, so a status-only step must
 	// not decide the reply again by its status (sendRelayToDirectEndpoints).
 	IsOwnVerdict bool
+	// IsSlotAlreadyUsed — the reply says the write's nonce or sequence is already used, read by the
+	// slot-already-used signatures (IsSlotAlreadyUsed in slot_already_used.go; PRD §5.2, MAG-5593)
+	// beside the row above, not from it: this very transaction may be what used the slot, so the copy
+	// may have run, is never refused, and the write is not sent again. Set on a write's copies only;
+	// a read keeps its verdict and never reads it.
+	IsSlotAlreadyUsed bool
 	// ClientFacing is what the listener shows the caller when the relay ends in a protocol error:
 	// the upstream's own answer when it gave one, else the leaf cause (MAG-4218).
 	ClientFacing *ClientFacingError
