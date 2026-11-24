@@ -35,6 +35,9 @@ func recordOfLegacyFixture(fixture errorFixture) ErrorRecord {
 	default: // REST and gRPC rows read the status as the code
 		if fixture.ErrorCode != 0 {
 			record.Status = fixture.ErrorCode
+			if transportFromString[fixture.Transport] == TransportGRPC {
+				record.GRPCCode = fixture.ErrorCode
+			}
 		}
 	}
 	return record
@@ -105,9 +108,12 @@ func TestClassifyRecord(t *testing.T) {
 		require.Equal(t, without.Name, withCode.Name)
 		require.Equal(t, ClassifyError(nil, ChainFamilyCosmosSDK, TransportREST, 404, "account not found").Name, without.Name)
 	})
-	t.Run("grpc: the status code is the code", func(t *testing.T) {
+	t.Run("grpc: the status code is the code, also under a gateway's HTTP status (D12)", func(t *testing.T) {
 		require.Equal(t, ClassifyError(nil, ChainFamilyCosmosSDK, TransportGRPC, 14, "connection refused").Name,
-			ClassifyRecord(ChainFamilyCosmosSDK, ErrorRecord{Interface: "grpc", Status: 14, Text: "connection refused"}).Name)
+			ClassifyRecord(ChainFamilyCosmosSDK, ErrorRecord{Interface: "grpc", Status: 14, GRPCCode: 14, Text: "connection refused"}).Name)
+		gateway429 := "unexpected HTTP status code received from server: 429; transport: received unexpected content-type \"text/html\""
+		require.Equal(t, ClassifyError(nil, ChainFamilyCosmosSDK, TransportGRPC, 14, gateway429).Name,
+			ClassifyRecord(ChainFamilyCosmosSDK, ErrorRecord{Interface: "grpc", Status: 429, GRPCCode: 14, Text: gateway429}).Name)
 	})
 	t.Run("graphql folds into the REST rows under the HTTP status", func(t *testing.T) {
 		require.Equal(t, ClassifyError(nil, ChainFamilySui, TransportREST, 429, "slow down").Name,

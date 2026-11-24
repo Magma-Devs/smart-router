@@ -3,6 +3,8 @@ package common
 import (
 	"bytes"
 	"encoding/json"
+	"regexp"
+	"strconv"
 	"strings"
 
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
@@ -211,10 +213,16 @@ func restStandardText(doc any, body []byte) string {
 	return bareText(body)
 }
 
+// grpcGatewayStatus is grpc-go's message when a gateway in front of the node answered with an HTTP
+// status instead of gRPC: the status is the gateway's, and the record carries it (Part III D12).
+var grpcGatewayStatus = regexp.MustCompile(`unexpected HTTP status code received from server: (\d{3})`)
+
 // ReadGRPCReply reads a gRPC reply: a status other than OK is a well-formed error with the status as
 // the record's status, its message as the text and its details, rendered by the caller from linked or
 // bundled types, as the detail; an OK whose message decoded is an answer; an OK that did not decode
-// is bare (C5). grpcCode is the status code (0 OK, 1 to 16).
+// is bare (C5). grpcCode is the status code (0 OK, 1 to 16). A status whose message carries a
+// gateway's HTTP status (grpcGatewayStatus) has that HTTP status as the record's Status, and the gRPC
+// code in GRPCCode.
 func ReadGRPCReply(grpcCode int, message string, details json.RawMessage, decoded bool) (ReplyKind, []ErrorRecord) {
 	if grpcCode == 0 {
 		if decoded {
@@ -222,7 +230,12 @@ func ReadGRPCReply(grpcCode int, message string, details json.RawMessage, decode
 		}
 		return ReplyBare, []ErrorRecord{{Interface: spectypes.APIInterfaceGrpc, Status: 0, Text: message}}
 	}
-	record := ErrorRecord{Interface: spectypes.APIInterfaceGrpc, Status: grpcCode, Text: message}
+	record := ErrorRecord{Interface: spectypes.APIInterfaceGrpc, Status: grpcCode, GRPCCode: grpcCode, Text: message}
+	if match := grpcGatewayStatus.FindStringSubmatch(message); match != nil {
+		if httpStatus, err := strconv.Atoi(match[1]); err == nil {
+			record.Status = httpStatus
+		}
+	}
 	if len(details) > 0 && !bytes.Equal(bytes.TrimSpace(details), []byte("null")) {
 		record.Detail = details
 	}

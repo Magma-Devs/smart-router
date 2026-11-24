@@ -18,8 +18,13 @@ type ErrorRecord struct {
 	// Interface is the api's interface, one of five (spectypes.APIInterface*).
 	Interface string
 	// Status is the HTTP status as received, on GraphQL too (an extension code never makes a
-	// status), or the gRPC status code (1 to 16) on grpc; 0 on a WebSocket frame.
+	// status); on grpc the gRPC status code (1 to 16), except that a status carrying grpc-go's
+	// "unexpected HTTP status code received from server: NNN" has the gateway's HTTP status NNN
+	// (Part III D12); 0 on a WebSocket frame.
 	Status int
+	// GRPCCode is the gRPC status code on grpc, whatever Status says (the two differ only under
+	// D12); 0 on every other interface.
+	GRPCCode int
 	// Code is the chain's code: a json.Number (a JSON-RPC or Tendermint error.code, a shape's
 	// integer), a string (a GraphQL extensions.code, a shape's "<space>/<code>"), or nil when the
 	// reply carries none.

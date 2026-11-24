@@ -64,7 +64,11 @@ func RecordsFromReply(policy *spectypes.ErrorsSection, apiInterface, method stri
 		if text == "" {
 			text = grpcErrorMessage(body)
 		}
-		return []common.ErrorRecord{{Interface: spectypes.APIInterfaceGrpc, Status: status, Text: text}}
+		if status == 0 {
+			return []common.ErrorRecord{{Interface: spectypes.APIInterfaceGrpc, Text: text}}
+		}
+		_, records := common.ReadGRPCReply(status, text, nil, false)
+		return records
 	default:
 		return []common.ErrorRecord{{Interface: apiInterface, Status: status, Text: checkerText}}
 	}

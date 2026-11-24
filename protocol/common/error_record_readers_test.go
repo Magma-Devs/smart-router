@@ -202,6 +202,8 @@ func TestReadGRPCReply(t *testing.T) {
 	require.Equal(t, ReplyWellFormedError, kind)
 	require.Equal(t, spectypes.APIInterfaceGrpc, records[0].Interface)
 	require.Equal(t, 5, records[0].Status, "the gRPC status is the record's status")
+	require.Equal(t, 5, records[0].GRPCCode)
+
 	require.Nil(t, records[0].Code)
 	require.Equal(t, "object not found", records[0].Text)
 	require.Contains(t, records[0].DetailText(), "NOT_FOUND")
@@ -217,4 +219,9 @@ func TestReadGRPCReply(t *testing.T) {
 	kind, records = ReadGRPCReply(0, "proto: cannot parse invalid wire-format data", nil, false)
 	require.Equal(t, ReplyBare, kind, "an OK that does not decode is C5")
 	require.Equal(t, 0, records[0].Status)
+	// A gateway in front of the node answered with an HTTP status (Part III D12): the record carries
+	// the gateway's status, and the gRPC code beside it.
+	_, records = ReadGRPCReply(14, "unexpected HTTP status code received from server: 429; transport: received unexpected content-type \"text/html\"", nil, false)
+	require.Equal(t, 429, records[0].Status)
+	require.Equal(t, 14, records[0].GRPCCode)
 }

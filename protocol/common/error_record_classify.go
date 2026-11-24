@@ -36,13 +36,17 @@ func (rr *RelayResult) ApplyNodeErrorClassificationForInterface(family ChainFami
 //     HTTP status, and the text with the status put back ahead of it under a non-2xx ("HTTP 503: "),
 //     as the direct sender writes it for the status rows (classifyJSONRPCNodeError, MAG-1666). The
 //     record itself keeps the text clean: the status is its own field (§3.2);
-//   - REST and gRPC rows read the status (the HTTP status; the gRPC status code) as the code and the
-//     text as is: a REST body's code reaches only the chain's spec rows;
+//   - REST and gRPC rows read the status (the HTTP status; the gRPC status code, GRPCCode, also
+//     under a gateway's HTTP status) as the code and the text as is: a REST body's code reaches only
+//     the chain's spec rows;
 //   - GraphQL rows read the HTTP status; the interface's own rows (OwnClassification, MAG-5121)
 //     decide before this is asked, as today.
 func ClassifyRecord(family ChainFamily, record ErrorRecord) *RouterError {
 	transport := ApiInterfaceToTransport(record.Interface)
 	code := record.Status
+	if transport == TransportGRPC && record.GRPCCode != 0 {
+		code = record.GRPCCode
+	}
 	message := record.Text
 	if transport == TransportJsonRPC {
 		if bodyCode, ok := record.IntCode(); ok && bodyCode != 0 {

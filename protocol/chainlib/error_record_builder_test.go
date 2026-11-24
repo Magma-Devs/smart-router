@@ -88,7 +88,7 @@ func TestRecordsFromReply(t *testing.T) {
 	})
 	t.Run("grpc: the status as the record's status, the node's message out of the router's body", func(t *testing.T) {
 		records := RecordsFromReply(nil, spectypes.APIInterfaceGrpc, "cosmos.bank.v1beta1.Query/Balance", 5, []byte(`{"error_message":"account not found","error_code":5}`), "")
-		require.Equal(t, common.ErrorRecord{Interface: "grpc", Status: 5, Text: "account not found"}, records[0])
+		require.Equal(t, common.ErrorRecord{Interface: "grpc", Status: 5, GRPCCode: 5, Text: "account not found"}, records[0])
 		records = RecordsFromReply(nil, spectypes.APIInterfaceGrpc, "x/Y", 8, []byte(`{}`), "resource exhausted")
 		require.Equal(t, "resource exhausted", records[0].Text, "the checker's text comes first")
 	})
