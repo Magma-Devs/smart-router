@@ -77,30 +77,33 @@ const (
 
 // The bound on Recompute's sole-voter pull-up (MAG-5080). A sole voter's head more than
 // OutlierThreshold over the fresh tip is followed only if it is within the most blocks the chain
-// could have made since the tip block was taken: OutlierThreshold plus soleVoterJumpMargin blocks for
-// each average block time from the spec since then (jumpBoundLocked). A head past that is an outlier.
-// NoteAnswer drops such an answer, so it neither extends nor ends its url's run, and the pull-up never
-// takes it, however often the url answers it. Under the bound the rule is MAG-4964's repeat: the url
-// must have answered above the guard soleVoterJumpAnswers times in a row, with no answer at or below
-// the guard between them, and the next consensus tick takes the tip up.
+// could have made since the tip block was taken: OutlierThreshold plus the chain's margin, in blocks
+// for each average block time from the spec since then (jumpBoundLocked). A head past that is an
+// outlier. NoteAnswer drops such an answer, so it neither extends nor ends its url's run, and the
+// pull-up never takes it, however often the url answers it. Under the bound the rule is MAG-4964's
+// repeat: the url must have answered above the guard soleVoterJumpAnswers times in a row, with no
+// answer at or below the guard between them, and the next consensus tick takes the tip up.
 //
-// The margin is set by the storms the pull-up exists for, not by the spec alone. A bitcoin testnet
-// storm made about 11,500 blocks in its first 3 h 20 min on a 600 s spec, close to 600 blocks per
-// block time on average, and its block headers put about 1,650 blocks in its busiest ten minutes. Each
-// pull-up starts the bound over from a tip up to one poll behind the head, so a storm is followed at
-// every tick while it makes fewer than about soleVoterJumpMargin blocks per block time, and a one-off
-// burst of up to about 1.5 × soleVoterJumpMargin blocks is taken within three block times. A load
-// balancer's bad backend that answers an absurd block is far past the bound for as long as the chain
-// lives.
+// The margin is per chain (soleVoterJumpMarginFor). A mainnet never runs anywhere near its spec's
+// block rate times soleVoterJumpMargin, so a looser margin there would only let more wrong blocks in.
+// The proof-of-work testnets in stormChains do: their difficulty rules let a miner make blocks far
+// faster than the spec says, for hours. A bitcoin testnet storm made about 11,500 blocks in its first
+// 3 h 20 min on a 600 s spec, close to 600 blocks per block time, and its block headers put about
+// 1,650 blocks in its busiest ten minutes. Each pull-up starts the bound over from a tip up to one
+// poll behind the head, so a storm is followed at every tick while it makes fewer than about the
+// margin per block time, and a one-off burst of up to about 1.5 × the margin is taken within three
+// block times: stormChainJumpMargin covers those storms, and soleVoterJumpMargin would leave the
+// busiest stretch to the TTL. A load balancer's bad backend that answers an absurd block is far past
+// either bound for as long as the chain lives.
 //
 // The bound stops protecting against a bad block within it. A backend on a sibling network about
-// 1,400 blocks ahead of a 600 s chain fits once the tip block is about 0.7 block times old, which half
-// of a proof-of-work chain's block gaps outlast. Then only the repeat is left: behind a balancer that
-// spreads requests, the good backend's answers at the tip end the run, so the bad backend must win two
-// answers in a row; behind one that keeps the router's one HTTP/2 connection (MAG-4211) on that
-// backend, nothing tells it from a storm. A longer run would make the first rarer on a slow chain, but
-// it would also hold a storm back behind a balancer whose other backend is stuck at the tip: the
-// freeze the pull-up exists to end.
+// 1,400 blocks ahead of a 600 s mainnet fits once the tip block is about 1.4 block times old, which a
+// quarter of a proof-of-work chain's block gaps outlast. Then only the repeat is left: behind a
+// balancer that spreads requests, the good backend's answers at the tip end the run, so the bad
+// backend must win two answers in a row; behind one that keeps the router's one HTTP/2 connection
+// (MAG-4211) on that backend, nothing tells it from a storm. A longer run would make the first rarer
+// on a slow chain, but it would also hold a storm back behind a balancer whose other backend is stuck
+// at the tip: the freeze the pull-up exists to end.
 //
 // The pull-up never goes past the run's own answers: the voter's block can be a peer pod's
 // observation (the fleet gate), which is not this url's answer. A run with an answer more than
@@ -111,9 +114,29 @@ const (
 // mixed run, so the next one needs a run of its own. A run that is not mixed is one source
 // climbing, and it takes the tip to its highest block, as a storm needs.
 const (
-	soleVoterJumpMargin  = 2000
+	soleVoterJumpMargin  = 1000
+	stormChainJumpMargin = 2000
 	soleVoterJumpAnswers = 2
 )
+
+// stormChains are the chains, by spec index, whose block storms set stormChainJumpMargin: the
+// proof-of-work testnets whose rules let a block that comes 20 minutes after the last be mined at the
+// minimum difficulty, so a miner can make thousands of blocks in the time the spec gives a few. Every
+// other chain takes soleVoterJumpMargin.
+var stormChains = map[string]struct{}{
+	"BTCT":  {}, // bitcoin testnet3: about 11,500 blocks in its first 3 h 20 min on 2026-11-04
+	"BTCT4": {}, // bitcoin testnet4: the same 20-minute rule
+	"BCHT":  {}, // bitcoin-cash testnet: about 80 blocks in five minutes on 2026-11-05
+}
+
+// soleVoterJumpMarginFor is the margin of chainID's sole-voter bound, in blocks per average block
+// time: stormChainJumpMargin for a chain in stormChains, soleVoterJumpMargin for any other.
+func soleVoterJumpMarginFor(chainID string) int64 {
+	if _, ok := stormChains[chainID]; ok {
+		return stormChainJumpMargin
+	}
+	return soleVoterJumpMargin
+}
 
 // BlockObservation is the minimal per-endpoint observation ChainState needs to compute
 // consensus: which endpoint, what block, observed when. It is the decoupled subset of
@@ -220,6 +243,9 @@ func DefaultConfig(averageBlockTime time.Duration) Config {
 type ChainState struct {
 	chainID string
 	cfg     Config
+	// jumpMargin is this chain's sole-voter bound margin, in blocks per average block time
+	// (soleVoterJumpMarginFor). Set once at construction and never reassigned.
+	jumpMargin int64
 	// now is the BASE clock; time.Now in production, overridable in tests for deterministic TTL /
 	// staleness. Set once at construction and never reassigned, so it is read without the lock.
 	now func() time.Time
@@ -316,7 +342,7 @@ func NewWithClock(chainID string, cfg Config, clock func() time.Time) *ChainStat
 	if clock == nil {
 		clock = time.Now
 	}
-	return &ChainState{chainID: chainID, cfg: cfg, now: clock}
+	return &ChainState{chainID: chainID, cfg: cfg, now: clock, jumpMargin: soleVoterJumpMarginFor(chainID)}
 }
 
 // warpOffsetDuration is the current debug warp offset as a Duration (0 in production). Split out so
@@ -686,19 +712,19 @@ func (cs *ChainState) jumpHeldLocked(url string) bool {
 
 // jumpBoundLocked is the highest block a sole voter may move the tip to at now (the warped
 // evaluation clock), MAG-5080: the most blocks the chain could have made since the tip block was
-// taken (latestSince), at soleVoterJumpMargin blocks per average block time, over the fresh-tip
-// guard. That is tip + OutlierThreshold + floor(soleVoterJumpMargin × elapsed / AverageBlockTime),
+// taken (latestSince), at the chain's margin (jumpMargin) in blocks per average block time, over the
+// fresh-tip guard. That is tip + OutlierThreshold + floor(jumpMargin × elapsed / AverageBlockTime),
 // exact, and saturated at math.MaxInt64 instead of overflowing. The caller holds cs.mu.
 func (cs *ChainState) jumpBoundLocked(now time.Time) int64 {
 	elapsed := max(now.Sub(cs.latestSince), 0)
 	blockTime := cs.cfg.AverageBlockTime
 	whole, rest := int64(elapsed/blockTime), elapsed%blockTime
-	if whole > math.MaxInt64/2/soleVoterJumpMargin {
+	if whole > math.MaxInt64/2/cs.jumpMargin {
 		return math.MaxInt64
 	}
-	hi, lo := bits.Mul64(soleVoterJumpMargin, uint64(rest))
-	part, _ := bits.Div64(hi, lo, uint64(blockTime)) // < soleVoterJumpMargin, as rest < blockTime
-	headroom := cs.cfg.OutlierThreshold + soleVoterJumpMargin*whole + int64(part)
+	hi, lo := bits.Mul64(uint64(cs.jumpMargin), uint64(rest))
+	part, _ := bits.Div64(hi, lo, uint64(blockTime)) // < jumpMargin, as rest < blockTime
+	headroom := cs.cfg.OutlierThreshold + cs.jumpMargin*whole + int64(part)
 	if cs.latestBlock > math.MaxInt64-headroom {
 		return math.MaxInt64
 	}
@@ -813,13 +839,14 @@ func (cs *ChainState) Recompute(snapshots []BlockObservation) {
 		// tip was taken (jumpBoundLocked): an absurd block is an outlier however often it is answered.
 		// Under that bound, the voter's url must have answered above the guard twice in a row, with no
 		// answer at or below the guard between (jumpHeldLocked; the numbers are argued at
-		// soleVoterJumpMargin). A url that answers nothing but a block within the bound is still
-		// followed then: no count tells such a liar from a sole honest endpoint in a storm. The repeat
-		// is read from the endpoint's own record and its first-hand answers, so a copy of a tip (a peer
-		// pod's, or a cache echo) never counts as one. Dropping the guard for a sole voter, or making
-		// its block a one-endpoint baseline, would follow that same stored glitch and hold the tip
-		// there for a TTL. Following a voter that has a peer would let one endpoint's repeated absurd
-		// block drag a multi-endpoint tip (MAG-4632), so two or more voters still need a majority.
+		// soleVoterJumpMargin and stormChains). A url that answers nothing but a block within the
+		// bound is still followed then: no count tells such a liar from a sole honest endpoint in a
+		// storm. The repeat is read from the endpoint's own record and its first-hand answers, so a
+		// copy of a tip (a peer pod's, or a cache echo) never counts as one. Dropping the guard for a
+		// sole voter, or making its block a one-endpoint baseline, would follow that same stored glitch
+		// and hold the tip there for a TTL. Following a voter that has a peer would let one endpoint's
+		// repeated absurd block drag a multi-endpoint tip (MAG-4632), so two or more voters still need
+		// a majority.
 		//
 		// The tip goes no higher than the run's own answers: to its highest block, or to its lowest
 		// when the run is mixed, which is a storm behind a balancer with a bad backend, where the

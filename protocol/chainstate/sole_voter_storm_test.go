@@ -3,6 +3,7 @@ package chainstate
 import (
 	"fmt"
 	"math/rand"
+	"sort"
 	"testing"
 	"time"
 
@@ -14,18 +15,24 @@ import (
 // chain: a real block storm is followed within three block times (TestRecompute_SoleVoterFollowsARealStorm
 // WithinThreeBlockTimes), and a load balancer's absurd block is never taken
 // (TestNoteAnswer_LoadBalancerWithOneBadBackendIsNeverFollowed, and below for a connection pinned to the bad
-// backend). Both are built from DefaultConfig and the methods the router calls.
+// backend). The margin is per chain: the storms run as a storm chain, a testnet whose blocks can come in
+// storms, and the mainnet cases as a mainnet. All are built from DefaultConfig, the chain's spec index and
+// the methods the router calls.
+
+// stormChainID is a chain known for block storms (bitcoin testnet3), so its bound takes the storm margin.
+const stormChainID = "BTCT"
 
 type stormCadence struct {
 	name            string
 	blockTime, poll time.Duration
+	mainnet         string // a mainnet at this cadence, which keeps the default margin
 }
 
 // stormCadences: a 600 s chain is polled once a minute (chaintracker.BACKOFF_MAX_TIME), a 12 s chain twice
 // a block; the consensus loop ticks once a block time.
 var stormCadences = []stormCadence{
-	{"600s chain", 600 * time.Second, time.Minute},
-	{"12s chain", 12 * time.Second, 6 * time.Second},
+	{"600s chain", 600 * time.Second, time.Minute, "BTC"},
+	{"12s chain", 12 * time.Second, 6 * time.Second, "ETH1"},
 }
 
 // stormURL is one url as the router feeds it to ChainState: its tip store, the OnTipObservation feed
@@ -38,9 +45,9 @@ type stormURL struct {
 	clk   *fakeClock
 }
 
-func newStormURL(c stormCadence) *stormURL {
+func newStormURL(c stormCadence, chainID string) *stormURL {
 	clk := &fakeClock{t: time.Unix(1_700_000_000, 0)}
-	return &stormURL{cs: NewWithClock("STORM", DefaultConfig(c.blockTime), clk.now), store: endpointtip.NewStore(), clk: clk}
+	return &stormURL{cs: NewWithClock(chainID, DefaultConfig(c.blockTime), clk.now), store: endpointtip.NewStore(), clk: clk}
 }
 
 func (u *stormURL) feed(block int64, own bool) {
@@ -99,7 +106,7 @@ func (u *stormURL) run(c stormCadence, phase, relay, end time.Duration, answer f
 // the start. With pods 2 (the fleet gate) this pod polls every other cycle and adopts the other pod's
 // observation of the same head in between.
 func stormDelay(c stormCadence, head func(at time.Duration) int64, t0, length, phase time.Duration, pods int) (worst float64, over int64) {
-	u := newStormURL(c)
+	u := newStormURL(c, stormChainID)
 	const start = int64(1_000_000)
 	u.feed(start, true)
 	u.tick()
@@ -149,8 +156,9 @@ func stormDelay(c stormCadence, head func(at time.Duration) int64, t0, length, p
 //   - its busiest ten minutes as its block headers date them: 1,650 blocks a block time, here for three;
 //   - a one-off burst of 2,016 blocks, one difficulty period of that testnet mined at once.
 //
-// Each runs at the cadence of a 600 s chain and of a 12 s chain, with this pod polling alone or every other
-// cycle (the fleet gate), and with the storm's start and the consensus tick at random phases.
+// Each runs as a storm chain (stormChainID) at the cadence of a 600 s chain and of a 12 s chain, with this
+// pod polling alone or every other cycle (the fleet gate), and with the storm's start and the consensus tick
+// at random phases. On a mainnet's margin the busiest stretch would wait for the TTL.
 func TestRecompute_SoleVoterFollowsARealStormWithinThreeBlockTimes(t *testing.T) {
 	for _, c := range stormCadences {
 		threshold := DefaultConfig(c.blockTime).OutlierThreshold
@@ -217,54 +225,143 @@ func TestRecompute_SoleVoterFollowsARealStormWithinThreeBlockTimes(t *testing.T)
 //     once it is a TTL old the stale tip takes the next answer, as before MAG-4964: a stale tip anchors no
 //     guard (SetLatestBlock). The absurd block must never be taken while the tip is fresh.
 //   - A backend on a sibling network 1,400 blocks ahead, the distance between two bitcoin-family mainnets, is
-//     where the bound stops protecting on a 600 s chain: it fits once the tip block is about 0.7 block times
-//     old, and the pull-up takes it at the next tick after two answers, with the tip still fresh.
+//     where the bound stops protecting on a 600 s chain: until it fits, its answers are outliers and start no
+//     run; once it fits, the pull-up takes it at the next tick after two answers, with the tip still fresh.
+//     On a mainnet's margin it fits once the tip block is about 1.4 block times old, on a storm chain's 0.7.
 //
-// Polls only, and polls with a relay answer every half second.
+// On a mainnet and on a storm chain, polls only, and polls with a relay answer every half second.
 func TestNoteAnswer_PinnedConnectionToABadBackend(t *testing.T) {
 	const start = int64(1_000_000)
 	for _, c := range stormCadences {
-		for _, relay := range []time.Duration{0, 500 * time.Millisecond} {
-			t.Run(fmt.Sprintf("%s, absurd block, relay every %v", c.name, relay), func(t *testing.T) {
-				u := newStormURL(c)
-				u.feed(start, true)
-				u.tick()
-				wasFresh, took := true, false
-				u.run(c, c.blockTime/2, relay, 2*u.cs.cfg.TTL, func(time.Duration, bool) {
-					_, wasFresh = u.cs.GetLatestBlock() // just before the answer
-					u.feed(absurdBlock, true)
-				}, func(at time.Duration) bool {
-					if u.cs.GetLatestBlockAllowStale() == absurdBlock {
-						require.False(t, wasFresh, "taken %v in, while the tip was fresh", at)
-						require.GreaterOrEqual(t, at, u.cs.cfg.TTL, "only once the tip went a TTL unconfirmed")
-						took = true
-						return true
-					}
-					return false
+		for _, chainID := range []string{c.mainnet, stormChainID} {
+			for _, relay := range []time.Duration{0, 500 * time.Millisecond} {
+				t.Run(fmt.Sprintf("%s %s, absurd block, relay every %v", c.name, chainID, relay), func(t *testing.T) {
+					u := newStormURL(c, chainID)
+					u.feed(start, true)
+					u.tick()
+					wasFresh, took := true, false
+					u.run(c, c.blockTime/2, relay, 2*u.cs.cfg.TTL, func(time.Duration, bool) {
+						_, wasFresh = u.cs.GetLatestBlock() // just before the answer
+						u.feed(absurdBlock, true)
+					}, func(at time.Duration) bool {
+						if u.cs.GetLatestBlockAllowStale() == absurdBlock {
+							require.False(t, wasFresh, "taken %v in, while the tip was fresh", at)
+							require.GreaterOrEqual(t, at, u.cs.cfg.TTL, "only once the tip went a TTL unconfirmed")
+							took = true
+							return true
+						}
+						return false
+					})
+					require.True(t, took, "the stale-tip path still takes it, as before MAG-4964")
 				})
-				require.True(t, took, "the stale-tip path still takes it, as before MAG-4964")
-			})
+			}
 		}
 	}
 
-	t.Run("600s chain, a backend 1,400 blocks ahead", func(t *testing.T) {
-		c := stormCadences[0]
-		u := newStormURL(c)
-		u.feed(start, true)
-		u.tick()
-		var takenAt time.Duration
-		u.run(c, c.blockTime/2, 0, u.cs.cfg.TTL, func(at time.Duration, _ bool) {
-			u.feed(start+int64(at/c.blockTime)+1400, true)
-		}, func(at time.Duration) bool {
-			if u.cs.GetLatestBlockAllowStale() > start+int64(at/c.blockTime)+u.cs.cfg.OutlierThreshold {
-				_, fresh := u.cs.GetLatestBlock()
-				require.True(t, fresh, "taken by the pull-up, not by a stale tip")
-				takenAt = at
-				return true
-			}
-			return false
+	c := stormCadences[0]
+	for _, tc := range []struct {
+		chainID   string
+		fitsAfter time.Duration // a little before (1,400 - OutlierThreshold) / margin block times
+	}{
+		{c.mainnet, 13 * c.blockTime / 10},
+		{stormChainID, 6 * c.blockTime / 10},
+	} {
+		t.Run(fmt.Sprintf("%s %s, a backend 1,400 blocks ahead", c.name, tc.chainID), func(t *testing.T) {
+			u := newStormURL(c, tc.chainID)
+			u.feed(start, true)
+			u.tick()
+			var takenAt time.Duration
+			u.run(c, c.blockTime/2, 0, u.cs.cfg.TTL, func(at time.Duration, _ bool) {
+				u.feed(start+int64(at/c.blockTime)+1400, true)
+			}, func(at time.Duration) bool {
+				if at < tc.fitsAfter {
+					require.NotContains(t, u.cs.jumpRuns, "storm", "%v in: an outlier until it fits, so no run", at)
+				}
+				if u.cs.GetLatestBlockAllowStale() > start+int64(at/c.blockTime)+u.cs.cfg.OutlierThreshold {
+					_, fresh := u.cs.GetLatestBlock()
+					require.True(t, fresh, "taken by the pull-up, not by a stale tip")
+					takenAt = at
+					return true
+				}
+				return false
+			})
+			require.Positive(t, takenAt, "within the bound, a pinned bad backend is followed")
+			require.GreaterOrEqual(t, takenAt, tc.fitsAfter, "not before it fits")
 		})
-		require.Positive(t, takenAt, "within the bound, a pinned bad backend is followed")
-		require.GreaterOrEqual(t, takenAt, 6*c.blockTime/10, "not before it fits, about 0.7 block times in")
-	})
+	}
+}
+
+// TestRecompute_SoleVoterOnAMainnetKeepsASiblingNetworkOut: a mainnet keeps the default margin, which no
+// mainnet comes near, and that keeps out a backend on another network 10,000 blocks ahead behind a balancer
+// that spreads requests. One url, its answers split at random between the good backend and that one, for a
+// simulated day over 20 seeds. A 600 s chain's blocks come at exponential gaps (proof of work); a 12 s
+// chain's come every slot, with one slot in twenty missed. The tip must never pass the chain by more than
+// OutlierThreshold. On the storm margin the 12 s chain took the far block within hours.
+func TestRecompute_SoleVoterOnAMainnetKeepsASiblingNetworkOut(t *testing.T) {
+	const (
+		start = int64(1_000_000)
+		ahead = int64(10_000)
+	)
+	for _, c := range stormCadences {
+		t.Run(fmt.Sprintf("%s %s", c.name, c.mainnet), func(t *testing.T) {
+			for seed := int64(1); seed <= 20; seed++ {
+				r := rand.New(rand.NewSource(seed))
+				var arrivals []time.Duration
+				for at := time.Duration(0); at <= 24*time.Hour+c.blockTime; {
+					if c.blockTime >= time.Minute {
+						at += time.Duration(r.ExpFloat64() * float64(c.blockTime))
+					} else {
+						at += c.blockTime
+						if r.Intn(20) == 0 {
+							at += c.blockTime
+						}
+					}
+					arrivals = append(arrivals, at)
+				}
+				head := func(at time.Duration) int64 {
+					return start + int64(sort.Search(len(arrivals), func(i int) bool { return arrivals[i] > at }))
+				}
+				u := newStormURL(c, c.mainnet)
+				u.feed(start, true)
+				u.tick()
+				phase := time.Duration(r.Int63n(int64(c.blockTime)))
+				u.run(c, phase, 0, 24*time.Hour, func(at time.Duration, _ bool) {
+					block := head(at)
+					if r.Intn(2) == 0 {
+						block += ahead // the other network's backend
+					}
+					u.feed(block, true)
+				}, func(at time.Duration) bool {
+					if tip := u.cs.GetLatestBlockAllowStale(); tip > head(at)+u.cs.cfg.OutlierThreshold {
+						require.Failf(t, "the far block was taken", "seed %d, %v in: tip %d, chain %d", seed, at, tip, head(at))
+					}
+					return false
+				})
+			}
+		})
+	}
+}
+
+// TestJumpBound_MarginIsPerChain: the sole-voter bound grows by 2,000 blocks a block time on the testnets
+// known for block storms, and by 1,000 on every other chain, mainnets and the bitcoin signet included.
+func TestJumpBound_MarginIsPerChain(t *testing.T) {
+	for _, tc := range []struct {
+		chainID string
+		margin  int64
+	}{
+		{"BTCT", 2000},
+		{"BTCT4", 2000},
+		{"BCHT", 2000},
+		{"BTC", 1000},
+		{"BCH", 1000},
+		{"BTCS", 1000},
+		{"ETH1", 1000},
+		{"SEP1", 1000},
+	} {
+		clk := &fakeClock{t: time.Unix(1_700_000_000, 0)}
+		cs := NewWithClock(tc.chainID, DefaultConfig(600*time.Second), clk.now)
+		cs.SetLatestBlock(1_000_000)
+		clk.advance(600 * time.Second)
+		require.Equal(t, int64(1_000_000)+cs.cfg.OutlierThreshold+tc.margin, cs.jumpBoundLocked(clk.now()), tc.chainID)
+	}
 }
