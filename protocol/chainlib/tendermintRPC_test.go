@@ -311,7 +311,7 @@ func TestTendermintURIRPC(t *testing.T) {
 // over as "/?", and a request with no url and no body, as a POST without one is. It is refused as
 // an API the spec does not declare. A URI that names a method still parses.
 func TestTendermintURIThatNamesNoMethodDoesNotParse(t *testing.T) {
-	chainParser, _, _, closeServer, _, err := CreateChainLibMocks(context.Background(), "LAVA", spectypes.APIInterfaceTendermintRPC, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), nil, "../../", nil)
+	chainParser, _, _, closeServer, _, err := CreateChainLibMocks(context.Background(), "COSMOSHUB", spectypes.APIInterfaceTendermintRPC, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), nil, "../../", nil)
 	if closeServer != nil {
 		t.Cleanup(closeServer)
 	}
