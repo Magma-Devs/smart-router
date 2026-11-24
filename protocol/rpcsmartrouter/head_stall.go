@@ -112,9 +112,11 @@ type headStallResult struct {
 // possibly listing one *Endpoint twice when a provider sits in both pools.
 //
 // addPaused runs the remove half only (MAG-5742): step 1 releases every url that moved above its
-// stuck block, and steps 2 (add) and 3 (never-empty) are skipped. Never-empty is skipped with add
-// because both judge the current pool, and while idle that pool is only as fresh as each url's last
-// heartbeat; it resumes with add on the first cycle after the wake burst, before any relay waits on it.
+// stuck block, and steps 2 (add) and 3 (never-empty) are skipped. Never-empty stays paused only to
+// keep this change to the release the bug needed: while the chain is idle no client relay depends on
+// it. It resumes with add on the first probe cycle after the wake burst. A relay routed before that
+// cycle (the one that woke the chain waits at most wakeWaitCap) and finding no usable url is served
+// by the last-chance path, as it was before this change.
 func runHeadStallStep(
 	endpoints []*routersession.EndpointWithDirectConnection,
 	getObservation func(url string) (endpointstate.EndpointObservation, bool),

@@ -1904,8 +1904,9 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 				"EndpointsScored":     s.EndpointsScored,
 				"ReEnabledCount":      s.ReEnabledCount,
 				"SyncOmittedCount":    s.SyncOmittedCount,
-				// Idle mode: the last cycle withheld its QoS feed / skipped the head-stall step
-				// because the chain was idle or a wake burst was still re-polling.
+				// Idle mode: the last cycle withheld its QoS feed / ran the head-stall step
+				// remove-only (no new marks, releases still run) because the chain was idle or a
+				// wake burst was still re-polling.
 				"QoSFeedPausedIdle":   s.QoSFeedPausedIdle,
 				"HeadStallPausedIdle": s.HeadStallPausedIdle,
 				// MAG-3986 head-stall transitions, cumulative since process start.
