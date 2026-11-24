@@ -25,7 +25,7 @@ const (
 	cosmosFailedTx     = `{"tx":{},"tx_response":{"height":"17","txhash":"5C504ED432CB51138BCF09AA5E8A410DD4A1E204EF84BFED1BE16DFBA1B22060","codespace":"sdk","code":11,"raw_log":"out of gas in location: WriteFlat; gasWanted: 200000, gasUsed: 200524: out of gas"}}`
 )
 
-// newCosmosFailedTxServer is a LAVA REST router over count upstreams that all answer reply, and
+// newCosmosFailedTxServer is a COSMOSHUB REST router over count upstreams that all answer reply, and
 // the number of calls they took between them.
 func newCosmosFailedTxServer(t *testing.T, count int, reply string) (*RPCSmartRouterServer, *atomic.Int32) {
 	t.Helper()
@@ -38,7 +38,7 @@ func newCosmosFailedTxServer(t *testing.T, count int, reply string) (*RPCSmartRo
 			answer(w, r)
 		}})
 	}
-	server := newRelayEndServer(t, "LAVA", spectypes.APIInterfaceRest, relayEndSpecParser(t, "LAVA", spectypes.APIInterfaceRest), nodes...)
+	server := newRelayEndServer(t, "COSMOSHUB", spectypes.APIInterfaceRest, relayEndSpecParser(t, "COSMOSHUB", spectypes.APIInterfaceRest), nodes...)
 	return server, calls
 }
 
@@ -62,9 +62,9 @@ func TestCosmosFailedTxRead_IsOneAnswer_MAG5326(t *testing.T) {
 		require.EqualValues(t, 1, calls.Load(), "the answer is final: no other provider is asked")
 		require.False(t, result.IsNodeError)
 		_, retried := replyHeader(result.Reply.Metadata, common.RETRY_COUNT_HEADER_NAME)
-		require.False(t, retried, "no Lava-Retries")
+		require.False(t, retried, "no Router-Retries")
 		_, nodeError := replyHeader(result.Reply.Metadata, common.IDENTIFIED_NODE_ERROR_HEADER)
-		require.False(t, nodeError, "no lava-identified-node-error")
+		require.False(t, nodeError, "no router-identified-node-error")
 	})
 
 	t.Run("cross-validation agrees", func(t *testing.T) {
@@ -101,7 +101,7 @@ func TestCosmosFailedTxRead_BroadcastRefusalStaysANodeError_MAG5326(t *testing.T
 	rand.InitRandomSeed()
 	refused := `{"tx_response":{"height":"0","txhash":"5C504ED4","codespace":"sdk","code":32,"raw_log":"account sequence mismatch, expected 379, got 392: incorrect account sequence"}}`
 	accepted := `{"tx_response":{"height":"0","txhash":"5C504ED4","codespace":"","code":0,"raw_log":"[]"}}`
-	server := newRelayEndServer(t, "LAVA", spectypes.APIInterfaceRest, relayEndSpecParser(t, "LAVA", spectypes.APIInterfaceRest),
+	server := newRelayEndServer(t, "COSMOSHUB", spectypes.APIInterfaceRest, relayEndSpecParser(t, "COSMOSHUB", spectypes.APIInterfaceRest),
 		relayEndNode{name: "refuses", handler: relayEndReply(http.StatusOK, refused, 0)},
 		relayEndNode{name: "accepts", handler: relayEndReply(http.StatusOK, accepted, 300*time.Millisecond)},
 	)
