@@ -133,6 +133,8 @@ func TestDefaultMethodShapeCollapsesConcreteIDs(t *testing.T) {
 		// Opaque hashes: Tezos block hash (51), cosmos bech32 address (46).
 		"/chains/main/blocks/BKiHLREqU3JkXfzEDYAkmmfX48gBDtYqbugTxCcv9YrK1H1EAy/header":     "/chains/main/blocks/{}/header",
 		"/cosmos/staking/v1beta1/delegations/cosmos17ym998u666u8w2qgjd5m7w7ydjqmu3mlgl7ua2": "/cosmos/staking/v1beta1/delegations/{}",
+		// An opaque id with an "@" separator.
+		"/accounts/acct@17ym998u666u8w2qgjd5m7w7ydjqmu3mlgl7ua2/balance": "/accounts/{}/balance",
 		// Several values in one path all collapse.
 		"/blocks/123/operations/0/4": "/blocks/{}/operations/{}/{}",
 	} {
