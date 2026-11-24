@@ -14,21 +14,10 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-func newSmartRouterForCacheTest() *SmartRouterMetricsManager {
-	cacheLabels := []string{"spec", "apiInterface", "method", "cache_tier"}
-	return &SmartRouterMetricsManager{
-		cacheRequestsTotalMetric: prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_cache_req"}, cacheLabels),
-		cacheSuccessTotalMetric:  prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_cache_success"}, cacheLabels),
-		cacheFailedTotalMetric:   prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_cache_failed"}, append(append([]string{}, cacheLabels...), "outcome")),
-		cacheLatencyHistogram:    prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "t_sr_cache_latency"}, cacheLabels),
-		urlToProviderNames:       make(map[string][]string),
-	}
-}
-
 // ---- outcome-aware, per-tier recording (docs/METRICS.md#cache) ----
 
 func TestSmartRouterRecordCacheResult_HitPerTier(t *testing.T) {
-	m := newSmartRouterForCacheTest()
+	m := newTestMetricsManager(t)
 
 	m.RecordCacheResult("ETH1", "jsonrpc", "eth_blockNumber", CacheTierPrimary, CacheOutcomeHit, 5.0)
 	m.RecordCacheResult("ETH1", "jsonrpc", "eth_blockNumber", CacheTierSecondary, CacheOutcomeHit, 9.0)
@@ -42,7 +31,7 @@ func TestSmartRouterRecordCacheResult_HitPerTier(t *testing.T) {
 }
 
 func TestSmartRouterRecordCacheResult_FailedSplitsByOutcome(t *testing.T) {
-	m := newSmartRouterForCacheTest()
+	m := newTestMetricsManager(t)
 
 	m.RecordCacheResult("ETH1", "jsonrpc", "eth_blockNumber", CacheTierPrimary, CacheOutcomeMiss, 1.0)
 	m.RecordCacheResult("ETH1", "jsonrpc", "eth_blockNumber", CacheTierPrimary, CacheOutcomeMiss, 1.0)
@@ -69,7 +58,7 @@ func TestSmartRouterRecordCacheResult_FailedSplitsByOutcome(t *testing.T) {
 // sum-across-outcome that a dashboard can get wrong silently, and a future outcome
 // value recorded on neither counter would leave requests_total unexplained.
 func TestSmartRouterRecordCacheResult_TotalEqualsSuccessPlusFailedPerTier(t *testing.T) {
-	m := newSmartRouterForCacheTest()
+	m := newTestMetricsManager(t)
 
 	mixed := []struct {
 		tier    string
@@ -110,7 +99,7 @@ func TestSmartRouterRecordCacheResult_TotalEqualsSuccessPlusFailedPerTier(t *tes
 // old hit-only observation, which hid exactly the tail (errors/timeouts) that
 // matters for a network-hop secondary.
 func TestSmartRouterRecordCacheResult_LatencyObservedOnAllAttempts(t *testing.T) {
-	m := newSmartRouterForCacheTest()
+	m := newTestMetricsManager(t)
 
 	m.RecordCacheResult("ETH1", "jsonrpc", "eth_blockNumber", CacheTierPrimary, CacheOutcomeMiss, 20.0)
 	require.Equal(t, 1, testutil.CollectAndCount(m.cacheLatencyHistogram), "a miss alone must produce a latency series")
@@ -153,8 +142,7 @@ func TestClassifyCacheLookupOutcome(t *testing.T) {
 // ---- cache writes ----
 
 func TestSmartRouterRecordCacheWriteSkipped_CountsByReason(t *testing.T) {
-	m := newSmartRouterForCacheTest()
-	m.cacheWriteSkippedTotalMetric = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_cache_write_skipped"}, []string{"spec", "apiInterface", "method", "reason"})
+	m := newTestMetricsManager(t)
 
 	m.RecordCacheWriteSkipped("SOLANA", "jsonrpc", "getBlock", CacheWriteSkipReasonSize)
 	m.RecordCacheWriteSkipped("SOLANA", "jsonrpc", "getBlock", CacheWriteSkipReasonSize)
@@ -164,8 +152,7 @@ func TestSmartRouterRecordCacheWriteSkipped_CountsByReason(t *testing.T) {
 
 // A 1 MiB cap is a bucket boundary, so "entries at or under the cap" is one bucket.
 func TestSmartRouterRecordCacheEntryWritten_ObservesBodySize(t *testing.T) {
-	m := newSmartRouterForCacheTest()
-	m.cacheEntryBytesHistogram = prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "t_sr_cache_entry_bytes", Buckets: cacheEntryBytesBuckets}, []string{"spec", "apiInterface", "method"})
+	m := newTestMetricsManager(t)
 
 	m.RecordCacheEntryWritten("SOLANA", "jsonrpc", "getBlock", 900)
 	m.RecordCacheEntryWritten("SOLANA", "jsonrpc", "getBlock", 1<<20)

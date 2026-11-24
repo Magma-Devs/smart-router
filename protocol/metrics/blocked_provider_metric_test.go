@@ -3,25 +3,15 @@ package metrics
 import (
 	"testing"
 
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 )
-
-var blockedProviderLabels = []string{"spec", "apiInterface", "provider_address"}
-
-func newSmartRouterForBlockedProviderTest() *SmartRouterMetricsManager {
-	return &SmartRouterMetricsManager{
-		csmProviderBlocked: prometheus.NewGaugeVec(
-			prometheus.GaugeOpts{Name: "t_sr_provider_blocked"}, blockedProviderLabels),
-	}
-}
 
 // SetBlockedProvider was an empty function body, so no call site published anything. Assert the
 // value in both directions — the previous test only asserted that the call did not panic, which
 // an empty body also satisfies, so it passed against the very stub it was named after.
 func TestSetBlockedProvider_PublishesBothDirections(t *testing.T) {
-	m := newSmartRouterForBlockedProviderTest()
+	m := newTestMetricsManager(t)
 	g := m.csmProviderBlocked.WithLabelValues("COSMOSHUB", "tendermintrpc", "provider-1")
 
 	m.SetBlockedProvider("COSMOSHUB", "tendermintrpc", "provider-1", "http://127.0.0.1:1", true)
@@ -35,7 +25,7 @@ func TestSetBlockedProvider_PublishesBothDirections(t *testing.T) {
 // docs/METRICS.md makes that a rule for every series. Two calls that differ ONLY by endpoint
 // must land on one series rather than creating a second one keyed by the URL.
 func TestSetBlockedProvider_DoesNotLabelByNodeURL(t *testing.T) {
-	m := newSmartRouterForBlockedProviderTest()
+	m := newTestMetricsManager(t)
 
 	m.SetBlockedProvider("COSMOSHUB", "tendermintrpc", "provider-1", "https://node.example/v2/SECRET-KEY", true)
 	m.SetBlockedProvider("COSMOSHUB", "tendermintrpc", "provider-1", "https://node.example/v2/ROTATED-KEY", false)
@@ -52,7 +42,7 @@ func TestSetBlockedProvider_DoesNotLabelByNodeURL(t *testing.T) {
 // the unblock path only publishes for addresses still in the standing block list, so nothing
 // else can ever clear it.
 func TestResetBlockedProvidersMetrics_DropsProvidersNoLongerPaired(t *testing.T) {
-	m := newSmartRouterForBlockedProviderTest()
+	m := newTestMetricsManager(t)
 	m.SetBlockedProvider("COSMOSHUB", "tendermintrpc", "stays", "", true)
 	m.SetBlockedProvider("COSMOSHUB", "tendermintrpc", "leaves", "", true)
 	require.Equal(t, 2, testutil.CollectAndCount(m.csmProviderBlocked))
@@ -68,7 +58,7 @@ func TestResetBlockedProvidersMetrics_DropsProvidersNoLongerPaired(t *testing.T)
 
 // The rebase is scoped to one chain: a reset on one spec/apiInterface must not wipe another's.
 func TestResetBlockedProvidersMetrics_ScopedToOneChain(t *testing.T) {
-	m := newSmartRouterForBlockedProviderTest()
+	m := newTestMetricsManager(t)
 	m.SetBlockedProvider("COSMOSHUB", "tendermintrpc", "provider-1", "", true)
 	m.SetBlockedProvider("ETH1", "jsonrpc", "provider-1", "", true)
 

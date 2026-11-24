@@ -15,6 +15,7 @@ import (
 	"google.golang.org/protobuf/types/dynamicpb"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
+	"github.com/magma-Devs/smart-router/protocol/chainlibtest/fixture"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
@@ -37,7 +38,7 @@ func (methodRefusingBlockService) GetLatestBlock(context.Context, *dynamicpb.Mes
 // the chain fetcher used to decode the JSON as the method's protobuf reply, so the check failed as
 // "proto: bad wiretype": it read as a router that cannot parse the chain's replies (MAG-5002).
 func TestGrpcVerificationReportsTheNodesRefusal(t *testing.T) {
-	UseMockLogLevel()
+	fixture.UseMockLogLevel()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
@@ -50,7 +51,7 @@ func TestGrpcVerificationReportsTheNodesRefusal(t *testing.T) {
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	srv := grpc.NewServer()
-	srv.RegisterService(&mockGRPCServiceDesc, methodRefusingBlockService{})
+	srv.RegisterService(&fixture.BlockServiceDesc, methodRefusingBlockService{})
 	reflection.Register(srv)
 	go func() { _ = srv.Serve(lis) }()
 	t.Cleanup(srv.Stop)

@@ -343,3 +343,12 @@ func TestCompositeProtoFileRegistry_AncestorMatchDoesNotShadowReflection(t *test
 		require.Equal(t, int32(1), remote.symbolCalls.Load())
 	})
 }
+
+// ResetFileRegistryCacheForTest drops every memoized registry. Production never
+// calls this; tests that rewrite a descriptor set at a reused temp path must.
+func ResetFileRegistryCacheForTest() {
+	fileRegistryCache.Range(func(key, _ any) bool {
+		fileRegistryCache.Delete(key)
+		return true
+	})
+}

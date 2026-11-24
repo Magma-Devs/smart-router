@@ -12,9 +12,7 @@ import (
 // the caller asked for, once per request per extension.
 
 func TestRecordExtensionUnavailable_CountsEveryRequestPerExtension(t *testing.T) {
-	m := &SmartRouterMetricsManager{
-		extensionUnavailableTotal: prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_extension_unavailable"}, []string{"spec", "apiInterface", "extension"}),
-	}
+	m := newTestMetricsManager(t)
 
 	m.RecordExtensionUnavailable("ETH1", "jsonrpc", "archive")
 	m.RecordExtensionUnavailable("ETH1", "jsonrpc", "archive")

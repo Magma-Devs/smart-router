@@ -88,9 +88,7 @@ func TestMetricsServer_PageStaysUpWhenOneMetricFails(t *testing.T) {
 	healthy.Add(3)
 	registry.MustRegister(healthy)
 	registry.MustRegister(duplicatingCollector{desc: prometheus.NewDesc("test_duplicated_total", "One series reported twice.", []string{"provider_address"}, nil)})
-	m := NewSmartRouterMetricsManager(SmartRouterMetricsManagerOptions{})
-	require.NotNil(t, m)
-	mux := m.metricsMux(registry, registry)
+	mux := newTestMetricsManager(t).metricsMux(registry, registry)
 
 	first := httptest.NewRecorder()
 	mux.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/metrics", nil))

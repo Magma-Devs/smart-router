@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
+	"github.com/magma-Devs/smart-router/protocol/chainlibtest/fixture"
 	commonlib "github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
@@ -47,7 +48,7 @@ func (f *fakeTon) setRoot(root string) {
 
 func newFakeTon(t *testing.T, root string) *fakeTon {
 	t.Helper()
-	chainlib.UseMockLogLevel()
+	fixture.UseMockLogLevel()
 	f := &fakeTon{root: root, hits: map[string]int{}}
 	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()

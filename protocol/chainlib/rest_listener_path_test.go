@@ -28,7 +28,7 @@ func TestRestChainListener_LeadingSlashesCollapseBeforeTheRelay(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	stub := &restHealthRelayStub{}
+	stub := newRestHealthRelay()
 	logger, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
 	require.NoError(t, err)
 	endpoint := &routersession.RPCEndpoint{
@@ -57,7 +57,7 @@ func TestRestChainListener_LeadingSlashesCollapseBeforeTheRelay(t *testing.T) {
 		{http.MethodGet, "/cosmos/bank/v1beta1/balances/addr1", "/cosmos/bank/v1beta1/balances/addr1?"},
 	} {
 		t.Run(tc.method+" "+tc.requestPath, func(t *testing.T) {
-			before := len(stub.seen())
+			before := len(stub.sentURLs())
 			var body io.Reader
 			if tc.method == http.MethodPost {
 				body = bytes.NewReader([]byte(`{"tx_bytes":"AA==","mode":"BROADCAST_MODE_SYNC"}`))
@@ -72,7 +72,7 @@ func TestRestChainListener_LeadingSlashesCollapseBeforeTheRelay(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, http.StatusOK, response.StatusCode, string(responseBody))
 
-			seen := stub.seen()
+			seen := stub.sentURLs()
 			require.Len(t, seen, before+1, "exactly one relay per request")
 			require.Equal(t, tc.wantRelayed, seen[before])
 		})

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
+	"github.com/magma-Devs/smart-router/protocol/chainlibtest"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
@@ -66,7 +67,7 @@ func newHealthRelayFleetServing(t *testing.T, policy *CrossValidationPolicy, han
 		served.Add(1)
 		handler(w, r)
 	})
-	chainParser, _, _, closeServer, providerEndpoint, err := chainlib.CreateChainLibMocks(
+	chainParser, _, _, closeServer, providerEndpoint, err := chainlibtest.CreateChainLibMocks(
 		ctx, "ETH1", spectypes.APIInterfaceJsonRPC, upstream, nil, "../../", nil)
 	var stopOnce sync.Once
 	stopUpstream := func() {

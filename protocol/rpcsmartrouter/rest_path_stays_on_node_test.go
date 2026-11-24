@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
+	"github.com/magma-Devs/smart-router/protocol/chainlibtest"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
@@ -34,7 +34,7 @@ func TestRESTRelay_ClientPathNeverChangesTheUpstreamHost(t *testing.T) {
 
 	type upstreamRequest struct{ host, requestURI string }
 	received := make(chan upstreamRequest, 1)
-	chainParser, _, _, closeServer, endpoint, err := chainlib.CreateChainLibMocks(
+	chainParser, _, _, closeServer, endpoint, err := chainlibtest.CreateChainLibMocks(
 		ctx, "COSMOSHUB", spectypes.APIInterfaceRest,
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			received <- upstreamRequest{host: r.Host, requestURI: r.RequestURI}

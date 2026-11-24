@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
+	"github.com/magma-Devs/smart-router/protocol/chainlibtest"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
@@ -364,7 +365,7 @@ func TestRESTListener_HedgedLoserCountsAsARetry(t *testing.T) {
 	loserCancelled := make(chan struct{})
 	markLoserCancelled := sync.OnceFunc(func() { close(loserCancelled) })
 
-	parser, _, _, closeServer, slowNode, err := chainlib.CreateChainLibMocks(
+	parser, _, _, closeServer, slowNode, err := chainlibtest.CreateChainLibMocks(
 		ctx, "COSMOSHUB", spectypes.APIInterfaceRest, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path != path {
 				w.WriteHeader(http.StatusNotFound)

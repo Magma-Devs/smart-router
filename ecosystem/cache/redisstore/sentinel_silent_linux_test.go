@@ -335,7 +335,7 @@ func TestClientLogBridge(t *testing.T) {
 	cfg.Addresses = cfg.Addresses[:1]
 	seed, primary := cfg.Addresses[0], deployment.primary.Load().proxy.addr()
 
-	logged := captureLog(t, func() {
+	logged := logSink.Capture(t, func() {
 		store, err := New(cfg)
 		require.NoError(t, err)
 		defer store.Close()

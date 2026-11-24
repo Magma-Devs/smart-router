@@ -11,6 +11,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
+	"github.com/magma-Devs/smart-router/protocol/chainlibtest/fixture"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 )
@@ -91,9 +92,9 @@ type broadcastRefusalCase struct {
 }
 
 func broadcastRefusalCases() []broadcastRefusalCase {
-	tendermint := chainlib.CreateMockCosmosBroadcastSpec("COSMOSBCAST", spectypes.APIInterfaceTendermintRPC)
-	grpcSpec := chainlib.CreateMockCosmosBroadcastSpec("COSMOSBCASTG", spectypes.APIInterfaceGrpc)
-	tron := chainlib.CreateMockTronSpec("TRONBCAST")
+	tendermint := fixture.CreateMockCosmosBroadcastSpec("COSMOSBCAST", spectypes.APIInterfaceTendermintRPC)
+	grpcSpec := fixture.CreateMockCosmosBroadcastSpec("COSMOSBCASTG", spectypes.APIInterfaceGrpc)
+	tron := fixture.CreateMockTronSpec("TRONBCAST")
 	const grpcBroadcast = "cosmos.tx.v1beta1.Service/BroadcastTx"
 	grpcRequest := string([]byte{0x0a, 0x02, 0x01, 0x02, 0x10, 0x02}) // tx_bytes, mode SYNC
 	return []broadcastRefusalCase{

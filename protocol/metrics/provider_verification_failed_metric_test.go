@@ -4,7 +4,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 )
@@ -17,21 +16,18 @@ func (c *verificationClock) advance(d time.Duration) float64 {
 	return float64(c.now.Unix())
 }
 
-func newVerificationFailedManager() (*SmartRouterMetricsManager, *verificationClock) {
+func newVerificationFailedManager(t *testing.T) (*SmartRouterMetricsManager, *verificationClock) {
+	t.Helper()
 	clock := &verificationClock{now: time.Date(2026, 10, 25, 20, 0, 0, 0, time.UTC)}
-	return &SmartRouterMetricsManager{
-		providerVerificationFailed: prometheus.NewGaugeVec(
-			prometheus.GaugeOpts{Name: "t_sr_provider_verification_failed"},
-			verificationFailureLabels,
-		),
-		verificationNow: func() time.Time { return clock.now },
-	}, clock
+	m := newTestMetricsManager(t)
+	m.verificationNow = func() time.Time { return clock.now }
+	return m, clock
 }
 
 // A failing check is published valued with the unix time it started failing, and keeps
 // that start on every republish while it lasts (MAG-3950: the time it started failing).
 func TestSetProviderVerificationFailures_PublishesTheFailingCheck(t *testing.T) {
-	m, clock := newVerificationFailedManager()
+	m, clock := newVerificationFailedManager(t)
 	chainID := ProviderVerificationFailure{Scope: VerificationScopeProvider, Check: "chain-id"}
 	started := clock.advance(0)
 
@@ -49,7 +45,7 @@ func TestSetProviderVerificationFailures_PublishesTheFailingCheck(t *testing.T) 
 // one is removed. The new series keeps the time the provider started failing, so "out
 // since" survives the change of check.
 func TestSetProviderVerificationFailures_MovesToTheNewCheck(t *testing.T) {
-	m, clock := newVerificationFailedManager()
+	m, clock := newVerificationFailedManager(t)
 	started := clock.advance(0)
 	m.SetProviderVerificationFailures("XRP", "jsonrpc", "blockdaemon", "backup",
 		[]ProviderVerificationFailure{{Scope: VerificationScopeProvider, Check: "latest-block"}})
@@ -64,7 +60,7 @@ func TestSetProviderVerificationFailures_MovesToTheNewCheck(t *testing.T) {
 // A failure in another scope or service starts its own clock, and so does a failure that
 // comes back after the provider recovered.
 func TestSetProviderVerificationFailures_EachFailureStartsItsOwnClock(t *testing.T) {
-	m, clock := newVerificationFailedManager()
+	m, clock := newVerificationFailedManager(t)
 	outAt := clock.advance(0)
 	m.SetProviderVerificationFailures("ETH1", "jsonrpc", "llama", "static",
 		[]ProviderVerificationFailure{{Scope: VerificationScopeProvider, Check: "chain-id"}})
@@ -86,7 +82,7 @@ func TestSetProviderVerificationFailures_EachFailureStartsItsOwnClock(t *testing
 
 // Recovery removes the provider's series; other providers keep theirs.
 func TestSetProviderVerificationFailures_RecoveryClearsOnlyThatProvider(t *testing.T) {
-	m, clock := newVerificationFailedManager()
+	m, clock := newVerificationFailedManager(t)
 	started := clock.advance(0)
 	archive := []ProviderVerificationFailure{{Scope: VerificationScopeService, Service: "archive", Check: "pruning"}}
 	m.SetProviderVerificationFailures("ETH1", "jsonrpc", "llama", "backup", archive)
@@ -108,12 +104,7 @@ func TestSetProviderVerificationFailures_NilManager(t *testing.T) {
 
 // Each failed run is one increment, so a chart can draw one mark per run.
 func TestCountVerificationCheckFailure_OnePerRun(t *testing.T) {
-	m := &SmartRouterMetricsManager{
-		verificationCheckFailures: prometheus.NewCounterVec(
-			prometheus.CounterOpts{Name: "t_sr_provider_verification_check_failures_total"},
-			verificationFailureLabels,
-		),
-	}
+	m := newTestMetricsManager(t)
 	archive := ProviderVerificationFailure{Scope: VerificationScopeService, Service: "archive", Check: "pruning"}
 	m.CountVerificationCheckFailure("ETH1", "jsonrpc", "llama", "backup", archive)
 	m.CountVerificationCheckFailure("ETH1", "jsonrpc", "llama", "backup", archive)
@@ -127,7 +118,7 @@ func TestCountVerificationCheckFailure_OnePerRun(t *testing.T) {
 // url or the provider out, PartialFail when it switches off one service, whichever scope
 // carries that service.
 func TestSetProviderVerificationFailures_SeverityFollowsWhatTheFailureCosts(t *testing.T) {
-	m, clock := newVerificationFailedManager()
+	m, clock := newVerificationFailedManager(t)
 	started := clock.advance(0)
 	m.SetProviderVerificationFailures("ETH1", "jsonrpc", "llama", "static", []ProviderVerificationFailure{
 		{Scope: VerificationScopeProvider, Check: "chain-id"},
@@ -149,7 +140,7 @@ func TestSetProviderVerificationFailures_SeverityFollowsWhatTheFailureCosts(t *t
 // A failing Warning check is published as scope=none, severity Warning. Warning checks
 // fail independently of each other, so a new one starts its own clock (MAG-3950).
 func TestSetProviderVerificationFailures_EachWarningStartsItsOwnClock(t *testing.T) {
-	m, clock := newVerificationFailedManager()
+	m, clock := newVerificationFailedManager(t)
 	tokens := ProviderVerificationFailure{Scope: VerificationScopeNone, Check: "tokens-owner-indexed", Severity: VerificationSeverityWarning}
 	tokensAt := clock.advance(0)
 	m.SetProviderVerificationFailures("SOLANA", "jsonrpc", "llama", "static", []ProviderVerificationFailure{tokens})
@@ -170,7 +161,7 @@ func TestSetProviderVerificationFailures_EachWarningStartsItsOwnClock(t *testing
 // A caller that tracks its failures' starts (VerificationFailuresSince) publishes them as
 // they are, and a failure it no longer lists is removed (MAG-3950).
 func TestSetProviderVerificationFailuresSince_PublishesTheGivenStart(t *testing.T) {
-	m, clock := newVerificationFailedManager()
+	m, clock := newVerificationFailedManager(t)
 	started := clock.now.Add(-time.Hour)
 	tracked := VerificationFailuresSince(nil, []ProviderVerificationFailure{{Scope: VerificationScopeProvider, Check: "chain-id"}}, started)
 	m.SetProviderVerificationFailuresSince("XRP", "jsonrpc", "blockdaemon", "backup", tracked)

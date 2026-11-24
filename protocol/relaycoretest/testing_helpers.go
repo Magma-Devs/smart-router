@@ -13,8 +13,13 @@ import (
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 )
 
-// RelayProcessorMetricsMock is a mock implementation of metrics interfaces for testing
-type RelayProcessorMetricsMock struct{}
+// RelayProcessorMetricsMock is a mock implementation of metrics interfaces for testing. It records
+// nothing; GetChainIdAndApiInterface answers ChainID and APIInterface, or "testId" and
+// "testInterface" while they are empty.
+type RelayProcessorMetricsMock struct {
+	ChainID      string
+	APIInterface string
+}
 
 func (romm *RelayProcessorMetricsMock) SetRelayNodeErrorMetric(chainId, apiInterface, providerAddress, method string) {
 }
@@ -26,7 +31,10 @@ func (romm *RelayProcessorMetricsMock) RecordHedgeRelaySent(chainId string, apiI
 }
 
 func (romm *RelayProcessorMetricsMock) GetChainIdAndApiInterface() (string, string) {
-	return "testId", "testInterface"
+	if romm.ChainID == "" && romm.APIInterface == "" {
+		return "testId", "testInterface"
+	}
+	return romm.ChainID, romm.APIInterface
 }
 
 // RelayProcessorMetrics is a mock metrics implementation for tests

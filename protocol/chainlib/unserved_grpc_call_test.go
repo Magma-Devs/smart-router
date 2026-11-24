@@ -95,10 +95,12 @@ func TestUnservedCallReason(t *testing.T) {
 // attempts separately, so the listener reads the refusal first instead of relying on that pick to
 // keep the two apart.
 func TestGrpcChainListener_UnservedRefusalWinsOverNoAnswer(t *testing.T) {
-	sender := &stubRelaySender{
-		parser:       grpcParserWithSubscription(),
-		sendErr:      fmt.Errorf("failed relay, insufficient results ErrMsg: %w", common.UnservedGRPCCallError),
-		failedResult: &common.RelayResult{ClientFacing: &common.ClientFacingError{RouterErrorCode: 1012, RouterErrorName: "PROTOCOL_PROVIDER_UNAVAILABLE"}},
+	sender := &recordingRelaySender{
+		parser: grpcParserWithSubscription(),
+		send: answeringWith(
+			&common.RelayResult{ClientFacing: &common.ClientFacingError{RouterErrorCode: 1012, RouterErrorName: "PROTOCOL_PROVIDER_UNAVAILABLE"}},
+			fmt.Errorf("failed relay, insufficient results ErrMsg: %w", common.UnservedGRPCCallError),
+		),
 	}
 	conn, err := grpc.NewClient(startTestGrpcListener(t, sender), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	require.NoError(t, err)

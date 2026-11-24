@@ -3,9 +3,7 @@ package rpcsmartrouter
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -13,7 +11,6 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
-	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -29,50 +26,13 @@ const (
 	grpcDirectivesPassthroughHeader = "x-passthrough"
 )
 
-// parsingRelaySender stands in for the router behind a real gRPC listener: SendRelay
-// runs the router's own ParseRelay on exactly what the listener handed over, keeps the
-// protocol message, and answers with an empty body instead of relaying upstream.
-type parsingRelaySender struct {
-	rpcss *RPCSmartRouterServer
-
-	mu     sync.Mutex
-	parsed []chainlib.ProtocolMessage
-}
-
-func (s *parsingRelaySender) SendRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, analytics *metrics.RelayMetrics, metadataValues []pairingtypes.Metadata) (*common.RelayResult, error) {
-	protocolMessage, err := s.rpcss.ParseRelay(ctx, url, req, connectionType, dappID, consumerIp, metadataValues)
-	if err != nil {
-		return nil, err
-	}
-	s.mu.Lock()
-	s.parsed = append(s.parsed, protocolMessage)
-	s.mu.Unlock()
-	return &common.RelayResult{Reply: &pairingtypes.RelayReply{Data: []byte{}}}, nil
-}
-
-func (s *parsingRelaySender) ParseRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, metadataValues []pairingtypes.Metadata) (chainlib.ProtocolMessage, error) {
-	return s.rpcss.ParseRelay(ctx, url, req, connectionType, dappID, consumerIp, metadataValues)
-}
-
-func (s *parsingRelaySender) SendParsedRelay(ctx context.Context, analytics *metrics.RelayMetrics, protocolMessage chainlib.ProtocolMessage) (*common.RelayResult, error) {
-	return nil, errors.New("not used")
-}
-
-func (s *parsingRelaySender) only(t *testing.T) chainlib.ProtocolMessage {
-	t.Helper()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	require.Len(t, s.parsed, 1, "the call must reach the router exactly once")
-	return s.parsed[0]
-}
-
 type healthyReporter struct{}
 
 func (healthyReporter) IsHealthy() bool { return true }
 
 // dialGrpcDirectivesListener starts a real gRPC listener in front of a router that
 // parses with a one-method gRPC spec, and returns a client connection to it.
-func dialGrpcDirectivesListener(t *testing.T) (*grpc.ClientConn, *parsingRelaySender) {
+func dialGrpcDirectivesListener(t *testing.T) (*grpc.ClientConn, *routerRelaySender) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -103,7 +63,7 @@ func dialGrpcDirectivesListener(t *testing.T) (*grpc.ClientConn, *parsingRelaySe
 	parser.SetSpec(spec)
 
 	endpoint := &routersession.RPCEndpoint{NetworkAddress: "127.0.0.1:0", ChainID: "SUIT", ApiInterface: spectypes.APIInterfaceGrpc}
-	sender := &parsingRelaySender{rpcss: &RPCSmartRouterServer{chainParser: parser, listenEndpoint: endpoint}}
+	sender := &routerRelaySender{rpcss: &RPCSmartRouterServer{chainParser: parser, listenEndpoint: endpoint}, keep: true}
 	logger, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
 	require.NoError(t, err)
 

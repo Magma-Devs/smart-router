@@ -14,7 +14,6 @@ func TestComputePollInterval_FlatCadence(t *testing.T) {
 	const avg = 400 * time.Millisecond
 	flat := avg / 2 // 200ms
 	ct := &ChainTracker{
-		averageBlockTime: avg,
 		flatPollInterval: flat,
 	}
 
@@ -71,7 +70,7 @@ func TestNewChainTracker_FloorsAnUnsetPollInterval(t *testing.T) {
 		{"set", avg / 4, avg / 4},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			tracker := newCustomChainTracker(&advancingFetcher{}, ChainTrackerConfig{
+			tracker := newCustomChainTracker(newFakeFetcher(0), ChainTrackerConfig{
 				BlocksToSave:          1,
 				AverageBlockTime:      avg,
 				ServerBlockMemory:     100,

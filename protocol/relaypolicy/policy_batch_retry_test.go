@@ -9,8 +9,10 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
+	"github.com/magma-Devs/smart-router/protocol/chainlibtest"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
+	"github.com/magma-Devs/smart-router/protocol/relaycoretest"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
@@ -36,14 +38,6 @@ func (m *batchStateMachine) GetCrossValidationParams() *common.CrossValidationPa
 func (m *batchStateMachine) GetUsedProviders() *routersession.UsedProviders          { return m.usedProviders }
 func (m *batchStateMachine) SetResultsChecker(relaycore.ResultsCheckerInf)           {}
 
-type noMetrics struct{}
-
-func (noMetrics) SetRelayNodeErrorMetric(string, string, string, string)  {}
-func (noMetrics) SetRelayNodeResultMetric(string, string, string, string) {}
-func (noMetrics) GetChainIdAndApiInterface() (string, string) {
-	return "ETH1", spectypes.APIInterfaceJsonRPC
-}
-
 // batchRelayProcessor builds a RelayProcessor around a real two-element JSON-RPC batch parsed by
 // the ETH1 spec, with one provider's attempt in flight, so the summary the policy sees is the one
 // production builds for a batch.
@@ -51,7 +45,7 @@ func batchRelayProcessor(t *testing.T) (*relaycore.RelayProcessor, chainlib.Prot
 	t.Helper()
 	ctx := context.Background()
 	serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
-	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, "ETH1", spectypes.APIInterfaceJsonRPC, serverHandler, nil, "../../", nil)
+	chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, "ETH1", spectypes.APIInterfaceJsonRPC, serverHandler, nil, "../../", nil)
 	if closeServer != nil {
 		t.Cleanup(closeServer)
 	}
@@ -69,7 +63,8 @@ func batchRelayProcessor(t *testing.T) (*relaycore.RelayProcessor, chainlib.Prot
 	usedProviders.AddUsed(routersession.ConsumerSessionsMap{batchTestProvider: &routersession.SessionInfo{}}, nil)
 
 	stateMachine := &batchStateMachine{protocolMessage: protocolMessage, usedProviders: usedProviders}
-	return relaycore.NewRelayProcessor(ctx, nil, noMetrics{}, noMetrics{}, stateMachine), protocolMessage
+	metrics := &relaycoretest.RelayProcessorMetricsMock{ChainID: "ETH1", APIInterface: spectypes.APIInterfaceJsonRPC}
+	return relaycore.NewRelayProcessor(ctx, nil, metrics, metrics, stateMachine), protocolMessage
 }
 
 // completeAttempt finishes the in-flight attempt the way the relay goroutine does (release the

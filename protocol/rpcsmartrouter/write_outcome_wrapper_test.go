@@ -36,7 +36,7 @@ func newWriteOutcomeProcessor(t *testing.T, msg chainlib.ProtocolMessage, dispat
 		usedProviders.AddUsed(sessions, nil)
 	}
 	sm := &budgetCallSiteStateMachine{usedProviders: usedProviders, protocolMessage: msg}
-	return relaycore.NewRelayProcessor(context.Background(), nil, cvGuardMetrics{}, cvGuardMetrics{},
+	return relaycore.NewRelayProcessor(context.Background(), nil, hubRESTMetrics, hubRESTMetrics,
 		sm)
 }
 
@@ -268,4 +268,9 @@ func TestWriteOutcomeIsUnknown_SecondBatchWithASilentEndpoint(t *testing.T) {
 
 	require.True(t, writeOutcomeIsUnknown(msg, processor),
 		"the retry's endpoint is still silent and may have broadcast; telling the customer the write failed invites a resubmit")
+}
+
+// writeOutcomeIsUnknown is unclearWriteOutcomeFor as a yes or no.
+func writeOutcomeIsUnknown(protocolMessage chainlib.ProtocolMessage, relayProcessor *relaycore.RelayProcessor) bool {
+	return unclearWriteOutcomeFor(protocolMessage, relayProcessor) != nil
 }

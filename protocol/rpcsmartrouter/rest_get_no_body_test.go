@@ -8,6 +8,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
+	"github.com/magma-Devs/smart-router/protocol/chainlibtest"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	specutils "github.com/magma-Devs/smart-router/utils/keeper"
@@ -34,7 +35,7 @@ func newRESTWireFixture(t *testing.T) *restWireFixture {
 	t.Helper()
 	ctx := t.Context()
 	received := make(chan restWireRequest, 1)
-	parser, _, _, closeServer, endpoint, err := chainlib.CreateChainLibMocks(
+	parser, _, _, closeServer, endpoint, err := chainlibtest.CreateChainLibMocks(
 		ctx, "COSMOSHUB", spectypes.APIInterfaceRest, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			data, readErr := io.ReadAll(r.Body)
 			assert.NoError(t, readErr)

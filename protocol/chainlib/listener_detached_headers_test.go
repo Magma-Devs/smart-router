@@ -2,53 +2,29 @@ package chainlib
 
 import (
 	"context"
-	"errors"
 	"io"
 	"net/http"
 	"net/http/httptrace"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
-	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils/rand"
 	"github.com/stretchr/testify/require"
 )
 
-// headerKeepingRelay is a RelaySender that keeps the metadata of every relay it is handed, the way
-// the router keeps a pinned provider name past the request: as a session-map key and a metric label.
-type headerKeepingRelay struct {
-	mu   sync.Mutex
-	kept [][]pairingtypes.Metadata
-}
-
-func (r *headerKeepingRelay) SendRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, analytics *metrics.RelayMetrics, metadataValues []pairingtypes.Metadata) (*common.RelayResult, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.kept = append(r.kept, metadataValues)
-	return &common.RelayResult{Reply: &pairingtypes.RelayReply{Data: []byte(`{"jsonrpc":"2.0","id":1,"result":"0x1"}`)}, StatusCode: http.StatusOK}, nil
-}
-
-func (r *headerKeepingRelay) ParseRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, metadata []pairingtypes.Metadata) (ProtocolMessage, error) {
-	return nil, errors.New("not used")
-}
-
-func (r *headerKeepingRelay) SendParsedRelay(ctx context.Context, analytics *metrics.RelayMetrics, protocolMessage ProtocolMessage) (*common.RelayResult, error) {
-	return nil, errors.New("not used")
-}
-
-// keptValues reads, now, the value each relay was handed for header name.
-func (r *headerKeepingRelay) keptValues(name string) []string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	values := make([]string, len(r.kept))
-	for i, metadata := range r.kept {
-		for _, md := range metadata {
+// keptValues reads, now, the value each relay was handed for header name. The relay sender keeps
+// the metadata of every relay, the way the router keeps a pinned provider name past the request:
+// as a session-map key and a metric label.
+func keptValues(relay *recordingRelaySender, name string) []string {
+	sends := relay.sends()
+	values := make([]string, len(sends))
+	for i, call := range sends {
+		for _, md := range call.metadata {
 			if strings.EqualFold(md.Name, name) {
 				values[i] = md.Value
 			}
@@ -97,7 +73,7 @@ func TestListeners_KeepNoHeaderPastTheRequest(t *testing.T) {
 			defer cancel()
 			logger, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
 			require.NoError(t, err)
-			relay := &headerKeepingRelay{}
+			relay := &recordingRelaySender{send: answering(jsonRPCResultReply)}
 			listener := tc.newListener(ctx, &routersession.RPCEndpoint{
 				NetworkAddress:  "127.0.0.1:0",
 				ChainID:         "COSMOSHUB",
@@ -134,7 +110,7 @@ func TestListeners_KeepNoHeaderPastTheRequest(t *testing.T) {
 			}
 			require.Equal(t, []bool{false, true}, reused, "both requests on one connection, or the second cannot reach the first one's buffer")
 
-			require.Equal(t, []string{"ethprimaryprovider2", "tests.simulator.sim"}, relay.keptValues(common.SELECT_PROVIDER_HEADER_NAME),
+			require.Equal(t, []string{"ethprimaryprovider2", "tests.simulator.sim"}, keptValues(relay, common.SELECT_PROVIDER_HEADER_NAME),
 				"what the first relay was handed changed under it")
 		})
 	}

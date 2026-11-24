@@ -26,7 +26,8 @@ var noAnswerTransportError = errors.New(`failed relay, insufficient results ErrM
 // trailer.
 func callGRPCListenerFailing(t *testing.T, cf common.ClientFacingError) (*status.Status, metadata.MD) {
 	t.Helper()
-	sender := &stubRelaySender{parser: grpcParserWithSubscription(), sendErr: noAnswerTransportError, failedResult: &common.RelayResult{ClientFacing: &cf}}
+	sender := newGrpcRelay()
+	sender.send = answeringWith(&common.RelayResult{ClientFacing: &cf}, noAnswerTransportError)
 	conn, err := grpc.NewClient(startTestGrpcListener(t, sender), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close() })

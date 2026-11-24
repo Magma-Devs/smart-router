@@ -5,20 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 )
-
-func newSmartRouterForOptimizerTest(client *ConsumerOptimizerQoSClient) *SmartRouterMetricsManager {
-	scoreLabels := []string{"spec", "apiInterface", "endpoint_id", "score_type"}
-	optimizerLabels := []string{"spec", "endpoint_id", "score_type"}
-	return &SmartRouterMetricsManager{
-		endpointSelectionScore:  prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "t_endpoint_sel"}, scoreLabels),
-		optimizerSelectionScore: prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "t_optimizer_sel"}, optimizerLabels),
-		optimizerQoSClient:      client,
-	}
-}
 
 func TestStartSelectionStatsUpdater_WritesToOptimizerMetric(t *testing.T) {
 	coqc := NewConsumerOptimizerQoSClient("addr", NoopUsageSink{})
@@ -34,7 +23,8 @@ func TestStartSelectionStatsUpdater_WritesToOptimizerMetric(t *testing.T) {
 		},
 	})
 
-	m := newSmartRouterForOptimizerTest(coqc)
+	m := newTestMetricsManager(t)
+	m.optimizerQoSClient = coqc
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -61,7 +51,8 @@ func TestStartSelectionStatsUpdater_DoesNotWriteToEndpointMetric(t *testing.T) {
 		},
 	})
 
-	m := newSmartRouterForOptimizerTest(coqc)
+	m := newTestMetricsManager(t)
+	m.optimizerQoSClient = coqc
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -77,7 +68,7 @@ func TestStartSelectionStatsUpdater_DoesNotWriteToEndpointMetric(t *testing.T) {
 }
 
 func TestSetProviderSelected_WritesToEndpointMetric(t *testing.T) {
-	m := newSmartRouterForOptimizerTest(nil)
+	m := newTestMetricsManager(t)
 
 	scores := []ProviderSelectionScores{
 		{

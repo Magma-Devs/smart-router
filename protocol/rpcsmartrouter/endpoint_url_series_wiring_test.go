@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
+	"github.com/magma-Devs/smart-router/protocol/chainlibtest"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/endpointstate"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
@@ -108,7 +109,7 @@ func TestDirectRelay_CountsTheRelayOnTheURLItWentTo(t *testing.T) {
 	defer cancel()
 	const provider = "provider@mag4204Relays"
 	const path = "/cosmos/base/tendermint/v1beta1/blocks/17"
-	parser, _, _, closeServer, endpoint, err := chainlib.CreateChainLibMocks(
+	parser, _, _, closeServer, endpoint, err := chainlibtest.CreateChainLibMocks(
 		ctx, "COSMOSHUB", spectypes.APIInterfaceRest, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"block":{"header":{"height":"17"}}}`))

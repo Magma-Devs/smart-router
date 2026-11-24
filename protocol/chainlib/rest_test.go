@@ -2,13 +2,11 @@ package chainlib
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -76,69 +74,16 @@ func TestRestChainProxy(t *testing.T) {
 }
 
 func TestParsingRequestedBlocksHeadersRest(t *testing.T) {
-	ctx := context.Background()
-	callbackHeaderNameToCheck := ""
-	serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Handle the incoming request and provide the desired response
-		w.WriteHeader(http.StatusOK)
-		header := r.Header.Get(callbackHeaderNameToCheck)
-		if header != "" {
-			fmt.Fprint(w, `{"block": { "header": {"height": "244590"}}}`)
-		} else {
-			fmt.Fprint(w, `{"block": { "header": {"height": "244591"}}}`)
-		}
-	})
-	chainParser, chainRouter, _, closeServer, _, err := CreateChainLibMocks(ctx, "COSMOSHUB", spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
-	require.NoError(t, err)
-	defer func() {
-		if closeServer != nil {
-			closeServer()
-		}
-	}()
-	parsingForCrafting, apiCollection, ok := chainParser.GetParsingByTag(spectypes.FUNCTION_TAG_GET_BLOCKNUM)
-	require.True(t, ok)
-	collectionData := apiCollection.CollectionData
-	headerParsingDirective, _, ok := chainParser.GetParsingByTag(spectypes.FUNCTION_TAG_SET_LATEST_IN_METADATA)
-	callbackHeaderNameToCheck = headerParsingDirective.GetApiName() // this causes the callback to modify the response to simulate a real behavior
-	require.True(t, ok)
-	block := 244590
-	metadata := []pairingtypes.Metadata{{Name: headerParsingDirective.GetApiName(), Value: fmt.Sprintf(headerParsingDirective.FunctionTemplate, block)}}
-
-	tests := []struct {
-		desc           string
-		metadata       []pairingtypes.Metadata
-		block          int64
-		requestedBlock int64
-	}{
-		{
-			desc:           "no metadata",
-			metadata:       []pairingtypes.Metadata{},
-			block:          244591,
-			requestedBlock: spectypes.LATEST_BLOCK,
-		},
-		{
-			desc:           "with-metadata",
-			metadata:       metadata,
-			block:          244590,
-			requestedBlock: 244590,
-		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.desc, func(t *testing.T) {
-			chainMessage, err := chainParser.ParseMsg(parsingForCrafting.ApiName, []byte{}, collectionData.Type, test.metadata, extensionslib.ExtensionInfo{LatestBlock: 0})
-			require.NoError(t, err)
-			require.NoError(t, err)
-			latestReqBlock, _ := chainMessage.RequestedBlock()
-			require.Equal(t, test.requestedBlock, latestReqBlock)
-			reply, _, _, err := chainRouter.SendNodeMsg(ctx, chainMessage, nil)
-			require.NoError(t, err)
-			parserInput, err := FormatResponseForParsing(reply.RelayReply, chainMessage)
-			require.NoError(t, err)
-			parsedInput := parser.ParseBlockFromReply(parserInput, parsingForCrafting.ResultParsing, nil)
-			require.Equal(t, test.block, parsedInput.GetBlock())
+	requireLatestInMetadataSetsTheRequestedBlock(t, "COSMOSHUB", spectypes.APIInterfaceRest, func(headerName *string) http.HandlerFunc {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			if r.Header.Get(*headerName) != "" {
+				fmt.Fprint(w, `{"block": { "header": {"height": "244590"}}}`)
+			} else {
+				fmt.Fprint(w, `{"block": { "header": {"height": "244591"}}}`)
+			}
 		})
-	}
+	})
 }
 
 func TestSettingRequestedBlocksHeadersRest(t *testing.T) {
@@ -287,40 +232,10 @@ func TestRegexParsing(t *testing.T) {
 	}
 }
 
-func TestRestChainListener_Shutdown_NilApp(t *testing.T) {
-	listener := &RestChainListener{}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	// Should not panic when Shutdown is called before Serve has captured an app.
-	require.NoError(t, listener.Shutdown(ctx))
-}
-
-// restHealthRelayStub is the slice of RelaySender the rest relay path uses: it records
-// what it was asked to relay, so a test can prove the relay was never reached.
-type restHealthRelayStub struct {
-	mu   sync.Mutex
-	urls []string
-}
-
-func (s *restHealthRelayStub) SendRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, analytics *metrics.RelayMetrics, metadataValues []pairingtypes.Metadata) (*common.RelayResult, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.urls = append(s.urls, url)
-	return &common.RelayResult{Reply: &pairingtypes.RelayReply{Data: []byte(`{"relayed":true}`)}, StatusCode: http.StatusOK}, nil
-}
-
-func (s *restHealthRelayStub) ParseRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, metadata []pairingtypes.Metadata) (ProtocolMessage, error) {
-	return nil, errors.New("not used")
-}
-
-func (s *restHealthRelayStub) SendParsedRelay(ctx context.Context, analytics *metrics.RelayMetrics, protocolMessage ProtocolMessage) (*common.RelayResult, error) {
-	return nil, errors.New("not used")
-}
-
-func (s *restHealthRelayStub) seen() []string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return append([]string(nil), s.urls...)
+// newRestHealthRelay is the rest relay path behind the health route: it answers every relay, and
+// its sentURLs() tells a test whether the relay was reached.
+func newRestHealthRelay() *recordingRelaySender {
+	return &recordingRelaySender{send: answering(`{"relayed":true}`)}
 }
 
 // The health route hands a websocket upgrade past the health handler so a client
@@ -338,7 +253,7 @@ func TestRestChainListener_HealthPathNeverReachesTheRelay(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 
-			stub := &restHealthRelayStub{}
+			stub := newRestHealthRelay()
 			logger, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
 			require.NoError(t, err)
 			endpoint := &routersession.RPCEndpoint{
@@ -386,36 +301,9 @@ func TestRestChainListener_HealthPathNeverReachesTheRelay(t *testing.T) {
 			require.Equal(t, "Health status OK", string(upgradeBody),
 				"an upgrade on the health path must still be answered by the health check, not the chain")
 
-			require.Empty(t, stub.seen(), "the health path must never reach the relay")
+			require.Empty(t, stub.sentURLs(), "the health path must never reach the relay")
 		})
 	}
-}
-
-// restBodyRelayStub records the method and body of every request the listener relays.
-type restBodyRelayStub struct {
-	restHealthRelayStub
-	relayed []restRelayedRequest
-}
-
-type restRelayedRequest struct {
-	method string
-	body   string
-}
-
-func (s *restBodyRelayStub) SendRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, analytics *metrics.RelayMetrics, metadataValues []pairingtypes.Metadata) (*common.RelayResult, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.relayed = append(s.relayed, restRelayedRequest{method: connectionType, body: req})
-	return &common.RelayResult{Reply: &pairingtypes.RelayReply{Data: []byte(`{}`)}, StatusCode: http.StatusOK}, nil
-}
-
-func (s *restBodyRelayStub) last() restRelayedRequest {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if len(s.relayed) == 0 {
-		return restRelayedRequest{}
-	}
-	return s.relayed[len(s.relayed)-1]
 }
 
 // The listener routes POST to its own handler and every other method to the catch-all.
@@ -429,7 +317,7 @@ func TestRestChainListener_RelaysTheBodyOfMethodsThatCarryOne(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	stub := &restBodyRelayStub{}
+	stub := &recordingRelaySender{send: answering(`{}`)}
 	logger, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
 	require.NoError(t, err)
 	endpoint := &routersession.RPCEndpoint{
@@ -472,19 +360,11 @@ func TestRestChainListener_RelaysTheBodyOfMethodsThatCarryOne(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, http.StatusOK, resp.StatusCode)
 
-			got := stub.last()
-			require.Equal(t, tc.method, got.method)
-			require.Equal(t, tc.wantBody, got.body)
+			got := stub.lastSend()
+			require.Equal(t, tc.method, got.connectionType)
+			require.Equal(t, tc.wantBody, got.req)
 		})
 	}
-}
-
-// restRefusingRelayStub answers every relay with APINotSupportedError, the error ParseRelay
-// returns for a verb the spec does not declare.
-type restRefusingRelayStub struct{ restHealthRelayStub }
-
-func (s *restRefusingRelayStub) SendRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, analytics *metrics.RelayMetrics, metadataValues []pairingtypes.Metadata) (*common.RelayResult, error) {
-	return nil, common.APINotSupportedError
 }
 
 // The catch-all handler maps an undeclared api to 501; the POST handler used to answer the same
@@ -502,7 +382,7 @@ func TestRestListener_UndeclaredVerbIs501OnEveryHandler(t *testing.T) {
 		ChainID:         "COSMOSHUB",
 		ApiInterface:    "rest",
 		HealthCheckPath: common.DEFAULT_HEALTH_PATH,
-	}, &restRefusingRelayStub{}, alwaysHealthyReporter{}, logger)
+	}, &recordingRelaySender{send: answeringWith(nil, common.APINotSupportedError)}, alwaysHealthyReporter{}, logger)
 	go listener.Serve(ctx, common.ConsumerCmdFlags{})
 	var addr string
 	for deadline := time.Now().Add(3 * time.Second); addr == "" && time.Now().Before(deadline); {

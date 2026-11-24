@@ -16,6 +16,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
+	"github.com/magma-Devs/smart-router/protocol/chainlibtest"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/endpointtip"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
@@ -60,7 +61,7 @@ func failedReplyInterfaces() []failedReplyInterface {
 	mockParser := func(chainID, apiInterface string) func(t *testing.T) chainlib.ChainParser {
 		return func(t *testing.T) chainlib.ChainParser {
 			t.Helper()
-			parser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(context.Background(), chainID, apiInterface,
+			parser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(context.Background(), chainID, apiInterface,
 				http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }), nil, "../../", nil)
 			require.NoError(t, err)
 			if closeServer != nil {
@@ -502,7 +503,7 @@ func TestSendParsedRelay_ACrossValidatedRequestThatEndsBeforeDispatchHasNoVerdic
 	ctx := context.Background()
 	logs, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
 	require.NoError(t, err)
-	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, "ETH1", spectypes.APIInterfaceJsonRPC,
+	chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, "ETH1", spectypes.APIInterfaceJsonRPC,
 		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }), nil, "../../", nil)
 	if closeServer != nil {
 		t.Cleanup(closeServer)

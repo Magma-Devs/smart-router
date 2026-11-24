@@ -14,6 +14,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
+	"github.com/magma-Devs/smart-router/protocol/chainlibtest"
 	common "github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	"github.com/magma-Devs/smart-router/protocol/relaycoretest"
@@ -93,7 +94,7 @@ func (srsm *SmartRouterRelaySenderMock) ParseRelay(
 		w.WriteHeader(http.StatusOK)
 	})
 	specId := "ETH1"
-	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceJsonRPC, serverHandler, nil, "../../", []string{"archive"})
+	chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceJsonRPC, serverHandler, nil, "../../", []string{"archive"})
 	if err != nil {
 		return nil, err
 	}
@@ -121,7 +122,7 @@ func TestConsumerStateMachineHappyFlow(t *testing.T) {
 			w.WriteHeader(http.StatusOK)
 		})
 		specId := "COSMOSHUB"
-		chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
+		chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 		if closeServer != nil {
 			defer closeServer()
 		}
@@ -193,7 +194,7 @@ func TestConsumerStateMachineExhaustRetries(t *testing.T) {
 			w.WriteHeader(http.StatusOK)
 		})
 		specId := "COSMOSHUB"
-		chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
+		chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 		if closeServer != nil {
 			defer closeServer()
 		}
@@ -248,7 +249,7 @@ func TestSmartRouterStateMachineRetryKeepsTheRequestIntact(t *testing.T) {
 			w.WriteHeader(http.StatusOK)
 		})
 		specId := "ETH1"
-		chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceJsonRPC, serverHandler, nil, "../../", nil)
+		chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceJsonRPC, serverHandler, nil, "../../", nil)
 		if closeServer != nil {
 			defer closeServer()
 		}
@@ -350,7 +351,7 @@ func TestSmartRouterStateMachineCircuitBreakerOnPairingErrors(t *testing.T) {
 			w.WriteHeader(http.StatusOK)
 		})
 		specId := "COSMOSHUB"
-		chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
+		chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 		if closeServer != nil {
 			defer closeServer()
 		}
@@ -399,7 +400,7 @@ func TestSmartRouterStateMachineCircuitBreakerResetsOnSuccess(t *testing.T) {
 			w.WriteHeader(http.StatusOK)
 		})
 		specId := "COSMOSHUB"
-		chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
+		chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 		if closeServer != nil {
 			defer closeServer()
 		}
@@ -455,7 +456,7 @@ func TestSmartRouterStateMachineCircuitBreakerResetsOnDifferentError(t *testing.
 			w.WriteHeader(http.StatusOK)
 		})
 		specId := "COSMOSHUB"
-		chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
+		chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 		if closeServer != nil {
 			defer closeServer()
 		}
@@ -514,7 +515,7 @@ func TestProcessingContextTimeoutEnforcement(t *testing.T) {
 			w.WriteHeader(http.StatusOK)
 		})
 		specId := "COSMOSHUB"
-		chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
+		chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 		if closeServer != nil {
 			defer closeServer()
 		}
@@ -610,7 +611,7 @@ func TestProcessingContextStillValidAllowsRetries(t *testing.T) {
 			w.WriteHeader(http.StatusOK)
 		})
 		specId := "COSMOSHUB"
-		chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
+		chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 		if closeServer != nil {
 			defer closeServer()
 		}
@@ -688,7 +689,7 @@ func TestProcessingContextRaceCondition(t *testing.T) {
 			w.WriteHeader(http.StatusOK)
 		})
 		specId := "COSMOSHUB"
-		chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
+		chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 		if closeServer != nil {
 			defer closeServer()
 		}
@@ -775,7 +776,7 @@ func TestSmartRouterStateMachineBatchRequestRetryCondition(t *testing.T) {
 			w.WriteHeader(http.StatusOK)
 		})
 		specId := "ETH1"
-		chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceJsonRPC, serverHandler, nil, "../../", nil)
+		chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceJsonRPC, serverHandler, nil, "../../", nil)
 		if closeServer != nil {
 			defer closeServer()
 		}
@@ -829,7 +830,7 @@ func TestSmartRouterStateMachineBatchRequestRetryCondition(t *testing.T) {
 			w.WriteHeader(http.StatusOK)
 		})
 		specId := "ETH1"
-		chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceJsonRPC, serverHandler, nil, "../../", nil)
+		chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceJsonRPC, serverHandler, nil, "../../", nil)
 		if closeServer != nil {
 			defer closeServer()
 		}
@@ -860,7 +861,7 @@ func TestSmartRouterStateMachineBatchRequestRetryCondition(t *testing.T) {
 			w.WriteHeader(http.StatusOK)
 		})
 		specId := "ETH1"
-		chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceJsonRPC, serverHandler, nil, "../../", nil)
+		chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceJsonRPC, serverHandler, nil, "../../", nil)
 		if closeServer != nil {
 			defer closeServer()
 		}
@@ -1061,7 +1062,7 @@ func TestSmartRouterStateMachineRetryLimit(t *testing.T) {
 				w.WriteHeader(http.StatusOK)
 			})
 			specId := "COSMOSHUB"
-			chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
+			chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 			if closeServer != nil {
 				defer closeServer()
 			}
@@ -1108,7 +1109,7 @@ func TestSmartRouterStateMachine_ForbidCallerCV(t *testing.T) {
 	ctx := context.Background()
 	serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	specId := "ETH1"
-	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceJsonRPC, serverHandler, nil, "../../", nil)
+	chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceJsonRPC, serverHandler, nil, "../../", nil)
 	if closeServer != nil {
 		defer closeServer()
 	}
@@ -1175,7 +1176,7 @@ func TestSmartRouterStateMachine_CallerCVHeadersOnAWrite(t *testing.T) {
 	ctx := context.Background()
 	serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	specId := "ETH1"
-	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceJsonRPC, serverHandler, nil, "../../", nil)
+	chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceJsonRPC, serverHandler, nil, "../../", nil)
 	if closeServer != nil {
 		defer closeServer()
 	}

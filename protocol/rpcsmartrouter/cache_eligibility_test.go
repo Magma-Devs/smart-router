@@ -12,6 +12,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
+	"github.com/magma-Devs/smart-router/protocol/chainlibtest/fixture"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
@@ -106,7 +107,7 @@ func TestCacheExclusionReasonRefusesWalletdMempoolAndPeerReads(t *testing.T) {
 	for _, name := range declared {
 		apis = append(apis, &spectypes.Api{Name: name, Enabled: true})
 	}
-	spec := chainlib.CreateMockSpec()
+	spec := fixture.CreateMockSpec()
 	spec.ApiCollections = []*spectypes.ApiCollection{{
 		Enabled:        true,
 		CollectionData: spectypes.CollectionData{ApiInterface: spectypes.APIInterfaceRest, Type: http.MethodGet},

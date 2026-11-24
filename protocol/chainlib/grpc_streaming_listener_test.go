@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
-	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
@@ -72,65 +71,17 @@ func (s *stubGRPCSubscriptionManager) ClientKey(dappID, consumerIp, connectionUn
 	return dappID + ":" + consumerIp + ":" + connectionUniqueId
 }
 
-// stubRelaySender implements the slice of RelaySender the streaming callback uses, and
-// the unary path's SendRelay when a reply is configured.
-type stubRelaySender struct {
-	parser     *GrpcChainParser
-	parseErr   error
-	parseCalls int
-	reply      []byte // when set, SendRelay answers with it instead of refusing the call
-	sendErr    error  // when set, SendRelay fails with it
-	// failedResult is the result SendRelay returns beside sendErr, as a relay that recorded its
-	// failure does; nil when unset.
-	failedResult *common.RelayResult
-
-	mu      sync.Mutex
-	tracing *tracingIds // the caller ids on the context of the last ParseRelay or SendRelay
+// newGrpcRelay parses every call with grpcParserWithSubscription's parser. Its SendRelay is not
+// used unless the test gives it a send hook.
+func newGrpcRelay() *recordingRelaySender {
+	return &recordingRelaySender{parser: grpcParserWithSubscription()}
 }
 
-func (s *stubRelaySender) SendRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, analytics *metrics.RelayMetrics, metadataValues []pairingtypes.Metadata) (*common.RelayResult, error) {
-	s.noteTracing(ctx)
-	if s.sendErr != nil {
-		return s.failedResult, s.sendErr
-	}
-	if s.reply == nil {
-		return nil, errors.New("not used")
-	}
-	return &common.RelayResult{Reply: &pairingtypes.RelayReply{Data: s.reply}}, nil
-}
-
-func (s *stubRelaySender) noteTracing(ctx context.Context) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	ids := tracingIdsFromContext(ctx)
-	s.tracing = &ids
-}
-
-// lastTracing reports the caller ids seen on the most recent call, and whether there was one.
-func (s *stubRelaySender) lastTracing() (tracingIds, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.tracing == nil {
-		return tracingIds{}, false
-	}
-	return *s.tracing, true
-}
-
-func (s *stubRelaySender) ParseRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, metadata []pairingtypes.Metadata) (ProtocolMessage, error) {
-	s.noteTracing(ctx)
-	s.parseCalls++
-	if s.parseErr != nil {
-		return nil, s.parseErr
-	}
-	chainMessage, err := s.parser.ParseMsg(url, []byte(req), connectionType, metadata, extensionslib.ExtensionInfo{LatestBlock: 0})
-	if err != nil {
-		return nil, err
-	}
-	return NewProtocolMessage(chainMessage, nil, nil, dappID, consumerIp), nil
-}
-
-func (s *stubRelaySender) SendParsedRelay(ctx context.Context, analytics *metrics.RelayMetrics, protocolMessage ProtocolMessage) (*common.RelayResult, error) {
-	return nil, errors.New("not used")
+// newGrpcRelayAnswering is newGrpcRelay answering every unary call with body.
+func newGrpcRelayAnswering(body string) *recordingRelaySender {
+	relay := newGrpcRelay()
+	relay.send = answering(body)
+	return relay
 }
 
 // --- fixtures ---------------------------------------------------------------
@@ -175,17 +126,19 @@ func grpcParserWithSubscription() *GrpcChainParser {
 	return parser
 }
 
-func newStreamingListener(t *testing.T, sender *stubRelaySender) *GrpcChainListener {
+func newStreamingListener(t *testing.T, sender *recordingRelaySender) *GrpcChainListener {
 	t.Helper()
 	logger, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
 	require.NoError(t, err)
+	parser, ok := sender.parser.(*GrpcChainParser)
+	require.True(t, ok, "a streaming listener needs a gRPC parser, got %T", sender.parser)
 	return &GrpcChainListener{
 		chainListenerBase: chainListenerBase{
 			endpoint:    &routersession.RPCEndpoint{ChainID: "SUI", ApiInterface: spectypes.APIInterfaceGrpc},
 			relaySender: sender,
 			logger:      logger,
 		},
-		chainParser: sender.parser,
+		chainParser: parser,
 	}
 }
 
@@ -264,7 +217,7 @@ func TestSpecSubscriptionTagGatesStreamingCallback(t *testing.T) {
 // a spec-declared streaming method reaches StartSubscription and its per-client channel
 // comes back as the payload channel grpcproxy pumps.
 func TestStreamRelayCallback_StreamsSubscription(t *testing.T) {
-	sender := &stubRelaySender{parser: grpcParserWithSubscription()}
+	sender := newGrpcRelay()
 	listener := newStreamingListener(t, sender)
 	manager := newStubGRPCSubscriptionManager()
 
@@ -297,7 +250,7 @@ func TestStreamRelayCallback_StreamsSubscription(t *testing.T) {
 // frame the client actually receives — those are application/grpc, a header the HTTP/2
 // transport writes itself. Forwarding the ack's metadata wholesale sent both.
 func TestStreamRelayCallback_DropsTransportOwnedHeaders(t *testing.T) {
-	sender := &stubRelaySender{parser: grpcParserWithSubscription()}
+	sender := newGrpcRelay()
 	listener := newStreamingListener(t, sender)
 	manager := newStubGRPCSubscriptionManager()
 
@@ -344,7 +297,7 @@ func TestStreamResponseHeaders_FiltersReservedKeys(t *testing.T) {
 // TestStreamRelayCallback_UnaryFallsThrough proves ordinary gRPC queries are untouched:
 // no subscription is started and the proxy is told to use the unary path.
 func TestStreamRelayCallback_UnaryFallsThrough(t *testing.T) {
-	sender := &stubRelaySender{parser: grpcParserWithSubscription()}
+	sender := newGrpcRelay()
 	listener := newStreamingListener(t, sender)
 	manager := newStubGRPCSubscriptionManager()
 
@@ -357,7 +310,7 @@ func TestStreamRelayCallback_UnaryFallsThrough(t *testing.T) {
 // TestStreamRelayCallback_UnparseableFallsThrough keeps error reporting where it was:
 // an unknown method must produce the unary path's existing error, not a new one.
 func TestStreamRelayCallback_UnparseableFallsThrough(t *testing.T) {
-	sender := &stubRelaySender{parser: grpcParserWithSubscription(), parseErr: errors.New("api not supported")}
+	sender := &recordingRelaySender{parse: func(relayCall) (ProtocolMessage, error) { return nil, errors.New("api not supported") }, parser: grpcParserWithSubscription()}
 	listener := newStreamingListener(t, sender)
 	manager := newStubGRPCSubscriptionManager()
 
@@ -370,7 +323,7 @@ func TestStreamRelayCallback_UnparseableFallsThrough(t *testing.T) {
 // TestStreamRelayCallback_ReleasesClientOnClose covers the disconnect half: the Close
 // grpcproxy runs when the client stream ends must drop this client upstream.
 func TestStreamRelayCallback_ReleasesClientOnClose(t *testing.T) {
-	sender := &stubRelaySender{parser: grpcParserWithSubscription()}
+	sender := newGrpcRelay()
 	listener := newStreamingListener(t, sender)
 	manager := newStubGRPCSubscriptionManager()
 
@@ -391,7 +344,7 @@ func TestStreamRelayCallback_ReleasesClientOnClose(t *testing.T) {
 // TestStreamRelayCallback_StartFailurePropagates: a failed subscribe (no endpoints,
 // rate limit, reflection down) must surface to the client instead of an empty stream.
 func TestStreamRelayCallback_StartFailurePropagates(t *testing.T) {
-	sender := &stubRelaySender{parser: grpcParserWithSubscription()}
+	sender := newGrpcRelay()
 	listener := newStreamingListener(t, sender)
 	manager := newStubGRPCSubscriptionManager()
 	manager.startErr = errors.New("no gRPC endpoints available")
@@ -404,7 +357,7 @@ func TestStreamRelayCallback_StartFailurePropagates(t *testing.T) {
 
 // reportingRelaySender records the subscription requests a listener reports.
 type reportingRelaySender struct {
-	*stubRelaySender
+	*recordingRelaySender
 	mu      sync.Mutex
 	reports []subscriptionReport
 }
@@ -441,8 +394,8 @@ func TestStreamRelayCallback_ReportsEachStreamOpen(t *testing.T) {
 		{"a unary call", unaryApiName, nil, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			sender := &reportingRelaySender{stubRelaySender: &stubRelaySender{parser: grpcParserWithSubscription()}}
-			listener := newStreamingListener(t, sender.stubRelaySender)
+			sender := &reportingRelaySender{recordingRelaySender: newGrpcRelay()}
+			listener := newStreamingListener(t, sender.recordingRelaySender)
 			listener.relaySender = sender
 			manager := newStubGRPCSubscriptionManager()
 			manager.startErr = tc.startErr
@@ -468,7 +421,7 @@ func TestStreamRelayCallback_ReportsEachStreamOpen(t *testing.T) {
 // leaking: once the client stream's context is done nobody reads the payload channel,
 // so an unconditional send would park this goroutine for the process lifetime.
 func TestForwardSubscriptionReplies_StopsWhenClientGone(t *testing.T) {
-	sender := &stubRelaySender{parser: grpcParserWithSubscription()}
+	sender := newGrpcRelay()
 	listener := newStreamingListener(t, sender)
 
 	replies := make(chan *pairingtypes.RelayReply, 4)

@@ -14,7 +14,7 @@ import (
 	commonlib "github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/endpointstate"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
-	"github.com/magma-Devs/smart-router/protocol/statetracker"
+	"github.com/magma-Devs/smart-router/protocol/staticspec"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/magma-Devs/smart-router/utils/rand"
 	"github.com/magma-Devs/smart-router/version"
@@ -57,7 +57,7 @@ func startTesting(ctx context.Context, rpcEndpoints []*routersession.RPCProvider
 				ChainID:      rpcProviderEndpoint.ChainID,
 				ApiInterface: rpcProviderEndpoint.ApiInterface,
 			}
-			if err := statetracker.RegisterForSpecUpdatesOrSetStaticSpecsWithToken(
+			if err := staticspec.Load(
 				ctx, chainParser, staticSpecPaths, rpcEndpoint,
 				githubToken,
 				gitlabToken,

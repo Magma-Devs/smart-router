@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/golang/mock/gomock"
-	"github.com/magma-Devs/smart-router/protocol/chainlib"
+	"github.com/magma-Devs/smart-router/protocol/chainlibtest"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
@@ -433,7 +433,7 @@ func TestPreflightValidateCrossValidationConfig(t *testing.T) {
 func TestValidateCrossValidationStartup(t *testing.T) {
 	ctx := context.Background()
 	noop := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
-	realParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, "ETH1", spectypes.APIInterfaceJsonRPC, noop, nil, "../../", nil)
+	realParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, "ETH1", spectypes.APIInterfaceJsonRPC, noop, nil, "../../", nil)
 	if closeServer != nil {
 		defer closeServer()
 	}
@@ -502,7 +502,7 @@ func TestValidateCrossValidationStartup(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		defer ctrl.Finish()
 		// MockChainParser implements chainlib.ChainParser but NOT ApiHasStatefulCategory.
-		mockParser := chainlib.NewMockChainParser(ctrl)
+		mockParser := chainlibtest.NewMockChainParser(ctrl)
 		require.Error(t, validateCrossValidationStartup(mkResolver(t, readPolicy), mockParser, "ETH1", "jsonrpc", 5, nil),
 			"policies + a parser that cannot classify stateful methods must fail closed")
 	})
@@ -767,7 +767,7 @@ func TestCrossValidationFinality(t *testing.T) {
 func TestCrossValidationPolicy_StatefulGuard_ProductionParser(t *testing.T) {
 	ctx := context.Background()
 	noop := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
-	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, "ETH1", spectypes.APIInterfaceJsonRPC, noop, nil, "../../", nil)
+	chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(ctx, "ETH1", spectypes.APIInterfaceJsonRPC, noop, nil, "../../", nil)
 	if closeServer != nil {
 		defer closeServer()
 	}

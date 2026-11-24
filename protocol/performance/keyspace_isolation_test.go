@@ -8,6 +8,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/ecosystem/cache"
 	"github.com/magma-Devs/smart-router/ecosystem/cache/core"
+	"github.com/magma-Devs/smart-router/internal/testutil/cachetest"
 	"github.com/magma-Devs/smart-router/protocol/performance"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
@@ -163,14 +164,12 @@ func (s *legacyCacheServer) SetStickySession(ctx context.Context, req *pairingty
 // warning; a router with no prefix has nothing to confirm on either.
 func TestKeyPrefixEchoNamesAServerThatIgnoresIt(t *testing.T) {
 	const unisolated = "did not echo it"
-	legacyAddr := startLoopbackCacheServerWith(t, func(srv *cache.RelayerCacheServer) pairingtypes.RelayerCacheServer {
-		return &legacyCacheServer{RelayerCacheServer: srv}
-	})
+	legacyAddr := cachetest.ServeAddr(t, &legacyCacheServer{RelayerCacheServer: newParityCacheServer(t)})
 	hash := []byte("echo-hash")
 
 	prefixed := newPrefixedGRPCBackend(t, legacyAddr, "tenant-a")
 	require.Equal(t, legacyAddr+" prefix=tenant-a (unconfirmed)", prefixed.DebugCacheState().Address)
-	logged := captureLog(t, func() {
+	logged := logSink.Capture(t, func() {
 		getForParity(t, prefixed, hash, nil, 100, 100, false)
 		getForParity(t, prefixed, hash, nil, 100, 100, false)
 		_, _, err := prefixed.GetStickySession(context.Background(), "ETH1", "jsonrpc", "base", "digest-1")
@@ -187,7 +186,7 @@ func TestKeyPrefixEchoNamesAServerThatIgnoresIt(t *testing.T) {
 	// The in-process server logs its own debug lines through the same sink, so
 	// the controls look for the warning rather than for silence.
 	unprefixed := newPrefixedGRPCBackend(t, legacyAddr, "")
-	require.NotContains(t, captureLog(t, func() {
+	require.NotContains(t, logSink.Capture(t, func() {
 		getForParity(t, unprefixed, hash, nil, 100, 100, false)
 	}), unisolated, "no prefix, nothing to confirm")
 	require.Equal(t, legacyAddr, unprefixed.DebugCacheState().Address)
@@ -196,7 +195,7 @@ func TestKeyPrefixEchoNamesAServerThatIgnoresIt(t *testing.T) {
 	// confirms it and warns about nothing.
 	currentAddr := startLoopbackCacheServer(t)
 	confirmed := newPrefixedGRPCBackend(t, currentAddr, "tenant-a")
-	require.NotContains(t, captureLog(t, func() {
+	require.NotContains(t, logSink.Capture(t, func() {
 		getForParity(t, confirmed, hash, nil, 100, 100, false)
 		_, _, err := confirmed.GetStickySession(context.Background(), "ETH1", "jsonrpc", "base", "digest-1")
 		require.NoError(t, err)

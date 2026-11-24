@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
+	"github.com/magma-Devs/smart-router/protocol/chainlibtest"
 	"github.com/magma-Devs/smart-router/protocol/chainstate"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
@@ -237,7 +238,7 @@ func TestCacheWriteOfAByHashReplyThatSaysNotFinalIsNeverFinal(t *testing.T) {
 		receipt = `{"jsonrpc":"2.0","id":1,"method":"eth_getTransactionReceipt","params":["0x88df016429689c079f3b2f6ad39fa052532c56795b733da78a91ebe6a713944b"]}`
 	)
 	noop := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
-	eth, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(context.Background(), "ETH1", spectypes.APIInterfaceJsonRPC, noop, nil, "../../", nil)
+	eth, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(context.Background(), "ETH1", spectypes.APIInterfaceJsonRPC, noop, nil, "../../", nil)
 	require.NoError(t, err)
 	if closeServer != nil {
 		t.Cleanup(closeServer)

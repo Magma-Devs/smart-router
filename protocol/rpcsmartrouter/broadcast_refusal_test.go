@@ -20,6 +20,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
+	"github.com/magma-Devs/smart-router/protocol/chainlibtest/fixture"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
@@ -119,7 +120,7 @@ type broadcastRefusalPath struct {
 func tendermintBroadcast(request string) broadcastRefusalPath {
 	return broadcastRefusalPath{
 		apiInterface: spectypes.APIInterfaceTendermintRPC,
-		spec:         chainlib.CreateMockCosmosBroadcastSpec("COSMOSREFUSE", spectypes.APIInterfaceTendermintRPC),
+		spec:         fixture.CreateMockCosmosBroadcastSpec("COSMOSREFUSE", spectypes.APIInterfaceTendermintRPC),
 		body:         []byte(request),
 	}
 }
@@ -127,7 +128,7 @@ func tendermintBroadcast(request string) broadcastRefusalPath {
 func tronBroadcast(path, request string) broadcastRefusalPath {
 	return broadcastRefusalPath{
 		apiInterface: spectypes.APIInterfaceRest,
-		spec:         chainlib.CreateMockTronSpec("TRONREFUSE"),
+		spec:         fixture.CreateMockTronSpec("TRONREFUSE"),
 		url:          path,
 		body:         []byte(request),
 	}
@@ -136,7 +137,7 @@ func tronBroadcast(path, request string) broadcastRefusalPath {
 func grpcBroadcast() broadcastRefusalPath {
 	return broadcastRefusalPath{
 		apiInterface: spectypes.APIInterfaceGrpc,
-		spec:         chainlib.CreateMockCosmosBroadcastSpec("COSMOSREFUSEG", spectypes.APIInterfaceGrpc),
+		spec:         fixture.CreateMockCosmosBroadcastSpec("COSMOSREFUSEG", spectypes.APIInterfaceGrpc),
 		url:          grpcBroadcastMethod,
 		body:         grpcBroadcastRequest,
 	}

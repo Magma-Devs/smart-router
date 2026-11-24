@@ -2,15 +2,12 @@ package endpointstate
 
 import (
 	"context"
-	"net"
 	"testing"
 	"time"
 
-	"github.com/magma-Devs/smart-router/ecosystem/cache"
-	"github.com/magma-Devs/smart-router/protocol/performance"
+	"github.com/magma-Devs/smart-router/internal/testutil/cachetest"
 	relaytypes "github.com/magma-Devs/smart-router/types/relay"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -19,27 +16,9 @@ import (
 // round-trip through the JSON wire codec end to end, and that a cache backend that predates
 // them (Unimplemented) degrades to "poll locally" without surfacing an error.
 
-func startCacheGRPC(t *testing.T, srv relaytypes.RelayerCacheServer) *performance.Cache {
-	t.Helper()
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	s := grpc.NewServer()
-	relaytypes.RegisterRelayerCacheServer(s, srv)
-	go func() { _ = s.Serve(lis) }()
-	t.Cleanup(s.Stop)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	c, err := performance.InitCache(ctx, lis.Addr().String())
-	require.NoError(t, err)
-	require.Eventually(t, c.CacheActive, 5*time.Second, 10*time.Millisecond)
-	return c
-}
-
 func TestCachePeerObservations_RoundTripOverGRPC(t *testing.T) {
-	cs := &cache.CacheServer{CacheMaxCost: 1 << 20}
-	cs.InitCache(context.Background(), time.Hour, time.Second, time.Second, time.Hour, "disabled", 1, 1)
-	store := NewCachePeerObservations(startCacheGRPC(t, &cache.RelayerCacheServer{CacheServer: cs}))
+	server := cachetest.NewServer(t, cachetest.TTLs{Finalized: time.Hour, NonFinalized: time.Second, NodeErrors: time.Second})
+	store := NewCachePeerObservations(cachetest.Serve(t, server))
 	require.NotNil(t, store)
 	ctx := context.Background()
 
@@ -64,7 +43,7 @@ func TestCachePeerObservations_RoundTripOverGRPC(t *testing.T) {
 // zero peer skips, indistinguishable from a healthy fleet with nothing to share, which is the exact
 // state that metric exists to expose. (This test previously asserted the swallow.)
 func TestCachePeerObservations_OlderBackendSurfacesUnimplemented(t *testing.T) {
-	store := NewCachePeerObservations(startCacheGRPC(t, relaytypes.UnimplementedRelayerCacheServer{}))
+	store := NewCachePeerObservations(cachetest.Serve(t, relaytypes.UnimplementedRelayerCacheServer{}))
 	ctx := context.Background()
 
 	err := store.Publish(ctx, "ETH1", "jsonrpc", "ep", "pod-a", 1, time.Second)

@@ -16,7 +16,6 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
-	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/magma-Devs/smart-router/utils/rand"
@@ -74,26 +73,19 @@ func TestRelayBodyForLog(t *testing.T) {
 	require.Equal(t, logged, relayBodyForLog(body, false))
 }
 
-// failingRelay fails every request, so a listener writes its request line and then its failure
+// newFailingRelay fails every request, so a listener writes its request line and then its failure
 // lines: the UniqueGuidResponseForError line and the in/out line at error level.
-type failingRelay struct{}
-
-func (failingRelay) SendRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, analytics *metrics.RelayMetrics, metadataValues []pairingtypes.Metadata) (*common.RelayResult, error) {
-	return nil, errors.New("no upstream answered")
+func newFailingRelay() *recordingRelaySender {
+	return &recordingRelaySender{
+		send:  answeringWith(nil, errors.New("no upstream answered")),
+		parse: func(relayCall) (ProtocolMessage, error) { return nil, errors.New("the frame does not parse") },
+	}
 }
 
-func (failingRelay) ParseRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, metadata []pairingtypes.Metadata) (ProtocolMessage, error) {
-	return nil, errors.New("the frame does not parse")
-}
-
-func (failingRelay) SendParsedRelay(ctx context.Context, analytics *metrics.RelayMetrics, protocolMessage ProtocolMessage) (*common.RelayResult, error) {
-	return nil, errors.New("not used")
-}
-
-// streamingRelaySender is stubRelaySender with a gRPC subscription manager behind it, so a served
+// streamingRelaySender is a relay sender with a gRPC subscription manager behind it, so a served
 // gRPC listener takes its stream path.
 type streamingRelaySender struct {
-	*stubRelaySender
+	*recordingRelaySender
 	manager *stubGRPCSubscriptionManager
 }
 
@@ -101,11 +93,11 @@ func (s streamingRelaySender) GetGRPCSubscriptionManager() GRPCSubscriptionManag
 	return s.manager
 }
 
-// wsSendFailingStub parses every websocket frame as a plain relay and fails to send it.
-type wsSendFailingStub struct{ wsRelayStub }
-
-func (wsSendFailingStub) SendParsedRelay(ctx context.Context, analytics *metrics.RelayMetrics, protocolMessage ProtocolMessage) (*common.RelayResult, error) {
-	return nil, errors.New("no upstream answered")
+// newWSSendFailingRelay parses every websocket frame as a plain relay and fails to send it.
+func newWSSendFailingRelay() *recordingRelaySender {
+	relay := newWSRelay()
+	relay.sendParsed = answeringWith(nil, errors.New("no upstream answered"))
+	return relay
 }
 
 type newTestListener func(context.Context, *routersession.RPCEndpoint, RelaySender, *metrics.RPCConsumerLogs) ChainListener
@@ -219,7 +211,7 @@ func TestListeners_LogTheBodyCutUnlessDebugRelays(t *testing.T) {
 		} {
 			t.Run(name(tc.name), func(t *testing.T) {
 				utils.ClearDebugLogBuffer()
-				addr := serveWithFlags(t, tc.newListener, tc.apiInterface, failingRelay{}, flags)
+				addr := serveWithFlags(t, tc.newListener, tc.apiInterface, newFailingRelay(), flags)
 				requestID := "req-" + strings.ReplaceAll(name(tc.name), " ", "-")
 				req, err := http.NewRequest(tc.method, "http://"+addr+tc.path, strings.NewReader(body))
 				require.NoError(t, err)
@@ -256,9 +248,9 @@ func TestListeners_LogTheBodyCutUnlessDebugRelays(t *testing.T) {
 			relay         RelaySender
 			subscriptions WSSubscriptionManager
 		}{
-			{"websocket frame that does not parse", failingRelay{}, nil},
-			{"websocket relay that fails", wsSendFailingStub{}, nil},
-			{"websocket subscribe that fails", wsSubscribeStub{}, failingSubscriptions{}},
+			{"websocket frame that does not parse", newFailingRelay(), nil},
+			{"websocket relay that fails", newWSSendFailingRelay(), nil},
+			{"websocket subscribe that fails", newWSSubscribeRelay(), failingSubscriptions{}},
 		} {
 			t.Run(name(ws.name), func(t *testing.T) {
 				utils.ClearDebugLogBuffer()
@@ -293,7 +285,7 @@ func TestListeners_LogTheBodyCutUnlessDebugRelays(t *testing.T) {
 
 		t.Run(name("grpc unary"), func(t *testing.T) {
 			utils.ClearDebugLogBuffer()
-			sender := &stubRelaySender{parser: grpcParserWithSubscription()}
+			sender := newGrpcRelay()
 			newGrpc := func(ctx context.Context, endpoint *routersession.RPCEndpoint, relay RelaySender, logger *metrics.RPCConsumerLogs) ChainListener {
 				return NewGrpcChainListener(ctx, endpoint, relay, alwaysHealthyReporter{}, logger, sender.parser)
 			}
@@ -333,7 +325,7 @@ func TestListeners_LogTheBodyCutUnlessDebugRelays(t *testing.T) {
 			utils.ClearDebugLogBuffer()
 			manager := newStubGRPCSubscriptionManager()
 			manager.startErr = errors.New("no upstream answered")
-			sender := streamingRelaySender{stubRelaySender: &stubRelaySender{parser: grpcParserWithSubscription()}, manager: manager}
+			sender := streamingRelaySender{recordingRelaySender: newGrpcRelay(), manager: manager}
 			newGrpc := func(ctx context.Context, endpoint *routersession.RPCEndpoint, relay RelaySender, logger *metrics.RPCConsumerLogs) ChainListener {
 				return NewGrpcChainListener(ctx, endpoint, relay, alwaysHealthyReporter{}, logger, sender.parser)
 			}

@@ -329,30 +329,25 @@ func TestCheckGrpcRequestMessage_ReadsWithTheBuildTheUpstreamServesNow(t *testin
 	require.NoError(t, checkGrpcRequestMessage(registry, "chainlib_test.build.Query/Get", newRequest), "field 2 is a string in the build served now")
 }
 
-// parseFirstRelaySender sends a relay the way the router does: it parses the request first and
-// fails with the parse's error. sent counts the requests that got past the parse.
-type parseFirstRelaySender struct {
-	*stubRelaySender
-	manager *stubGRPCSubscriptionManager
-	sent    *atomic.Int32
-}
-
-func (s parseFirstRelaySender) SendRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, _ *metrics.RelayMetrics, metadataValues []pairingtypes.Metadata) (*common.RelayResult, error) {
-	if _, err := s.ParseRelay(ctx, url, req, connectionType, dappID, consumerIp, metadataValues); err != nil {
-		return nil, err
+// newParseFirstRelay sends a relay the way the router does: it parses the request first and fails
+// with the parse's error, so relayed() counts the requests that got past the parse.
+func newParseFirstRelay() *recordingRelaySender {
+	relay := newGrpcRelay()
+	relay.send = func(call relayCall) (*common.RelayResult, error) {
+		if _, err := relay.ParseRelay(call.ctx, call.url, call.req, call.connectionType, call.dappID, call.consumerIp, call.metadata); err != nil {
+			return nil, err
+		}
+		return &common.RelayResult{Reply: &pairingtypes.RelayReply{Data: []byte{}}}, nil
 	}
-	s.sent.Add(1)
-	return &common.RelayResult{Reply: &pairingtypes.RelayReply{Data: []byte{}}}, nil
+	return relay
 }
-
-func (s parseFirstRelaySender) GetGRPCSubscriptionManager() GRPCSubscriptionManager { return s.manager }
 
 // A server-streaming call whose body is not a protobuf message gets the unary call's refusal: the
 // stream path hands a failed parse back to the unary path, which refuses it, and no subscription
 // starts.
 func TestGrpcListener_RefusesAStreamCallWhoseBodyIsNotAProtobufMessage(t *testing.T) {
 	manager := newStubGRPCSubscriptionManager()
-	sender := parseFirstRelaySender{stubRelaySender: &stubRelaySender{parser: grpcParserWithSubscription()}, manager: manager, sent: &atomic.Int32{}}
+	sender := streamingRelaySender{recordingRelaySender: newParseFirstRelay(), manager: manager}
 	newGrpc := func(ctx context.Context, endpoint *routersession.RPCEndpoint, relay RelaySender, logger *metrics.RPCConsumerLogs) ChainListener {
 		return NewGrpcChainListener(ctx, endpoint, relay, alwaysHealthyReporter{}, logger, sender.parser)
 	}
@@ -380,7 +375,7 @@ func TestGrpcListener_RefusesAStreamCallWhoseBodyIsNotAProtobufMessage(t *testin
 		require.NotEmpty(t, stream.Trailer().Get(common.GUID_HEADER_NAME), name)
 		cancel()
 	}
-	require.Zero(t, sender.sent.Load(), "nothing is sent")
+	require.Zero(t, sender.relayed(), "nothing is sent")
 
 	// A readable subscribe is served as a stream, and gets the message no refused call took.
 	stream, cancel := subscribe([]byte(wire(nil).varint(1, 1)))

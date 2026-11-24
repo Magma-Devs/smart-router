@@ -9,32 +9,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// newSmartRouterForRequestGroupTest constructs a minimal SmartRouterMetricsManager
-// with fresh, unregistered counters for testing RecordDirectRelayEnd logic.
-func newSmartRouterForRequestGroupTest() *SmartRouterMetricsManager {
-	reqLabels := []string{"spec", "apiInterface", "provider_address", "method"}
-	endpointLabels := []string{"spec", "apiInterface", "endpoint_id", "function"}
-	funcLabels := []string{"spec", "apiInterface", "endpoint_id", "function"}
-	return &SmartRouterMetricsManager{
-		// Fields touched by RecordDirectRelayEnd before the request-group block
-		endpointInFlight:            prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "t_sr_inflight"}, funcLabels),
-		endpointTotalRelaysServiced: prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_relays"}, funcLabels),
-		endpointTotalErrored:        prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_errored"}, funcLabels),
-		endpointTotalCancelled:      prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_cancelled"}, funcLabels),
-		endpointEndToEndLatency:     prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "t_sr_latency"}, endpointLabels),
-		// Request-group counters under test
-		routerRequestsTotal:      prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_req_total"}, reqLabels),
-		routerRequestsSuccess:    prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_req_success"}, reqLabels),
-		routerRequestsFailed:     prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_req_failed"}, reqLabels),
-		routerRequestsRead:       prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_req_read"}, reqLabels),
-		routerRequestsWrite:      prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_req_write"}, reqLabels),
-		routerRequestsDebugTrace: prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_req_debug"}, reqLabels),
-		routerRequestsArchive:    prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_req_archive"}, reqLabels),
-		routerRequestsBatch:      prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_req_batch"}, reqLabels),
-		urlToProviderNames:       make(map[string][]string),
-	}
-}
-
 // requestGroupRunner is a thin adapter that lets the shared test case table
 // drive SmartRouterMetricsManager.
 type requestGroupRunner struct {
@@ -52,8 +26,8 @@ type requestGroupRunner struct {
 	batch   *prometheus.CounterVec
 }
 
-func newSmartRouterRequestGroupRunner() *requestGroupRunner {
-	m := newSmartRouterForRequestGroupTest()
+func newSmartRouterRequestGroupRunner(t *testing.T) *requestGroupRunner {
+	m := newTestMetricsManager(t)
 	return &requestGroupRunner{
 		invoke: func(r RelayMetrics, e error) {
 			outcome := RelayOutcomeSuccess
@@ -148,7 +122,7 @@ func TestSetRelayMetrics(t *testing.T) {
 
 	runners := []struct {
 		name string
-		new  func() *requestGroupRunner
+		new  func(*testing.T) *requestGroupRunner
 	}{
 		{"smart_router", newSmartRouterRequestGroupRunner},
 	}
@@ -157,7 +131,7 @@ func TestSetRelayMetrics(t *testing.T) {
 		t.Run(r.name, func(t *testing.T) {
 			for _, tc := range cases {
 				t.Run(tc.name, func(t *testing.T) {
-					runner := r.new()
+					runner := r.new(t)
 					runner.invoke(tc.relay, tc.err)
 					runner.assertCounters(t, tc.relay.ApiMethod,
 						tc.wantTotal, tc.wantSuccess, tc.wantFailed,

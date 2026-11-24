@@ -40,14 +40,14 @@ func newIdleGateTracker(t *testing.T, chainID string, fetcher ChainFetcher, idle
 func TestIdleGate_SkipsWholeCycle_EVMAndSolana(t *testing.T) {
 	for _, chainID := range []string{"ETH1", "SOLANA"} {
 		t.Run(chainID, func(t *testing.T) {
-			fetcher := &countingGateFetcher{}
+			fetcher := newUpstreamCountingFetcher()
 			ct := newIdleGateTracker(t, chainID, fetcher, func(time.Time, time.Duration) bool { return true }, nil)
 			for i := 0; i < 10; i++ {
 				skipped, err := ct.fetchAllPreviousBlocksIfNecessary(context.Background(), false)
 				require.NoError(t, err)
 				require.True(t, skipped, "cycle %d: an idle skip is reported as a skip, not a successful poll", i)
 			}
-			require.Equal(t, int32(0), fetcher.upstreamCalls(), "an idle chain sends nothing upstream")
+			require.Equal(t, int64(0), fetcher.upstreamCalls(), "an idle chain sends nothing upstream")
 		})
 	}
 }
@@ -55,13 +55,13 @@ func TestIdleGate_SkipsWholeCycle_EVMAndSolana(t *testing.T) {
 // TestIdleGate_Unbounded: unlike the traffic gate, idle skips are NOT capped by
 // MaxRelaySkipsBeforePoll — there is nobody to route, so no verifying poll is forced.
 func TestIdleGate_Unbounded(t *testing.T) {
-	fetcher := &countingGateFetcher{}
+	fetcher := newUpstreamCountingFetcher()
 	ct := newIdleGateTracker(t, "ETH1", fetcher, func(time.Time, time.Duration) bool { return true }, func(time.Time) bool { return true })
 	for i := 0; i < DefaultMaxRelaySkipsBeforePoll*3; i++ {
 		skipped, _ := ct.fetchAllPreviousBlocksIfNecessary(context.Background(), false)
 		require.True(t, skipped)
 	}
-	require.Equal(t, int32(0), fetcher.upstreamCalls())
+	require.Equal(t, int64(0), fetcher.upstreamCalls())
 	require.Equal(t, 0, ct.relaySkipsSinceRealPoll, "an idle skip never touches the traffic gate's budget")
 }
 
@@ -69,7 +69,7 @@ func TestIdleGate_Unbounded(t *testing.T) {
 // reaches the traffic gate (which may read the fleet store to decide).
 func TestIdleGate_BeforeTrafficGate(t *testing.T) {
 	var relayGateCalls atomic.Int32
-	fetcher := &countingGateFetcher{}
+	fetcher := newUpstreamCountingFetcher()
 	ct := newIdleGateTracker(t, "ETH1", fetcher,
 		func(time.Time, time.Duration) bool { return true },
 		func(time.Time) bool { relayGateCalls.Add(1); return false },
@@ -78,7 +78,7 @@ func TestIdleGate_BeforeTrafficGate(t *testing.T) {
 		_, _ = ct.fetchAllPreviousBlocksIfNecessary(context.Background(), false)
 	}
 	require.Equal(t, int32(0), relayGateCalls.Load(), "the traffic gate is not consulted while idle")
-	require.Equal(t, int32(0), fetcher.upstreamCalls())
+	require.Equal(t, int64(0), fetcher.upstreamCalls())
 }
 
 // TestIdleGate_ReceivesTimeSinceLastRealPoll: the gate's second argument is how long this
@@ -86,7 +86,7 @@ func TestIdleGate_BeforeTrafficGate(t *testing.T) {
 // real poll (any cycle that is not skipped, including a failed one) re-stamps it.
 func TestIdleGate_ReceivesTimeSinceLastRealPoll(t *testing.T) {
 	var lastSince atomic.Int64
-	fetcher := &countingGateFetcher{}
+	fetcher := newUpstreamCountingFetcher()
 	idle := true
 	ct := newIdleGateTracker(t, "ETH1", fetcher, func(_ time.Time, since time.Duration) bool {
 		lastSince.Store(int64(since))
@@ -106,7 +106,7 @@ func TestIdleGate_ReceivesTimeSinceLastRealPoll(t *testing.T) {
 	skipped, err := ct.fetchAllPreviousBlocksIfNecessary(context.Background(), false)
 	require.False(t, skipped)
 	require.Error(t, err, "the counting fetcher fails upstream, which proves the cycle got there")
-	require.Equal(t, int32(1), fetcher.latestCalls.Load())
+	require.Equal(t, int64(1), fetcher.latestCalls())
 	require.False(t, ct.lastRealPoll.Before(before), "a real poll re-stamps lastRealPoll even when it fails")
 
 	idle = true
@@ -118,32 +118,31 @@ func TestIdleGate_ReceivesTimeSinceLastRealPoll(t *testing.T) {
 // must reach upstream no matter what the gate says.
 func TestIdleGate_ForceBypasses(t *testing.T) {
 	var gateCalls atomic.Int32
-	fetcher := &countingGateFetcher{}
+	fetcher := newUpstreamCountingFetcher()
 	ct := newIdleGateTracker(t, "ETH1", fetcher, func(time.Time, time.Duration) bool { gateCalls.Add(1); return true }, nil)
 	skipped, err := ct.fetchAllPreviousBlocksIfNecessary(context.Background(), true)
 	require.False(t, skipped)
 	require.Error(t, err, "forced: the cycle reached upstream (and the counting fetcher failed it there)")
-	require.Equal(t, int32(1), fetcher.latestCalls.Load())
+	require.Equal(t, int64(1), fetcher.latestCalls())
 	require.Equal(t, int32(0), gateCalls.Load(), "a forced poll does not even ask the idle gate")
 }
 
 // TestIdleGate_NilGateNeverSkips: with no gate wired (idle mode off) the cycle is unchanged.
 func TestIdleGate_NilGateNeverSkips(t *testing.T) {
-	fetcher := &countingGateFetcher{}
+	fetcher := newUpstreamCountingFetcher()
 	ct := newIdleGateTracker(t, "ETH1", fetcher, nil, nil)
 	for i := 0; i < 3; i++ {
 		skipped, _ := ct.fetchAllPreviousBlocksIfNecessary(context.Background(), false)
 		require.False(t, skipped)
 	}
-	require.Equal(t, int32(3), fetcher.latestCalls.Load())
+	require.Equal(t, int64(3), fetcher.latestCalls())
 }
 
 // TestIdleGate_InitFetchStampsLastRealPoll: the init fetch is a real upstream contact, so a
 // tracker that has just started reports a small sinceLastRealPoll — not "never", which would
 // fire the heartbeat on its very first idle tick.
 func TestIdleGate_InitFetchStampsLastRealPoll(t *testing.T) {
-	fetcher := &advancingFetcher{}
-	fetcher.block.Store(1000)
+	fetcher := newFakeFetcher(1000)
 	ct := newIdleGateTracker(t, "ETH1", fetcher, nil, nil)
 	require.True(t, ct.lastRealPoll.IsZero(), "precondition: nothing has polled yet")
 	before := time.Now()

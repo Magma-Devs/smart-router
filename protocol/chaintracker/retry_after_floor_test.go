@@ -45,3 +45,9 @@ func TestComputePollInterval_RetryAfterFloors(t *testing.T) {
 	cs.noteFetchOutcome(errors.New("connection refused"))
 	require.Greater(t, cs.computePollInterval(0), 4*time.Minute)
 }
+
+// computePollInterval is the interval updateTimer publishes for the next dedicated poll:
+// pollCadence floored by a standing rate-limit hold-off.
+func (cs *ChainTracker) computePollInterval(fetchFails uint64) time.Duration {
+	return cs.floorWithRetryAfter(cs.pollCadence(fetchFails))
+}

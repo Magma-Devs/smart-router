@@ -124,7 +124,7 @@ linters:
       # The jhump/protoreflect v1 API (desc, dynamic, grpcreflect) is load-bearing across the gRPC
       # relay, pool and subscription paths, and grpc_reflection_v1alpha is what upstream nodes still
       # serve; moving to google.golang.org/protobuf's protoreflect/dynamicpb and reflection v1 is a
-      # cross-package migration tracked under MAG-4243, not a lint fix.
+      # cross-package migration tracked under MAG-4876, not a lint fix.
       - linters:
           - staticcheck
         text: 'SA1019:.*"?github.com/jhump/protoreflect/(desc|dynamic|grpcreflect)"? is deprecated.*'
@@ -133,7 +133,7 @@ linters:
         text: 'SA1019:.*grpc_reflection_v1alpha.*'
       # h2c.NewHandler and the http2.Server it takes are replaced by http.Server.Protocols (Go 1.24+);
       # that touches the cache server, the gRPC proxy and the connection probe together, and is
-      # tracked under MAG-4243.
+      # tracked under MAG-4876.
       - linters:
           - staticcheck
         text: 'SA1019:.*golang.org/x/net/http2(/h2c.*|\.Server) is deprecated.*'

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/magma-Devs/smart-router/protocol/chainlibtest/fixture"
 	types "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 )
@@ -74,7 +75,7 @@ func TestCraftChainMessage(t *testing.T) {
 			chainParser, err := NewChainParser(play.apiInterface)
 			require.NoError(t, err)
 
-			spec := CreateMockSpec()
+			spec := fixture.CreateMockSpec()
 			spec.ApiCollections = []*types.ApiCollection{
 				{
 					Enabled: true,

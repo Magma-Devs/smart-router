@@ -20,6 +20,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
+	"github.com/magma-Devs/smart-router/protocol/chainlibtest"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
@@ -91,7 +92,7 @@ func sendRESTWriteThroughListener(t *testing.T, upstreams []restWriteUpstream) r
 		}
 	}
 
-	parser, _, _, closeServer, endpoint, err := chainlib.CreateChainLibMocks(
+	parser, _, _, closeServer, endpoint, err := chainlibtest.CreateChainLibMocks(
 		ctx, "COSMOSHUB", spectypes.APIInterfaceRest, handlerFor(upstreams[0]), nil, "../../", nil)
 	require.NoError(t, err)
 	t.Cleanup(closeServer)

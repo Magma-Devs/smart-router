@@ -6,7 +6,6 @@ package performance_test
 import (
 	"bytes"
 	"context"
-	"net"
 	"testing"
 	"time"
 
@@ -14,12 +13,12 @@ import (
 	"github.com/magma-Devs/smart-router/ecosystem/cache"
 	"github.com/magma-Devs/smart-router/ecosystem/cache/core"
 	"github.com/magma-Devs/smart-router/ecosystem/cache/redisstore"
+	"github.com/magma-Devs/smart-router/internal/testutil/cachetest"
 	"github.com/magma-Devs/smart-router/protocol/performance"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/grpc"
 )
 
 // The parity harness: every behavioral case runs against BOTH backends —
@@ -31,37 +30,18 @@ import (
 // listener and returns its address.
 func startLoopbackCacheServer(t *testing.T) string {
 	t.Helper()
-	return startLoopbackCacheServerWith(t, func(srv *cache.RelayerCacheServer) pairingtypes.RelayerCacheServer { return srv })
+	return cachetest.ServeAddr(t, newParityCacheServer(t))
 }
 
-// startLoopbackCacheServerWith is startLoopbackCacheServer with the service
-// implementation chosen by the caller, so a test can stand in an older build's
-// behaviour around the real one (see legacyCacheServer).
-func startLoopbackCacheServerWith(t *testing.T, wrap func(*cache.RelayerCacheServer) pairingtypes.RelayerCacheServer) string {
+// newParityCacheServer is the real cache server the parity tests compare the RESP cache with.
+func newParityCacheServer(t *testing.T) *cache.RelayerCacheServer {
 	t.Helper()
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-
-	cs := &cache.CacheServer{CacheMaxCost: 1 << 20}
-	// metricsAddr "disabled" skips prometheus registration — parallel tests
-	// would otherwise collide on MustRegister.
-	cs.InitCache(ctx, time.Hour, time.Minute, time.Minute, time.Hour, "disabled", 1, 1)
-
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	grpcServer := grpc.NewServer()
-	pairingtypes.RegisterRelayerCacheServer(grpcServer, wrap(&cache.RelayerCacheServer{CacheServer: cs}))
-	go func() { _ = grpcServer.Serve(lis) }()
-	t.Cleanup(grpcServer.Stop)
-	return lis.Addr().String()
+	return cachetest.NewServer(t, cachetest.TTLs{Finalized: time.Hour, NonFinalized: time.Minute, NodeErrors: time.Minute})
 }
 
 func newGRPCBackend(t *testing.T) performance.CacheBackend {
 	t.Helper()
-	client, err := performance.InitCache(context.Background(), startLoopbackCacheServer(t))
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = client.Close() })
-	return client
+	return cachetest.Serve(t, newParityCacheServer(t))
 }
 
 func newRespBackend(t *testing.T) performance.CacheBackend {

@@ -67,7 +67,7 @@ func TestListeners_ASelectedProviderThatIsNotConfiguredIsAClientError(t *testing
 
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			relay := &scriptedRelay{err: notConfiguredRelayError()}
+			relay := &recordingRelaySender{send: answeringWith(nil, notConfiguredRelayError())}
 			addrs := map[string]string{}
 			for _, apiInterface := range []string{spectypes.APIInterfaceJsonRPC, spectypes.APIInterfaceTendermintRPC, spectypes.APIInterfaceRest, spectypes.APIInterfaceGraphQL} {
 				addrs[apiInterface] = serveGoldenListener(t, ctx, apiInterface, relay)
@@ -139,7 +139,7 @@ func TestListeners_AnUnavailableSelectedProviderKeepsTheServerReply(t *testing.T
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	relay := &scriptedRelay{err: utils.FormatError("Selected provider not available", routersession.SelectedProviderUnavailableError)}
+	relay := &recordingRelaySender{send: answeringWith(nil, utils.FormatError("Selected provider not available", routersession.SelectedProviderUnavailableError))}
 	addr := serveGoldenListener(t, ctx, spectypes.APIInterfaceJsonRPC, relay)
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+addr+"/", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}`))
@@ -154,7 +154,8 @@ func TestListeners_AnUnavailableSelectedProviderKeepsTheServerReply(t *testing.T
 // gRPC gives a wrong request INVALID_ARGUMENT. A plain error, which every other relay failure
 // returns, reaches the client as Unknown.
 func TestGrpcChainListener_ASelectedProviderThatIsNotConfiguredIsInvalidArgument(t *testing.T) {
-	sender := &stubRelaySender{parser: grpcParserWithSubscription(), sendErr: notConfiguredRelayError()}
+	sender := newGrpcRelay()
+	sender.send = answeringWith(nil, notConfiguredRelayError())
 	addr := startTestGrpcListener(t, sender)
 
 	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -188,7 +189,7 @@ func TestGraphQLListener_ARefusedPinnedWriteSaysNotSent(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	refused := &common.RelayResult{Reply: &pairingtypes.RelayReply{Metadata: []pairingtypes.Metadata{{Name: common.WRITE_OUTCOME_HEADER_NAME, Value: "not_sent"}}}}
-	relay := &scriptedRelay{result: refused, err: notConfiguredRelayError()}
+	relay := &recordingRelaySender{send: answeringWith(refused, notConfiguredRelayError())}
 	addr := serveGoldenListener(t, ctx, spectypes.APIInterfaceGraphQL, relay)
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+addr+"/graphql", strings.NewReader(`{"query":"mutation { executeTransaction(transactionDataBcs: \"AA==\", signatures: []) { digest } }"}`))

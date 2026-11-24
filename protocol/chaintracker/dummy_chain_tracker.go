@@ -10,16 +10,6 @@ const DummyChainTrackerLatestBlock = int64(math.MaxInt64)
 
 type DummyChainTracker struct{}
 
-// GetLatestBlockData returns block hashes for the specified block range and a specific block
-func (dct *DummyChainTracker) GetLatestBlockData(fromBlock, toBlock, specificBlock int64) (latestBlock int64, requestedHashes []*BlockStore, changeTime time.Time, err error) {
-	return DummyChainTrackerLatestBlock, []*BlockStore{}, time.Now(), nil
-}
-
-// GetLatestBlockNum returns the current latest block number and the time it was last changed
-func (dct *DummyChainTracker) GetLatestBlockNum() (int64, time.Time) {
-	return DummyChainTrackerLatestBlock, time.Now()
-}
-
 // GetAtomicLatestBlockNum returns the current latest block number atomically
 func (dct *DummyChainTracker) GetAtomicLatestBlockNum() int64 {
 	return DummyChainTrackerLatestBlock

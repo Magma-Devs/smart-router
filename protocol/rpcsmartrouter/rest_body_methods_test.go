@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
+	"github.com/magma-Devs/smart-router/protocol/chainlibtest"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
@@ -44,7 +45,7 @@ func TestRESTListener_PutAndPatchBodiesReachTheNode(t *testing.T) {
 			defer cancel()
 
 			received := make(chan nodeRequest, 1)
-			parser, _, _, closeServer, endpoint, err := chainlib.CreateChainLibMocks(
+			parser, _, _, closeServer, endpoint, err := chainlibtest.CreateChainLibMocks(
 				ctx, "COSMOSHUB", spectypes.APIInterfaceRest, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					data, readErr := io.ReadAll(r.Body)
 					assert.NoError(t, readErr)

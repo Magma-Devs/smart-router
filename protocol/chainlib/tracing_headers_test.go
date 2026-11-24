@@ -118,7 +118,7 @@ func (ep httpTracingEntryPoint) newRequest(t *testing.T, ctx context.Context, ad
 func TestTendermintRpcChainListener_TracingHeadersReachTheRelay(t *testing.T) {
 	serveCtx, cancelServe := context.WithCancel(context.Background())
 	defer cancelServe()
-	stub := &tendermintGetRelayStub{}
+	stub := newTendermintGetRelay()
 	_, addr := startTestTendermintListenerWithOptions(t, serveCtx, common.DEFAULT_HEALTH_PATH, stub)
 	httpClient := &http.Client{Timeout: 2 * time.Second}
 
@@ -166,7 +166,7 @@ func TestTendermintRpcChainListener_TracingHeadersReachTheRelay(t *testing.T) {
 // startTestGrpcListener serves a gRPC listener on an ephemeral port through the same h2c
 // proxy production uses, so the ids travel the wire as gRPC metadata rather than being
 // planted on a context by hand.
-func startTestGrpcListener(t *testing.T, sender *stubRelaySender) string {
+func startTestGrpcListener(t *testing.T, sender *recordingRelaySender) string {
 	t.Helper()
 	// GenerateUniqueIdentifier uses the custom rand package, which the package-level
 	// TestMain does not seed. InitRandomSeed is idempotent.
@@ -203,7 +203,7 @@ func startTestGrpcListener(t *testing.T, sender *stubRelaySender) string {
 // the client attaches X-Request-Id and the listener reads x-request-id, as gRPC lowers
 // metadata keys in transit.
 func TestGrpcChainListener_TracingHeadersReachTheRelay(t *testing.T) {
-	sender := &stubRelaySender{parser: grpcParserWithSubscription(), reply: []byte("checkpoint")}
+	sender := newGrpcRelayAnswering("checkpoint")
 	addr := startTestGrpcListener(t, sender)
 
 	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -240,7 +240,7 @@ func TestGrpcChainListener_TracingHeadersReachTheRelay(t *testing.T) {
 // needs its own stamp: the ids must be on the context ParseRelay classifies under and on
 // the one the subscription is started with.
 func TestStreamRelayCallback_TracingHeadersReachTheRelay(t *testing.T) {
-	sender := &stubRelaySender{parser: grpcParserWithSubscription()}
+	sender := newGrpcRelay()
 	listener := newStreamingListener(t, sender)
 	manager := newStubGRPCSubscriptionManager()
 
@@ -293,7 +293,7 @@ func TestListeners_TracingIdsReachAnInfoLine(t *testing.T) {
 		t.Run(ep.name, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			addr := ep.serve(t, ctx, &contextKeepingRelay{})
+			addr := ep.serve(t, ctx, &recordingRelaySender{send: answering(jsonRPCResultReply)})
 			ids := idsFor(ep.name)
 			resp, err := http.DefaultClient.Do(ep.newRequest(t, ctx, addr, ids))
 			require.NoError(t, err)
@@ -303,7 +303,7 @@ func TestListeners_TracingIdsReachAnInfoLine(t *testing.T) {
 		})
 	}
 	t.Run("grpc unary", func(t *testing.T) {
-		addr := startTestGrpcListener(t, &stubRelaySender{parser: grpcParserWithSubscription(), reply: []byte("checkpoint")})
+		addr := startTestGrpcListener(t, newGrpcRelayAnswering("checkpoint"))
 		conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 		require.NoError(t, err)
 		defer conn.Close()
@@ -319,7 +319,7 @@ func TestListeners_TracingIdsReachAnInfoLine(t *testing.T) {
 		requireInfoLine(t, ids)
 	})
 	t.Run("grpc stream subscribe", func(t *testing.T) {
-		listener := newStreamingListener(t, &stubRelaySender{parser: grpcParserWithSubscription()})
+		listener := newStreamingListener(t, newGrpcRelay())
 		ids := idsFor("grpc stream subscribe")
 		ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs(
 			"x-request-id", ids.requestId,

@@ -1,7 +1,6 @@
 package chainlib
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -9,34 +8,19 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/metrics"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	"github.com/stretchr/testify/require"
 )
 
-// noAnswerRelay is a RelaySender whose relay ends with no provider answer, the way the router's
-// relay path ends one: the status the router chose, the client-facing verdict with the transport
-// cause, and the reply headers the relay put on, its own Router-Guid among them.
-type noAnswerRelay struct {
-	status int
-	cf     common.ClientFacingError
-}
-
-func (r *noAnswerRelay) SendRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, analytics *metrics.RelayMetrics, metadataValues []pairingtypes.Metadata) (*common.RelayResult, error) {
-	cf := r.cf
-	return &common.RelayResult{
-		StatusCode:   r.status,
+// noAnswerRelay is a relay that ends with no provider answer, the way the router's relay path ends
+// one: the status the router chose, the client-facing verdict with the transport cause, and the
+// reply headers the relay put on, its own Router-Guid among them.
+func noAnswerRelay(status int, cf common.ClientFacingError) *recordingRelaySender {
+	return &recordingRelaySender{send: answeringWith(&common.RelayResult{
+		StatusCode:   status,
 		ClientFacing: &cf,
 		Reply:        &pairingtypes.RelayReply{Metadata: []pairingtypes.Metadata{{Name: common.GUID_HEADER_NAME, Value: "a-relay-guid"}}},
-	}, errors.New(cf.NoAnswerMessage())
-}
-
-func (r *noAnswerRelay) ParseRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, metadata []pairingtypes.Metadata) (ProtocolMessage, error) {
-	return nil, errors.New("not used")
-}
-
-func (r *noAnswerRelay) SendParsedRelay(ctx context.Context, analytics *metrics.RelayMetrics, protocolMessage ProtocolMessage) (*common.RelayResult, error) {
-	return nil, errors.New("not used")
+	}, errors.New(cf.NoAnswerMessage()))}
 }
 
 // TestGraphQLListener_NoProviderAnswerIsTheRoutersGraphQLError is MAG-5119's no-answer reply through
@@ -56,11 +40,11 @@ func TestGraphQLListener_NoProviderAnswerIsTheRoutersGraphQLError(t *testing.T) 
 	timedOut := common.ClientFacingError{TimedOut: true, Timeout: 30 * time.Second, RouterErrorCode: 1007, RouterErrorName: "PROTOCOL_CONTEXT_DEADLINE"}
 	for _, tc := range []struct {
 		name   string
-		relay  *noAnswerRelay
+		relay  *recordingRelaySender
 		status int
 	}{
-		{"a provider refused the connection (T9)", &noAnswerRelay{status: http.StatusBadGateway, cf: refused}, http.StatusBadGateway},
-		{"every provider timed out (T10)", &noAnswerRelay{status: http.StatusGatewayTimeout, cf: timedOut}, http.StatusGatewayTimeout},
+		{"a provider refused the connection (T9)", noAnswerRelay(http.StatusBadGateway, refused), http.StatusBadGateway},
+		{"every provider timed out (T10)", noAnswerRelay(http.StatusGatewayTimeout, timedOut), http.StatusGatewayTimeout},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			send := sendToGraphQLListener(t, tc.relay)

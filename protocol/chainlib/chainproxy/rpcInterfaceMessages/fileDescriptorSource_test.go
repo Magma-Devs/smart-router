@@ -305,3 +305,13 @@ func TestDescriptorSourceForGrpcConfig(t *testing.T) {
 		require.NoError(t, err)
 	})
 }
+
+// ResetProtosetCacheForTest drops every memoized protoset. Tests that write a
+// descriptor set to a temp path and expect it to be re-read must call this;
+// production never does.
+func ResetProtosetCacheForTest() {
+	protosetCache.Range(func(key, _ any) bool {
+		protosetCache.Delete(key)
+		return true
+	})
+}

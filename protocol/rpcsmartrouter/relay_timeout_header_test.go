@@ -9,6 +9,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
+	"github.com/magma-Devs/smart-router/protocol/chainlibtest"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	"github.com/magma-Devs/smart-router/protocol/relaycoretest"
@@ -29,7 +30,7 @@ func TestStateMachine_NonPositiveAttemptWindowDoesNotEndTheProcess(t *testing.T)
 	for _, window := range []time.Duration{-45 * time.Second, -time.Nanosecond} {
 		t.Run(window.String(), func(t *testing.T) {
 			ctx := context.Background()
-			chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(
+			chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(
 				ctx, "COSMOSHUB", spectypes.APIInterfaceRest,
 				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }),
 				nil, "../../", nil)
@@ -98,7 +99,7 @@ func pinRelayTimeoutGlobals(t *testing.T, defaultTimeout, maxCallerRelayTimeout 
 func relayTimeoutTestServer(t *testing.T) *RPCSmartRouterServer {
 	t.Helper()
 	noop := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
-	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(
+	chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(
 		context.Background(), "ETH1", spectypes.APIInterfaceJsonRPC, noop, nil, "../../", nil)
 	if closeServer != nil {
 		t.Cleanup(closeServer)
@@ -266,7 +267,7 @@ func TestRelayTimeoutHeader_BoundIsTheCallsOwnBudgetNotItsCategory(t *testing.T)
 	common.MinimumTimePerRelayDelay = 7 * time.Second // the production --min-relay-timeout
 
 	noop := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
-	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(
+	chainParser, _, _, closeServer, _, err := chainlibtest.CreateChainLibMocks(
 		context.Background(), "BTC", spectypes.APIInterfaceJsonRPC, noop, nil, "../../", nil)
 	if closeServer != nil {
 		t.Cleanup(closeServer)

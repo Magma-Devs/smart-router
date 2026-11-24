@@ -65,7 +65,7 @@ func byPath(t *testing.T, points []urlPoint) map[string]float64 {
 
 func newTONProvider(t *testing.T) *SmartRouterMetricsManager {
 	t.Helper()
-	m := newSmartRouterForURLFanoutTest()
+	m := newTestMetricsManager(t)
 	m.RegisterEndpoint("TON", "rest", tonV2URL, "chainstack")
 	m.RegisterEndpoint("TON", "rest", tonV3URL, "chainstack")
 	m.RegisterEndpointInternalPath(tonV2URL, "/v2")
@@ -128,7 +128,7 @@ func TestURLLatestBlock_SharedURLIsASeriesPerProvider(t *testing.T) {
 
 // An unregistered url would name itself as its provider, and no part of a url is safe to export.
 func TestURLLatestBlock_UnregisteredURLGetsNoSeries(t *testing.T) {
-	m := newSmartRouterForURLFanoutTest()
+	m := newTestMetricsManager(t)
 	const url = "https://unregistered.vendor.example/key"
 	m.SetEndpointURLLatestBlock("ETH1", "jsonrpc", url, 10, DefaultURLAnswerTimeout)
 	m.SetProviderURLLatestBlock("ETH1", "jsonrpc", "p", url, 10, DefaultURLAnswerTimeout)

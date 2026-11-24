@@ -11,17 +11,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// newSmartRouterForProbeTest builds a minimal manager with just the gauge the
-// health path touches, so we can exercise the HTTP probes without binding a
-// socket or registering against the Prometheus default registerer.
-func newSmartRouterForProbeTest() *SmartRouterMetricsManager {
-	return &SmartRouterMetricsManager{
-		// fail-closed default, matching NewSmartRouterMetricsManager
-		endpointsHealthChecksOk: 0,
-		routerOverallHealth:     prometheus.NewGauge(prometheus.GaugeOpts{Name: "t_sr_router_overall_health"}),
-	}
-}
-
 func probeServer(m *SmartRouterMetricsManager) *httptest.Server {
 	mux := http.NewServeMux()
 	m.registerHTTPHandlers(mux)
@@ -38,7 +27,7 @@ func getStatus(t *testing.T, url string) int {
 
 // /livez is a dumb liveness probe: always 200 regardless of provider health.
 func TestLivez_AlwaysOK(t *testing.T) {
-	m := newSmartRouterForProbeTest()
+	m := newTestMetricsManager(t)
 	srv := probeServer(m)
 	defer srv.Close()
 
@@ -53,7 +42,7 @@ func TestLivez_AlwaysOK(t *testing.T) {
 // /readyz reflects real serving capacity: fail-closed at boot, 200 once a chain
 // is healthy, back to 503 when health drops.
 func TestReadyz_TracksHealth(t *testing.T) {
-	m := newSmartRouterForProbeTest()
+	m := newTestMetricsManager(t)
 	srv := probeServer(m)
 	defer srv.Close()
 
@@ -71,7 +60,7 @@ func TestReadyz_TracksHealth(t *testing.T) {
 
 // /readyz and the legacy /metrics/health-overall alias share the same flag.
 func TestReadyz_AliasesHealthOverall(t *testing.T) {
-	m := newSmartRouterForProbeTest()
+	m := newTestMetricsManager(t)
 	srv := probeServer(m)
 	defer srv.Close()
 
@@ -88,8 +77,7 @@ func TestReadyz_AliasesHealthOverall(t *testing.T) {
 // nothing reported healthy, and one that never became healthy went on doing so,
 // which is how a 503 on /readyz sat next to a gauge reading 1 on a live tenant.
 func TestOverallHealthGaugeAgreesWithReadyz(t *testing.T) {
-	m := NewSmartRouterMetricsManager(SmartRouterMetricsManagerOptions{})
-	require.NotNil(t, m)
+	m := newTestMetricsManager(t)
 	srv := probeServer(m)
 	defer srv.Close()
 
@@ -115,8 +103,7 @@ func TestOverallHealthGaugeAgreesWithReadyz(t *testing.T) {
 // /readyz change inside this test is transition-driven; a tick-driven
 // implementation would leave /readyz frozen for the whole test.
 func TestReadyz_FlipsOnTransitionWithoutWaitingForTicker(t *testing.T) {
-	m := NewSmartRouterMetricsManager(SmartRouterMetricsManagerOptions{})
-	require.NotNil(t, m)
+	m := newTestMetricsManager(t)
 	srv := probeServer(m)
 	defer srv.Close()
 

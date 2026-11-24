@@ -9,47 +9,20 @@ package chaintracker
 
 import (
 	"context"
-	"fmt"
-	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/stretchr/testify/require"
 )
 
-// countingGateFetcher implements ChainFetcher and counts every upstream call by kind. To
-// keep the gate decision isolated from the downstream hash-queue machinery, the latest-block
-// fetch returns an error so fetchAllPreviousBlocksIfNecessary exits right after counting the
-// upstream call — the test asks only "did this cycle reach upstream", which is exactly the
-// gate's contract.
-type countingGateFetcher struct {
-	latestCalls atomic.Int32 // generic FetchLatestBlockNum (EVM path)
-	hashCalls   atomic.Int32 // FetchBlockHashByNum
-	customCalls atomic.Int32 // CustomMessage (SVM getLatestBlockhash poll)
-}
-
-func (f *countingGateFetcher) FetchLatestBlockNum(ctx context.Context) (int64, error) {
-	f.latestCalls.Add(1)
-	return 0, fmt.Errorf("counting fetcher: latest-block poll reached upstream")
-}
-
-func (f *countingGateFetcher) FetchBlockHashByNum(ctx context.Context, blockNum int64) (string, error) {
-	f.hashCalls.Add(1)
-	return "", fmt.Errorf("counting fetcher: hash fetch reached upstream")
-}
-
-func (f *countingGateFetcher) CustomMessage(ctx context.Context, path string, data []byte, connectionType string, apiName string) ([]byte, error) {
-	f.customCalls.Add(1)
-	return nil, fmt.Errorf("counting fetcher: SVM custom message reached upstream")
-}
-
-func (f *countingGateFetcher) FetchEndpoint() routersession.RPCProviderEndpoint {
-	return routersession.RPCProviderEndpoint{}
-}
-
-func (f *countingGateFetcher) upstreamCalls() int32 {
-	return f.latestCalls.Load() + f.hashCalls.Load() + f.customCalls.Load()
+// newUpstreamCountingFetcher counts every upstream call by kind and fails each one. To keep the
+// gate decision isolated from the downstream hash-queue machinery, the latest-block fetch fails
+// so fetchAllPreviousBlocksIfNecessary exits right after counting the upstream call — the test
+// asks only "did this cycle reach upstream", which is exactly the gate's contract.
+func newUpstreamCountingFetcher() *fakeFetcher {
+	f := newFakeFetcher(0)
+	f.fail.Store(true)
+	return f
 }
 
 // newGateTracker builds a real *ChainTracker (generic or SVM wrapper, by chainID) wired to
@@ -92,7 +65,7 @@ func TestTrafficGate_FullCycle_UpstreamCallCounts(t *testing.T) {
 			for _, sc := range []struct {
 				name           string
 				relayFresh     func(time.Time) bool
-				wantUpstream   int32
+				wantUpstream   int64
 				wantPolledSome bool
 			}{
 				{"fresh unchanged relay tip", func(time.Time) bool { return true }, 2, true},
@@ -101,7 +74,7 @@ func TestTrafficGate_FullCycle_UpstreamCallCounts(t *testing.T) {
 				{"no relay gate at all", nil, cycles, true},
 			} {
 				t.Run(sc.name, func(t *testing.T) {
-					fetcher := &countingGateFetcher{}
+					fetcher := newUpstreamCountingFetcher()
 					ct := newGateTracker(t, chain.chainID, fetcher, sc.relayFresh, maxSkips)
 					for i := 0; i < cycles; i++ {
 						_, _ = ct.fetchAllPreviousBlocksIfNecessary(context.Background(), false)
@@ -120,7 +93,7 @@ func TestTrafficGate_FullCycle_UpstreamCallCounts(t *testing.T) {
 // suppress the dedicated poll forever" guarantee.
 func TestTrafficGate_BoundedVerification(t *testing.T) {
 	const maxSkips = 3
-	fetcher := &countingGateFetcher{}
+	fetcher := newUpstreamCountingFetcher()
 	ct := newGateTracker(t, "ETH1", fetcher, func(time.Time) bool { return true }, maxSkips)
 
 	// First maxSkips cycles skip — zero upstream, and each reports skipped=true so the caller
@@ -129,7 +102,7 @@ func TestTrafficGate_BoundedVerification(t *testing.T) {
 		skipped, err := ct.fetchAllPreviousBlocksIfNecessary(context.Background(), false)
 		require.NoError(t, err)
 		require.True(t, skipped, "cycle %d is a gate skip, reported as such (not a successful poll)", i)
-		require.Equal(t, int32(0), fetcher.upstreamCalls(), "cycle %d must skip (no upstream)", i)
+		require.Equal(t, int64(0), fetcher.upstreamCalls(), "cycle %d must skip (no upstream)", i)
 		require.Equal(t, i+1, ct.relaySkipsSinceRealPoll)
 	}
 
@@ -137,7 +110,7 @@ func TestTrafficGate_BoundedVerification(t *testing.T) {
 	skipped, err := ct.fetchAllPreviousBlocksIfNecessary(context.Background(), false)
 	require.False(t, skipped, "the forced verification cycle is a real poll, not a skip")
 	require.Error(t, err, "after maxSkips skips the cycle must force a real poll")
-	require.Equal(t, int32(1), fetcher.latestCalls.Load(), "exactly one real latest-block poll was forced")
+	require.Equal(t, int64(1), fetcher.latestCalls(), "exactly one real latest-block poll was forced")
 	require.Equal(t, 0, ct.relaySkipsSinceRealPoll, "the skip counter resets after a real poll")
 }
 
@@ -145,33 +118,11 @@ func TestTrafficGate_BoundedVerification(t *testing.T) {
 // (relayTipFresh nil — what the global tracker leaves it) every cycle reaches upstream, so
 // the legacy behavior is untouched.
 func TestTrafficGate_NilGate_GlobalTrackerAlwaysPolls(t *testing.T) {
-	fetcher := &countingGateFetcher{}
+	fetcher := newUpstreamCountingFetcher()
 	ct := newGateTracker(t, "ETH1", fetcher, nil, DefaultMaxRelaySkipsBeforePoll)
 	for i := 0; i < 5; i++ {
 		skipped, _ := ct.fetchAllPreviousBlocksIfNecessary(context.Background(), false)
 		require.False(t, skipped, "an ungated tracker never skips")
 	}
-	require.Equal(t, int32(5), fetcher.latestCalls.Load(), "an ungated tracker polls every cycle")
-}
-
-// advancingFetcher is a minimal in-package ChainFetcher whose latest block advances on demand,
-// enough to drive gotNewBlock through the real poll path.
-type advancingFetcher struct {
-	block atomic.Int64
-}
-
-func (f *advancingFetcher) FetchLatestBlockNum(context.Context) (int64, error) {
-	return f.block.Load(), nil
-}
-
-func (f *advancingFetcher) FetchBlockHashByNum(_ context.Context, blockNum int64) (string, error) {
-	return fmt.Sprintf("hash-%d", blockNum), nil
-}
-
-func (f *advancingFetcher) FetchEndpoint() routersession.RPCProviderEndpoint {
-	return routersession.RPCProviderEndpoint{}
-}
-
-func (f *advancingFetcher) CustomMessage(context.Context, string, []byte, string, string) ([]byte, error) {
-	return nil, fmt.Errorf("advancingFetcher: custom message not supported")
+	require.Equal(t, int64(5), fetcher.latestCalls(), "an ungated tracker polls every cycle")
 }

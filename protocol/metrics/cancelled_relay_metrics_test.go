@@ -20,7 +20,7 @@ func cancelledTestLabels() []string {
 // start, and RecordDirectRelayEnd is the only thing that decrements it. Skipping the call
 // for cancelled relays — the naive fix — leaks the gauge one per race loser.
 func TestCancelledRelay_InFlightGaugeReturnsToZero(t *testing.T) {
-	m := newSmartRouterForRequestGroupTest()
+	m := newTestMetricsManager(t)
 	for i := 0; i < 25; i++ {
 		m.RecordDirectRelayStart("ETH1", "jsonrpc", "ep1", "eth_sendRawTransaction")
 		m.RecordDirectRelayEnd("ETH1", "jsonrpc", "ep1", "eth_sendRawTransaction", 5, RelayOutcomeCancelled, &RelayMetrics{IsWrite: true})
@@ -30,7 +30,7 @@ func TestCancelledRelay_InFlightGaugeReturnsToZero(t *testing.T) {
 }
 
 func TestCancelledRelay_InFlightBalancesAcrossMixedOutcomes(t *testing.T) {
-	m := newSmartRouterForRequestGroupTest()
+	m := newTestMetricsManager(t)
 	for _, outcome := range []RelayOutcome{RelayOutcomeSuccess, RelayOutcomeCancelled, RelayOutcomeCancelled, RelayOutcomeCancelled, RelayOutcomeError} {
 		m.RecordDirectRelayStart("ETH1", "jsonrpc", "ep1", "eth_sendRawTransaction")
 		m.RecordDirectRelayEnd("ETH1", "jsonrpc", "ep1", "eth_sendRawTransaction", 5, outcome, &RelayMetrics{IsWrite: true})
@@ -40,7 +40,7 @@ func TestCancelledRelay_InFlightBalancesAcrossMixedOutcomes(t *testing.T) {
 
 // The customer-visible symptom: errored relays were almost all eth_sendRawTransaction.
 func TestCancelledRelay_DoesNotCountAsErrored(t *testing.T) {
-	m := newSmartRouterForRequestGroupTest()
+	m := newTestMetricsManager(t)
 	labels := cancelledTestLabels()
 
 	for i := 0; i < 10; i++ {
@@ -55,7 +55,7 @@ func TestCancelledRelay_DoesNotCountAsErrored(t *testing.T) {
 // COLLATERAL GUARD: a real error must still be counted as errored. If this ever fails the
 // fix is hiding genuine faults, which is worse than the bug it replaced.
 func TestErroredRelay_StillCountsAsErrored(t *testing.T) {
-	m := newSmartRouterForRequestGroupTest()
+	m := newTestMetricsManager(t)
 	labels := cancelledTestLabels()
 
 	m.RecordDirectRelayEnd("ETH1", "jsonrpc", "ep1", "eth_sendRawTransaction", 5, RelayOutcomeError, &RelayMetrics{IsWrite: true})
@@ -66,7 +66,7 @@ func TestErroredRelay_StillCountsAsErrored(t *testing.T) {
 
 // COLLATERAL GUARD: success accounting is untouched by the signature change.
 func TestSuccessRelay_StillCountsAsServiced(t *testing.T) {
-	m := newSmartRouterForRequestGroupTest()
+	m := newTestMetricsManager(t)
 	labels := cancelledTestLabels()
 	reqLabels := []string{"ETH1", "jsonrpc", "ep1", "eth_sendRawTransaction"}
 
@@ -82,7 +82,7 @@ func TestSuccessRelay_StillCountsAsServiced(t *testing.T) {
 // requests_total == requests_success + requests_failed is a documented invariant
 // (docs/METRICS.md). A cancelled relay moves none of them, which is what keeps it exact.
 func TestCancelledRelay_PreservesRequestGroupInvariant(t *testing.T) {
-	m := newSmartRouterForRequestGroupTest()
+	m := newTestMetricsManager(t)
 	reqLabels := []string{"ETH1", "jsonrpc", "ep1", "eth_sendRawTransaction"}
 
 	m.RecordDirectRelayEnd("ETH1", "jsonrpc", "ep1", "eth_sendRawTransaction", 5, RelayOutcomeSuccess, &RelayMetrics{IsWrite: true})
@@ -102,7 +102,7 @@ func TestCancelledRelay_PreservesRequestGroupInvariant(t *testing.T) {
 // A cancelled relay never finished, so its latency carries no information and must not be
 // observed — otherwise cancel timings would drag the endpoint's distribution toward zero.
 func TestCancelledRelay_DoesNotObserveLatency(t *testing.T) {
-	m := newSmartRouterForRequestGroupTest()
+	m := newTestMetricsManager(t)
 	m.RecordDirectRelayEnd("ETH1", "jsonrpc", "ep1", "eth_sendRawTransaction", 5, RelayOutcomeCancelled, &RelayMetrics{IsWrite: true})
 	require.Equal(t, 0, testutil.CollectAndCount(m.endpointEndToEndLatency))
 
@@ -122,7 +122,7 @@ func TestCancelledRelay_NilManager(t *testing.T) {
 // PR #242 interaction: batch method labels must still be collapsed on the cancelled path,
 // or a cancelled batch would reintroduce the unbounded-cardinality leak that PR fixed.
 func TestCancelledRelay_StillNormalisesBatchLabel(t *testing.T) {
-	m := newSmartRouterForRequestGroupTest()
+	m := newTestMetricsManager(t)
 	m.batchSignatures = newBatchSignatureRegistry()
 
 	raw := "eth_call&eth_call&eth_getBalance"
