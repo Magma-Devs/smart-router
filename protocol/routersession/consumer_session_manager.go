@@ -781,7 +781,7 @@ type EndpointWithDirectConnection struct {
 // the primary pairing and the backup provider list. This is used by the smart router for
 // initializing ChainTrackers on startup — excluding backups left their endpoints without a
 // tracker until a relay happened to hit them (rare, because backups are fallback-only),
-// which meant dedicated-URL backups like base.lava.build had no block data on the dashboard.
+// which meant dedicated-URL backups like base.example.com had no block data on the dashboard.
 // Returns empty slice if no direct RPC endpoints are configured.
 //
 // NOT a silent filter on reachability (MAG-2622 chased this as a suspect and it was not the

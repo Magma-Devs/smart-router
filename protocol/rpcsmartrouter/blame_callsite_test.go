@@ -63,7 +63,7 @@ func TestBlameAtCallSite(t *testing.T) {
 			defer close(release)
 
 			chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(
-				ctx, "LAVA", spectypes.APIInterfaceRest,
+				ctx, "COSMOSHUB", spectypes.APIInterfaceRest,
 				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }),
 				nil, "../../", nil)
 			if closeServer != nil {
@@ -109,13 +109,13 @@ func TestBlameAtCallSite(t *testing.T) {
 			// deferred cancel that releases the goroutines.
 			relayProcessor.SetStopReason(tc.stopReason)
 
-			rpcEndpoint := &routersession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "rest"}
+			rpcEndpoint := &routersession.RPCEndpoint{ChainID: "COSMOSHUB", ApiInterface: "rest"}
 			rpcss := &RPCSmartRouterServer{
 				listenEndpoint:    rpcEndpoint,
 				chainParser:       chainParser,
 				consistencyConfig: relaycore.DefaultConsistencyValidationConfig(),
 				sessionManager: routersession.NewConsumerSessionManager(rpcEndpoint,
-					provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "LAVA"),
+					provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "COSMOSHUB"),
 					nil, "test-router", routersession.NewActiveSubscriptionProvidersStorage()),
 			}
 
