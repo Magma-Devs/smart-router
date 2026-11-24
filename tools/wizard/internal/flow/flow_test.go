@@ -15,12 +15,12 @@ import (
 func TestAssignListeners(t *testing.T) {
 	chains := []catalog.Chain{
 		{Index: "ETH1", Interfaces: []string{"jsonrpc"}},
-		{Index: "LAV1", Interfaces: []string{"grpc", "rest", "tendermintrpc"}},
+		{Index: "COSMOSHUB", Interfaces: []string{"grpc", "rest", "tendermintrpc"}},
 	}
 	s := &State{}
 	s.AssignListeners(map[string][]string{
-		"ETH1": {"jsonrpc"},
-		"LAV1": {"rest", "grpc"},
+		"ETH1":      {"jsonrpc"},
+		"COSMOSHUB": {"rest", "grpc"},
 	}, chains)
 	if len(s.Listeners) != 3 {
 		t.Fatalf("want 3 listeners, got %d", len(s.Listeners))
@@ -140,38 +140,38 @@ func TestAddonProbeConfigIsHTTPOnly(t *testing.T) {
 // TestNameTaken locks in the duplicate-upstream-name rule: a name collides only
 // within the SAME listener (chain + interface), case-insensitively, across BOTH
 // primary and backup pools — never across different chains/interfaces. Names are the
-// <base>-<iface> form the round-naming derives (e.g. lav1-1-jsonrpc).
+// <base>-<iface> form the round-naming derives (e.g. hub-1-jsonrpc).
 func TestNameTaken(t *testing.T) {
 	s := &State{
 		Primary: []emit.Upstream{
-			{Name: "lav1-1-jsonrpc", ChainID: "LAV1", Iface: "jsonrpc"},
+			{Name: "hub-1-jsonrpc", ChainID: "COSMOSHUB", Iface: "jsonrpc"},
 			{Name: "cosmoshub-1-rest", ChainID: "COSMOSHUB", Iface: "rest"},
 		},
 		Backup: []emit.Upstream{
-			{Name: "lav1-bak-jsonrpc", ChainID: "LAV1", Iface: "jsonrpc"},
+			{Name: "hub-bak-jsonrpc", ChainID: "COSMOSHUB", Iface: "jsonrpc"},
 		},
 	}
 	// exact + case-insensitive hit on a primary name
-	if !s.nameTaken("LAV1", "jsonrpc", "lav1-1-jsonrpc") {
+	if !s.nameTaken("COSMOSHUB", "jsonrpc", "hub-1-jsonrpc") {
 		t.Error("exact primary name must be taken")
 	}
-	if !s.nameTaken("LAV1", "jsonrpc", "LAV1-1-JSONRPC") {
+	if !s.nameTaken("COSMOSHUB", "jsonrpc", "HUB-1-JSONRPC") {
 		t.Error("name match must be case-insensitive")
 	}
 	// a backup name on the same chain+iface also collides (shared chain router)
-	if !s.nameTaken("LAV1", "jsonrpc", "lav1-bak-jsonrpc") {
+	if !s.nameTaken("COSMOSHUB", "jsonrpc", "hub-bak-jsonrpc") {
 		t.Error("backup name of the same chain+iface must be taken")
 	}
 	// free name on the same chain+iface
-	if s.nameTaken("LAV1", "jsonrpc", "lav1-2-jsonrpc") {
+	if s.nameTaken("COSMOSHUB", "jsonrpc", "hub-2-jsonrpc") {
 		t.Error("a fresh name must be available")
 	}
 	// same string, DIFFERENT interface → not taken (scoped to chain+iface)
-	if s.nameTaken("LAV1", "grpc", "lav1-1-jsonrpc") {
+	if s.nameTaken("COSMOSHUB", "grpc", "hub-1-jsonrpc") {
 		t.Error("name from a different interface must not collide")
 	}
 	// same string, DIFFERENT chain → not taken
-	if s.nameTaken("BASE", "jsonrpc", "lav1-1-jsonrpc") {
+	if s.nameTaken("BASE", "jsonrpc", "hub-1-jsonrpc") {
 		t.Error("name from a different chain must not collide")
 	}
 }
@@ -179,8 +179,8 @@ func TestNameTaken(t *testing.T) {
 // TestRoundProviderName locks in the <base>-<iface> derivation: one backend name
 // fans out to a distinct, lower-cased provider name per interface.
 func TestRoundProviderName(t *testing.T) {
-	if got := roundProviderName("lav1-1", "jsonrpc"); got != "lav1-1-jsonrpc" {
-		t.Errorf("roundProviderName = %q, want lav1-1-jsonrpc", got)
+	if got := roundProviderName("hub-1", "jsonrpc"); got != "hub-1-jsonrpc" {
+		t.Errorf("roundProviderName = %q, want hub-1-jsonrpc", got)
 	}
 	// iface is lower-cased; the base is taken verbatim
 	if got := roundProviderName("MyBackend", "TendermintRPC"); got != "MyBackend-tendermintrpc" {
@@ -195,25 +195,25 @@ func TestRoundProviderName(t *testing.T) {
 // chain's interfaces, since a backend may skip interfaces), not the listener group.
 func TestRoundNameClash(t *testing.T) {
 	round := []emit.Upstream{
-		{ChainID: "LAV1", Iface: "jsonrpc"},
-		{ChainID: "LAV1", Iface: "rest"},
+		{ChainID: "COSMOSHUB", Iface: "jsonrpc"},
+		{ChainID: "COSMOSHUB", Iface: "rest"},
 	}
 	s := &State{Primary: []emit.Upstream{
-		{Name: "lav1-1-jsonrpc", ChainID: "LAV1", Iface: "jsonrpc"},
-		{Name: "lav1-1-rest", ChainID: "LAV1", Iface: "rest"},
+		{Name: "hub-1-jsonrpc", ChainID: "COSMOSHUB", Iface: "jsonrpc"},
+		{Name: "hub-1-rest", ChainID: "COSMOSHUB", Iface: "rest"},
 	}}
 
 	// reusing the first round's base collides on the very first interface
-	if clash := s.roundNameClash(round, "lav1-1"); clash != "lav1-1-jsonrpc" {
-		t.Errorf("clash = %q, want lav1-1-jsonrpc (base reuse must be rejected)", clash)
+	if clash := s.roundNameClash(round, "hub-1"); clash != "hub-1-jsonrpc" {
+		t.Errorf("clash = %q, want hub-1-jsonrpc (base reuse must be rejected)", clash)
 	}
 	// a fresh base clears the whole round
-	if clash := s.roundNameClash(round, "lav1-2"); clash != "" {
+	if clash := s.roundNameClash(round, "hub-2"); clash != "" {
 		t.Errorf("clash = %q, want \"\" (a fresh base must be free)", clash)
 	}
 	// a collision on a LATER interface is still caught (only rest collides here)
 	s2 := &State{Primary: []emit.Upstream{
-		{Name: "shared-rest", ChainID: "LAV1", Iface: "rest"},
+		{Name: "shared-rest", ChainID: "COSMOSHUB", Iface: "rest"},
 	}}
 	if clash := s2.roundNameClash(round, "shared"); clash != "shared-rest" {
 		t.Errorf("clash = %q, want shared-rest (a later-interface collision must be caught)", clash)
@@ -223,13 +223,13 @@ func TestRoundNameClash(t *testing.T) {
 	// single-element round. Its clash check is keyed off that upstream's own iface, so
 	// reusing the base of an UNRELATED already-committed interface must NOT false-clash
 	// (this is the positional-alignment bug the per-upstream keying fixes).
-	partial := []emit.Upstream{{ChainID: "LAV1", Iface: "rest"}} // only rest, jsonrpc skipped
-	if clash := s.roundNameClash(partial, "lav1-1"); clash != "lav1-1-rest" {
-		t.Errorf("partial clash = %q, want lav1-1-rest (rest still collides with a committed rest)", clash)
+	partial := []emit.Upstream{{ChainID: "COSMOSHUB", Iface: "rest"}} // only rest, jsonrpc skipped
+	if clash := s.roundNameClash(partial, "hub-1"); clash != "hub-1-rest" {
+		t.Errorf("partial clash = %q, want hub-1-rest (rest still collides with a committed rest)", clash)
 	}
 	// the same partial round under a fresh base commits cleanly — the skipped jsonrpc
-	// must not drag a phantom lav1-2-jsonrpc collision into a rest-only backend.
-	if clash := s.roundNameClash(partial, "lav1-2"); clash != "" {
+	// must not drag a phantom hub-2-jsonrpc collision into a rest-only backend.
+	if clash := s.roundNameClash(partial, "hub-2"); clash != "" {
 		t.Errorf("partial clash = %q, want \"\" (a rest-only backend ignores the skipped jsonrpc)", clash)
 	}
 }
@@ -273,19 +273,19 @@ func TestRoundDefaultBase(t *testing.T) {
 func TestListenerGroups(t *testing.T) {
 	s := &State{Listeners: []Listener{
 		{Chain: catalog.Chain{Index: "ETH1"}, Iface: "jsonrpc", Port: 3360},
-		{Chain: catalog.Chain{Index: "LAV1"}, Iface: "rest", Port: 3361},
-		{Chain: catalog.Chain{Index: "LAV1"}, Iface: "grpc", Port: 3362},
-		{Chain: catalog.Chain{Index: "LAV1"}, Iface: "tendermintrpc", Port: 3363},
+		{Chain: catalog.Chain{Index: "COSMOSHUB"}, Iface: "rest", Port: 3361},
+		{Chain: catalog.Chain{Index: "COSMOSHUB"}, Iface: "grpc", Port: 3362},
+		{Chain: catalog.Chain{Index: "COSMOSHUB"}, Iface: "tendermintrpc", Port: 3363},
 	}}
 	groups := s.listenerGroups()
 	if len(groups) != 2 {
-		t.Fatalf("want 2 chain groups (ETH1, LAV1), got %d", len(groups))
+		t.Fatalf("want 2 chain groups (ETH1, COSMOSHUB), got %d", len(groups))
 	}
 	if len(groups[0]) != 1 || groups[0][0].Chain.Index != "ETH1" {
 		t.Errorf("group 0 = %+v, want one ETH1 listener", groups[0])
 	}
-	if len(groups[1]) != 3 || groups[1][0].Chain.Index != "LAV1" {
-		t.Errorf("group 1 = %+v, want three LAV1 listeners", groups[1])
+	if len(groups[1]) != 3 || groups[1][0].Chain.Index != "COSMOSHUB" {
+		t.Errorf("group 1 = %+v, want three COSMOSHUB listeners", groups[1])
 	}
 }
 
@@ -414,7 +414,7 @@ func TestPlanRemoteSpecAndOverride(t *testing.T) {
 		RepoRoot: dir, Source: "gh", RenderedPath: rendered,
 		Listeners: []Listener{
 			{Chain: catalog.Chain{Index: "ETH1"}, Iface: "jsonrpc", Port: 3360},
-			{Chain: catalog.Chain{Index: "LAV1"}, Iface: "tendermintrpc", Port: 3363},
+			{Chain: catalog.Chain{Index: "COSMOSHUB"}, Iface: "tendermintrpc", Port: 3363},
 		},
 	}
 	rel, _ := filepath.Rel(dir, rendered)
@@ -432,7 +432,7 @@ func TestPlanRemoteSpecAndOverride(t *testing.T) {
 	if err != nil {
 		t.Fatalf("override not written: %v", err)
 	}
-	for _, want := range []string{`"3360:3360"`, `"3363:3363"`, `"7779:7779"`, "ETH1 jsonrpc", "LAV1 tendermintrpc"} {
+	for _, want := range []string{`"3360:3360"`, `"3363:3363"`, `"7779:7779"`, "ETH1 jsonrpc", "COSMOSHUB tendermintrpc"} {
 		if !strings.Contains(string(b), want) {
 			t.Errorf("override missing %q in:\n%s", want, b)
 		}

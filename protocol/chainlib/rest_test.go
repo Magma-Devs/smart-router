@@ -343,7 +343,7 @@ func TestRestChainListener_HealthPathNeverReachesTheRelay(t *testing.T) {
 			require.NoError(t, err)
 			endpoint := &routersession.RPCEndpoint{
 				NetworkAddress:  "127.0.0.1:0",
-				ChainID:         "LAV1",
+				ChainID:         "COSMOSHUB",
 				ApiInterface:    "rest",
 				HealthCheckPath: healthPath,
 			}
@@ -434,7 +434,7 @@ func TestRestChainListener_RelaysTheBodyOfMethodsThatCarryOne(t *testing.T) {
 	require.NoError(t, err)
 	endpoint := &routersession.RPCEndpoint{
 		NetworkAddress:  "127.0.0.1:0",
-		ChainID:         "LAV1",
+		ChainID:         "COSMOSHUB",
 		ApiInterface:    "rest",
 		HealthCheckPath: common.DEFAULT_HEALTH_PATH,
 	}
@@ -499,7 +499,7 @@ func TestRestListener_UndeclaredVerbIs501OnEveryHandler(t *testing.T) {
 	require.NoError(t, err)
 	listener := NewRestChainListener(ctx, &routersession.RPCEndpoint{
 		NetworkAddress:  "127.0.0.1:0",
-		ChainID:         "LAV1",
+		ChainID:         "COSMOSHUB",
 		ApiInterface:    "rest",
 		HealthCheckPath: common.DEFAULT_HEALTH_PATH,
 	}, &restRefusingRelayStub{}, alwaysHealthyReporter{}, logger)

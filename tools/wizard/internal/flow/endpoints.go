@@ -148,8 +148,8 @@ func (s *State) collectForChain(group []Listener, tier string) Nav {
 }
 
 // roundProviderName derives the provider name for one interface of a round-backend
-// from the user's single base name: <base>-<iface> (lower-cased). So base "lav1-1"
-// over jsonrpc/rest/tendermintrpc yields lav1-1-jsonrpc, lav1-1-rest, … — distinct
+// from the user's single base name: <base>-<iface> (lower-cased). So base "hub-1"
+// over jsonrpc/rest/tendermintrpc yields hub-1-jsonrpc, hub-1-rest, … — distinct
 // per interface, and distinct across rounds as long as the base differs.
 func roundProviderName(base, iface string) string {
 	return fmt.Sprintf("%s-%s", base, strings.ToLower(iface))

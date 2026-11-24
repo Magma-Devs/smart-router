@@ -68,7 +68,7 @@ func New(repoRoot string, timeout time.Duration) (*Prober, error) {
 
 // SpecsGitHubURL is the remote spec source the health binary can fetch from —
 // used when the wizard's catalog came from remote, so health can validate
-// chains (e.g. LAV1) that aren't in the local specs/ dir.
+// chains (e.g. OSMOSIS) that aren't in the local specs/ dir.
 const SpecsGitHubURL = "https://github.com/magma-Devs/lava-specs/tree/main"
 
 // SetSpecPath points the health probe at a spec source: the local "specs/" dir
