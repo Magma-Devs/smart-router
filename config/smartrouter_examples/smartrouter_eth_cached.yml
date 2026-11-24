@@ -1,5 +1,5 @@
 # Smart Router Direct RPC Configuration — Ethereum WITH cache
-# Mode: Direct connections to Ethereum JSON-RPC endpoints (no Lava providers!)
+# Mode: Direct connections to Ethereum JSON-RPC endpoints (no provider-relay network — direct upstreams)
 #
 # Same as smartrouter_eth.yml, but with the external cache-be address baked
 # into the config (cache-be: below). Demonstrates config-file-driven caching —

@@ -49,7 +49,7 @@ func TestRedactSecrets_LeavesNonURLTextAlone(t *testing.T) {
 		"prometheus endpoint listening 0.0.0.0:7779",
 		"provider eth-primary-1 blocked",
 		"eth-primary-1",
-		"lava@harvestGenProvider",
+		"provider@harvestGenProvider",
 		"lava@1abcdefghijklmnop",
 		"ep:8545",
 		"",
@@ -151,9 +151,9 @@ func TestRedactIfURL(t *testing.T) {
 		in   string
 		want string
 	}{
-		// Not urls — must survive byte-for-byte. A lava address carries an "@",
+		// Not urls — must survive byte-for-byte. A provider address carries an "@",
 		// which RedactURL would otherwise read as userinfo and strip.
-		{"provider address", "lava@harvestGenProvider", "lava@harvestGenProvider"},
+		{"provider address", "provider@harvestGenProvider", "provider@harvestGenProvider"},
 		{"lava bech32 address", "lava@1abcdefghijklmnop", "lava@1abcdefghijklmnop"},
 		{"provider name", "eth-primary-1", "eth-primary-1"},
 		{"host and port", "ep:8545", "ep:8545"},

@@ -59,6 +59,9 @@ type ChainParser interface {
 	ParseMsg(url string, data []byte, connectionType string, metadata []pairingtypes.Metadata, extensionInfo extensionslib.ExtensionInfo) (ChainMessage, error)
 	SetSpec(spec spectypes.Spec)
 	ChainBlockStats() (allowedBlockLagForQosSync int64, averageBlockTime time.Duration, blockDistanceForFinalizedData, blocksInFinalizationProof uint32)
+	// FinalityField is the reply field by which the chain's nodes say whether an answer is
+	// final, and the raw JSON value that means final; both empty when the spec names none.
+	FinalityField() (path, finalValue string)
 	GetParsingByTag(tag spectypes.FUNCTION_TAG) (parsing *spectypes.ParseDirective, apiCollection *spectypes.ApiCollection, existed bool)
 	GetParsingByTagForCollection(tag spectypes.FUNCTION_TAG, addons []string, internalPath string, allowBaseFallback bool) (parsing *spectypes.ParseDirective, apiCollection *spectypes.ApiCollection, existed bool)
 	IsTagInCollection(tag spectypes.FUNCTION_TAG, collectionKey CollectionKey) bool
@@ -188,6 +191,16 @@ type GRPCSubscriptionProvider interface {
 	// rather than a nil concrete pointer, which would satisfy the interface and slip
 	// past the caller's nil check.
 	GetGRPCSubscriptionManager() GRPCSubscriptionManager
+}
+
+// GRPCCallShapes is an optional interface on RelaySender, like GRPCSubscriptionProvider. The gRPC
+// listener asks it the shape of each call before reading the call's first message, to refuse the
+// shapes the router does not serve before any provider is asked (MAG-5133).
+type GRPCCallShapes interface {
+	// GRPCCallShape reads the shape of method ("service/method") from a definition the router
+	// already holds, without asking any node and without waiting. known is false when it holds
+	// none.
+	GRPCCallShape(method string) (clientStreams, serverStreams, known bool)
 }
 
 type RelaySender interface {

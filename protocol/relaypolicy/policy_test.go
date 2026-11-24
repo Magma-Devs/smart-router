@@ -537,3 +537,18 @@ func TestDecide_GraphQLWriteHasNoRateLimitCarveOut(t *testing.T) {
 	require.Equal(t, relaycore.ActionRetry, nonGraphQLWrite.Action,
 		"every other interface keeps the carve-out until MAG-5061 decides whether to remove it there too")
 }
+
+// A Sui gRPC write has no rate-limit carve-out either (MAG-5186, decided 18 Nov): the chain's rows
+// file every RESOURCE_EXHAUSTED on a send as a throttle the client retries after, and the router
+// does not send the write again, however every copy was refused.
+func TestDecide_ChainListWriteHasNoRateLimitCarveOut(t *testing.T) {
+	policy := NewPolicy(PolicyConfig{MaxRetries: 10, RelayRetryLimit: 5, SendRelayAttempts: 3})
+	for name, summary := range map[string]relaycore.ResultsSummary{
+		"every copy a node's throttle": {NodeErrors: 2, OnlyRateLimited: true},
+		"every copy a transport 429":   {ProtocolErrors: 2, OnlyRateLimited: true},
+	} {
+		decision := policy.Decide(relaycore.DecisionInput{Selection: relaycore.Stateful, AttemptNumber: 1, IsChainListWrite: true, Summary: summary})
+		require.Equal(t, relaycore.ActionStop, decision.Action, name)
+		require.Equal(t, "Stateful", decision.Reason, name)
+	}
+}

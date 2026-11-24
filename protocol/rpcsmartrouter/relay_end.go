@@ -112,6 +112,7 @@ type relayEndAttempt struct {
 	message          string
 	nodeCode         int           // the code of the node's JSON-RPC error reply; 0 when there is none
 	grpcStatus       int           // the status of a gRPC node error; 0 when there is none
+	writeOutcome     string        // what the copy says of the transaction, on a write its chain's list reads
 	latency          time.Duration // zero when unknown
 	returnedToClient bool
 	sent             bool // went out as a dispatch, so batch and sentAfter are known
@@ -244,6 +245,9 @@ func (a *relayEndAttempt) MarshalZerologObject(event *zerolog.Event) {
 	if a.grpcStatus != 0 {
 		event.Int("grpc_status", a.grpcStatus)
 	}
+	if a.writeOutcome != "" {
+		event.Str("write_outcome", a.writeOutcome)
+	}
 	if a.errorCode != "" {
 		event.Bool("retryable", a.retryable())
 	}
@@ -278,7 +282,7 @@ var _ chainlib.RelayRejectionReporter = (*RPCSmartRouterServer)(nil)
 
 // writeRelayEnd writes the relay's relay_end event. Each exit calls it once.
 func (rpcss *RPCSmartRouterServer) writeRelayEnd(ctx context.Context, in relayEndInput) {
-	utils.LogEvent(relayEndEvent, rpcss.buildRelayEnd(ctx, in))
+	emitRelayEnd(rpcss.buildRelayEnd(ctx, in))
 }
 
 // ReportRejectedRelay writes the relay_end of a request a listener parsed itself and could not hand
@@ -350,6 +354,7 @@ func (rpcss *RPCSmartRouterServer) buildRelayEnd(ctx context.Context, in relayEn
 		dispatched = len(dispatches)
 		successes, nodeErrors, protocolErrors := in.processor.GetResultsDetail()
 		end.attempts = relayEndAttemptsOf(dispatches, in.start, successes, nodeErrors, protocolErrors, requestRanOutOfRoad(end.stopReason))
+		end.attempts.readWriteOutcomes(in.protocolMessage)
 	}
 
 	served := in.err == nil && in.result != nil && in.result.Reply != nil
@@ -477,6 +482,29 @@ func relayEndAttemptsOf(dispatched []routersession.Dispatch, start time.Time, su
 		}
 	}
 	return attempts
+}
+
+// readWriteOutcomes fills each answered attempt's write_outcome when the request is its chain's
+// write on a chain whose list reads each copy (MAG-5186): a copy that succeeded ran; a node error is
+// read by the chain's write rows. An attempt with no reply has its outcome (timeout, transport_error,
+// cancelled) and no reading.
+func (attempts relayEndAttempts) readWriteOutcomes(protocolMessage chainlib.ProtocolMessage) {
+	if protocolMessage == nil {
+		return
+	}
+	grpcMessage, ok := protocolMessage.GetRPCMessage().(*rpcInterfaceMessages.GrpcMessage)
+	if !ok || !grpcMessage.IsChainListWrite() {
+		return
+	}
+	for i := range attempts {
+		attempt := &attempts[i]
+		if attempt.reply == nil || attempt.transport {
+			continue
+		}
+		if reading, known := grpcMessage.WriteCopyOfReply(attempt.reply.Data, attempt.outcome != attemptOutcomeOK); known {
+			attempt.writeOutcome = reading.Outcome.String()
+		}
+	}
 }
 
 // retryable is the router's verdict on the attempt's error, the registry's Retryable flag the
@@ -723,6 +751,17 @@ func relayEndNamedByURL(protocolMessage chainlib.ProtocolMessage, apiInterface s
 		return len(protocolMessage.RelayPrivateData().GetData()) == 0
 	}
 	return true
+}
+
+// relayAnswerMethod names a request on the debug answer ring (GET /debug/relay-answers) the way
+// relay_end names it: without the leading slash, an unlisted api named by URL withheld, and capped
+// at relayEndMethodLimit. The ring keeps the last few thousand answers, so the raw api name would
+// put a caller's own path on the debug route and let one entry be as long as the request.
+func relayAnswerMethod(protocolMessage chainlib.ProtocolMessage, apiInterface string) string {
+	if protocolMessage == nil || protocolMessage.GetApi() == nil {
+		return ""
+	}
+	return relayEndMethod(protocolMessage.GetApi().Name, relayEndNamedByURL(protocolMessage, apiInterface))
 }
 
 func relayEndSelection(selection relaycore.Selection) string {

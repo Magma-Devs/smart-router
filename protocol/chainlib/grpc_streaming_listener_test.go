@@ -40,7 +40,7 @@ func newStubGRPCSubscriptionManager() *stubGRPCSubscriptionManager {
 		unsubscribed: make(chan string, 4),
 		firstReply: &pairingtypes.RelayReply{
 			Data:     []byte(`{"subscription_id":"router-1","status":"STREAMING"}`),
-			Metadata: []pairingtypes.Metadata{{Name: "x-lava-grpc-sub-id", Value: "router-1"}},
+			Metadata: []pairingtypes.Metadata{{Name: "x-router-grpc-sub-id", Value: "router-1"}},
 		},
 	}
 }
@@ -79,6 +79,10 @@ type stubRelaySender struct {
 	parseErr   error
 	parseCalls int
 	reply      []byte // when set, SendRelay answers with it instead of refusing the call
+	sendErr    error  // when set, SendRelay fails with it
+	// failedResult is the result SendRelay returns beside sendErr, as a relay that recorded its
+	// failure does; nil when unset.
+	failedResult *common.RelayResult
 
 	mu      sync.Mutex
 	tracing *tracingIds // the caller ids on the context of the last ParseRelay or SendRelay
@@ -86,6 +90,9 @@ type stubRelaySender struct {
 
 func (s *stubRelaySender) SendRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, analytics *metrics.RelayMetrics, metadataValues []pairingtypes.Metadata) (*common.RelayResult, error) {
 	s.noteTracing(ctx)
+	if s.sendErr != nil {
+		return s.failedResult, s.sendErr
+	}
 	if s.reply == nil {
 		return nil, errors.New("not used")
 	}
@@ -270,7 +277,7 @@ func TestStreamRelayCallback_StreamsSubscription(t *testing.T) {
 
 	// The subscription id rides in the headers. The acknowledgement payload does not
 	// go on the wire — it is JSON and would not decode as the method's output type.
-	require.Equal(t, []string{"router-1"}, response.Metadata.Get("x-lava-grpc-sub-id"))
+	require.Equal(t, []string{"router-1"}, response.Metadata.Get("x-router-grpc-sub-id"))
 
 	manager.replies <- &pairingtypes.RelayReply{Data: []byte("checkpoint-1")}
 	manager.replies <- &pairingtypes.RelayReply{Data: []byte("checkpoint-2")}
@@ -298,7 +305,7 @@ func TestStreamRelayCallback_DropsTransportOwnedHeaders(t *testing.T) {
 	manager.firstReply = &pairingtypes.RelayReply{
 		Data: []byte(`{"subscription_id":"router-1","status":"STREAMING"}`),
 		Metadata: []pairingtypes.Metadata{
-			{Name: "x-lava-grpc-sub-id", Value: "router-1"},
+			{Name: "x-router-grpc-sub-id", Value: "router-1"},
 			{Name: "content-type", Value: "application/json"},
 		},
 	}
@@ -307,7 +314,7 @@ func TestStreamRelayCallback_DropsTransportOwnedHeaders(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, response)
 
-	require.Equal(t, []string{"router-1"}, response.Metadata.Get("x-lava-grpc-sub-id"),
+	require.Equal(t, []string{"router-1"}, response.Metadata.Get("x-router-grpc-sub-id"),
 		"the subscription id is the one value that has to reach the client")
 	require.Empty(t, response.Metadata.Get("content-type"),
 		"the transport owns content-type; a second one on the wire is at best redundant and at worst rejected")
@@ -317,7 +324,7 @@ func TestStreamRelayCallback_DropsTransportOwnedHeaders(t *testing.T) {
 // honest as headers are added — the callback test above only exercises the live case.
 func TestStreamResponseHeaders_FiltersReservedKeys(t *testing.T) {
 	headers := streamResponseHeaders([]pairingtypes.Metadata{
-		{Name: "x-lava-grpc-sub-id", Value: "router-1"},
+		{Name: "x-router-grpc-sub-id", Value: "router-1"},
 		{Name: "Content-Type", Value: "application/json"},
 		{Name: "content-length", Value: "42"},
 		{Name: "GRPC-Status", Value: "0"},
@@ -329,8 +336,8 @@ func TestStreamResponseHeaders_FiltersReservedKeys(t *testing.T) {
 	})
 
 	require.Equal(t, metadata.MD{
-		"x-lava-grpc-sub-id": []string{"router-1"},
-		"x-custom":           []string{"kept"},
+		"x-router-grpc-sub-id": []string{"router-1"},
+		"x-custom":             []string{"kept"},
 	}, headers, "only transport-owned keys are dropped, and matching is case-insensitive")
 }
 

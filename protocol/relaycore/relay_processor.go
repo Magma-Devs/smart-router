@@ -52,7 +52,7 @@ type RelayProcessor struct {
 	// crossValidationFailFastReason carries the structured reason for a request-time cross-validation
 	// fail-fast (capacity/diversity checks that abort before any relay completes, so no RelayResult is
 	// produced). It rides on the shared processor back to the caller, which synthesizes the
-	// lava-cross-validation-failure-reason header from it — the error returns are left byte-for-byte
+	// router-cross-validation-failure-reason header from it — the error returns are left byte-for-byte
 	// unchanged so the state machine's PairingListEmptyError stop logic is unaffected. Guarded by rp.lock.
 	crossValidationFailFastReason string
 	// crossValidationProviderGroups maps each provider the request was sent to onto its group, folded like
@@ -69,7 +69,7 @@ type RelayProcessor struct {
 	// no further attempt. Guarded by rp.lock.
 	stopReason string
 
-	// degradedExtensions are the extensions the caller asked for (lava-extension) that an attempt
+	// degradedExtensions are the extensions the caller asked for (router-extension) that an attempt
 	// of this request was sent without: no node serving them could take it, so the attempt went to
 	// a regular node instead (see GetAllowSessionDegradation). The reply names them as it names an
 	// extension no node offers (MAG-4729). Guarded by rp.lock.
@@ -79,6 +79,10 @@ type RelayProcessor struct {
 	// from "the request is over and nothing will ever read this". Read-only after construction, so
 	// it needs no lock. See SetResponse.
 	ctx context.Context
+
+	// startedAt is when the request's relay processing started, the zero of an answer's Elapsed on
+	// the debug answer record. Read-only after construction.
+	startedAt time.Time
 }
 
 // quorumStat is the per-hash agreement tally for cross-validation: how many providers returned this exact
@@ -147,6 +151,7 @@ func NewRelayProcessor(
 	chainID, _ := chainIdAndApiInterfaceGetter.GetChainIdAndApiInterface()
 	relayProcessor := &RelayProcessor{
 		ctx:                          ctx,
+		startedAt:                    time.Now(),
 		crossValidationParams:        crossValidationParams,
 		responses:                    make(chan *RelayResponse, responseBufferSize(selection, crossValidationParams)), // buffered to prevent blocking
 		ResultsManager:               NewResultsManager(guid, chainID),
@@ -557,6 +562,7 @@ func (rp *RelayProcessor) SetResponse(response *RelayResponse) {
 	if response == nil {
 		return
 	}
+	rp.recordAnswer(response)
 	select {
 	case rp.responses <- response:
 		return
@@ -813,6 +819,9 @@ func (rp *RelayProcessor) handleResponse(response *RelayResponse) {
 	}
 
 	nodeError := rp.ResultsManager.SetResponse(response, rp.RelayStateMachine.GetProtocolMessage())
+	if response != nil {
+		recordAnswerOutcome(response, nodeError)
+	}
 
 	// send relay error metrics only on non stateful queries, as stateful queries always return X-1/X errors.
 	if nodeError != nil && rp.selection != Stateful {
@@ -1552,8 +1561,8 @@ func onlyRateLimited(nodeErrorResults []common.RelayResult, protocolErrorResults
 // node/protocol error's own RelayResult, whose ProviderInfo.ProviderAddress is a SINGLE provider — the
 // source of the error body being returned. It must never be a comma-joined list: packing the whole
 // attempted set here made appendHeadersToRelayResult treat the joined blob as the resolver name and
-// append it after the per-attempt names, so on the all-transport-errors path Lava-Provider-Address
-// listed ~2x the providers and disagreed with Lava-Retries (MAG-2351).
+// append it after the per-attempt names, so on the all-transport-errors path Router-Provider-Address
+// listed ~2x the providers and disagreed with Router-Retries (MAG-2351).
 func (rp *RelayProcessor) buildFailureResult(
 	nodeErrors []common.RelayResult, protocolErrors []RelayError,
 ) (*common.RelayResult, error) {

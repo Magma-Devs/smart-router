@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils/rand"
 )
@@ -73,7 +74,7 @@ func TestGraphQLWrite_UnclearOutcomeAnswersWithHTTP200(t *testing.T) {
 }
 
 // TestGraphQLWrite_AcceptedOnlyOnTheChainSuccessRow is the other half of MAG-5122's
-// Lava-Write-Outcome header. accepted is the chain's success row only: Sui's write field carries
+// Router-Write-Outcome header. accepted is the chain's success row only: Sui's write field carries
 // effects with SUCCESS or FAILURE (a transaction that ran and paid gas, MAG-4742). Every other 2xx
 // gets no header, because the router cannot yet tell it apart from "may have run": effects: null
 // (MAG-4518), a reply that did not select effects, and a rejected transaction, which answers with a
@@ -139,7 +140,7 @@ func TestGraphQLWrite_NeverRetriedWhenEveryCopyIsRateLimited(t *testing.T) {
 	}
 }
 
-// writeOutcomeHeader reads Lava-Write-Outcome off a RelayResult's reply, or "" when absent.
+// writeOutcomeHeader reads Router-Write-Outcome off a RelayResult's reply, or "" when absent.
 func writeOutcomeHeader(t *testing.T, result *common.RelayResult) string {
 	t.Helper()
 	if result == nil || result.Reply == nil {
@@ -151,4 +152,32 @@ func writeOutcomeHeader(t *testing.T, result *common.RelayResult) string {
 		}
 	}
 	return ""
+}
+
+// MAG-3800: a write pinned to a router-select-provider name the router does not have is refused
+// before any provider is asked. On GraphQL its reply says Router-Write-Outcome: not_sent, as the
+// listener's other refusals of a GraphQL write do (Part I R-Q, Part II Q8). The other interfaces
+// carry no write outcome yet (MAG-5232), so they get no header.
+func TestGraphQLWrite_APinToANameTheRouterDoesNotHaveIsNotSent(t *testing.T) {
+	rand.InitRandomSeed()
+	for _, tc := range writeInterfaceCases {
+		t.Run(tc.name, func(t *testing.T) {
+			chainParser := tc.parser(t)
+			served := writeUpstream{status: http.StatusOK, body: tc.success}
+			a, b := served, served
+			a.name, b.name = "a-"+t.Name(), "b-"+t.Name()
+			hits, server := newTwoPrimaryWriteServer(t, tc, chainParser, [2]writeUpstream{a, b})
+			server.sessionManager.SetConfiguredProviderNames([]string{a.name, b.name})
+
+			result, err := sendWriteWithDirectives(t, tc, chainParser, server, map[string]string{common.SELECT_PROVIDER_HEADER_NAME: "no-such-provider"})
+
+			require.ErrorIs(t, err, routersession.SelectedProviderNotConfiguredError)
+			require.Equal(t, [2]int64{0, 0}, [2]int64{atomic.LoadInt64(&hits[0]), atomic.LoadInt64(&hits[1])}, "no provider is asked")
+			want := ""
+			if tc.apiInterface == spectypes.APIInterfaceGraphQL {
+				want = "not_sent"
+			}
+			require.Equal(t, want, writeOutcomeHeader(t, result))
+		})
+	}
 }

@@ -115,7 +115,7 @@ func TestApplyReverification_AHeldURLIsNotAskedAndItsSiblingIs(t *testing.T) {
 	}
 	active := map[uint64]*routersession.ConsumerSessionsWithProvider{0: makeSession(provider.Name)}
 
-	next, demoted, _ := applyReverification(t.Context(), inputs, active, reverifyTierStatic, 100)
+	next, demoted, _ := probeAndApplyReverification(t.Context(), inputs, active, reverifyTierStatic, 100)
 	require.Contains(t, collectNames(next), provider.Name)
 	require.Empty(t, demoted)
 	require.NotEmpty(t, up.methods("http", "/a/"+upArchive), "the free url is checked")
@@ -148,7 +148,7 @@ func TestApplyReverification_EveryURLHeldSkipsThePass(t *testing.T) {
 	}
 	active := map[uint64]*routersession.ConsumerSessionsWithProvider{0: makeSession(provider.Name)}
 
-	next, demoted, _ := applyReverification(t.Context(), inputs, active, reverifyTierStatic, 100)
+	next, demoted, _ := probeAndApplyReverification(t.Context(), inputs, active, reverifyTierStatic, 100)
 	require.Contains(t, collectNames(next), provider.Name, "a skipped pass is inconclusive")
 	require.Empty(t, demoted)
 	require.Empty(t, up.methods("http", "/a/"+upArchive))
@@ -187,7 +187,7 @@ func TestApplyReverification_ARecoveredURLComesBackWhileItsSiblingIsHeld(t *test
 	active := map[uint64]*routersession.ConsumerSessionsWithProvider{0: makeSession(provider.Name)}
 
 	askedAtBoot := len(up.methods("http", "/a/"+upArchive))
-	_, _, promoted := applyReverification(t.Context(), inputs, active, reverifyTierStatic, 100)
+	_, _, promoted := probeAndApplyReverification(t.Context(), inputs, active, reverifyTierStatic, 100)
 	require.Contains(t, promoted, provider.Name, "the session is rebuilt with B in it")
 	require.False(t, admissions.admissionFor(provider).URLRefused(1), "B is admitted again")
 	require.False(t, admissions.admissionFor(provider).URLRefused(0), "A keeps its last verdict")
@@ -227,7 +227,7 @@ func TestApplyReverification_AHeldURLKeepsItsAddonRefusals(t *testing.T) {
 	active := map[uint64]*routersession.ConsumerSessionsWithProvider{0: makeSession(provider.Name)}
 
 	askedAtBoot := len(up.methods("http", "/b/"+upPruned))
-	applyReverification(t.Context(), inputs, active, reverifyTierStatic, 100)
+	probeAndApplyReverification(t.Context(), inputs, active, reverifyTierStatic, 100)
 	require.Len(t, up.methods("http", "/b/"+upPruned), askedAtBoot, "B is not sent a request by the pass")
 	after, _ := admissions.admissionFor(provider).AdmittedServices(provider.NodeUrls[1])
 	require.Empty(t, after, "archive stays refused on B")
