@@ -27,7 +27,8 @@ func TestHTTPStatusRows_NodeTextIsNotAStatus(t *testing.T) {
 		{"REST 200, channel", ChainFamilyUnknown, TransportREST, 200, "failed to execute message; message index: 0: port transfer, channel-429: channel not found", RouterErrorNodeRateLimited},
 		{"REST 200, wasm", ChainFamilyUnknown, TransportREST, 200, "failed to execute message; message index: 0: have 100, need 404: execute wasm contract failed", RouterErrorNodeEndpointNotFound},
 		{"REST 200, fee denom", ChainFamilyUnknown, TransportREST, 200, "insufficient fees; got: 100uakt required: 429uakt", RouterErrorNodeRateLimited},
-		{"Tendermint abci log, code 200", ChainFamilyCosmosSDK, TransportJsonRPC, 200, balance, RouterErrorNodeInternalError},
+		// Not the balance log: JSON-RPC's "insufficient funds" row reads that one before any status row.
+		{"Tendermint abci log, code 200", ChainFamilyCosmosSDK, TransportJsonRPC, 200, "failed to execute message; message index: 0: port transfer, channel-429: channel not found", RouterErrorNodeRateLimited},
 		{"gRPC UNKNOWN", ChainFamilyCosmosSDK, TransportGRPC, 2, balance, RouterErrorNodeInternalError},
 		{"gRPC UNKNOWN, no family", ChainFamilyUnknown, TransportGRPC, 2, balance, RouterErrorNodeInternalError},
 	} {
