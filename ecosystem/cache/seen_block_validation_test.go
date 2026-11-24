@@ -21,7 +21,7 @@ func TestGetRelayRejectsEntryWithStaleSeenBlock(t *testing.T) {
 	set := func(hash []byte, seenBlock int64) {
 		_, err := srv.SetRelay(context.Background(), &relaytypes.RelayCacheSet{
 			RequestHash:      hash,
-			ChainId:          "LAV1",
+			ChainId:          "COSMOSHUB",
 			RequestedBlock:   100,
 			SeenBlock:        seenBlock,
 			Response:         &relaytypes.RelayReply{Data: []byte(`{"result":"0x64"}`), LatestBlock: 0},
@@ -56,7 +56,7 @@ func TestStatusCodeRoundTrip(t *testing.T) {
 	withStatus := []byte("hash-status-200")
 	_, err := srv.SetRelay(context.Background(), &relaytypes.RelayCacheSet{
 		RequestHash:      withStatus,
-		ChainId:          "LAV1",
+		ChainId:          "COSMOSHUB",
 		RequestedBlock:   100,
 		SeenBlock:        100,
 		Response:         &relaytypes.RelayReply{Data: []byte(`ok`), LatestBlock: 100},
