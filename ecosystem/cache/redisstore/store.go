@@ -650,6 +650,15 @@ func (s *Store) SetEntry(ctx context.Context, key string, env *core.Envelope, tt
 // cannot self-heal. That would make a foreign writer on a SHARED store able to
 // wedge tip publishing permanently, which is exactly the invariant GetInt64
 // states below.
+//
+// This is one of three compare-and-set scripts here, with
+// setChainTipGuardedScript and publishEndpointObservationScript. They share
+// the GET, compare, SET shape and stay three because each guards a different
+// stored value with its own rule: a bare number, rewritten on an equal write
+// and kept without expiry on a zero TTL; "block:deadline", which a lower block
+// replaces once the deadline has passed; "block|stamp|pod", stamped with the
+// server's TIME. One script would take a mode argument per difference, and
+// each rule's corrupt-value handling would be read through the others'.
 var setInt64GEScript = redis.NewScript(`
 local cur = redis.call('GET', KEYS[1])
 local curn = cur and tonumber(cur)
@@ -718,6 +727,9 @@ func (s *Store) SetInt64IfGreaterOrEqual(ctx context.Context, key string, value 
 // untestable under miniredis and invites someone to "fix" a script that is
 // already correct against a real backend. A value that is not
 // "block:deadline" fences nothing.
+//
+// It stays apart from the other two compare-and-set scripts here for the
+// reason setInt64GEScript gives: the deadline is a rule only this value has.
 var setChainTipGuardedScript = redis.NewScript(`
 local cur = redis.call('GET', KEYS[1])
 if cur then
@@ -950,6 +962,9 @@ func decodeStickyPin(raw string) (core.StickyPin, error) {
 // TIME inside a writing script needs effects replication, which every Redis from 5.0 and every
 // Valkey uses by default; on the 3.x/4.x line it would need redis.replicate_commands(), which
 // this adapter does not target.
+//
+// It stays apart from the other two compare-and-set scripts here for the reason setInt64GEScript
+// gives: the stamp from the server's TIME is a rule only this value has.
 var publishEndpointObservationScript = redis.NewScript(`
 local cur = redis.call('GET', KEYS[1])
 if cur then

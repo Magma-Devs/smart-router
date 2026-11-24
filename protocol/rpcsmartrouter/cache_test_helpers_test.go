@@ -52,7 +52,7 @@ func ethCacheTestServer(chainParser chainlib.ChainParser, primary *performance.C
 	}
 }
 
-// directGetOn is directGet for a chain other than the REST harness's LAVA.
+// directGetOn is directGet for a chain other than the REST harness's COSMOSHUB.
 func directGetOn(rcs *ecocache.RelayerCacheServer, chainID string, hashKey []byte, block, seenBlock int64) *pairingtypes.CacheRelayReply {
 	reply, _ := rcs.GetRelay(context.Background(), &pairingtypes.RelayCacheGet{
 		RequestHash:    hashKey,

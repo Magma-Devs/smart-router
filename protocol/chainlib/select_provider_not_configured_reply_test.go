@@ -26,11 +26,11 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// The provider names the router's own error text lists for a lava-select-provider refusal. None of
+// The provider names the router's own error text lists for a router-select-provider refusal. None of
 // them may reach the caller.
 var configuredProviderNames = []string{"provider-name-alpha", "provider-name-beta"}
 
-// notConfiguredRelayError is the error SendRelay returns for a lava-select-provider name that none
+// notConfiguredRelayError is the error SendRelay returns for a router-select-provider name that none
 // of the router's providers carries, built the way GetSessions builds it: the marker wrapped around
 // the selection's own error, whose text lists every valid provider name.
 func notConfiguredRelayError() error {
@@ -42,7 +42,7 @@ func notConfiguredRelayError() error {
 
 // MAG-3800. A request pinned to a provider name the router does not have is the caller's mistake,
 // so every HTTP interface answers 400, not the 500 that says the server failed. The reply carries
-// the one fixed sentence, the request's Lava-Guid, and none of the router's provider names, in
+// the one fixed sentence, the request's Router-Guid, and none of the router's provider names, in
 // masked mode too.
 func TestListeners_ASelectedProviderThatIsNotConfiguredIsAClientError(t *testing.T) {
 	if !rand.Initialized() {
@@ -178,7 +178,7 @@ func TestGrpcChainListener_ASelectedProviderThatIsNotConfiguredIsInvalidArgument
 	require.NotEmpty(t, trailer.Get(common.GUID_HEADER_NAME), "the refusal carries the request id, as a served call does")
 }
 
-// A GraphQL write refused this way says Lava-Write-Outcome: not_sent. The router puts it on the
+// A GraphQL write refused this way says Router-Write-Outcome: not_sent. The router puts it on the
 // reply it returns beside the error, since only it knows the request was a mutation, and the
 // listener sends that reply's headers with its refusal document.
 func TestGraphQLListener_ARefusedPinnedWriteSaysNotSent(t *testing.T) {

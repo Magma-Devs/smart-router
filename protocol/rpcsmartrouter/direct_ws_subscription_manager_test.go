@@ -1999,12 +1999,12 @@ func TestTendermintSubscriptionEndToEnd(t *testing.T) {
 // (the interface is shared across both subscription managers despite its name).
 // It returns a configurable address from ChooseUpstream; relay-data callbacks are no-ops.
 type fakeSubscriptionOptimizer struct {
-	chooseFn func(allAddresses []string, ignored map[string]struct{}) []string
+	chooseFn func(allAddresses []string) []string
 }
 
-func (f *fakeSubscriptionOptimizer) ChooseUpstream(_ context.Context, allAddresses []string, ignored map[string]struct{}, _ uint64, _ int64) []string {
+func (f *fakeSubscriptionOptimizer) ChooseUpstream(_ context.Context, allAddresses []string, _ map[string]struct{}, _ uint64, _ int64) []string {
 	if f.chooseFn != nil {
-		return f.chooseFn(allAddresses, ignored)
+		return f.chooseFn(allAddresses)
 	}
 	return nil
 }

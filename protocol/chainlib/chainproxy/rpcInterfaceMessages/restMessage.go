@@ -48,7 +48,8 @@ func (rm *RestMessage) GetRawRequestHash() ([]byte, error) {
 // it adds on JSON-RPC: a write broadcast keeps waiting for a sibling's success instead of taking
 // the first refusal as the result, and the error registry classifies the reply — its REST rows
 // decide whether a read is retried elsewhere and whether the endpoint is scored. A 2xx is a
-// success unless its body carries a Cosmos transaction error.
+// success unless its body carries a Cosmos transaction error, or it is Tron refusing a broadcast
+// transaction (checkTronBroadcast, MAG-5323).
 //
 // A status of 0 is "not set" — a cache entry written before statuses were stored, a test
 // fixture, gRPC's codes.OK on the shared RelayResult — and reads as a success, the way the
@@ -58,9 +59,28 @@ func (jm RestMessage) CheckResponseError(data []byte, httpStatusCode int) (hasEr
 		if cosmosTxErr, errMsg := checkCosmosTxError(data); cosmosTxErr {
 			return cosmosTxErr, errMsg
 		}
-		return false, ""
+		return checkTronBroadcast(jm.apiPath(), data)
 	}
 	return true, extractErrorMessage(data, httpStatusCode)
+}
+
+// RefusesTransaction reports whether a 2xx reply is the node refusing the transaction the request
+// broadcast (checkTronBroadcast). The sender marks such a reply a node error, as it does any reply
+// outside 2xx; a Cosmos tx_response error keeps its old place, a node error to the relay processor
+// only.
+func (jm RestMessage) RefusesTransaction(data []byte) bool {
+	refused, _ := checkTronBroadcast(jm.apiPath(), data)
+	return refused
+}
+
+// apiPath is the spec api the request was parsed as, or, on a message built without one, its path
+// without the query.
+func (jm RestMessage) apiPath() string {
+	if jm.SpecPath != "" {
+		return jm.SpecPath
+	}
+	path, _, _ := strings.Cut(jm.Path, "?")
+	return path
 }
 
 // ServerErrorIsNodeReply reports whether a REST 5xx is the node's own answer rather than a failure
