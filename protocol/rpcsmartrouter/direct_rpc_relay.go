@@ -575,6 +575,7 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 	// and no body. It used to be rewritten into a JSON-RPC POST built from the parsed method and
 	// params (MAG-5267); the router is a proxy (Part I R-0). The parsed message still drives routing
 	// and caching. CometBFT serves both forms on the same port.
+	uriGET := false
 	if tendermintMessage, ok := chainMessage.GetRPCMessage().(*rpcInterfaceMessages.TendermintrpcMessage); ok {
 		if uri, fromURI := tendermintMessage.URIRequest(); fromURI {
 			fullURL, err := tendermintURIRequestURL(nodeUrl, uri)
@@ -582,6 +583,7 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 				return nil, fmt.Errorf("failed to build Tendermint RPC URL: %w", err)
 			}
 			httpParams.Method, httpParams.URL, httpParams.Body = http.MethodGet, fullURL, nil
+			uriGET = true
 		}
 	}
 
@@ -610,8 +612,10 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 	statusCode := response.StatusCode
 	responseData := response.Body
 
-	// Handle HTTP error status codes
-	if statusCode >= 500 {
+	// Handle HTTP error status codes. A client's Tendermint GET that the node answered with its
+	// JSON-RPC error is the exception (uriServerErrorIsNodeReply): that 5xx is the node's reply, and
+	// it goes on below to be read by its body, as the same error over POST is.
+	if statusCode >= 500 && !(uriGET && uriServerErrorIsNodeReply(statusCode, responseData)) {
 		utils.FormatDebug("direct RPC request returned server error",
 			utils.LogAttr("endpoint", endpointIdentifier),
 			utils.LogAttr("status", statusCode),
@@ -783,6 +787,18 @@ func withoutQueryNames(rawQuery string, names map[string]bool) string {
 		}
 		rawQuery, before = rest, after
 	}
+}
+
+// uriServerErrorIsNodeReply reports whether a 5xx that answered a client's Tendermint GET is the
+// node's own reply, to be read by its body. CometBFT answers a URI request that fails with a 500 and
+// the JSON-RPC error that a JSON-RPC POST gets with a 200 (rpc/jsonrpc/server/http_uri_handler.go):
+// the status adds nothing the body does not say. The rule is REST's, ServerErrorIsNodeReply: the
+// body is JSON, and the registry does not mark the status as one that may come from a gateway that
+// had already sent the request on, as it marks a 502, a 504 and a status it does not list. On top of
+// it, the body must be a JSON-RPC error, its error member an object. An empty, HTML or text body, or
+// JSON that is not a JSON-RPC error, stays a failure in front of the node (MAG-5267).
+func uriServerErrorIsNodeReply(statusCode int, body []byte) bool {
+	return rpcInterfaceMessages.ServerErrorIsNodeReply(statusCode, body) && gjson.GetBytes(body, "error").IsObject()
 }
 
 // classifyJSONRPCNodeError stamps the registry's verdict on a JSON-RPC or Tendermint reply that
