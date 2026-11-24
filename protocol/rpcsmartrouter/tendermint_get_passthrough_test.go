@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -212,6 +213,61 @@ func TestTendermintGETReachesTheNodeAsAGET_MAG5267(t *testing.T) {
 		require.Len(t, got, 1)
 		require.Equal(t, http.MethodPost, got[0].method, "a JSON-RPC POST stays a POST")
 		require.JSONEq(t, tendermint.body, got[0].body, "with the client's own body")
+	})
+
+	// A request that names no method is answered by the router itself: a GET of the root, with or
+	// without a query, or a request with no body, which a POST without one parses as. CometBFT would
+	// answer it with its HTML list of endpoints, which names the node's host and is no reply the
+	// router can pass on. No provider is asked and no endpoint is charged. The reply is the router's
+	// own method-not-found, the one the POST handler gives an API the spec does not declare.
+	methodNotFound, err := json.Marshal(common.JsonRpcMethodNotFoundError)
+	require.NoError(t, err)
+	for _, tc := range []struct{ name, method, path, body string }{
+		{name: "a GET of the root", method: http.MethodGet, path: "/"},
+		{name: "a GET of the root with a query", method: http.MethodGet, path: "/?height=5"},
+		{name: "a GET of a path of slashes", method: http.MethodGet, path: "//"},
+		{name: "a GET of the root with a body", method: http.MethodGet, path: "/", body: tendermint.body},
+		{name: "a POST with no body", method: http.MethodPost, path: "/"},
+	} {
+		t.Run(tc.name+" is answered by the router", func(t *testing.T) {
+			relayEnds := captureRelayEnds(t)
+			node := newCometBFTNode(t)
+			request := tendermint
+			request.method, request.path, request.body = tc.method, tc.path, tc.body
+			send, endpoints := startFailedReplyRouterWithEndpoints(t, request, node.url)
+			read := send()
+			require.Zero(t, node.hits.Load(), "no provider is asked")
+			// Read without the endpoint's lock: no relay ran, so nothing else wrote it.
+			require.Zero(t, endpoints[0].ConnectionRefusals, "no endpoint is charged")
+			require.Equal(t, http.StatusOK, read.status)
+			require.JSONEq(t, string(methodNotFound), read.body, "the router's own method-not-found")
+			require.NotContains(t, read.body, strings.TrimPrefix(node.url, "http://"), "nothing of the node's page")
+			require.Empty(t, read.nodeError, "no node answered")
+			require.Empty(t, read.header.Get(common.PROVIDER_ADDRESS_HEADER_NAME), "no provider was asked")
+
+			lines := relayEnds()
+			require.Len(t, lines, 1)
+			var end tendermintRelayEnd
+			require.NoError(t, json.Unmarshal([]byte(lines[0]), &end))
+			require.Equal(t, "rejected_before_dispatch", end.Outcome)
+			require.Empty(t, end.Attempts)
+		})
+	}
+
+	// A GET that names a method the node does not serve still goes to the node, and the node's 404
+	// reaches the client as it came. The node answered about its own surface, so the endpoint is not
+	// charged for it.
+	t.Run("a GET of a method the node does not serve gets the node's 404", func(t *testing.T) {
+		node := newCometBFTNode(t)
+		get := tendermint
+		get.method, get.path, get.body = http.MethodGet, "/no_such_method", ""
+		send, endpoints := startFailedReplyRouterWithEndpoints(t, get, node.url)
+		read := send()
+		require.EqualValues(t, 1, node.hits.Load())
+		require.Equal(t, http.StatusNotFound, read.status)
+		require.Equal(t, "404 page not found\n", read.body)
+		// Read without the endpoint's lock: only a refusal writes the count, and this relay made none.
+		require.Zero(t, endpoints[0].ConnectionRefusals)
 	})
 
 	// CometBFT answers a GET that fails with a 500 and the JSON-RPC error that a JSON-RPC POST gets

@@ -101,18 +101,27 @@ const failedReplyRelayTimeout = 300 * time.Millisecond
 // the interface's request and reads the reply.
 func startFailedReplyRouter(t *testing.T, iface failedReplyInterface, upstreamURLs ...string) func() failedReplyClientRead {
 	t.Helper()
+	send, _ := startFailedReplyRouterWithEndpoints(t, iface, upstreamURLs...)
+	return send
+}
+
+// startFailedReplyRouterWithEndpoints is startFailedReplyRouter that also returns each upstream's
+// endpoint, in the order of upstreamURLs.
+func startFailedReplyRouterWithEndpoints(t *testing.T, iface failedReplyInterface, upstreamURLs ...string) (func() failedReplyClientRead, []*routersession.Endpoint) {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
 	parser := iface.parser(t)
 	providers := map[uint64]*routersession.ConsumerSessionsWithProvider{}
+	endpoints := make([]*routersession.Endpoint, 0, len(upstreamURLs))
 	for i, upstreamURL := range upstreamURLs {
 		connection, err := routersession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: upstreamURL, Timeout: iface.upstreamTimeout}, 5, iface.apiInterface)
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = connection.Close() })
-		provider := routersession.NewConsumerSessionWithProvider(fmt.Sprintf("upstream-%d", i+1), []*routersession.Endpoint{{
-			NetworkAddress: upstreamURL, Enabled: true, DirectConnections: []routersession.DirectRPCConnection{connection},
-		}}, 100000, 1, 1)
+		endpoint := &routersession.Endpoint{NetworkAddress: upstreamURL, Enabled: true, DirectConnections: []routersession.DirectRPCConnection{connection}}
+		endpoints = append(endpoints, endpoint)
+		provider := routersession.NewConsumerSessionWithProvider(fmt.Sprintf("upstream-%d", i+1), []*routersession.Endpoint{endpoint}, 100000, 1, 1)
 		provider.StaticProvider = true
 		providers[uint64(i)] = provider
 	}
@@ -163,7 +172,7 @@ func startFailedReplyRouter(t *testing.T, iface failedReplyInterface, upstreamUR
 			nodeError:   response.Header.Get(common.IDENTIFIED_NODE_ERROR_HEADER),
 			header:      response.Header,
 		}
-	}
+	}, endpoints
 }
 
 // answeringUpstream answers every request with status, body and Content-Type.
