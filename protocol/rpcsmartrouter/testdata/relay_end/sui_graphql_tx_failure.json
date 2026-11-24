@@ -10,7 +10,8 @@
       "outcome": "ok",
       "returned_to_client": true,
       "sent_ms": "<ms>",
-      "upstream": "node-a"
+      "upstream": "node-a",
+      "write_outcome": "accepted"
     }
   ],
   "chain": "SUI",

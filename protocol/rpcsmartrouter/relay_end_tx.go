@@ -85,6 +85,12 @@ func (e *relayEnd) readTransaction(protocolMessage chainlib.ProtocolMessage, rep
 		// One root field: a mutation that selects several has no single transaction to name.
 		if api.Name == suiGraphQLExecuteRootField {
 			e.txHash, e.txStatus, e.txError = suiGraphQLExecution(reply)
+			// With no digest in the reply (the mutation did not select it, or the client got a node
+			// error, the router's unknown reply or none), the digest is computed from the
+			// transaction in the request (MAG-4909), the one the unknown reply hands the client.
+			if e.txHash == "" {
+				e.txHash = graphQLWriteDigest(protocolMessage)
+			}
 		}
 	case spectypes.APIInterfaceTendermintRPC, spectypes.APIInterfaceRest:
 		// A Cosmos node answers a refused transaction with a normal reply, so the outcome stays ok and

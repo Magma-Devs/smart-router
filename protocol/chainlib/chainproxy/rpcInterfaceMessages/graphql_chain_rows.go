@@ -52,6 +52,19 @@ const (
 	GraphQLWriteMayHaveRun
 )
 
+// String is the outcome as relay_end writes it, in the same words as GRPCWriteOutcome's.
+func (o GraphQLWriteOutcome) String() string {
+	switch o {
+	case GraphQLWriteAccepted:
+		return "accepted"
+	case GraphQLWriteRejected:
+		return "rejected"
+	case GraphQLWriteMayHaveRun:
+		return "may_have_run"
+	}
+	return ""
+}
+
 // graphQLWriteCopy is one copy's reading: its outcome, and for a copy that is not accepted, the
 // verdict the error registry files it under (status and message).
 type graphQLWriteCopy struct {

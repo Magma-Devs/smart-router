@@ -1486,7 +1486,8 @@ var (
 //
 // Silence is not the whole of it. An endpoint whose connection died after the request went out has
 // come back without answering, so when everyone came back we still ask whether any of them was cut
-// off mid-delivery. A node error is a real reply and passes through untouched.
+// off mid-delivery. A node error is a real reply and settles its endpoint, unless the chain's write
+// rows read it as "may have run" (MAG-4909: Sui's GraphQL write).
 //
 // No record at all means either an attempt still in flight (unknown) or a request that never
 // dispatched one (no pairings, everything filtered out, or a deadline before dispatch). An expired
@@ -1523,9 +1524,10 @@ func unclearWriteOutcomeFor(protocolMessage chainlib.ProtocolMessage, relayProce
 
 	ranOutOfRoad := requestRanOutOfRoad(relayProcessor.GetStopReason())
 
-	// A node error is a reply, so it settles that endpoint. A transport error may not: an
-	// unclassified one proves nothing, and a reset, EOF or timeout can arrive after the request was
-	// already on the wire.
+	// A node error is a reply, so it settles that endpoint unless the chain's write rows read it as
+	// "may have run" (the node-error loop below). A transport error may not: an unclassified one
+	// proves nothing, and a reset, EOF or timeout can arrive after the request was already on the
+	// wire.
 	cutOffMidDelivery := false
 	var cutOffs writeCutOffs
 	for _, protocolError := range protocolErrors {
