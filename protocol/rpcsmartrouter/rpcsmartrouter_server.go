@@ -7338,13 +7338,10 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 		// caller and needs no deploy change. It is safe to gate on a client-settable
 		// header precisely because these two values name nothing internal.
 		//
-		// router-debug-relay is also the only directive that can carry this without
-		// breaking it: hashCacheRequest marshals the whole RelayPrivateData, metadata
-		// included, into the cache key, so a newly minted request header would put the
-		// flagged request in its own cache lane — it would never hit, and a test would
-		// assert against a miss having measured nothing. router-debug-relay is registered
-		// in common.SPECIAL_DIRECTIVE_HEADERS and stripped by DirectiveHeaders
-		// before ParseMsg, so it never reaches the key.
+		// router-debug-relay stays out of the cache key: it is registered in
+		// common.SPECIAL_DIRECTIVE_HEADERS and stripped by DirectiveHeaders before ParseMsg.
+		// The key hashes only the metadata HandleHeaders keeps, which is the headers the
+		// spec declares plus a REST body's Content-Type, so the flag leaves the lane as is.
 		//
 		// Both are emitted unconditionally under the directive, including "none" and
 		// the not-consulted outcomes: an absent header must be able to mean only
