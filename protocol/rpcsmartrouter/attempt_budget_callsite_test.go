@@ -72,7 +72,7 @@ func TestSendRelayToDirectEndpoints_PassesTheBudgetNotTheWindow(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(
-		ctx, "LAVA", spectypes.APIInterfaceRest, noopHandler, nil, "../../", nil)
+		ctx, "COSMOSHUB", spectypes.APIInterfaceRest, noopHandler, nil, "../../", nil)
 	if closeServer != nil {
 		defer closeServer()
 	}
@@ -124,8 +124,8 @@ func TestSendRelayToDirectEndpoints_PassesTheBudgetNotTheWindow(t *testing.T) {
 	relayProcessor := relaycore.NewRelayProcessor(
 		ctx, nil, metricsStub, metricsStub, sm)
 
-	rpcEndpoint := &routersession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "rest"}
-	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "LAVA")
+	rpcEndpoint := &routersession.RPCEndpoint{ChainID: "COSMOSHUB", ApiInterface: "rest"}
+	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "COSMOSHUB")
 	rpcss := &RPCSmartRouterServer{
 		listenEndpoint:    rpcEndpoint,
 		chainParser:       chainParser,

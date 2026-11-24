@@ -25,7 +25,7 @@ func TestLegacyFieldsAreIgnoredOnDecode(t *testing.T) {
 		"reliability_threshold": 268435455,
 		"data_reliability_enabled": true,
 		"block_last_updated": 99,
-		"min_stake_provider": {"denom": "ulava", "amount": "5000000000"},
+		"min_stake_provider": {"denom": "uatom", "amount": "5000000000"},
 		"providers_types": "static",
 		"contributor": ["a", "b"],
 		"contributor_percentage": "0.015",

@@ -350,7 +350,7 @@ func CreateChainLibMocks(
 		cancelConnector()
 	}
 
-	// Load specs from all directories so cross-directory imports (e.g. LAV1 -> COSMOSSDK) resolve.
+	// Load specs from all directories so cross-directory imports (e.g. COSMOSHUB -> COSMOSSDK50) resolve.
 	spec, err := specutils.GetSpecFromLocalDirs([]string{
 		getToTopMostPath + "specs/",
 	}, specIndex)
