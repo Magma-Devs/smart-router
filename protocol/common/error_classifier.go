@@ -106,6 +106,8 @@ var chainErrorMappings = map[ChainFamily][]errorMapping{
 	// both and starts the message with the name or the code; the direct-RPC sender adds an
 	// "HTTP <status>: " prefix to a non-2xx reply. Matched as the message's first token,
 	// case-sensitive, as rippled writes them. An API error not listed here is UNKNOWN_ERROR.
+	// Three rows (tefALREADY, tooBusy/slowDown, noPermission/forbidden) are xrpFirstRows, run ahead
+	// of this table and of the chain's spec rows (PRD §5.5).
 	ChainFamilyXRP: {
 		// Engine results (submit, submit_multisigned): what happened to the transaction, never that
 		// the node is broken, so each is a non-retryable chain error that keeps the availability gate
@@ -114,9 +116,8 @@ var chainErrorMappings = map[ChainFamily][]errorMapping{
 		// hint, a provider-supplied body) is better labelled a rejection, non-retryable and not at
 		// fault, than left UNKNOWN_ERROR, which is retryable and scored
 		// (TestXRPLTerQueuedRowKeepsTheGateOff).
-		{xrplMessageStartsWith("tefPAST_SEQ"), RouterErrorChainNonceTooLow},   // sequence used, often by this very transaction arriving by gossip
-		{xrplMessageStartsWith("tefALREADY"), RouterErrorChainTxAlreadyKnown}, // this exact transaction is already in the ledger
-		{xrplMessageStartsWith("terPRE_SEQ"), RouterErrorChainNonceTooHigh},   // an earlier sequence has not been applied yet
+		{xrplMessageStartsWith("tefPAST_SEQ"), RouterErrorChainNonceTooLow}, // sequence used, often by this very transaction arriving by gossip
+		{xrplMessageStartsWith("terPRE_SEQ"), RouterErrorChainNonceTooHigh}, // an earlier sequence has not been applied yet
 		{xrplMessageStartsWith(xrplRejectionCode), RouterErrorChainTxRejected},
 		// API errors, by what each says about the node.
 		// The node cannot serve yet; another can. That is the node's own state.
@@ -124,8 +125,6 @@ var chainErrorMappings = map[ChainFamily][]errorMapping{
 		// The node runs a version the network has amended past, or holds an expired validator list
 		// (unlBlocked): this node cannot serve now; another can.
 		{xrplMessageStartsWith("amendmentBlocked", "unlBlocked"), RouterErrorNodeServiceUnavailable},
-		// Healthy but busy, and nothing was executed: the hold-off applies and the score does not move.
-		{xrplMessageStartsWith("tooBusy", "slowDown"), RouterErrorNodeRateLimited},
 		// The node failed on its side: dbDeserialization is tx unable to read its own stored copy;
 		// json_rpc is rippled's transport error.
 		{xrplMessageStartsWith("internal", "internalJson", "internalSubmit", "internalTransaction", "dbDeserialization", "json_rpc"), RouterErrorNodeInternalError},
@@ -146,10 +145,6 @@ var chainErrorMappings = map[ChainFamily][]errorMapping{
 		// The node has the command switched off (notEnabled: no transaction tables) or its version
 		// does not implement the request (notImpl: simulate of a Batch); another node may serve it.
 		{xrplMessageStartsWith("notEnabled", "notImpl"), RouterErrorNodeUnimplemented},
-		// This node refuses the caller: an admin-only command or option (noPermission), or the
-		// router's address is barred (forbidden). Another node may allow it; it says nothing about
-		// this node's health.
-		{xrplMessageStartsWith("noPermission", "forbidden"), RouterErrorNodeAccessDenied},
 		// The request itself, which every node answers the same way. notSupported is how a public
 		// node answers a sign-and-submit; wrongNetwork is tx given a CTID from another network;
 		// badFeature is feature given an unknown amendment name.
@@ -165,6 +160,24 @@ var chainErrorMappings = map[ChainFamily][]errorMapping{
 			"badSeed", "masterDisabled", "alreadyMultisig", "alreadySingleSig",
 		), RouterErrorUserInvalidParams},
 	},
+}
+
+// xrpFirstRows are the XRP rows that run ahead of the family table and of the chain's spec rows
+// (PRD §5.5, §3.2 step 4.1; MAG-5597): the rulebook decides a rate limit, a duplicate and an access
+// refusal before any chain row, and XRPL says these inside a 200 result, where no status can. The
+// te[fmlr] catch-all stays in the table above and runs after the spec rows, where tefPAST_SEQ and
+// terPRE_SEQ move with the XRP chapter. Each row's first token is its own, so running them first
+// changes no verdict the table gave. ClassifyError runs them for the XRP family; ClassifyInOrder runs
+// them at their stage.
+var xrpFirstRows = []errorMapping{
+	// This exact transaction is already in the ledger: a duplicate, took it.
+	{xrplMessageStartsWith("tefALREADY"), RouterErrorChainTxAlreadyKnown},
+	// Healthy but busy, and nothing was executed: the hold-off applies and the score does not move.
+	{xrplMessageStartsWith("tooBusy", "slowDown"), RouterErrorNodeRateLimited},
+	// This node refuses the caller: an admin-only command or option (noPermission), or the
+	// router's address is barred (forbidden). Another node may allow it; it says nothing about
+	// this node's health.
+	{xrplMessageStartsWith("noPermission", "forbidden"), RouterErrorNodeAccessDenied},
 }
 
 // xrplRejectionCode is the shape of an XRPL engine result that refuses the transaction: tef
@@ -831,6 +844,16 @@ func ClassifyError(connectionError *RouterError, chainFamily ChainFamily, transp
 	// on the hot retry path. The loweredMessageMatcher fast path lets matchers
 	// consume the pre-lowered form directly.
 	loweredMessage := strings.ToLower(errorMessage)
+
+	// The XRP rows that come first (xrpFirstRows, PRD §5.5): ahead of the family table here, and of
+	// the chain's spec rows in ClassifyInOrder.
+	if chainFamily == ChainFamilyXRP {
+		for _, mapping := range xrpFirstRows {
+			if matchMapping(mapping.Matcher, errorCode, errorMessage, loweredMessage) {
+				return mapping.RouterError
+			}
+		}
+	}
 
 	// Step 1: Check chain-specific mappings (Tier 2)
 	if chainMappings, ok := chainErrorMappings[chainFamily]; ok {
