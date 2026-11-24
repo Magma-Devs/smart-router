@@ -649,6 +649,9 @@ func TestDecodeAsMessage_StopsAtTheDecodersNestingLimit(t *testing.T) {
 
 // The read builds nothing, however many fields a body holds.
 func TestDecodeAsMessage_AllocatesNothing(t *testing.T) {
+	if raceEnabled {
+		t.Skip("testing.AllocsPerRun reads no stable count under -race; the run without -race asserts this")
+	}
 	md := everyKindRequest(t, "Request")
 	const size = 1 << 20
 	emptyMessages, strs, packed := wire(nil), wire(nil), []byte(nil)

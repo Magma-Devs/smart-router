@@ -116,9 +116,11 @@ func TestDefaultMethodShapeCollapsesConcreteIDs(t *testing.T) {
 		// Hex addresses, whatever their length.
 		"/accounts/0x1/resources":                                     "/accounts/{}/resources",
 		"/accounts/0xd85fd8b6d0f1b1a1c6c6e0d6b6f6a6d6e6f6a6b6/events": "/accounts/{}/events",
-		// Opaque hashes: Tezos block hash (51), cosmos bech32 with the lava@ prefix (45).
-		"/chains/main/blocks/BKiHLREqU3JkXfzEDYAkmmfX48gBDtYqbugTxCcv9YrK1H1EAy/header":    "/chains/main/blocks/{}/header",
-		"/cosmos/staking/v1beta1/delegations/lava@17ym998u666u8w2qgjd5m7w7ydjqmu3mlgl7ua2": "/cosmos/staking/v1beta1/delegations/{}",
+		// Opaque hashes: Tezos block hash (50), cosmos bech32 address (45).
+		"/chains/main/blocks/BKiHLREqU3JkXfzEDYAkmmfX48gBDtYqbugTxCcv9YrK1H1EAy/header":     "/chains/main/blocks/{}/header",
+		"/cosmos/staking/v1beta1/delegations/cosmos17ym998u666u8w2qgjd5m7w7ydjqmu3mlgl7ua2": "/cosmos/staking/v1beta1/delegations/{}",
+		// An opaque id with an "@" separator.
+		"/accounts/acct@17ym998u666u8w2qgjd5m7w7ydjqmu3mlgl7ua2/balance": "/accounts/{}/balance",
 		// Several values in one path all collapse.
 		"/blocks/123/operations/0/4": "/blocks/{}/operations/{}/{}",
 	} {
@@ -211,16 +213,16 @@ func TestNormalizeMethodLabelCollapsesNamesThatAreNotUTF8(t *testing.T) {
 	m := newTestMetricsManager(t)
 
 	single := defaultName("/x/\xff")
-	require.Equal(t, DefaultMethodOther, m.normalizeMethodLabel("LAV1", single))
-	require.Equal(t, 1.0, testutil.ToFloat64(m.defaultMethodOverflow.WithLabelValues("LAV1")))
-	require.NotContains(t, m.defaultMethods.admitted["LAV1"], single, "must not spend the budget")
+	require.Equal(t, DefaultMethodOther, m.normalizeMethodLabel("COSMOSHUB", single))
+	require.Equal(t, 1.0, testutil.ToFloat64(m.defaultMethodOverflow.WithLabelValues("COSMOSHUB")))
+	require.NotContains(t, m.defaultMethods.admitted["COSMOSHUB"], single, "must not spend the budget")
 
 	batch := defaultName("/a\xff") + batchMethodSeparator + "eth_call"
-	require.Equal(t, BatchMethodOther, m.normalizeMethodLabel("LAV1", batch))
-	require.Equal(t, 1.0, testutil.ToFloat64(m.batchSignatureOverflow.WithLabelValues("LAV1", batchOverflowReasonInvalid)))
+	require.Equal(t, BatchMethodOther, m.normalizeMethodLabel("COSMOSHUB", batch))
+	require.Equal(t, 1.0, testutil.ToFloat64(m.batchSignatureOverflow.WithLabelValues("COSMOSHUB", batchOverflowReasonInvalid)))
 
 	matched := "\xffeth_call"
-	require.Equal(t, DefaultMethodOther, m.normalizeMethodLabel("LAV1", matched), "any name, not only Default-*")
+	require.Equal(t, DefaultMethodOther, m.normalizeMethodLabel("COSMOSHUB", matched), "any name, not only Default-*")
 }
 
 // Every recorder that takes a method label goes through normalizeMethodLabel, so a name
@@ -229,13 +231,13 @@ func TestMethodRecordersTakeANameThatIsNotUTF8(t *testing.T) {
 	m := newTestMetricsManager(t)
 	name := defaultName("/x/\xff")
 	require.NotPanics(t, func() {
-		m.RecordDirectRelayStart("LAV1", "rest", "ep-utf8", name)
-		m.recordRelayOutcome("LAV1", "rest", "ep-utf8", name, true, 12)
-		m.recordRelayOutcome("LAV1", "rest", "ep-utf8", name, false, 0)
-		m.RecordRouterEndToEndLatency("LAV1", "rest", name, 12)
-		m.SetEndpointEndToEndLatency("LAV1", "rest", "ep-utf8", name, 12)
-		m.RecordCacheResult("LAV1", "rest", name, "hot", "hit", 1)
-		m.RecordIncidentRetry("LAV1", "rest", name, 2, true)
-		m.SetRelayMetrics(&RelayMetrics{ChainID: "LAV1", APIType: "rest", ApiMethod: name, ProjectHash: "acme", Success: true}, nil)
+		m.RecordDirectRelayStart("COSMOSHUB", "rest", "ep-utf8", name)
+		m.recordRelayOutcome("COSMOSHUB", "rest", "ep-utf8", name, true, 12)
+		m.recordRelayOutcome("COSMOSHUB", "rest", "ep-utf8", name, false, 0)
+		m.RecordRouterEndToEndLatency("COSMOSHUB", "rest", name, 12)
+		m.SetEndpointEndToEndLatency("COSMOSHUB", "rest", "ep-utf8", name, 12)
+		m.RecordCacheResult("COSMOSHUB", "rest", name, "hot", "hit", 1)
+		m.RecordIncidentRetry("COSMOSHUB", "rest", name, 2, true)
+		m.SetRelayMetrics(&RelayMetrics{ChainID: "COSMOSHUB", APIType: "rest", ApiMethod: name, ProjectHash: "acme", Success: true}, nil)
 	})
 }

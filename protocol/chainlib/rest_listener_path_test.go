@@ -33,7 +33,7 @@ func TestRestChainListener_LeadingSlashesCollapseBeforeTheRelay(t *testing.T) {
 	require.NoError(t, err)
 	endpoint := &routersession.RPCEndpoint{
 		NetworkAddress:  "127.0.0.1:0",
-		ChainID:         "LAV1",
+		ChainID:         "COSMOSHUB",
 		ApiInterface:    "rest",
 		HealthCheckPath: common.DEFAULT_HEALTH_PATH,
 	}

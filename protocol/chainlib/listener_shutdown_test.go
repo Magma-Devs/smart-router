@@ -48,7 +48,7 @@ func fiberChainListeners(t *testing.T, ctx context.Context) map[string]func() fi
 			return NewTendermintRpcChainListener(ctx, endpoint("COS5", spectypes.APIInterfaceTendermintRPC), nil, alwaysHealthyReporter{}, logger, nil, nil)
 		},
 		"rest": func() fiberChainListener {
-			return NewRestChainListener(ctx, endpoint("LAV1", spectypes.APIInterfaceRest), nil, alwaysHealthyReporter{}, logger)
+			return NewRestChainListener(ctx, endpoint("COSMOSHUB", spectypes.APIInterfaceRest), nil, alwaysHealthyReporter{}, logger)
 		},
 		"graphql": func() fiberChainListener {
 			return NewGraphQLChainListener(ctx, endpoint("SUI", spectypes.APIInterfaceGraphQL), nil, alwaysHealthyReporter{}, logger)

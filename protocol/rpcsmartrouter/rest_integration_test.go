@@ -20,7 +20,7 @@ func TestRESTRelay_GET_PathParameters(t *testing.T) {
 	ctx := context.Background()
 	chainParser, _, _, closeServer, endpoint, err := chainlibtest.CreateChainLibMocks(
 		ctx,
-		"LAVA",
+		"COSMOSHUB",
 		spectypes.APIInterfaceRest,
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			assert.Equal(t, http.MethodGet, r.Method)
@@ -69,7 +69,7 @@ func TestRESTRelay_GET_QueryParameters(t *testing.T) {
 	ctx := context.Background()
 	chainParser, _, _, closeServer, endpoint, err := chainlibtest.CreateChainLibMocks(
 		ctx,
-		"LAVA",
+		"COSMOSHUB",
 		spectypes.APIInterfaceRest,
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			assert.Equal(t, http.MethodGet, r.Method)
@@ -119,7 +119,7 @@ func TestRESTRelay_POST_JSONBody(t *testing.T) {
 	ctx := context.Background()
 	chainParser, _, _, closeServer, endpoint, err := chainlibtest.CreateChainLibMocks(
 		ctx,
-		"LAVA",
+		"COSMOSHUB",
 		spectypes.APIInterfaceRest,
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			assert.Equal(t, http.MethodPost, r.Method)
@@ -168,7 +168,7 @@ func TestRESTRelay_404_NotFound(t *testing.T) {
 	ctx := context.Background()
 	chainParser, _, _, closeServer, endpoint, err := chainlibtest.CreateChainLibMocks(
 		ctx,
-		"LAVA",
+		"COSMOSHUB",
 		spectypes.APIInterfaceRest,
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusNotFound)
@@ -224,7 +224,7 @@ func sendRESTThroughMockUpstream(t *testing.T, status int, body string) *common.
 	ctx := context.Background()
 	chainParser, _, _, closeServer, endpoint, err := chainlibtest.CreateChainLibMocks(
 		ctx,
-		"LAVA",
+		"COSMOSHUB",
 		spectypes.APIInterfaceRest,
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(status)
@@ -412,7 +412,7 @@ func TestRESTRelay_429_RateLimit(t *testing.T) {
 	ctx := context.Background()
 	chainParser, _, _, closeServer, endpoint, err := chainlibtest.CreateChainLibMocks(
 		ctx,
-		"LAVA",
+		"COSMOSHUB",
 		spectypes.APIInterfaceRest,
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusTooManyRequests)
@@ -457,7 +457,7 @@ func TestRESTRelay_503_ServiceUnavailable(t *testing.T) {
 	ctx := context.Background()
 	chainParser, _, _, closeServer, endpoint, err := chainlibtest.CreateChainLibMocks(
 		ctx,
-		"LAVA",
+		"COSMOSHUB",
 		spectypes.APIInterfaceRest,
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusServiceUnavailable)
@@ -498,7 +498,7 @@ func TestRESTRelay_503_ServiceUnavailable(t *testing.T) {
 	assert.True(t, result.IsNodeError)
 }
 
-// TestRESTRelay_ResponseHeaders pins, through the real LAVA REST spec, which upstream
+// TestRESTRelay_ResponseHeaders pins, through the real COSMOSHUB REST spec, which upstream
 // headers reach the reply (MAG-3104): the vendor's own header is dropped, Content-Type is
 // kept, and the block-height header the spec declares as a reply header (inherited from
 // cosmossdk as pass_both) is kept under the upstream's spelling.
@@ -506,7 +506,7 @@ func TestRESTRelay_ResponseHeaders(t *testing.T) {
 	ctx := context.Background()
 	chainParser, _, _, closeServer, endpoint, err := chainlibtest.CreateChainLibMocks(
 		ctx,
-		"LAVA",
+		"COSMOSHUB",
 		spectypes.APIInterfaceRest,
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
@@ -576,7 +576,7 @@ func TestRESTRelay_501_NotImplemented_relayInnerDirect(t *testing.T) {
 	ctx := context.Background()
 	chainParser, _, _, closeServer, endpoint, err := chainlibtest.CreateChainLibMocks(
 		ctx,
-		"LAVA",
+		"COSMOSHUB",
 		spectypes.APIInterfaceRest,
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Cosmos gRPC-gateway "not implemented" surfaces as HTTP 501.
@@ -619,7 +619,7 @@ func TestRESTRelay_501_NotImplemented_relayInnerDirect(t *testing.T) {
 	}
 
 	rpcss := &RPCSmartRouterServer{
-		listenEndpoint: &routersession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "rest"},
+		listenEndpoint: &routersession.RPCEndpoint{ChainID: "COSMOSHUB", ApiInterface: "rest"},
 	}
 
 	relayResult := &common.RelayResult{}
@@ -651,7 +651,7 @@ func relayInnerDirectREST(t *testing.T, status int, body string) (*common.RelayR
 	ctx := context.Background()
 	chainParser, _, _, closeServer, endpoint, err := chainlibtest.CreateChainLibMocks(
 		ctx,
-		"LAVA",
+		"COSMOSHUB",
 		spectypes.APIInterfaceRest,
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(status)
@@ -680,7 +680,7 @@ func relayInnerDirectREST(t *testing.T, status int, body string) (*common.RelayR
 		},
 	}
 	rpcss := &RPCSmartRouterServer{
-		listenEndpoint: &routersession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "rest"},
+		listenEndpoint: &routersession.RPCEndpoint{ChainID: "COSMOSHUB", ApiInterface: "rest"},
 	}
 	relayResult := &common.RelayResult{}
 	_, relayErr := rpcss.relayInnerDirect(ctx, session, relayResult, 5*time.Second, 5*time.Second, chainMessage, nil, nil, nil, false)

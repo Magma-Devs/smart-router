@@ -135,7 +135,7 @@ func sendRESTWriteThroughListener(t *testing.T, upstreams []restWriteUpstream) r
 		providers[uint64(index)] = provider
 	}
 
-	sessionManager, rpcEndpoint := createTestSessionManager("LAVA", spectypes.APIInterfaceRest)
+	sessionManager, rpcEndpoint := createTestSessionManager("COSMOSHUB", spectypes.APIInterfaceRest)
 	rpcEndpoint.NetworkAddress = "127.0.0.1:0"
 	require.NoError(t, sessionManager.UpdateAllProviders(1, providers, nil))
 	logs, err := metrics.NewRPCConsumerLogs(nil, nil, nil)

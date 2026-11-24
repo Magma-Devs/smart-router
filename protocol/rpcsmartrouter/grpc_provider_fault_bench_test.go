@@ -48,7 +48,7 @@ func newGRPCBenchHarness(t *testing.T, addr string) *grpcBenchHarness {
 	}
 	return &grpcBenchHarness{
 		rpcss: &RPCSmartRouterServer{
-			listenEndpoint: &routersession.RPCEndpoint{ChainID: "LAV1", ApiInterface: "grpc"},
+			listenEndpoint: &routersession.RPCEndpoint{ChainID: "COSMOSHUB", ApiInterface: "grpc"},
 		},
 		session: &routersession.SingleConsumerSession{
 			Parent: &routersession.ConsumerSessionsWithProvider{

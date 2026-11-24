@@ -21,7 +21,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// restBodyMethodPath is the route the test adds to the LAVA spec under PUT and PATCH. It has
+// restBodyMethodPath is the route the test adds to the COSMOSHUB spec under PUT and PATCH. It has
 // the shape of Concordium's wallet-proxy submissions: a stateful write whose body is opaque bytes.
 const restBodyMethodPath = "/v0/submitRawTransaction"
 
@@ -60,7 +60,7 @@ func TestRESTListener_PutAndPatchBodiesReachTheNode(t *testing.T) {
 			defer closeServer()
 
 			// No bundled spec has a PUT or PATCH collection, so add one.
-			spec, err := specutils.GetSpecFromLocalDirs([]string{"../../specs/"}, "LAVA")
+			spec, err := specutils.GetSpecFromLocalDirs([]string{"../../specs/"}, "COSMOSHUB")
 			require.NoError(t, err)
 			spec.ApiCollections = append(spec.ApiCollections, &spectypes.ApiCollection{
 				Enabled:        true,
@@ -83,7 +83,7 @@ func TestRESTListener_PutAndPatchBodiesReachTheNode(t *testing.T) {
 				DirectConnections: []routersession.DirectRPCConnection{conn},
 			}}, 100000, 1, 1)
 			provider.StaticProvider = true
-			sessionManager, rpcEndpoint := createTestSessionManager("LAVA", spectypes.APIInterfaceRest)
+			sessionManager, rpcEndpoint := createTestSessionManager("COSMOSHUB", spectypes.APIInterfaceRest)
 			rpcEndpoint.NetworkAddress = "127.0.0.1:0"
 			require.NoError(t, sessionManager.UpdateAllProviders(1,
 				map[uint64]*routersession.ConsumerSessionsWithProvider{0: provider}, nil))

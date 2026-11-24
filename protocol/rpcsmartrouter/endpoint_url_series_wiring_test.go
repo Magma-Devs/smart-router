@@ -125,7 +125,7 @@ func TestDirectRelay_CountsTheRelayOnTheURLItWentTo(t *testing.T) {
 		NetworkAddress: nodeURL.Url, Enabled: true, DirectConnections: []routersession.DirectRPCConnection{conn},
 	}}, 100000, 1, 1)
 	session.StaticProvider = true
-	sessionManager, rpcEndpoint := createTestSessionManager("LAVA", spectypes.APIInterfaceRest)
+	sessionManager, rpcEndpoint := createTestSessionManager("COSMOSHUB", spectypes.APIInterfaceRest)
 	rpcEndpoint.NetworkAddress = "127.0.0.1:0"
 	require.NoError(t, sessionManager.UpdateAllProviders(1,
 		map[uint64]*routersession.ConsumerSessionsWithProvider{0: session}, nil))

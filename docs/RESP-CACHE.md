@@ -612,7 +612,7 @@ ports are held by anything else.
 | `scripts/pre_setups/cache/init_smartrouter_eth_redis_demo.sh` | Redis + router; drop-in caching, and degraded mode when the backend is paused |
 | `scripts/pre_setups/cache/init_smartrouter_eth_redis_sentinel.sh` | Primary + replica + 3 sentinels, both credential planes. `--failover` kills the primary and follows the promotion, `--recover` rejoins it, `--status` reports the topology |
 | `scripts/pre_setups/cache/init_smartrouter_eth_redis_multiregion.sh` | Two regions and two routers; `--demo` shows a region-local read served from a replica while writes go to the primary region |
-| `scripts/pre_setups/cache/init_smartrouter_eth_grpc_cache.sh` | No RESP infrastructure — router + cache sidecar only |
+| `scripts/pre_setups/cache/init_smartrouter_eth_sidecar_cache.sh` | No RESP infrastructure — router + cache sidecar only |
 | `scripts/pre_setups/cache/init_smartrouter_eth_resp_cache.sh` | Single-node lane against the checked-in example config (`RUN_DEMO=1` for an end-to-end check) |
 
 Test lanes — the docker-gated ones fail hard if docker is unreachable rather than skipping, so
@@ -644,7 +644,7 @@ a documented command never prints PASS for a lane that verified nothing:
 
 Five scenarios, each driven by a lane that brings up its own infrastructure and verifies
 itself before handing over. The standalone, sentinel and multi-region lanes use distinct
-ports and can run at the same time; the `grpc-cache` lane reuses the standard ports, so stop
+ports and can run at the same time; the `sidecar-cache` lane reuses the standard ports, so stop
 the standalone one first.
 
 ### Setup
@@ -890,13 +890,13 @@ than a replica role, so this lane uses `standalone` — the shape the feature is
 
 ```bash
 scripts/pre_setups/cache/init_smartrouter_eth_redis_demo.sh --stop
-scripts/pre_setups/cache/init_smartrouter_eth_grpc_cache.sh
+scripts/pre_setups/cache/init_smartrouter_eth_sidecar_cache.sh
 ```
 
 Router plus cache sidecar, no Redis and no `resp-cache:` block — today's deployment shape:
 
 ```
-  cache backend          gRPC cache (cache-be)
+  cache backend          cache sidecar (cache-be)
   relay                  ok
   cache hits             1
   resp-cache metrics     none (backend never built)

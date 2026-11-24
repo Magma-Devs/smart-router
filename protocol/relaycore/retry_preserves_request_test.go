@@ -33,7 +33,7 @@ func (s *stubRelaySender) GetProcessingTimeout(chainlib.ChainMessage) (time.Dura
 	return 30 * time.Second, time.Second
 }
 
-func (s *stubRelaySender) GetChainIdAndApiInterface() (string, string) { return "LAVA", "rest" }
+func (s *stubRelaySender) GetChainIdAndApiInterface() (string, string) { return "COSMOSHUB", "rest" }
 
 func newRetryTestProtocolMessage(t *testing.T, extensions []string, directiveHeaders map[string]string) chainlib.ProtocolMessage {
 	t.Helper()

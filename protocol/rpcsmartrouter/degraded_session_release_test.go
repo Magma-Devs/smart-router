@@ -55,9 +55,9 @@ func sendToEveryEndpointStale(t *testing.T, msg archiveRequest) (*relaycore.Rela
 	chainTip := seedChainTip(200)
 	endpointtip.Default().Reset()
 	staleEp1 := &routersession.Endpoint{NetworkAddress: "http://stale1:8545"}
-	seedEndpointTip("LAVA", "rest", "http://stale1:8545", 50)
+	seedEndpointTip("COSMOSHUB", "rest", "http://stale1:8545", 50)
 	staleEp2 := &routersession.Endpoint{NetworkAddress: "http://stale2:8545"}
-	seedEndpointTip("LAVA", "rest", "http://stale2:8545", 50)
+	seedEndpointTip("COSMOSHUB", "rest", "http://stale2:8545", 50)
 
 	mkSession := func(addr string, ep *routersession.Endpoint) *routersession.SingleConsumerSession {
 		return &routersession.SingleConsumerSession{

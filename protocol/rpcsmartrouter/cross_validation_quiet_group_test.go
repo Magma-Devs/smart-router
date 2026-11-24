@@ -325,8 +325,8 @@ func TestSendRelayToDirectEndpoints_RecordsTheCrossValidationGroupLayout(t *test
 			metricsStub := lavaRESTMetrics
 			relayProcessor := relaycore.NewRelayProcessor(ctx, cvParams, metricsStub, metricsStub, sm)
 
-			rpcEndpoint := &routersession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "rest"}
-			optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "LAVA")
+			rpcEndpoint := &routersession.RPCEndpoint{ChainID: "COSMOSHUB", ApiInterface: "rest"}
+			optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "COSMOSHUB")
 			rpcss := &RPCSmartRouterServer{
 				listenEndpoint:    rpcEndpoint,
 				chainParser:       chainParser,

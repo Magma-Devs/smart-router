@@ -162,7 +162,7 @@ func TestDirectRPCRelaySender_MalformedJSONResponseRoutesAsTransportError(t *tes
 			endpointName:     "truncated-rest-upstream",
 			chainFamily:      common.ChainFamilyEVM,
 		}
-		chainMessage := createMockRESTChainMessage(t, "/cosmos/bank/v1beta1/balances/lava1foo")
+		chainMessage := createMockRESTChainMessage(t, "/cosmos/bank/v1beta1/balances/cosmos1foo")
 
 		result, err := sender.SendDirectRelay(ctx, chainMessage, 5*time.Second)
 		require.Nil(t, result)

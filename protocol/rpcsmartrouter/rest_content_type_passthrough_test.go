@@ -75,7 +75,7 @@ func contentTypeRelayHarness(t *testing.T, chainID, apiInterface string, specOve
 // default only fills in when the client sent none, and a spec pass_override (Stellar's
 // /transactions, MAG-2744) keeps the last word.
 func TestRESTRelay_ClientContentTypeReachesTheWire(t *testing.T) {
-	relay := contentTypeRelayHarness(t, "LAVA", spectypes.APIInterfaceRest, nil)
+	relay := contentTypeRelayHarness(t, "COSMOSHUB", spectypes.APIInterfaceRest, nil)
 
 	t.Run("the client's content-type is forwarded as sent", func(t *testing.T) {
 		got := relay(t, cosmosSimulatePath, "tx_bytes=AAAA", []pairingtypes.Metadata{{Name: "Content-Type", Value: contentTypeFormURLEncoded}})
@@ -105,7 +105,7 @@ func TestRESTRelay_ClientContentTypeReachesTheWire(t *testing.T) {
 }
 
 func TestRESTRelay_SpecOverrideStillWinsOverClientContentType(t *testing.T) {
-	relay := contentTypeRelayHarness(t, "LAVA", spectypes.APIInterfaceRest, func(spec *spectypes.Spec) {
+	relay := contentTypeRelayHarness(t, "COSMOSHUB", spectypes.APIInterfaceRest, func(spec *spectypes.Spec) {
 		var overridden bool
 		for _, collection := range spec.ApiCollections {
 			if collection.CollectionData.ApiInterface == spectypes.APIInterfaceRest && collection.CollectionData.Type == http.MethodPost {
@@ -124,7 +124,7 @@ func TestRESTRelay_SpecOverrideStillWinsOverClientContentType(t *testing.T) {
 // content-type as pass_send (APT1 does, so BCS submissions reach the fullnode): the
 // generic-default rewrite applies there too, while a specific type is forwarded as sent.
 func TestRESTRelay_DeclaredPassSendNormalizesGenericContentType(t *testing.T) {
-	relay := contentTypeRelayHarness(t, "LAVA", spectypes.APIInterfaceRest, func(spec *spectypes.Spec) {
+	relay := contentTypeRelayHarness(t, "COSMOSHUB", spectypes.APIInterfaceRest, func(spec *spectypes.Spec) {
 		var declared bool
 		for _, collection := range spec.ApiCollections {
 			if collection.CollectionData.ApiInterface == spectypes.APIInterfaceRest && collection.CollectionData.Type == http.MethodPost {

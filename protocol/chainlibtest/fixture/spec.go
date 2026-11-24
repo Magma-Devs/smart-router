@@ -119,7 +119,7 @@ func CreateMockTronSpec(index string) spectypes.Spec {
 }
 
 // LoadSpec loads specIndex from the specs/ directory under getToTopMostPath, resolving its
-// imports across every file there (e.g. LAV1 -> COSMOSSDK). apiInterface is either an interface
+// imports across every file there (e.g. COSMOSHUB -> COSMOSSDK50). apiInterface is either an interface
 // name, returned as is, or the index of one of the spec's api collections, returned as that
 // collection's interface.
 func LoadSpec(getToTopMostPath, specIndex, apiInterface string) (spectypes.Spec, string, error) {

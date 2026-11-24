@@ -119,7 +119,7 @@ func newSecondaryTestServer(chainParser chainlib.ChainParser, primary *performan
 		secondaryCache:        secondary,
 		secondaryCacheTimeout: timeout,
 		chainParser:           chainParser,
-		listenEndpoint:        &routersession.RPCEndpoint{ChainID: "LAVA", ApiInterface: spectypes.APIInterfaceRest},
+		listenEndpoint:        &routersession.RPCEndpoint{ChainID: "COSMOSHUB", ApiInterface: spectypes.APIInterfaceRest},
 	}
 }
 
@@ -137,11 +137,11 @@ func runSecondaryLookup(t *testing.T, rpcss *RPCSmartRouterServer, protocolMessa
 // serve, which is what the resilience cases assert.
 func runSecondaryLookupWithReport(t *testing.T, rpcss *RPCSmartRouterServer, protocolMessage chainlib.ProtocolMessage, requestedBlockForCache int64) (bool, *common.RelayResult, common.CacheLookupReport) {
 	t.Helper()
-	return runSecondaryLookupOn(t, rpcss, "LAVA", protocolMessage, requestedBlockForCache)
+	return runSecondaryLookupOn(t, rpcss, "COSMOSHUB", protocolMessage, requestedBlockForCache)
 }
 
 // runSecondaryLookupOn is runSecondaryLookupWithReport for a chain other than the REST
-// harness's LAVA.
+// harness's COSMOSHUB.
 func runSecondaryLookupOn(t *testing.T, rpcss *RPCSmartRouterServer, chainID string, protocolMessage chainlib.ProtocolMessage, requestedBlockForCache int64) (bool, *common.RelayResult, common.CacheLookupReport) {
 	t.Helper()
 	ctx := context.Background()
@@ -179,7 +179,7 @@ func runSecondaryLookupOn(t *testing.T, rpcss *RPCSmartRouterServer, chainID str
 }
 
 func directGet(rcs *ecocache.RelayerCacheServer, hashKey []byte, block, seenBlock int64) *pairingtypes.CacheRelayReply {
-	return directGetOn(rcs, "LAVA", hashKey, block, seenBlock)
+	return directGetOn(rcs, "COSMOSHUB", hashKey, block, seenBlock)
 }
 
 // ---------------------------------------------------------------------------
@@ -235,7 +235,7 @@ func TestSecondaryCacheTimeoutAndErrorAreMisses(t *testing.T) {
 			},
 		}
 		rpcss := newSecondaryTestServer(chainParser, nil, fake, 100*time.Millisecond)
-		hashKey, outputFormatter, err := protocolMessage.HashCacheRequest("LAVA")
+		hashKey, outputFormatter, err := protocolMessage.HashCacheRequest("COSMOSHUB")
 		require.NoError(t, err)
 		served := rpcss.trySecondaryCacheLookup(context.Background(), protocolMessage,
 			protocolMessage.RelayPrivateData(), nil, nil, hashKey, outputFormatter, 100, &common.CacheLookupReport{})
@@ -339,10 +339,10 @@ func TestSecondaryHitBackfillsPrimaryWithExactKeyAndValidSeenBlock(t *testing.T)
 	// The scenario says the guarded tip advanced to 100 by lookup time — that is
 	// where requestedBlockForCache=100 came from, and it is also what entitles the
 	// lift: the validity-floor clamp trusts resolvedBlock only up to this tip.
-	rpcss.chainState = chainstate.New("LAVA", chainstate.DefaultConfig(12*time.Second))
+	rpcss.chainState = chainstate.New("COSMOSHUB", chainstate.DefaultConfig(12*time.Second))
 	rpcss.chainState.SetLatestBlock(100)
 
-	hashKey, _, err := protocolMessage.HashCacheRequest("LAVA")
+	hashKey, _, err := protocolMessage.HashCacheRequest("COSMOSHUB")
 	require.NoError(t, err)
 	served, _ := runSecondaryLookup(t, rpcss, protocolMessage, 100)
 	require.True(t, served)
@@ -380,7 +380,7 @@ func TestSecondaryHitPreservesWriterRecordedStatusThroughBackfill(t *testing.T) 
 	}
 	rpcss := newSecondaryTestServer(chainParser, primary, fake, 100*time.Millisecond)
 
-	hashKey, _, err := protocolMessage.HashCacheRequest("LAVA")
+	hashKey, _, err := protocolMessage.HashCacheRequest("COSMOSHUB")
 	require.NoError(t, err)
 	served, result := runSecondaryLookup(t, rpcss, protocolMessage, 100)
 	require.True(t, served)
@@ -408,7 +408,7 @@ func TestSecondaryHitWithRejectedStatusServesButNeverBackfills(t *testing.T) {
 	}
 	rpcss := newSecondaryTestServer(chainParser, primary, fake, 100*time.Millisecond)
 
-	hashKey, _, err := protocolMessage.HashCacheRequest("LAVA")
+	hashKey, _, err := protocolMessage.HashCacheRequest("COSMOSHUB")
 	require.NoError(t, err)
 	served, result := runSecondaryLookup(t, rpcss, protocolMessage, 100)
 	require.True(t, served)
@@ -449,7 +449,7 @@ func TestSecondaryCachedNodeErrorsServeButNeverBackfill(t *testing.T) {
 			fake := &fakeCacheReader{active: true, reply: tc.reply}
 			rpcss := newSecondaryTestServer(chainParser, primary, fake, 100*time.Millisecond)
 
-			hashKey, _, err := protocolMessage.HashCacheRequest("LAVA")
+			hashKey, _, err := protocolMessage.HashCacheRequest("COSMOSHUB")
 			require.NoError(t, err)
 			served, result := runSecondaryLookup(t, rpcss, protocolMessage, 100)
 			require.True(t, served, "node errors are served (with GUID substitution), only backfill is rejected")
@@ -505,7 +505,7 @@ func TestSecondaryPoisonedEntrySanitizedForCallerAndBackfill(t *testing.T) {
 	}
 	rpcss := newSecondaryTestServer(chainParser, primary, fake, 100*time.Millisecond)
 
-	hashKey, _, err := protocolMessage.HashCacheRequest("LAVA")
+	hashKey, _, err := protocolMessage.HashCacheRequest("COSMOSHUB")
 	require.NoError(t, err)
 	served, result := runSecondaryLookup(t, rpcss, protocolMessage, 100)
 	require.True(t, served)
@@ -555,7 +555,7 @@ func TestSecondarySeenBlockNeverAdoptedIntoChainState(t *testing.T) {
 	}
 	rpcss := newSecondaryTestServer(chainParser, nil, fake, 100*time.Millisecond)
 	rpcss.sharedState = true
-	rpcss.chainState = chainstate.New("LAVA", chainstate.DefaultConfig(12*time.Second))
+	rpcss.chainState = chainstate.New("COSMOSHUB", chainstate.DefaultConfig(12*time.Second))
 
 	served, _ := runSecondaryLookup(t, rpcss, protocolMessage, 100)
 	require.True(t, served)
@@ -691,7 +691,7 @@ func TestSecondaryHitRestampsLatestBlockFromLocalTip(t *testing.T) {
 		},
 	}
 	rpcss := newSecondaryTestServer(chainParser, nil, fake, 100*time.Millisecond)
-	rpcss.chainState = chainstate.New("LAVA", chainstate.DefaultConfig(12*time.Second))
+	rpcss.chainState = chainstate.New("COSMOSHUB", chainstate.DefaultConfig(12*time.Second))
 	rpcss.chainState.SetLatestBlock(localTip)
 
 	served, result := runSecondaryLookup(t, rpcss, protocolMessage, localTip)
@@ -744,11 +744,11 @@ func TestSecondaryFutureKeyBackfillNeverRaisesPrimaryChainTip(t *testing.T) {
 	// tip at 100 and makes the final assertion non-vacuous — a nil LATEST result
 	// below could not be told apart from "no tip was ever published".
 	honestPayload := []byte(`{"block":{"header":{"height":"100"}}}`)
-	hashKey, _, err := protocolMessage.HashCacheRequest("LAVA")
+	hashKey, _, err := protocolMessage.HashCacheRequest("COSMOSHUB")
 	require.NoError(t, err)
 	_, err = rcs.SetRelay(context.Background(), &pairingtypes.RelayCacheSet{
 		RequestHash:      hashKey,
-		ChainId:          "LAVA",
+		ChainId:          "COSMOSHUB",
 		RequestedBlock:   localTip,
 		SeenBlock:        localTip,
 		Response:         &pairingtypes.RelayReply{Data: honestPayload, LatestBlock: localTip},
@@ -771,7 +771,7 @@ func TestSecondaryFutureKeyBackfillNeverRaisesPrimaryChainTip(t *testing.T) {
 		},
 	}
 	rpcss := newSecondaryTestServer(chainParser, primary, fake, 100*time.Millisecond)
-	rpcss.chainState = chainstate.New("LAVA", chainstate.DefaultConfig(12*time.Second))
+	rpcss.chainState = chainstate.New("COSMOSHUB", chainstate.DefaultConfig(12*time.Second))
 	rpcss.chainState.SetLatestBlock(localTip)
 
 	// Production shape for an explicit-block request: the lookup key is the raw

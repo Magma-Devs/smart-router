@@ -403,9 +403,9 @@ func TestRESTListener_HedgedLoserCountsAsARetry(t *testing.T) {
 		provider.StaticProvider = true
 		return provider
 	}
-	rpcEndpoint := &routersession.RPCEndpoint{ChainID: "LAVA", ApiInterface: spectypes.APIInterfaceRest, NetworkAddress: "127.0.0.1:0"}
+	rpcEndpoint := &routersession.RPCEndpoint{ChainID: "COSMOSHUB", ApiInterface: spectypes.APIInterfaceRest, NetworkAddress: "127.0.0.1:0"}
 	optimizer := &fixedOrderOptimizer{
-		ProviderOptimizer: provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "LAVA"),
+		ProviderOptimizer: provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "COSMOSHUB"),
 		order:             []string{"slow-upstream", "fast-upstream"},
 	}
 	sessionManager := routersession.NewConsumerSessionManager(rpcEndpoint, optimizer, nil, "test-router", routersession.NewActiveSubscriptionProvidersStorage())

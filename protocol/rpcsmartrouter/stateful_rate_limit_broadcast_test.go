@@ -116,7 +116,7 @@ var writeInterfaceCases = []writeInterfaceCase{
 		success: `{"jsonrpc":"2.0","id":1,"result":"0xabc"}`,
 	},
 	{
-		name: "rest", chainID: "LAVA", apiInterface: spectypes.APIInterfaceRest, parser: restWriteParser,
+		name: "rest", chainID: "COSMOSHUB", apiInterface: spectypes.APIInterfaceRest, parser: restWriteParser,
 		method: http.MethodPost, path: "/cosmos/tx/v1beta1/txs", body: `{"tx_bytes":"dHg=","mode":"BROADCAST_MODE_SYNC"}`,
 		success: `{"tx_response":{"code":0,"txhash":"ABC"}}`,
 	},

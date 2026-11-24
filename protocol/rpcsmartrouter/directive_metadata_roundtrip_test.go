@@ -72,7 +72,7 @@ func TestCacheTierDirectiveDoesNotChangeTheCacheKey(t *testing.T) {
 
 	rpcss := &RPCSmartRouterServer{
 		chainParser:    chainParser,
-		listenEndpoint: &routersession.RPCEndpoint{ChainID: "LAVA", ApiInterface: spectypes.APIInterfaceRest},
+		listenEndpoint: &routersession.RPCEndpoint{ChainID: "COSMOSHUB", ApiInterface: spectypes.APIInterfaceRest},
 	}
 
 	const apiURL = "/cosmos/base/tendermint/v1beta1/blocks/latest"
@@ -86,7 +86,7 @@ func TestCacheTierDirectiveDoesNotChangeTheCacheKey(t *testing.T) {
 	}
 	hashOf := func(t *testing.T, protocolMessage chainlib.ProtocolMessage) []byte {
 		t.Helper()
-		hashKey, _, err := protocolMessage.HashCacheRequest("LAVA")
+		hashKey, _, err := protocolMessage.HashCacheRequest("COSMOSHUB")
 		require.NoError(t, err)
 		return hashKey
 	}

@@ -41,12 +41,11 @@ screen -d -m -S cache bash -c "source ~/.bashrc; smartrouter cache \
 127.0.0.1:20100 --metrics_address 0.0.0.0:20200 --log_level debug 2>&1 | tee \"$LOGS_DIR/CACHE.log\"" && sleep 0.25
 sleep 2
 
-# PublicNode upstream endpoints (TLS)
-STELLAR_REST_LOCAL="https://g.w.lavanet.xyz/gateway/xlmt/rest/e980cb6d55f0c8c8b35e02b2aa328481"
+# Stellar testnet Horizon (the Stellar Development Foundation's public endpoint)
+STELLAR_REST_LOCAL="${STELLAR_REST_LOCAL:-https://horizon-testnet.stellar.org}"
 
-# Ports. 3360/3361 and 7779 are used by the lavap consumer that the other
-# pre_setup scripts start; that process binds 127.0.0.1 and wins for IPv4 traffic,
-# so curl silently reaches lavap instead of the smart router. Use our own ports.
+# Ports. The other pre_setup scripts bind 3360/3361 and 7779, so this router takes
+# its own ports and runs beside them.
 SR_REST_PORT=3390
 SR_METRICS_PORT=7789
 

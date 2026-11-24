@@ -23,7 +23,7 @@ import (
 // the published chart's readiness probe the pod never became Ready, so a router whose providers were
 // all healthy received no traffic at all.
 //
-// Both interfaces the report measured are covered, and LAVA/rest is the one it reproduced on first.
+// Both interfaces the report measured are covered, and COSMOSHUB/rest is the one it reproduced on first.
 // The method per interface is whatever the spec tags FUNCTION_TAG_GET_BLOCKNUM, which is what
 // craftRelay asks for.
 //
@@ -48,7 +48,7 @@ func healthCheckCVCases() []healthCheckCVCase {
 	return []healthCheckCVCase{
 		{
 			// The report's primary, measured reproduction.
-			name: "LAVA rest", specID: "LAVA", apiInterface: "rest", specAPI: spectypes.APIInterfaceRest,
+			name: "COSMOSHUB rest", specID: "COSMOSHUB", apiInterface: "rest", specAPI: spectypes.APIInterfaceRest,
 			latestBlockMethod: "/cosmos/base/tendermint/v1beta1/blocks/latest",
 			url:               "/cosmos/base/tendermint/v1beta1/blocks/latest", connectionType: http.MethodGet,
 		},

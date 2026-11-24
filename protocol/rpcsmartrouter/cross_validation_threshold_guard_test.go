@@ -83,8 +83,8 @@ func TestSendRelayToEndpoint_ThresholdGuardReleasesGatheredSessions(t *testing.T
 		MaxComputeUnits: 200,
 		PairingEpoch:    1,
 	}
-	rpcEndpoint := &routersession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "rest"}
-	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "LAVA")
+	rpcEndpoint := &routersession.RPCEndpoint{ChainID: "COSMOSHUB", ApiInterface: "rest"}
+	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "COSMOSHUB")
 	sessionManager := routersession.NewConsumerSessionManager(
 		rpcEndpoint, optimizer, nil, "test-router",
 		routersession.NewActiveSubscriptionProvidersStorage())
@@ -179,7 +179,7 @@ func TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesASessionlessEntr
 	// No chain state, so the consistency filter skips validation and passes the entry through:
 	// the guard fires on 1 < 2 with it among the survivors.
 	rpcss := &RPCSmartRouterServer{
-		listenEndpoint:    &routersession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "rest"},
+		listenEndpoint:    &routersession.RPCEndpoint{ChainID: "COSMOSHUB", ApiInterface: "rest"},
 		chainParser:       chainParser,
 		consistencyConfig: relaycore.DefaultConsistencyValidationConfig(),
 	}
@@ -242,7 +242,7 @@ func TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesADegradedSession
 	relayProcessor := relaycore.NewRelayProcessor(ctx, cvParams, metricsStub, metricsStub, sm)
 
 	rpcss := &RPCSmartRouterServer{
-		listenEndpoint:    &routersession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "rest"},
+		listenEndpoint:    &routersession.RPCEndpoint{ChainID: "COSMOSHUB", ApiInterface: "rest"},
 		chainParser:       chainParser,
 		consistencyConfig: relaycore.DefaultConsistencyValidationConfig(),
 	}

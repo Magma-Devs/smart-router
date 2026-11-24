@@ -185,7 +185,7 @@ func TestDebugRelayAnswers_AnUnlistedMethodIsCapped(t *testing.T) {
 		t.Cleanup(closeServer)
 	}
 	require.NoError(t, err)
-	server := newRelayEndServer(t, "LAVA", spectypes.APIInterfaceTendermintRPC, chainParser,
+	server := newRelayEndServer(t, "COSMOSHUB", spectypes.APIInterfaceTendermintRPC, chainParser,
 		relayEndNode{"node-a", relayEndReply(200, `{"jsonrpc":"2.0","id":1,"result":{}}`, 0)})
 	const guid = 4360
 	long := "not_a_method_" + strings.Repeat("x", 64*1024)

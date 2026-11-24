@@ -83,7 +83,7 @@ func (ep httpTracingEntryPoint) serve(t *testing.T, ctx context.Context, relay R
 	require.NoError(t, err)
 	listener := ep.newListener(ctx, &routersession.RPCEndpoint{
 		NetworkAddress:  "127.0.0.1:0",
-		ChainID:         "LAV1",
+		ChainID:         "COSMOSHUB",
 		ApiInterface:    ep.apiInterface,
 		HealthCheckPath: common.DEFAULT_HEALTH_PATH,
 	}, relay, logger)

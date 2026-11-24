@@ -1341,7 +1341,7 @@ func TestNoPairingsError(t *testing.T) {
 // Why: without this guard, GetSessions' outer loop spins forever when the pinned provider's
 // DirectRPC connection is unhealthy — the pinned name keeps being re-selected even after it
 // has been added to the in-request ignored list, producing the unbounded "Provider selected
-// via header" / "direct RPC connection is unhealthy" log pair seen in lava-sim-rest hangs.
+// via header" / "direct RPC connection is unhealthy" log pair seen in the simulator's REST hangs.
 func TestSelectedProviderAlreadyFailedReturnsError(t *testing.T) {
 	csm := CreateConsumerSessionManager()
 	pairingList := createPairingList("", true)
@@ -2544,13 +2544,13 @@ func TestGenerateReconnectCallback_OverlapBothPairingAndBackup(t *testing.T) {
 
 // TestGetAllDirectRPCEndpoints_IncludesBackupProviders verifies that the startup
 // ChainTracker initialization sees backup-only URLs too. Before the fix, only
-// primaries were iterated, so dedicated-URL backups (e.g. base.lava.build with no
+// primaries were iterated, so dedicated-URL backups (e.g. base.example.com with no
 // primary counterpart) never got a tracker created at startup — and since backups
 // rarely get the successful relay that triggers the lazy fallback init, their
 // per-endpoint metrics stayed empty on the dashboard.
 func TestGetAllDirectRPCEndpoints_IncludesBackupProviders(t *testing.T) {
 	ctx := context.Background()
-	nodeUrl := common.NodeUrl{Url: "https://base.lava.build:443/"}
+	nodeUrl := common.NodeUrl{Url: "https://base.example.com:443/"}
 	directConn, err := NewDirectRPCConnection(ctx, nodeUrl, 5, "")
 	require.NoError(t, err)
 

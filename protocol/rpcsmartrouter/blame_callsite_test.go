@@ -110,13 +110,13 @@ func TestBlameAtCallSite(t *testing.T) {
 			// deferred cancel that releases the goroutines.
 			relayProcessor.SetStopReason(tc.stopReason)
 
-			rpcEndpoint := &routersession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "rest"}
+			rpcEndpoint := &routersession.RPCEndpoint{ChainID: "COSMOSHUB", ApiInterface: "rest"}
 			rpcss := &RPCSmartRouterServer{
 				listenEndpoint:    rpcEndpoint,
 				chainParser:       chainParser,
 				consistencyConfig: relaycore.DefaultConsistencyValidationConfig(),
 				sessionManager: routersession.NewConsumerSessionManager(rpcEndpoint,
-					provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "LAVA"),
+					provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "COSMOSHUB"),
 					nil, "test-router", routersession.NewActiveSubscriptionProvidersStorage()),
 			}
 

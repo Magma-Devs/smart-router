@@ -3285,15 +3285,15 @@ func TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesAllSessions(t *t
 	userData := common.UserData{DappId: "test", ConsumerIp: "1.2.3.4"}
 	chainTip := seedChainTip(200)
 
-	// Tips live in the shared endpointtip store, keyed LAVA|rest|url (matching the rpcss
+	// Tips live in the shared endpointtip store, keyed COSMOSHUB|rest|url (matching the rpcss
 	// listenEndpoint below). Reset first so other tests' entries can't interfere.
 	endpointtip.Default().Reset()
 	syncedEp := &routersession.Endpoint{NetworkAddress: "http://synced:8545"}
-	seedEndpointTip("LAVA", "rest", "http://synced:8545", 195)
+	seedEndpointTip("COSMOSHUB", "rest", "http://synced:8545", 195)
 	staleEp1 := &routersession.Endpoint{NetworkAddress: "http://stale1:8545"}
-	seedEndpointTip("LAVA", "rest", "http://stale1:8545", 50)
+	seedEndpointTip("COSMOSHUB", "rest", "http://stale1:8545", 50)
 	staleEp2 := &routersession.Endpoint{NetworkAddress: "http://stale2:8545"}
-	seedEndpointTip("LAVA", "rest", "http://stale2:8545", 50)
+	seedEndpointTip("COSMOSHUB", "rest", "http://stale2:8545", 50)
 
 	mkSession := func(addr string, ep *routersession.Endpoint) *routersession.SingleConsumerSession {
 		return &routersession.SingleConsumerSession{
@@ -3339,8 +3339,8 @@ func TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesAllSessions(t *t
 		sm)
 
 	// Real session manager — OnSessionFailure runs against it for the 2 dropped sessions.
-	rpcEndpoint := &routersession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "rest"}
-	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "LAVA")
+	rpcEndpoint := &routersession.RPCEndpoint{ChainID: "COSMOSHUB", ApiInterface: "rest"}
+	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "COSMOSHUB")
 	sessionManager := routersession.NewConsumerSessionManager(
 		rpcEndpoint, optimizer, nil, "test-router",
 		routersession.NewActiveSubscriptionProvidersStorage())

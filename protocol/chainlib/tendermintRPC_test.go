@@ -78,7 +78,7 @@ func TestTendermintRpcChainProxy(t *testing.T) {
 		}`)
 	})
 
-	chainParser, chainProxy, chainFetcher, closeServer, _, err := CreateChainLibMocks(ctx, "LAVA", spectypes.APIInterfaceTendermintRPC, serverHandle, nil, "../../", nil)
+	chainParser, chainProxy, chainFetcher, closeServer, _, err := CreateChainLibMocks(ctx, "COSMOSHUB", spectypes.APIInterfaceTendermintRPC, serverHandle, nil, "../../", nil)
 	require.NoError(t, err)
 	require.NotNil(t, chainParser)
 	require.NotNil(t, chainProxy)
@@ -106,7 +106,7 @@ func TestTendermintRpcBatchSizeLimit(t *testing.T) {
 		fmt.Fprint(w, `{"jsonrpc":"2.0","id":1,"result":{"block_id":{},"block":{}}}`)
 	})
 
-	chainParser, _, _, closeServer, _, err := CreateChainLibMocks(ctx, "LAVA", spectypes.APIInterfaceTendermintRPC, serverHandle, nil, "../../", nil)
+	chainParser, _, _, closeServer, _, err := CreateChainLibMocks(ctx, "COSMOSHUB", spectypes.APIInterfaceTendermintRPC, serverHandle, nil, "../../", nil)
 	if closeServer != nil {
 		defer closeServer()
 	}
@@ -151,7 +151,7 @@ func TestTendermintRpcBatchCall(t *testing.T) {
 		fmt.Fprint(w, response)
 	})
 
-	chainParser, chainProxy, chainFetcher, closeServer, _, err := CreateChainLibMocks(ctx, "LAVA", spectypes.APIInterfaceTendermintRPC, serverHandle, nil, "../../", nil)
+	chainParser, chainProxy, chainFetcher, closeServer, _, err := CreateChainLibMocks(ctx, "COSMOSHUB", spectypes.APIInterfaceTendermintRPC, serverHandle, nil, "../../", nil)
 	require.NoError(t, err)
 	require.NotNil(t, chainParser)
 	require.NotNil(t, chainProxy)
@@ -197,7 +197,7 @@ func TestTendermintRpcSingleElementBatchRequestedBlock(t *testing.T) {
 		fmt.Fprint(w, `[{"jsonrpc":"2.0","id":1,"result":{"block_id":{},"block":{}}}]`)
 	})
 
-	chainParser, _, _, closeServer, _, err := CreateChainLibMocks(ctx, "LAVA", spectypes.APIInterfaceTendermintRPC, serverHandle, nil, "../../", nil)
+	chainParser, _, _, closeServer, _, err := CreateChainLibMocks(ctx, "COSMOSHUB", spectypes.APIInterfaceTendermintRPC, serverHandle, nil, "../../", nil)
 	if closeServer != nil {
 		defer closeServer()
 	}
@@ -236,7 +236,7 @@ func TestTendermintRpcBatchCallWithSameID(t *testing.T) {
 		fmt.Fprint(w, nodeResponse)
 	})
 
-	chainParser, chainProxy, chainFetcher, closeServer, _, err := CreateChainLibMocks(ctx, "LAVA", spectypes.APIInterfaceTendermintRPC, serverHandle, nil, "../../", nil)
+	chainParser, chainProxy, chainFetcher, closeServer, _, err := CreateChainLibMocks(ctx, "COSMOSHUB", spectypes.APIInterfaceTendermintRPC, serverHandle, nil, "../../", nil)
 	require.NoError(t, err)
 	require.NotNil(t, chainParser)
 	require.NotNil(t, chainProxy)
@@ -286,7 +286,7 @@ func TestTendermintURIRPC(t *testing.T) {
 		}`)
 	})
 
-	chainParser, chainProxy, chainFetcher, closeServer, _, err := CreateChainLibMocks(ctx, "LAVA", spectypes.APIInterfaceTendermintRPC, serverHandle, nil, "../../", nil)
+	chainParser, chainProxy, chainFetcher, closeServer, _, err := CreateChainLibMocks(ctx, "COSMOSHUB", spectypes.APIInterfaceTendermintRPC, serverHandle, nil, "../../", nil)
 	require.NoError(t, err)
 	require.NotNil(t, chainParser)
 	require.NotNil(t, chainProxy)
@@ -484,7 +484,7 @@ func TestTendermintRpcChainListener_PlainGetReachesTheRelayPath(t *testing.T) {
 // newTendermintParsingRelaySender parses every request with a real Tendermint parser.
 func newTendermintParsingRelaySender(t *testing.T) *recordingRelaySender {
 	t.Helper()
-	parser, _, _, closeServer, _, err := CreateChainLibMocks(context.Background(), "LAVA", spectypes.APIInterfaceTendermintRPC, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), nil, "../../", nil)
+	parser, _, _, closeServer, _, err := CreateChainLibMocks(context.Background(), "COSMOSHUB", spectypes.APIInterfaceTendermintRPC, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), nil, "../../", nil)
 	if closeServer != nil {
 		t.Cleanup(closeServer)
 	}
@@ -599,7 +599,7 @@ func TestTendermintRpcChainListener_UnsubscribeAllReplies(t *testing.T) {
 // The REST and JSON-RPC proxies run a transport failure through HandleNodeError, so the router sees a
 // coded, retryable RouterError; the Tendermint URI proxy returned the raw *url.Error (MAG-4278).
 func TestTendermintSendURI_ClassifiesTransportErrorsLikeTheOtherProxies(t *testing.T) {
-	spec, err := specutils.GetSpecFromLocalDirs([]string{"../../specs/"}, "LAVA")
+	spec, err := specutils.GetSpecFromLocalDirs([]string{"../../specs/"}, "COSMOSHUB")
 	require.NoError(t, err)
 	parser, err := NewChainParser(spectypes.APIInterfaceTendermintRPC)
 	require.NoError(t, err)
@@ -621,7 +621,7 @@ func TestTendermintSendURI_ClassifiesTransportErrorsLikeTheOtherProxies(t *testi
 // pins the wiring: a batch the Tendermint parser built classifies an element's
 // result.response.{code,log} app error as a single reply does (MAG-4278).
 func TestTendermintBatchParsedMessage_SeesTheAppErrorASingleReplySees(t *testing.T) {
-	spec, err := specutils.GetSpecFromLocalDirs([]string{"../../specs/"}, "LAVA")
+	spec, err := specutils.GetSpecFromLocalDirs([]string{"../../specs/"}, "COSMOSHUB")
 	require.NoError(t, err)
 	parser, err := NewChainParser(spectypes.APIInterfaceTendermintRPC)
 	require.NoError(t, err)

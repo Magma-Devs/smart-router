@@ -141,7 +141,7 @@ func TestRESTListener_WriteOutcome(t *testing.T) {
 			}
 			provider := routersession.NewConsumerSessionWithProvider("rest-upstream", []*routersession.Endpoint{providerEndpoint}, 100000, 1, 1)
 			provider.StaticProvider = true
-			sessionManager, rpcEndpoint := createTestSessionManager("LAVA", spectypes.APIInterfaceRest)
+			sessionManager, rpcEndpoint := createTestSessionManager("COSMOSHUB", spectypes.APIInterfaceRest)
 			rpcEndpoint.NetworkAddress = "127.0.0.1:0"
 			require.NoError(t, sessionManager.UpdateAllProviders(1,
 				map[uint64]*routersession.ConsumerSessionsWithProvider{0: provider}, nil))
