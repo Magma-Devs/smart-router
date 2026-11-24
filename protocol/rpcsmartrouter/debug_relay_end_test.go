@@ -2,7 +2,7 @@ package rpcsmartrouter
 
 // Tests for the relay_end record store and GET /debug/relay-end (MAG-4899). The acceptance tests
 // send each request through the real JSON-RPC HTTP listener, so the GUID they look up is the
-// Lava-Guid header the client actually got.
+// Router-Guid header the client actually got.
 
 import (
 	"bytes"
@@ -63,7 +63,7 @@ func requireOneRelayEndRecord(t *testing.T, guid string) map[string]any {
 }
 
 // serveRelayEndJSONRPC puts server behind a real JSON-RPC HTTP listener, which mints each request's
-// GUID and returns it as Lava-Guid, and returns its address.
+// GUID and returns it as Router-Guid, and returns its address.
 func serveRelayEndJSONRPC(t *testing.T, server *RPCSmartRouterServer) string {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -82,7 +82,7 @@ func serveRelayEndJSONRPC(t *testing.T, server *RPCSmartRouterServer) string {
 	return listener.GetListeningAddress()
 }
 
-// postRelayEnd sends body to the listener and returns the reply's Lava-Guid and body.
+// postRelayEnd sends body to the listener and returns the reply's Router-Guid and body.
 func postRelayEnd(t *testing.T, address, body string) (guid, reply string) {
 	t.Helper()
 	response, err := http.Post("http://"+address+"/", "application/json", bytes.NewBufferString(body))

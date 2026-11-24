@@ -133,6 +133,10 @@ func (apip *TendermintChainParser) ParseMsg(urlPath string, data []byte, connect
 	var blockFold requestedBlockFold
 	blockHashes := []string{}
 	parsedDefault := true
+	// This batch walk and JsonRPCChainParser.ParseMsg's share two blocks, an element's requested
+	// block and the batch's combined api, and stay two walks until an owner question is answered: a
+	// one-element batch gets its api's parse directive here and none on JSON-RPC (each parser's
+	// newBatchChainMessage). One walk would have to pick an answer.
 	for idx, msg := range msgs {
 		parsedInput := parser.NewParsedInput()
 		// Check api is supported and save it in nodeMsg
@@ -158,7 +162,7 @@ func (apip *TendermintChainParser) ParseMsg(urlPath string, data []byte, connect
 		msgs[idx].BaseMessage = jsonrpcBaseMessage(metadata, settingHeaderDirective)
 		msg.BaseMessage = msgs[idx].BaseMessage
 
-		if overwriteReqBlock == "" {
+		if overwriteReqBlock == "" { //nolint:dupl // kept twin of the JSON-RPC batch walk; see the comment above the walk
 			// Fetch requested block, it is used for data reliability
 			parsedInput = parser.ParseBlockFromParams(msg, apiCont.api.BlockParsing, apiCont.api.Parsers)
 			if hashes, err := parsedInput.GetBlockHashes(); err == nil {
@@ -186,7 +190,7 @@ func (apip *TendermintChainParser) ParseMsg(urlPath string, data []byte, connect
 		parsedBlock := parsedInput.GetBlock()
 		blockFold.add(parsedBlock, parsedBlock, parsedInput, overwriteReqBlock == "" && apiNamesNoBlock(apiCont.api))
 
-		if idx == 0 {
+		if idx == 0 { //nolint:dupl // kept twin of the JSON-RPC batch walk; see the comment above the walk
 			// on the first entry store them
 			api = apiCont.api
 			apiCollection = apiCollectionForMessage

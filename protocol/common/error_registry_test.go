@@ -344,7 +344,7 @@ func TestClassifyError_ChainExecutionMatchers(t *testing.T) {
 	})
 
 	t.Run("account not found (Cosmos Tier-2)", func(t *testing.T) {
-		result := ClassifyError(nil, ChainFamilyCosmosSDK, TransportJsonRPC, 0, "account not found: lava1abc")
+		result := ClassifyError(nil, ChainFamilyCosmosSDK, TransportJsonRPC, 0, "account not found: cosmos1abc")
 		assert.Equal(t, RouterErrorChainAccountNotFound, result)
 	})
 
@@ -427,7 +427,7 @@ func TestClassifyError_ChainMatchers(t *testing.T) {
 		expected *RouterError
 	}{
 		{"account sequence mismatch", "account sequence mismatch, expected 7, got 5", RouterErrorChainInvalidSequence},
-		{"insufficient fees (plural)", "insufficient fees; got: 100ulava required: 200ulava", RouterErrorChainInsufficientFee},
+		{"insufficient fees (plural)", "insufficient fees; got: 100uatom required: 200uatom", RouterErrorChainInsufficientFee},
 		{"insufficient fee (singular)", "insufficient fee for tx", RouterErrorChainInsufficientFee},
 	}
 	for _, tt := range cosmosCases {
@@ -774,7 +774,7 @@ func TestDetectConnectionError_NeverProducesUnknown(t *testing.T) {
 		{"string: context deadline exceeded", fmt.Errorf("http request failed: context deadline exceeded: Context deadline exceeded")},
 		{"string: context canceled", fmt.Errorf("operation failed: context canceled")},
 		{"net.Error timeout", &timeoutNetError{}},
-		{"http2 GOAWAY PROTOCOL_ERROR", fmt.Errorf(`http request failed: Post "https://base.lava.build:443/": http2: server sent GOAWAY and closed the connection; LastStreamID=1857, ErrCode=PROTOCOL_ERROR, debug=""`)},
+		{"http2 GOAWAY PROTOCOL_ERROR", fmt.Errorf(`http request failed: Post "https://base.example.com:443/": http2: server sent GOAWAY and closed the connection; LastStreamID=1857, ErrCode=PROTOCOL_ERROR, debug=""`)},
 		{"http2 GOAWAY INTERNAL_ERROR", fmt.Errorf(`http2: server sent GOAWAY and closed the connection; ErrCode=INTERNAL_ERROR, debug=""`)},
 		{"http2 RST_STREAM INTERNAL_ERROR", fmt.Errorf(`failed reading response: stream error: stream ID 77; INTERNAL_ERROR; received from peer`)},
 		{"503 envoy connection refused", fmt.Errorf(`503 Service Unavailable: {"error":{"code":503,"message":"upstream connect error or disconnect/reset before headers. retried and the latest reset reason: remote connection failure, transport failure reason: delayed connect error: Connection refused","status":"UNAVAILABLE"}}`)},
@@ -902,8 +902,78 @@ func TestClassifyError_TransportScoping(t *testing.T) {
 	assert.NotEqual(t, RouterErrorNodeAborted, ClassifyError(nil, ChainFamilyEVM, TransportJsonRPC, 10, ""),
 		"JSON-RPC 10 is not a gRPC status")
 
-	// DATA_LOSS (15) stays unregistered: no node we route to sends it.
-	assert.Equal(t, RouterErrorUnknown, ClassifyError(nil, ChainFamilyCosmosSDK, TransportGRPC, 15, ""))
+	// MAG-3564: the rulebook's other provider faults, 13, 15, and 1 and 4 sent by the node, count
+	// against the endpoint as 14 does.
+	for code, want := range map[int]*RouterError{
+		13: RouterErrorNodeInternalError,
+		15: RouterErrorNodeInternalError,
+		4:  RouterErrorNodeGatewayTimeout,
+		1:  RouterErrorNodeServerError,
+	} {
+		result = ClassifyError(nil, ChainFamilyCosmosSDK, TransportGRPC, code, "node said so")
+		assert.Equal(t, want, result, "gRPC %d", code)
+		assert.True(t, result.EndpointAtFault(), "gRPC %d must count toward --bench-after", code)
+		assert.NotEqual(t, want, ClassifyError(nil, ChainFamilyEVM, TransportJsonRPC, code, "node said so"),
+			"JSON-RPC %d is not a gRPC status", code)
+	}
+}
+
+// MAG-3564: grpc-go makes up INTERNAL for a gateway's plain HTTP 400. No node answered it, so the
+// INTERNAL row must not blame the node for it (rulebook decision D12 reads it by the HTTP status).
+func TestClassifyError_GRPCGatewayStatusIsNotTheNodes(t *testing.T) {
+	gateway400 := `unexpected HTTP status code received from server: 400 (Bad Request); transport: received unexpected content-type "text/html"`
+	result := ClassifyError(nil, ChainFamilyCosmosSDK, TransportGRPC, 13, gateway400)
+	assert.Equal(t, RouterErrorUnknown, result)
+	assert.False(t, result.EndpointAtFault())
+
+	assert.True(t, GRPCNodeCodeEquals(13).Matches(13, "stream terminated by RST_STREAM with error code: INTERNAL_ERROR"),
+		"a node that resets the stream did answer")
+	assert.False(t, GRPCNodeCodeEquals(13).Matches(13, "Unexpected HTTP Status Code Received From Server: 400 (Bad Request)"),
+		"the gateway text is matched case-insensitively")
+	assert.False(t, GRPCNodeCodeEquals(13).Matches(14, "internal"), "a different code is not 13")
+}
+
+// MAG-3564: INTERNAL is also a gRPC server's answer to a request message it cannot decode. That
+// answer is about the request's bytes, which every provider refuses the same way: the caller's,
+// not retried and not counted. Any other INTERNAL stays the node's.
+func TestClassifyError_GRPCRequestTheNodeCannotDecodeIsTheCallers(t *testing.T) {
+	for _, message := range []string{
+		"grpc: error unmarshalling request: unexpected EOF",                                            // grpc-go up to v1.82
+		"grpc: failed to unmarshal the received message: proto: cannot parse invalid wire-format data", // grpc-go from v1.82
+		"GRPC: Failed To Unmarshal The Received Message: string field contains invalid UTF-8",          // matched case-insensitively
+		"failed to decode Protobuf message: buffer underflow",                                          // tonic, a Sui fullnode
+		"failed to decode Protobuf message: invalid wire type value: 7",                                // tonic, a Sui fullnode
+	} {
+		result := ClassifyError(nil, ChainFamilyCosmosSDK, TransportGRPC, 13, message)
+		assert.Equal(t, RouterErrorUserInvalidRequest, result, message)
+		assert.False(t, result.EndpointAtFault(), "%q must not count toward --bench-after", message)
+		assert.False(t, result.Retryable, "%q: every provider refuses the same bytes", message)
+	}
+
+	assert.Equal(t, RouterErrorNodeInternalError, ClassifyError(nil, ChainFamilyCosmosSDK, TransportGRPC, 13, "failed to load the latest block"),
+		"any other INTERNAL is still the node's")
+	assert.NotEqual(t, RouterErrorUserInvalidRequest, ClassifyError(nil, ChainFamilyCosmosSDK, TransportGRPC, 14, "grpc: failed to unmarshal the received message"),
+		"only an INTERNAL carries the decode text")
+}
+
+// MAG-3564: the provider-fault rows are the last gRPC rows, so every text row that decided one of
+// these statuses before still decides it. Only a reply that ended UNKNOWN_ERROR changes.
+func TestClassifyError_GRPCProviderFaultRowsComeAfterTheTextRows(t *testing.T) {
+	for _, tc := range []struct {
+		code    int
+		message string
+		want    *RouterError
+	}{
+		{13, "rate limit exceeded", RouterErrorNodeRateLimited},
+		{4, "too many requests", RouterErrorNodeRateLimited},
+		{13, "method not implemented", RouterErrorNodeUnimplemented},
+		{15, "service not found", RouterErrorNodeUnimplemented},
+		{13, "upstream answered HTTP 401", RouterErrorNodeUnauthorized},
+		{1, "upstream answered HTTP 500", RouterErrorNodeInternalError},
+	} {
+		assert.Equal(t, tc.want, ClassifyError(nil, ChainFamilyUnknown, TransportGRPC, tc.code, tc.message),
+			"gRPC %d %q", tc.code, tc.message)
+	}
 }
 
 func TestClassifyError_ChainSpecificMappings(t *testing.T) {

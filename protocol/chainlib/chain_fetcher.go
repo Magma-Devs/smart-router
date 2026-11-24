@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"maps"
 	"mime"
+	"net/http"
 	"reflect"
 	"slices"
 	"strconv"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/cacheformat"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
+	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/parser"
 	"github.com/magma-Devs/smart-router/protocol/performance"
@@ -25,10 +27,11 @@ import (
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/magma-Devs/smart-router/utils/sigs"
+	"google.golang.org/grpc/codes"
 )
 
 const (
-	ChainFetcherHeaderName = "X-LAVA-Provider"
+	ChainFetcherHeaderName = "X-Router-Provider"
 )
 
 type ChainFetcher struct {
@@ -1795,6 +1798,14 @@ func (cf *ChainFetcher) verifyVia(ctx context.Context, router ChainRouter, chain
 		)
 	}
 
+	if nodeErr := grpcNodeErrorReply(reply, chainMessage); nodeErr != nil {
+		return utils.FormatWarning("[-] verify failed: the node answered with an error", nodeErr,
+			utils.LogAttr("chain_id", chainId),
+			utils.LogAttr("Api_interface", cf.endpoint.ApiInterface),
+			utils.LogAttr("Method", parsing.GetApiName()),
+		)
+	}
+
 	parserInput, err := FormatResponseForParsing(reply.RelayReply, chainMessage)
 	if err != nil {
 		return utils.FormatWarning("[-] verify failed to parse result", err,
@@ -1956,6 +1967,13 @@ func (cf *ChainFetcher) fetchLatestBlockNumVia(ctx context.Context, router Chain
 	if err != nil {
 		return spectypes.NOT_APPLICABLE, utils.FormatDebugErr(tagName+" failed sending chainMessage", err, []utils.Attribute{{Key: "chainID", Value: cf.endpoint.ChainID}, {Key: "APIInterface", Value: cf.endpoint.ApiInterface}}...)
 	}
+	if nodeErr := grpcNodeErrorReply(reply, chainMessage); nodeErr != nil {
+		return spectypes.NOT_APPLICABLE, utils.FormatDebugErr(tagName+" the node answered with an error", nodeErr, []utils.Attribute{
+			{Key: "chainId", Value: chainId},
+			{Key: "nodeUrl", Value: proxyUrl.Url},
+			{Key: "Method", Value: parsing.ApiName},
+		}...)
+	}
 	parserInput, err := FormatResponseForParsing(reply.RelayReply, chainMessage)
 	if err != nil {
 		return spectypes.NOT_APPLICABLE, utils.FormatDebug(tagName+" Failed formatResponseForParsing", []utils.Attribute{
@@ -1989,7 +2007,6 @@ func (cf *ChainFetcher) fetchLatestBlockNumVia(ctx context.Context, router Chain
 			{Key: "nodeUrl", Value: proxyUrl.Url},
 			{Key: "Method", Value: parsing.ApiName},
 			{Key: "Response", Value: parser.CapStringLen(string(reply.RelayReply.Data))},
-			{Key: "error", Value: err},
 		}...)
 	}
 	atomic.StoreInt64(&cf.latestBlock, blockNum)
@@ -2071,6 +2088,14 @@ func (cf *ChainFetcher) fetchSingleBlockHashByNum(ctx context.Context, blockNum 
 	}
 
 	responseData := reply.RelayReply.Data
+
+	if nodeErr := grpcNodeErrorReply(reply, chainMessage); nodeErr != nil {
+		return "", responseData, utils.FormatDebugErr(tagName+" the node answered with an error", nodeErr, []utils.Attribute{
+			{Key: "chainId", Value: chainId},
+			{Key: "nodeUrl", Value: proxyUrl.Url},
+			{Key: "Method", Value: parsing.ApiName},
+		}...)
+	}
 
 	parserInput, err := FormatResponseForParsing(reply.RelayReply, chainMessage)
 	if err != nil {
@@ -2244,11 +2269,30 @@ func RateLimitedErrorBody(chainID string, code int, message string) error {
 	return common.RateLimited(fmt.Errorf("json-rpc error %d: %s", code, message), 0)
 }
 
+// grpcNodeErrorReply returns the error a gRPC node answered with, or nil when reply is the method's
+// own reply. GrpcChainProxy.SendNodeMsg hands a node's error back as a reply, not as an error
+// (parseGrpcNodeErrorToReply): its body is a GrpcNodeErrorResponse in JSON and its StatusCode is
+// the node's gRPC code, where a served reply is the method's protobuf message with StatusCode 200.
+// Decoding that JSON as the method's reply can only fail, and it failed as "proto: bad wiretype",
+// which hid what the node said: a node that refuses a verification's method read as a router
+// that cannot parse the chain's replies (MAG-5002).
+func grpcNodeErrorReply(reply *RelayReplyWrapper, chainMessage ChainMessageForSend) error {
+	if _, isGrpc := chainMessage.GetRPCMessage().(*rpcInterfaceMessages.GrpcMessage); !isGrpc || reply.StatusCode == http.StatusOK {
+		return nil
+	}
+	nodeError := GrpcNodeErrorResponse{ErrorCode: uint32(reply.StatusCode)}
+	if reply.RelayReply != nil {
+		// A body that does not decode still leaves the status code, which is the node's.
+		_ = json.Unmarshal(reply.RelayReply.Data, &nodeError)
+	}
+	return fmt.Errorf("gRPC status %s: %s", codes.Code(nodeError.ErrorCode), nodeError.ErrorMessage)
+}
+
 func FormatResponseForParsing(reply *pairingtypes.RelayReply, chainMessage ChainMessageForSend) (parsable parser.RPCInput, err error) {
 	var parserInput parser.RPCInput
 	respData := reply.Data
 	if len(respData) == 0 {
-		return nil, utils.FormatDebug("result (reply.Data) is empty, can't be formatted for parsing", utils.Attribute{Key: "error", Value: err})
+		return nil, utils.FormatDebug("result (reply.Data) is empty, can't be formatted for parsing")
 	}
 	rpcMessage := chainMessage.GetRPCMessage()
 	if customParsingMessage, ok := rpcMessage.(chainproxy.CustomParsingMessage); ok {
@@ -2316,7 +2360,7 @@ func metadataForCacheKey(metadata []pairingtypes.Metadata) []pairingtypes.Metada
 }
 
 // hashCacheRequest derives the cache key for a relay. explicitExtensionDirective carries the
-// normalized value of the client's lava-extension directive header (empty when absent). When
+// normalized value of the client's router-extension directive header (empty when absent). When
 // present it is folded into the hash so an explicitly requested extension (e.g. "archive") lands
 // in its own cache lane and cannot collide with a request that was only auto-promoted to the same
 // resolved Extensions. Passing "" reproduces the historical hash, keeping existing entries valid.
@@ -2358,10 +2402,10 @@ func hashCacheRequest(relayData *pairingtypes.RelayPrivateData, chainId, explici
 		return nil, outputFormatter, utils.FormatError("Failed marshalling cash hash in HashCacheRequest", err)
 	}
 
-	// Fold an explicit lava-extension directive into the key so explicitly-requested extensions
+	// Fold an explicit router-extension directive into the key so explicitly-requested extensions
 	// get a dedicated cache lane, separate from requests auto-promoted to the same Extensions.
 	if explicitExtensionDirective != "" {
-		cashHashBytes = append(cashHashBytes, []byte("\x00lava-extension="+explicitExtensionDirective)...)
+		cashHashBytes = append(cashHashBytes, []byte("\x00router-extension="+explicitExtensionDirective)...)
 	}
 
 	// return the value

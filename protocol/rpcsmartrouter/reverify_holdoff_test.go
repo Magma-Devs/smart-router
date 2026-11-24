@@ -64,18 +64,18 @@ func TestReverify_AnswerAfterHoldoffClears(t *testing.T) {
 	active := map[uint64]*routersession.ConsumerSessionsWithProvider{0: makeSession("tatum")}
 
 	// Cycle 1: 429 → held off for the initial penalty.
-	active, _, _ = applyReverification(context.Background(), inputs, active, reverifyTierStatic, 100)
+	active, _, _ = probeAndApplyReverification(context.Background(), inputs, active, reverifyTierStatic, 100)
 	require.Equal(t, 1, probes)
 	require.True(t, reg.HeldOff(holdoff.ProviderKey("TEST", "jsonrpc", "tatum"), "tatum"))
 
 	// Cycle 2, past expiry: probed again, answers cleanly → hold-off and strikes cleared.
 	now = start.Add(holdoff.InitialHoldoff + time.Second)
-	active, _, _ = applyReverification(context.Background(), inputs, active, reverifyTierStatic, 101)
+	active, _, _ = probeAndApplyReverification(context.Background(), inputs, active, reverifyTierStatic, 101)
 	require.Equal(t, 2, probes)
 	require.False(t, reg.HeldOff(holdoff.ProviderKey("TEST", "jsonrpc", "tatum"), "tatum"))
 
 	// Cycle 3: a fresh 429 starts from the initial penalty again, proving the reset.
-	active, _, _ = applyReverification(context.Background(), inputs, active, reverifyTierStatic, 102)
+	active, _, _ = probeAndApplyReverification(context.Background(), inputs, active, reverifyTierStatic, 102)
 	require.Equal(t, 3, probes)
 	require.Equal(t, now.Add(holdoff.InitialHoldoff), reg.ReadyAt(holdoff.ProviderKey("TEST", "jsonrpc", "tatum"), "tatum"))
 
@@ -127,16 +127,16 @@ func TestReverify_NoAnswerKeepsTheStrikes(t *testing.T) {
 	}
 	active := map[uint64]*routersession.ConsumerSessionsWithProvider{0: makeSession("tatum")}
 
-	active, _, _ = applyReverification(context.Background(), inputs, active, reverifyTierStatic, 100)
+	active, _, _ = probeAndApplyReverification(context.Background(), inputs, active, reverifyTierStatic, 100)
 	require.True(t, reg.HeldOff(holdoff.ProviderKey("TEST", "jsonrpc", "tatum"), "tatum"))
 
 	// Past expiry the probe goes out and the connection drops: no answer, so the strike stands.
 	now = start.Add(holdoff.InitialHoldoff + time.Second)
-	active, _, _ = applyReverification(context.Background(), inputs, active, reverifyTierStatic, 101)
+	active, _, _ = probeAndApplyReverification(context.Background(), inputs, active, reverifyTierStatic, 101)
 	require.Equal(t, 2, probes)
 
 	// The next refusal is a second strike — twice the initial penalty — not a fresh first one.
-	_, _, _ = applyReverification(context.Background(), inputs, active, reverifyTierStatic, 102)
+	_, _, _ = probeAndApplyReverification(context.Background(), inputs, active, reverifyTierStatic, 102)
 	require.Equal(t, 3, probes)
 	require.Equal(t, now.Add(2*holdoff.InitialHoldoff), reg.ReadyAt(holdoff.ProviderKey("TEST", "jsonrpc", "tatum"), "tatum"))
 }
@@ -178,7 +178,7 @@ func TestReverify_ProviderPassingOnItsOtherUrlKeepsTheDeadUrlsStrikes(t *testing
 	// Past the hold-off the provider is probed: the second url carries it, and the first fails
 	// (it keeps its place for this one pass, the grace a url gets at an epoch).
 	now = start.Add(holdoff.InitialHoldoff + time.Second)
-	next, _, _ := applyReverification(t.Context(), inputs, map[uint64]*routersession.ConsumerSessionsWithProvider{0: makeSession(provider.Name)}, reverifyTierStatic, 100)
+	next, _, _ := probeAndApplyReverification(t.Context(), inputs, map[uint64]*routersession.ConsumerSessionsWithProvider{0: makeSession(provider.Name)}, reverifyTierStatic, 100)
 	require.Contains(t, collectNames(next), provider.Name, "the provider serves from its second url")
 
 	// The first url's next refusal is a second strike, not a fresh first one.

@@ -93,8 +93,8 @@ export ETH_RPC_URL_4="${ETH_RPC_URL_4:-}"
 #   export ETH_WS_URL_1="wss://mainnet.infura.io/ws/v3/YOUR_INFURA_KEY"
 #   export ETH_WS_URL_2="wss://eth-mainnet.g.alchemy.com/v2/YOUR_ALCHEMY_KEY"
 #   export ETH_WS_URL_3="wss://ethereum-rpc.publicnode.com"
-export ETH_WS_URL_1="${ETH_WS_URL_1:-wss://g.w.lavanet.xyz:443/gateway/eth/rpc/YOUR_LAVA_GATEWAY_KEY}"
-export ETH_WS_URL_2="${ETH_WS_URL_2:-wss://g.w.lavanet.xyz:443/gateway/eth/rpc/YOUR_LAVA_GATEWAY_KEY}"
+export ETH_WS_URL_1="${ETH_WS_URL_1:-wss://mainnet.infura.io/ws/v3/YOUR_INFURA_KEY}"
+export ETH_WS_URL_2="${ETH_WS_URL_2:-wss://eth-mainnet.g.alchemy.com/v2/YOUR_ALCHEMY_KEY}"
 export ETH_WS_URL_3="${ETH_WS_URL_3:-wss://ethereum-rpc.publicnode.com}"
 
 # Validate that real URLs are set (not placeholders)
@@ -139,7 +139,7 @@ echo "    WS Endpoint 3: ${ETH_WS_URL_3:0:50}..."
 echo ""
 echo "IMPORTANT: This is DIRECT RPC mode"
 echo "    - Smart router connects DIRECTLY to Ethereum RPC endpoints"
-echo "    - NO Lava providers in the middle!"
+echo "    - NO provider-relay network in the middle!"
 echo "    - 3 endpoints enable cross-validation testing (2-of-3 / 3-of-3)"
 echo "    - Testing Phases 1-5 implementation"
 echo ""
@@ -151,7 +151,7 @@ echo ""
 cat > $CONFIG_FILE <<EOF
 # Smart Router Direct RPC Configuration
 # Testing Phases 1-5: JSON-RPC over HTTP/HTTPS + WebSocket Subscriptions
-# Mode: Direct connections to Ethereum RPC endpoints (no Lava providers!)
+# Mode: Direct connections to Ethereum RPC endpoints (no provider-relay network — direct upstreams)
 
 endpoints:
   - listen-address: "0.0.0.0:3360"
@@ -238,7 +238,7 @@ fi
 echo "[Test Setup] starting Smart Router (DIRECT RPC mode, standalone)"
 echo ""
 echo "Smart Router Configuration:"
-echo "   - Mode: DIRECT RPC (bypasses Lava providers)"
+echo "   - Mode: DIRECT RPC (direct upstreams, no provider-relay network)"
 echo "   - Protocols: JSON-RPC over HTTP/HTTPS"
 if [[ "$WS_ENABLED" == "true" ]]; then
     echo "   - WebSocket: ENABLED (Phase 5 subscriptions)"
@@ -323,7 +323,7 @@ fi
 echo ""
 echo "Parallel Relay: Requests sent to ALL 3 endpoints simultaneously"
 echo "   First successful response wins (lower latency!)"
-echo "   Cross-validation: use lava-cross-validation-* headers for consensus"
+echo "   Cross-validation: use router-cross-validation-* headers for consensus"
 echo ""
 echo "TESTING $PHASE_STATUS"
 echo "  Phase 1: DirectRPCConnection foundation"
@@ -379,21 +379,21 @@ echo ""
 echo "  # 2-of-3 consensus (query 3 providers, 2 must agree):"
 echo '  curl -v -X POST http://127.0.0.1:3360 \'
 echo '    -H "Content-Type: application/json" \'
-echo '    -H "lava-cross-validation-max-participants: 3" \'
-echo '    -H "lava-cross-validation-agreement-threshold: 2" \'
+echo '    -H "router-cross-validation-max-participants: 3" \'
+echo '    -H "router-cross-validation-agreement-threshold: 2" \'
 echo '    -d '\''{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'\'''
 echo ""
 echo "  # 3-of-3 strict consensus (all must agree):"
 echo '  curl -v -X POST http://127.0.0.1:3360 \'
 echo '    -H "Content-Type: application/json" \'
-echo '    -H "lava-cross-validation-max-participants: 3" \'
-echo '    -H "lava-cross-validation-agreement-threshold: 3" \'
+echo '    -H "router-cross-validation-max-participants: 3" \'
+echo '    -H "router-cross-validation-agreement-threshold: 3" \'
 echo '    -d '\''{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}'\'''
 echo ""
 echo "  Response headers to check:"
-echo "    lava-cross-validation-status          — consensus result"
-echo "    lava-cross-validation-agreeing-providers — which providers agreed"
-echo "    lava-cross-validation-all-providers    — all participants"
+echo "    router-cross-validation-status          — consensus result"
+echo "    router-cross-validation-agreeing-providers — which providers agreed"
+echo "    router-cross-validation-all-providers    — all participants"
 echo ""
 echo "============================================"
 echo "CACHE TESTING (use these to verify cache)"
@@ -412,7 +412,7 @@ echo ""
 echo "Step 3: Force cache bypass (expect CACHE MISS even with cached data):"
 echo '  curl -s -X POST http://127.0.0.1:3360 \'
 echo '    -H "Content-Type: application/json" \'
-echo '    -H "lava-force-cache-refresh: true" \'
+echo '    -H "router-force-cache-refresh: true" \'
 echo '    -d '\''{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'\'''
 echo ""
 echo "Monitor CACHE logs (look for HIT/MISS/WRITE):"

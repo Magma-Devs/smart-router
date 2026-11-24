@@ -34,25 +34,25 @@ import (
 // ---------------------------------------------------------------------------
 //
 // The test gRPC spec (specs/grpctest.json) references
-// lavatest.v1.BlockService/GetLatestBlock. For gRPC reflection to resolve
+// routertest.v1.BlockService/GetLatestBlock. For gRPC reflection to resolve
 // this service, we register a FileDescriptorProto in the global proto
 // registry at init time. The mock handler uses dynamicpb messages so that
 // proto marshal/unmarshal works end-to-end.
 
-// testBlockServiceFD holds the registered file descriptor for lavatest.v1.
+// testBlockServiceFD holds the registered file descriptor for routertest.v1.
 var testBlockServiceFD protoreflect.FileDescriptor
 
 func init() {
 	syntax := "proto3"
-	fileName := "lavatest/v1/block_service.proto"
-	pkgName := "lavatest.v1"
+	fileName := "routertest/v1/block_service.proto"
+	pkgName := "routertest.v1"
 	reqName := "GetLatestBlockRequest"
 	respName := "GetLatestBlockResponse"
 	svcName := "BlockService"
 	methodName := "GetLatestBlock"
 	heightField := "height"
-	inputType := ".lavatest.v1.GetLatestBlockRequest"
-	outputType := ".lavatest.v1.GetLatestBlockResponse"
+	inputType := ".routertest.v1.GetLatestBlockRequest"
+	outputType := ".routertest.v1.GetLatestBlockResponse"
 	fieldNum := int32(1)
 	fieldType := descriptorpb.FieldDescriptorProto_TYPE_INT64
 	fieldLabel := descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL
@@ -121,7 +121,7 @@ func (mrw mockResponseWriter) WriteHeader(statusCode int) {
 
 // mockGRPCServiceDesc is the gRPC service descriptor for the test block service.
 var mockGRPCServiceDesc = grpc.ServiceDesc{
-	ServiceName: "lavatest.v1.BlockService",
+	ServiceName: "routertest.v1.BlockService",
 	HandlerType: (*mockBlockServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
@@ -239,34 +239,6 @@ func CreateMockSpec() spectypes.Spec {
 	)
 }
 
-// CreateMockTronSpec returns the part of a Tron spec a REST broadcast needs: one REST collection
-// holding /wallet/broadcasttransaction, stateful as in the catalog's tron.json, beside one read
-// (/wallet/getaccount); java-tron serves both as POST. The router's bundled specs carry no Tron
-// chain, so it registers tron.json's families itself, as loading the catalog would: TRXT takes the
-// Tron family from its import of TRX.
-func CreateMockTronSpec(index string) spectypes.Spec {
-	common.RegisterChainFamilies(map[string]spectypes.Spec{
-		"TRX":  {Index: "TRX"},
-		"TRXT": {Index: "TRXT", Imports: []string{"TRX"}},
-	})
-	api := func(name string, category spectypes.SpecCategory) *spectypes.Api {
-		return &spectypes.Api{
-			Name:         name,
-			Enabled:      true,
-			ComputeUnits: 10,
-			BlockParsing: spectypes.BlockParser{ParserArg: []string{""}, ParserFunc: spectypes.PARSER_FUNC_EMPTY},
-			Category:     category,
-		}
-	}
-	spec := newMockSpec(index,
-		spectypes.CollectionData{ApiInterface: spectypes.APIInterfaceRest, Type: http.MethodPost},
-		api("/wallet/broadcasttransaction", spectypes.SpecCategory{Stateful: common.CONSISTENCY_SELECT_ALL_PROVIDERS}),
-		api("/wallet/getaccount", spectypes.SpecCategory{}),
-	)
-	spec.AverageBlockTime = 3000
-	return spec
-}
-
 // CreateMockXRPLSpec returns the part of an XRP Ledger spec a transaction submission needs: one
 // JSON-RPC collection holding submit and submit_multisigned, stateful and hanging as in the
 // catalog's ripple.json, beside one read (account_info). The router's bundled specs carry no XRPL
@@ -277,21 +249,75 @@ func CreateMockXRPLSpec(index string) spectypes.Spec {
 		"XRP":  {Index: "XRP"},
 		"XRPT": {Index: "XRPT", Imports: []string{"XRP"}},
 	})
-	api := func(name string, category spectypes.SpecCategory) *spectypes.Api {
-		return &spectypes.Api{
-			Name:         name,
-			Enabled:      true,
-			ComputeUnits: 10,
-			BlockParsing: spectypes.BlockParser{ParserArg: []string{""}, ParserFunc: spectypes.PARSER_FUNC_EMPTY},
-			Category:     category,
-		}
-	}
 	submission := spectypes.SpecCategory{Stateful: common.CONSISTENCY_SELECT_ALL_PROVIDERS, HangingApi: true}
 	spec := newMockSpec(index,
 		spectypes.CollectionData{ApiInterface: spectypes.APIInterfaceJsonRPC, Type: http.MethodPost},
-		api("submit", submission), api("submit_multisigned", submission), api("account_info", spectypes.SpecCategory{}),
+		mockSpecApi("submit", submission), mockSpecApi("submit_multisigned", submission), mockSpecApi("account_info", spectypes.SpecCategory{}),
 	)
 	spec.AverageBlockTime = 4000
+	return spec
+}
+
+// mockSpecApi is an enabled api of the mock specs, with no block parsing.
+func mockSpecApi(name string, category spectypes.SpecCategory) *spectypes.Api {
+	return &spectypes.Api{
+		Name:         name,
+		Enabled:      true,
+		ComputeUnits: 10,
+		BlockParsing: spectypes.BlockParser{ParserArg: []string{""}, ParserFunc: spectypes.PARSER_FUNC_EMPTY},
+		Category:     category,
+	}
+}
+
+// CreateMockCosmosBroadcastSpec returns the part of a Cosmos chain's spec a transaction broadcast
+// needs, on one interface. On tendermintrpc: broadcast_tx_sync and broadcast_tx_commit (stateful and
+// hanging), broadcast_tx_async (stateful) and abci_query. On grpc: cosmos.tx.v1beta1.Service/
+// BroadcastTx (stateful and hanging) and Simulate. The categories are the catalog's (tendermint.json,
+// cosmossdk.json). The chain imports TENDERMINT, so it is a CosmosSDK chain.
+func CreateMockCosmosBroadcastSpec(index, apiInterface string) spectypes.Spec {
+	common.RegisterChainFamilies(map[string]spectypes.Spec{
+		"TENDERMINT": {Index: "TENDERMINT"},
+		index:        {Index: index, Imports: []string{"TENDERMINT"}},
+	})
+	write := spectypes.SpecCategory{Stateful: common.CONSISTENCY_SELECT_ALL_PROVIDERS, HangingApi: true}
+	var spec spectypes.Spec
+	if apiInterface == spectypes.APIInterfaceGrpc {
+		spec = newMockSpec(index,
+			spectypes.CollectionData{ApiInterface: spectypes.APIInterfaceGrpc},
+			mockSpecApi("cosmos.tx.v1beta1.Service/BroadcastTx", write),
+			mockSpecApi("cosmos.tx.v1beta1.Service/Simulate", spectypes.SpecCategory{}),
+		)
+	} else {
+		spec = newMockSpec(index,
+			spectypes.CollectionData{ApiInterface: spectypes.APIInterfaceTendermintRPC},
+			mockSpecApi("broadcast_tx_sync", write),
+			mockSpecApi("broadcast_tx_commit", write),
+			mockSpecApi("broadcast_tx_async", spectypes.SpecCategory{Stateful: common.CONSISTENCY_SELECT_ALL_PROVIDERS}),
+			mockSpecApi("abci_query", spectypes.SpecCategory{}),
+		)
+	}
+	spec.AverageBlockTime = 6000
+	return spec
+}
+
+// CreateMockTronSpec returns the part of a Tron spec a transaction broadcast needs: the REST POST
+// collection holding /wallet/broadcasttransaction and /wallet/broadcasthex, stateful as in the
+// catalog's tron.json, beside two reads (/wallet/getnowblock, /wallet/getaccount); java-tron serves
+// them all as POST. The chain imports TRX, so it is a Tron chain.
+func CreateMockTronSpec(index string) spectypes.Spec {
+	common.RegisterChainFamilies(map[string]spectypes.Spec{
+		"TRX": {Index: "TRX"},
+		index: {Index: index, Imports: []string{"TRX"}},
+	})
+	write := spectypes.SpecCategory{Stateful: common.CONSISTENCY_SELECT_ALL_PROVIDERS}
+	spec := newMockSpec(index,
+		spectypes.CollectionData{ApiInterface: spectypes.APIInterfaceRest, Type: http.MethodPost},
+		mockSpecApi("/wallet/broadcasttransaction", write),
+		mockSpecApi("/wallet/broadcasthex", write),
+		mockSpecApi("/wallet/getnowblock", spectypes.SpecCategory{}),
+		mockSpecApi("/wallet/getaccount", spectypes.SpecCategory{}),
+	)
+	spec.AverageBlockTime = 3000
 	return spec
 }
 
@@ -325,7 +351,7 @@ func CreateChainLibMocks(
 		cancelConnector()
 	}
 
-	// Load specs from all directories so cross-directory imports (e.g. LAV1 -> COSMOSSDK) resolve.
+	// Load specs from all directories so cross-directory imports (e.g. COSMOSHUB -> COSMOSSDK50) resolve.
 	spec, err := specutils.GetSpecFromLocalDirs([]string{
 		getToTopMostPath + "specs/",
 	}, specIndex)

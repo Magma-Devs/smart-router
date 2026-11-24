@@ -165,7 +165,7 @@ func TestListenerHandlers_Golden(t *testing.T) {
 				if name == "Date" || name == "Content-Length" {
 					continue
 				}
-				// Lava-Guid carries the per-request GUID too, so it is masked like the body's.
+				// Router-Guid carries the per-request GUID too, so it is masked like the body's.
 				headerLines = append(headerLines, name+": "+guidPattern.ReplaceAllString(strings.Join(values, ", "), "<GUID>"))
 			}
 			sort.Strings(headerLines)
@@ -195,7 +195,7 @@ func serveGoldenListener(t *testing.T, ctx context.Context, apiInterface string,
 	t.Helper()
 	logger, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
 	require.NoError(t, err)
-	endpoint := &routersession.RPCEndpoint{NetworkAddress: "127.0.0.1:0", ChainID: "LAV1", ApiInterface: apiInterface, HealthCheckPath: common.DEFAULT_HEALTH_PATH}
+	endpoint := &routersession.RPCEndpoint{NetworkAddress: "127.0.0.1:0", ChainID: "COSMOSHUB", ApiInterface: apiInterface, HealthCheckPath: common.DEFAULT_HEALTH_PATH}
 	var listener ChainListener
 	switch apiInterface {
 	case spectypes.APIInterfaceJsonRPC:
