@@ -164,6 +164,10 @@ type DecisionInput struct {
 	// send risks the double-spend this subtask exists to prevent. Every other interface keeps the
 	// carve-out until MAG-5061 decides whether to remove it there too.
 	IsGraphQLWrite bool
+	// IsChainListWrite is true when the request is the chain's gRPC write on a chain whose list reads
+	// each copy (MAG-5186, Sui). That list files a throttle as a rate limit the client retries after,
+	// and the router never re-sends the write, so the carve-out is off for it as for a GraphQL write.
+	IsChainListWrite bool
 }
 
 // RelayPolicyInf is the interface that the policy engine must implement.
