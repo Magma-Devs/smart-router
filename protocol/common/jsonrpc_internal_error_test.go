@@ -129,3 +129,40 @@ func TestCometBFTInternalErrorLeavesTheStatusPass(t *testing.T) {
 		ClassifyError(nil, ChainFamilyUnknown, TransportJsonRPC, 413, message))
 	require.False(t, ClassifyError(nil, ChainFamilyUnknown, TransportJsonRPC, 413, message).Retryable)
 }
+
+// The CometBFT rows and the batch row run before the revert row, so they read only a text a
+// CometBFT internal error can be: under -32603, or under the HTTP status a batch is classified
+// with. A revert's reason is the contract's own text and may hold CometBFT's words or a batch's
+// separator; under every code a revert arrives with, alone or as a batch's text, it stays a revert,
+// not retried and not the endpoint's fault, as on main.
+func TestCometBFTRowsLeaveARevertAlone(t *testing.T) {
+	reasons := []string{"Internal error: limit reached", "x,-,Internal error: y"}
+	for _, tc := range cometBFTInternalErrorCases {
+		reasons = append(reasons, JSONRPCErrorText(-32603, "Internal error", tc.data), "x,-,"+JSONRPCErrorText(-32603, "Internal error", tc.data))
+	}
+	for _, family := range []ChainFamily{ChainFamilyEVM, ChainFamilyUnknown, ChainFamilyCosmosSDK} {
+		for _, reason := range reasons {
+			// Geth's 3, the generic -32000, none at all, and a batch's status.
+			for _, code := range []int{3, -32000, 0, 200} {
+				got := ClassifyError(nil, family, TransportJsonRPC, code, "execution reverted: "+reason)
+				require.Same(t, RouterErrorChainExecutionReverted, got, "family %d, code %d, reason %q", family, code, reason)
+			}
+		}
+	}
+}
+
+// Under any code other than -32603 or an HTTP status, the text is another reply's, and its code and
+// the rows after the CometBFT rows decide it.
+func TestCometBFTRowsReadOnlyTheirOwnCodes(t *testing.T) {
+	text := JSONRPCErrorText(-32603, "Internal error", "tx already exists in cache")
+	for _, code := range []int{3, 40, 0} {
+		require.Same(t, RouterErrorUnknown, ClassifyError(nil, ChainFamilyUnknown, TransportJsonRPC, code, text), "code %d", code)
+		require.Same(t, RouterErrorUnknown, ClassifyError(nil, ChainFamilyUnknown, TransportJsonRPC, code, "Invalid params,-,Internal error: y"), "code %d", code)
+	}
+	// The codes the readers classify a CometBFT text with keep the PR's verdicts.
+	for _, code := range []int{-32603, 200, 500} {
+		require.Same(t, RouterErrorChainTxAlreadyKnown, ClassifyError(nil, ChainFamilyUnknown, TransportJsonRPC, code, text), "code %d", code)
+	}
+	// Read where the readers write it: not in the middle of an element's text.
+	require.Same(t, RouterErrorUnknown, ClassifyError(nil, ChainFamilyUnknown, TransportJsonRPC, 200, "unknown query: "+text))
+}

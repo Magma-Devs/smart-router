@@ -231,7 +231,8 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 		// reaches an element. This gives an element's internal error with data the verdict that
 		// row gives it alone, and keeps the data from the message rows after it. Anchored on an
 		// element's start, so a 4xx's status pass ("HTTP 413: ...") still reaches its status row;
-		// a single reply's negative JSON-RPC code skips it (batchElementInternalError).
+		// a single reply's own JSON-RPC code skips it, and so does a revert, which the revert row
+		// below reads first (batchElementInternalError).
 		{batchElementInternalError(), RouterErrorNodeInternalError},
 		{CodeEquals(-32603), RouterErrorNodeInternalError},
 
