@@ -27,7 +27,7 @@ import (
 // MAG-2786. Nothing checked that a provider holds the block it is asked for. An EVM node asked for a
 // block above its tip answers {"result": null} with HTTP 200, which is no node error, so it is counted
 // as a vote like any other answer, and two lagging nodes agree with each other. A cross-validated
-// request for a block near the tip came back "not found" with lava-cross-validation-status: success.
+// request for a block near the tip came back "not found" with router-cross-validation-status: success.
 //
 // Every case runs the enabled policy defaults, three participants and agreement two, on the method the
 // request calls. A provider's last known block is what the optimizer has observed of it; a provider

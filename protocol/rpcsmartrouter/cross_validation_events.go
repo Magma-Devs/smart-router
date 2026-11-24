@@ -19,8 +19,8 @@ package rpcsmartrouter
 // event-shaped. Counts are derivable from events; the reverse is not.
 //
 // Recording is DEBUG-MODE ONLY. The ring is installed by enableCrossValidationEventRing, called
-// from Start alongside utils.EnableDebugLogBuffer when --debug-address is set, so a production
-// router pays one atomic nil load per dissent and stores nothing.
+// from enableDebugRecorders when --debug-address is set, so a production router pays one atomic nil
+// load per dissent and stores nothing.
 
 import (
 	"context"
@@ -39,7 +39,7 @@ import (
 const crossValidationEventRingCapacity = 4096
 
 // Which recording path produced an event. The automation needs to tell the two apart: a dissent
-// compared BEFORE the reply was received in time to be in lava-cross-validation-disagreeing-providers,
+// compared BEFORE the reply was received in time to be in router-cross-validation-disagreeing-providers,
 // while a straggler resolved AFTER the reply was not (it was in pending-providers instead).
 const (
 	crossValidationEventSourceReplyTime = "reply-time"
@@ -61,7 +61,7 @@ type crossValidationEvent struct {
 	ChainID      string
 	ApiInterface string
 
-	// RequestID is the lava-guid: the value the router returns in the Lava-Guid response header,
+	// RequestID is the router-guid: the value the router returns in the Router-Guid response header,
 	// formatted the same way (decimal). NOTE this is NOT /debug/logs' request_id, which is the
 	// caller's X-Request-Id header — a different identifier that this router does not require.
 	RequestID string
@@ -113,8 +113,8 @@ type crossValidationEventRing struct {
 var crossValidationEventRecorder atomic.Pointer[crossValidationEventRing]
 
 // enableCrossValidationEventRing installs a fresh ring. Debug-mode only — called from
-// rpcsmartrouter.Start when --debug-address is set, next to utils.EnableDebugLogBuffer, so the two
-// debug-only stores are switched on by the same condition in the same place.
+// enableDebugRecorders when --debug-address is set, with the other debug-only stores, so they are
+// switched on by the same condition in the same place.
 func enableCrossValidationEventRing(capacity int) {
 	if capacity <= 0 {
 		capacity = crossValidationEventRingCapacity
@@ -146,7 +146,7 @@ func recordCrossValidationEvent(event crossValidationEvent) {
 
 // crossValidationEventFilter narrows a read. Every field is optional; the set ones are ANDed.
 type crossValidationEventFilter struct {
-	RequestID string // the lava-guid, exact match
+	RequestID string // the router-guid, exact match
 	ChainID   string // exact match, case-sensitive like the other debug chain filters
 	Outcome   string // exact match
 	Limit     int    // keep the most recent N after filtering; <= 0 means the whole ring
@@ -201,7 +201,7 @@ func clearCrossValidationEvents() (cleared int, enabled bool) {
 	return cleared, true
 }
 
-// crossValidationRequestID renders the request's lava-guid the same way the Lava-Guid response
+// crossValidationRequestID renders the request's router-guid the same way the Router-Guid response
 // header does (decimal), so the value a test reads off its own response is the value it filters
 // with. Empty when the context carries no guid — the recording paths always run under a relay
 // context that has one, so an empty value means an unwired test fixture, not a lost request.
