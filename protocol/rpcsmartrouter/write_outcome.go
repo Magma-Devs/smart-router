@@ -12,6 +12,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/rlp"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
@@ -329,8 +330,9 @@ func (rpcss *RPCSmartRouterServer) writeTxHash(protocolMessage chainlib.Protocol
 	}
 }
 
-// evmRawTxHash is keccak-256 of the raw transaction eth_sendRawTransaction sends, "" when its first
-// parameter is not hex.
+// evmRawTxHash is the hash of the transaction an EVM raw-transaction submit sends, "" when its first
+// parameter is not hex: keccak-256 of the signed transaction (evmSignedTransaction), the hash the
+// nodes report and relay_end computes (evmTxHash).
 func evmRawTxHash(protocolMessage chainlib.ProtocolMessage) string {
 	rawHex, ok := firstStringParam(protocolMessage)
 	if !ok {
@@ -340,7 +342,28 @@ func evmRawTxHash(protocolMessage chainlib.ProtocolMessage) string {
 	if err != nil || len(raw) == 0 {
 		return ""
 	}
-	return hexutil.Encode(crypto.Keccak256(raw))
+	return hexutil.Encode(crypto.Keccak256(evmSignedTransaction(raw)))
+}
+
+// evmSignedTransaction is the signed transaction in raw, the bytes its hash is taken of. A blob
+// transaction is submitted in its network form, its type and then [transaction, blobs,
+// commitments, proofs] (EIP-4844; EIP-7594 puts a wrapper version after the transaction), and its
+// hash leaves that sidecar out: it is the type and the transaction alone. The transaction is the
+// first item, a list where every other type has an integer, as evmTxSenderAndHash reads it. Any
+// other raw transaction is hashed whole.
+func evmSignedTransaction(raw []byte) []byte {
+	if raw[0] > 0x7f {
+		return raw // legacy: the RLP list itself
+	}
+	content, _, err := rlp.SplitList(raw[1:])
+	if err != nil {
+		return raw
+	}
+	kind, _, rest, err := rlp.Split(content)
+	if err != nil || kind != rlp.List {
+		return raw
+	}
+	return append([]byte{raw[0]}, content[:len(content)-len(rest)]...)
 }
 
 // solanaSignatureSize is the size of an ed25519 signature, the first of which is a Solana

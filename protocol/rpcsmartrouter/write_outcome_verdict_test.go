@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/stretchr/testify/require"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
@@ -192,5 +194,36 @@ func TestWriteTxHash_EVMRawTransactionVariants(t *testing.T) {
 	}
 	for _, name := range []string{"eth_sendRawTransactions", "eth_sendTransaction", "quai_sendRawTransaction"} {
 		require.Empty(t, server.writeTxHash(renamedWrite{write, name}), name)
+	}
+}
+
+// The hash a write's reply names is the one the nodes report for it, the one relay_end computes
+// (evmTxHash): keccak-256 of the signed transaction. A blob transaction is sent in its network form,
+// with its blobs, commitments and proofs after it, and its hash leaves them out. Hashing the bytes as
+// sent named a hash no node knows, and the client was told to look it up before signing anything new.
+func TestWriteTxHash_IsTheHashTheNodesReport(t *testing.T) {
+	tc := writeInterfaceCases[0]
+	chainParser := tc.parser(t)
+	server := &RPCSmartRouterServer{listenEndpoint: &routersession.RPCEndpoint{ChainID: tc.chainID, ApiInterface: tc.apiInterface}}
+	hashOf := func(raw string) string {
+		write := tc
+		write.body = `{"jsonrpc":"2.0","method":"eth_sendRawTransaction","params":["` + raw + `"],"id":1}`
+		return server.writeTxHash(parsedWrite(t, write, chainParser))
+	}
+	for _, vector := range rywGethVectors {
+		require.Equal(t, vector.hash, hashOf(vector.raw), vector.name)
+	}
+	require.Equal(t, rywCeloCIP64Hash, hashOf(rywCeloCIP64Raw), "a chain type go-ethereum does not know")
+
+	blob := hexutil.MustDecode(rywGethVectors[5].raw)
+	require.Equal(t, byte(0x03), blob[0], "precondition: vector 5 is the blob transaction")
+	sidecar := []interface{}{[][]byte{make([]byte, 64)}, [][]byte{make([]byte, 48)}, [][]byte{make([]byte, 48)}}
+	for name, rest := range map[string][]interface{}{
+		"EIP-4844 network form: [transaction, blobs, commitments, proofs]":               sidecar,
+		"EIP-7594 network form: [transaction, version, blobs, commitments, cell proofs]": append([]interface{}{uint(1)}, sidecar...),
+	} {
+		wrapped, err := rlp.EncodeToBytes(append([]interface{}{rlp.RawValue(blob[1:])}, rest...))
+		require.NoError(t, err)
+		require.Equal(t, rywGethVectors[5].hash, hashOf(hexutil.Encode(append([]byte{0x03}, wrapped...))), name)
 	}
 }

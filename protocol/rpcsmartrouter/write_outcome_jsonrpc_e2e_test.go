@@ -11,6 +11,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/stretchr/testify/require"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
@@ -254,6 +255,18 @@ func TestJSONRPCWrite_TxHashByChainFormula(t *testing.T) {
 				requireUnknownWrite(t, read, `77`, base58Encode(signature))
 			})
 		}
+	})
+	t.Run("evm: a blob transaction's hash leaves its sidecar out", func(t *testing.T) {
+		blob := hexutil.MustDecode(rywGethVectors[5].raw)
+		wrapped, err := rlp.EncodeToBytes([]interface{}{
+			rlp.RawValue(blob[1:]), [][]byte{make([]byte, 64)}, [][]byte{make([]byte, 48)}, [][]byte{make([]byte, 48)},
+		})
+		require.NoError(t, err)
+		iface := writeIface("evm blob", "ETH1", spectypes.APIInterfaceJsonRPC, http.MethodPost, "/",
+			`{"jsonrpc":"2.0","id":77,"method":"eth_sendRawTransaction","params":["`+hexutil.Encode(append([]byte{0x03}, wrapped...))+`"]}`)
+		read := startFailedReplyRouter(t, iface,
+			answeringUpstream(t, 503, "down", "text/plain"), answeringUpstream(t, 503, "down", "text/plain"))()
+		requireUnknownWrite(t, read, `77`, rywGethVectors[5].hash)
 	})
 	t.Run("bitcoin: no formula, no hash", func(t *testing.T) {
 		read := startFailedReplyRouter(t, bitcoinWrite,
