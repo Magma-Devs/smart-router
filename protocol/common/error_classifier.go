@@ -188,6 +188,66 @@ func xrplMessageStartsWith(alternatives ...string) ErrorMatcher {
 	return MessageRegex(`^(?:HTTP \d+: )?(?:` + strings.Join(alternatives, "|") + `)\b`)
 }
 
+// chainInterfaceErrorMappings holds the chain rows that are true on one of a family's interfaces
+// only: what the node software behind a REST interface writes in its error body. Keyed by family,
+// then transport, so a Sidecar phrase never classifies a Cosmos reply and a REST body's phrase never
+// classifies the same family's JSON-RPC error. ClassifyError checks them after the family's own rows
+// and before the generic table. Until MAG-5253 they sat in the generic REST table, where every
+// chain's REST reply was matched against every node software's wording.
+//
+// Evidence for every row is recorded in MAG-3972, MAG-3974 and MAG-3976 (twelve families probed
+// live 2026-09-27). Two kinds of body are here:
+//   - "The block you asked for is beyond my head". A lagging node says this while a synced node has
+//     the block: retryable elsewhere, and not the node's fault.
+//   - A 500 that is really the CALLER's answer. Cosmos, nodeos, MultiversX and the Sidecar answer a
+//     caller's mistake, or "I do not hold that", with a 500 (research doc finding 3). Left to the
+//     generic 500 row these are NODE_INTERNAL_ERROR, at fault, so a customer polling for an unmined
+//     transaction or asking for a pruned height walks the endpoint's refusal counter to the disable
+//     threshold. Each row is gated on the 500, so a genuinely broken node answering 500 with
+//     anything else STAYS at fault.
+//
+// INVARIANT: populated exclusively at package-init time via this literal and never mutated, like
+// chainErrorMappings, so ClassifyError reads it lock-free.
+var chainInterfaceErrorMappings = map[ChainFamily]map[TransportType][]errorMapping{
+	// The Substrate API Sidecar.
+	ChainFamilySubstrate: {TransportREST: {
+		{MessageContains("larger than the current largest block"), RouterErrorChainBlockNotFound},    // 400
+		{CodeAndMessage(500, "unable to retrieve header and parent"), RouterErrorChainBlockNotFound}, // unknown block hash
+	}},
+	ChainFamilyCosmosSDK: {TransportREST: cosmosGatewayRESTRows},
+	// EOS imports ETH1 for its EVM and serves nodeos on REST. CANTO imports ETH1 first, so it is EVM
+	// too, and its REST interface is the Cosmos gRPC-gateway it takes from COSMOSSDK.
+	ChainFamilyEVM: {TransportREST: append([]errorMapping{
+		// "unknown block" is two common English words, and on REST the matcher is fed the raw response
+		// body (extractErrorMessage's fallback), so it is gated on the 400 nodeos sends with it.
+		// Ungated it fired on any status: a 500 saying "unknown blockchain id" classified as
+		// block-not-found and the endpoint was never scored for it.
+		{CodeAndMessage(400, "unknown block"), RouterErrorChainBlockNotFound}, // nodeos unknown_block_exception
+	}, cosmosGatewayRESTRows...)},
+	ChainFamilyMultiversX: {TransportREST: {
+		{CodeAndMessage(500, "transaction not found"), RouterErrorChainTxNotFound},
+	}},
+}
+
+// cosmosGatewayRESTRows is what the Cosmos SDK's gRPC-gateway, a Cosmos chain's REST interface,
+// writes in its error body.
+var cosmosGatewayRESTRows = []errorMapping{
+	{MessageContains("requested block height is bigger then the chain length"), RouterErrorChainBlockNotFound}, // 400
+	{CodeAndMessage(500, "is not available, lowest height"), RouterErrorChainStatePruned},                      // pruned height
+	{CodeAndMessage(500, "decoding bech32 failed"), RouterErrorUserInvalidParams},                              // malformed address
+}
+
+// chainInterfaceVerdict is the first row of table's family and transport that matches the error,
+// or nil when none does.
+func chainInterfaceVerdict(table map[ChainFamily]map[TransportType][]errorMapping, family ChainFamily, transport TransportType, errorCode int, errorMessage, loweredMessage string) *RouterError {
+	for _, mapping := range table[family][transport] {
+		if matchMapping(mapping.Matcher, errorCode, errorMessage, loweredMessage) {
+			return mapping.RouterError
+		}
+	}
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // Tier 1: Generic error mappings, partitioned by transport type.
 // Evaluated in declaration order — first match wins.
@@ -400,30 +460,11 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 		{MessageContains("path not found"), RouterErrorNodeEndpointNotFound},
 		{MessageContains("method not allowed"), RouterErrorNodeMethodNotAllowed},
 
-		// --- 2. What the node said: "the block you asked for is beyond my head". ---
-		// A lagging node says this while a synced node has the block: retryable elsewhere, and
-		// not the node's fault. The first two phrases are long enough to stand alone; "unknown
-		// block" is two common English words, and on REST the matcher is fed the raw response
-		// body (extractErrorMessage's fallback), so it is gated on the 400 nodeos sends with it.
-		// Ungated it fired on any status — a 500 saying "unknown blockchain id" classified as
-		// block-not-found and the endpoint was never scored for it.
-		{MessageContains("larger than the current largest block"), RouterErrorChainBlockNotFound},                  // Substrate sidecar, 400
-		{MessageContains("requested block height is bigger then the chain length"), RouterErrorChainBlockNotFound}, // Cosmos gRPC-gateway, 400
-		{CodeAndMessage(400, "unknown block"), RouterErrorChainBlockNotFound},                                      // nodeos unknown_block_exception, 400
+		// What one node software says (the Substrate sidecar, the Cosmos gRPC-gateway, nodeos,
+		// MultiversX) is not here: those rows are chain rows, keyed by family and interface in
+		// chainInterfaceErrorMappings, and run before this table (MAG-5253).
 
-		// --- 3. What the node said, under a 500 that is really the CALLER's answer. ---
-		// Cosmos, nodeos, MultiversX and the Substrate sidecar all answer a caller's mistake, or
-		// "I do not hold that", with a 500 (research doc finding 3). Left to the generic 500 row
-		// these classified as NODE_INTERNAL_ERROR — at fault — so a customer polling for an
-		// unmined transaction or asking for a pruned height walked the endpoint's refusal counter
-		// to the disable threshold. Each row below is a body probed live, gated on the 500 so a
-		// genuinely broken node answering 500 with anything else STAYS at fault.
-		{CodeAndMessage(500, "is not available, lowest height"), RouterErrorChainStatePruned},        // Cosmos: pruned height
-		{CodeAndMessage(500, "decoding bech32 failed"), RouterErrorUserInvalidParams},                // Cosmos: malformed address
-		{CodeAndMessage(500, "unable to retrieve header and parent"), RouterErrorChainBlockNotFound}, // Sidecar: unknown block hash
-		{CodeAndMessage(500, "transaction not found"), RouterErrorChainTxNotFound},                   // MultiversX: tx not found
-
-		// --- 4. The status, as the fallback: 4xx that describe the request. ---
+		// --- 2. The status, as the fallback: 4xx that describe the request. ---
 		// Non-retryable and never the endpoint's fault, so a read returns the answer as-is
 		// without a second attempt and nothing is scored.
 		{CodeEquals(400), RouterErrorUserInvalidRequest},
@@ -839,6 +880,11 @@ func ClassifyError(connectionError *RouterError, chainFamily ChainFamily, transp
 				return mapping.RouterError
 			}
 		}
+	}
+
+	// Step 1b: chain rows keyed by interface — what the family's node software says on this transport
+	if mapped := chainInterfaceVerdict(chainInterfaceErrorMappings, chainFamily, transport, errorCode, errorMessage, loweredMessage); mapped != nil {
+		return mapped
 	}
 
 	// Step 2: Fall back to generic semantic mappings (Tier 1), scoped by transport

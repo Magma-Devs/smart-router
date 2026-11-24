@@ -218,8 +218,16 @@ func TestRESTRelay_404_NotFound(t *testing.T) {
 }
 
 // sendRESTThroughMockUpstream drives the real REST sender against a mock upstream that answers
-// every request with the given status and body, for a POST to a stateful path.
+// every request with the given status and body, for a POST to a stateful path. The sender
+// classifies as a chain with no family, so only the generic rows apply.
 func sendRESTThroughMockUpstream(t *testing.T, status int, body string) *common.RelayResult {
+	t.Helper()
+	return sendRESTThroughMockUpstreamAs(t, common.ChainFamilyUnknown, status, body)
+}
+
+// sendRESTThroughMockUpstreamAs is sendRESTThroughMockUpstream for a chain of the given family,
+// whose own rows apply first.
+func sendRESTThroughMockUpstreamAs(t *testing.T, family common.ChainFamily, status int, body string) *common.RelayResult {
 	t.Helper()
 	ctx := context.Background()
 	chainParser, _, _, closeServer, endpoint, err := chainlib.CreateChainLibMocks(
@@ -244,7 +252,7 @@ func sendRESTThroughMockUpstream(t *testing.T, status int, body string) *common.
 
 	directConn, err := routersession.NewDirectRPCConnection(ctx, endpoint.NodeUrls[0], 5, "")
 	require.NoError(t, err)
-	sender := &DirectRPCRelaySender{directConnection: directConn, endpointName: "test-cosmos-lcd"}
+	sender := &DirectRPCRelaySender{directConnection: directConn, endpointName: "test-cosmos-lcd", chainFamily: family}
 
 	result, err := sender.SendDirectRelay(ctx, chainMessage, 5*time.Second)
 	require.NoError(t, err)
@@ -363,7 +371,7 @@ func TestRESTRelay_401_Unauthorized_IsRetriedButNotBlamed(t *testing.T) {
 // endpoint that answered honestly.
 func TestRESTRelay_500_CosmosPrunedHeight_IsNotBlamed(t *testing.T) {
 	body := `{"code":2,"message":"height 1 is not available, lowest height is 25280088","details":[]}`
-	result := sendRESTThroughMockUpstream(t, http.StatusInternalServerError, body)
+	result := sendRESTThroughMockUpstreamAs(t, common.ChainFamilyCosmosSDK, http.StatusInternalServerError, body)
 
 	assert.Equal(t, http.StatusInternalServerError, result.StatusCode)
 	assert.True(t, result.IsNodeError)
@@ -382,10 +390,12 @@ func TestRESTRelay_500_Opaque_StaysBlamed(t *testing.T) {
 	assert.True(t, result.IsNodeAtFault, "an unexplained 500 is still the endpoint's problem")
 }
 
-// TestRESTRelay_400_BeyondHead_IsRetriedElsewhere: a lagging sidecar answers "the block you asked
-// for is beyond my head" with a 400. A synced node has the block: retry, do not blame.
+// TestRESTRelay_400_BeyondHead_IsRetriedElsewhere: a lagging sidecar, Polkadot Asset Hub's REST
+// interface, answers "the block you asked for is beyond my head" with a 400. A synced node has the
+// block: retry, do not blame.
 func TestRESTRelay_400_BeyondHead_IsRetriedElsewhere(t *testing.T) {
-	result := sendRESTThroughMockUpstream(t, http.StatusBadRequest, `{"code":400,"message":"Specified block number is larger than the current largest block. The largest known block number is 21144972."}`)
+	family := common.GetChainFamilyOrDefault("POLKADOTASSETHUB")
+	result := sendRESTThroughMockUpstreamAs(t, family, http.StatusBadRequest, `{"code":400,"message":"Specified block number is larger than the current largest block. The largest known block number is 21144972."}`)
 
 	assert.True(t, result.IsNodeError)
 	assert.False(t, result.IsNonRetryable)
