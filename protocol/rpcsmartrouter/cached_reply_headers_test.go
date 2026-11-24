@@ -35,7 +35,7 @@ func TestPrimaryCacheHitReplaysOnlyTheFilteredUpstreamHeaders(t *testing.T) {
 	reply := vendorEntry()
 	rpcss.filterCachedReplyMetadata(reply, protocolMessage)
 	require.Equal(t, []string{"Content-Type", "X-Cosmos-Block-Height"}, metadataNames(reply.Metadata),
-		"the LAVA REST spec inherits cosmossdk's block-height directive; everything else goes")
+		"the COSMOSHUB REST spec inherits cosmossdk's block-height directive; everything else goes")
 
 	// A server without a parser still filters on the matched collection's own directives.
 	bare := &RPCSmartRouterServer{}

@@ -8,7 +8,7 @@ func TestRender(t *testing.T) {
 		Listeners: []Listener{{ChainID: "ETH1", Iface: "jsonrpc", Port: 3360}},
 		Primary: []Upstream{{
 			Name: "eth-public", ChainID: "ETH1", Iface: "jsonrpc",
-			URLs:   []string{"https://eth1.lava.build", "wss://eth1.lava.build/websocket"},
+			URLs:   []string{"https://eth1.example.com", "wss://eth1.example.com/websocket"},
 			Addons: []string{"debug", "trace"},
 		}, {
 			Name: "eth-keyed", ChainID: "ETH1", Iface: "jsonrpc",
@@ -27,7 +27,7 @@ func TestRender(t *testing.T) {
 	// router. See writeRPCBlock for the live-verified reasoning.
 	must := []string{
 		`cache-be: "cache:20100"`, `chain-id: "ETH1"`,
-		`- url: "wss://eth1.lava.build/websocket"`, `addons: ["debug"]`, `addons: ["trace"]`,
+		`- url: "wss://eth1.example.com/websocket"`, `addons: ["debug"]`, `addons: ["trace"]`,
 		`- name: "eth-public"`, `- name: "eth-keyed"`,
 		`auth-config:`, `x-api-key: "${RPC_KEY_ETH1}"`, "backup-direct-rpc:",
 	}
@@ -44,12 +44,12 @@ func TestRender(t *testing.T) {
 		}
 	}
 	// The ws url appears exactly once — under the single eth-public provider.
-	if n := countOf(tpl, `- url: "wss://eth1.lava.build/websocket"`); n != 1 {
+	if n := countOf(tpl, `- url: "wss://eth1.example.com/websocket"`); n != 1 {
 		t.Errorf("ws url must appear once, got %d\n---\n%s", n, tpl)
 	}
 	// The http url appears 3× under eth-public: the base node-url + the debug
 	// addon node-url + the trace addon node-url — all in one provider.
-	if n := countOf(tpl, `- url: "https://eth1.lava.build"`); n != 3 {
+	if n := countOf(tpl, `- url: "https://eth1.example.com"`); n != 3 {
 		t.Errorf("eth-public http url should appear 3× (base + debug + trace node-urls), got %d\n---\n%s", n, tpl)
 	}
 	// One provider per upstream: eth-public + eth-keyed (primary) + eth-bk (backup),
