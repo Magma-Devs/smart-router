@@ -1454,6 +1454,25 @@ func TestTronServletErrorRows(t *testing.T) {
 	}
 }
 
+// TestTronRateLimitRowIsTheRateLimitersWholeMessage: the rate limiter writes one message, and only
+// that message is a rate limit. Another exception's message that holds the same words is not.
+func TestTronRateLimitRowIsTheRateLimitersWholeMessage(t *testing.T) {
+	for _, msg := range []string{
+		"class java.lang.IllegalAccessException : lack of computing resources",
+		"HTTP 200: class java.lang.IllegalAccessException : lack of computing resources",
+	} {
+		require.Equal(t, RouterErrorNodeRateLimited.Name, ClassifyError(nil, ChainFamilyTron, TransportREST, 200, msg).Name, msg)
+	}
+	for _, msg := range []string{
+		"class java.lang.IllegalStateException : lack of computing resources",
+		"class java.lang.Exception : not a lack of computing resources",
+		"class java.lang.IllegalAccessException : lack of computing resources for this one",
+	} {
+		require.Equal(t, RouterErrorUnknown.Name, ClassifyError(nil, ChainFamilyTron, TransportREST, 200, msg).Name, msg)
+		require.False(t, ClassifyNodeErrorForRetry(ChainFamilyTron, TransportREST, 200, msg).IsRateLimited, msg)
+	}
+}
+
 // The Tron row is Tier-2: another family's node error that happens to contain the same words is
 // not classified by it.
 func TestTronRowsAreTronOnly(t *testing.T) {

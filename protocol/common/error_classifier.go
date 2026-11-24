@@ -16,6 +16,11 @@ import (
 // Tier 2: Chain-specific error mappings (checked first, overrides generic)
 // ---------------------------------------------------------------------------
 
+// tronRateLimiterMessage is the message java-tron's RateLimiterServlet answers a request it has no
+// capacity for, inside {"Error": ...} with HTTP 200: Util.printErrorMsg of an IllegalAccessException
+// (MAG-5449).
+const tronRateLimiterMessage = "class java.lang.IllegalAccessException : lack of computing resources"
+
 // INVARIANT: chainErrorMappings is populated exclusively at package-init time
 // via this literal declaration. It is never mutated at runtime, which is what
 // lets ClassifyError read it lock-free on the hot classification path. If you
@@ -94,10 +99,12 @@ var chainErrorMappings = map[ChainFamily][]errorMapping{
 	// Source: java-tron services/http/Util.java and RateLimiterServlet (MAG-5449). A servlet
 	// exception is a 2xx {"Error": "<class> : <message>"}; checkTronServletError flags it, and
 	// this row names the one message that is capacity, not a fault: RateLimiterServlet's own
-	// IllegalAccessException. Every other message falls through to UNKNOWN_ERROR, which stays
-	// never-success now that checkTronServletError marks it a node error — not a silent "no verdict".
+	// IllegalAccessException. The row matches that whole message, as the broadcast refusal rows
+	// match theirs, so another exception whose message holds the same words is not read as a rate
+	// limit. Every other message falls through to UNKNOWN_ERROR, which stays never-success now that
+	// checkTronServletError marks it a node error — not a silent "no verdict".
 	ChainFamilyTron: {
-		{MessageContains("lack of computing resources"), RouterErrorNodeRateLimited},
+		{MessageRegex(`^(?:HTTP \d+: )?` + regexp.QuoteMeta(tronRateLimiterMessage) + `$`), RouterErrorNodeRateLimited},
 	},
 	ChainFamilyNEAR: {
 		// Source: NEAR RPC docs — matched by error.cause.name in message
