@@ -524,7 +524,7 @@ func TestNoteAnswer_ConcurrentWithRecomputeAndReset(t *testing.T) {
 
 // TestRecompute_SoleVoterJumpPastTheBoundIsAnOutlier pins the bound: a url that answers more blocks over
 // the tip than the chain could have made since the tip block was taken (OutlierThreshold, plus
-// soleVoterJumpMargin for each block time since then) is an outlier, however often and however long it
+// the chain's margin for each block time since then) is an outlier, however often and however long it
 // answers. That is a url pinned to a load balancer's bad backend, which no count of answers tells from a
 // storm. Its answers never start a run. A url that answers at the bound is followed at the first tick after
 // its second answer. Both run for less than a TTL, so the tip stays fresh and only the pull-up could move it.
@@ -546,7 +546,7 @@ func TestRecompute_SoleVoterJumpPastTheBoundIsAnOutlier(t *testing.T) {
 			takenAt := clk.now()
 			// The bound while the tip is still honest, taken at takenAt.
 			bound := func() int64 {
-				return honest + cs.cfg.OutlierThreshold + soleVoterJumpMargin*int64(clk.now().Sub(takenAt))/int64(cs.cfg.AverageBlockTime)
+				return honest + cs.cfg.OutlierThreshold + cs.jumpMargin*int64(clk.now().Sub(takenAt))/int64(cs.cfg.AverageBlockTime)
 			}
 			heldAt := takenAt.Add(2 * slowChainPoll) // the second answer
 			for i := 1; clk.now().Sub(takenAt) < cs.cfg.TTL-slowChainBlockTime; i++ {
@@ -588,8 +588,8 @@ func TestRecompute_SoleVoterBoundCountsFromWhenTheTipBlockWasTaken(t *testing.T)
 	u := newSoleURL(cs)
 	u.answer(clk.now(), honest)
 	cs.Recompute(u.vote())
-	// 3 × soleVoterJumpMargin over the tip: within the bound once the tip block is three block times old.
-	head := honest + 3*soleVoterJumpMargin
+	// 3 × the chain's margin over the tip: within the bound once the tip block is three block times old.
+	head := honest + 3*cs.jumpMargin
 	tip := honest
 	for i := 1; i <= 80; i++ {
 		clk.advance(slowChainPoll)
@@ -617,7 +617,7 @@ func TestRecompute_SoleVoterBoundCountsFromWhenTheTipBlockWasTaken(t *testing.T)
 	}
 }
 
-// TestJumpBoundLocked_IsExactAndSaturates: the bound is tip + OutlierThreshold + soleVoterJumpMargin per
+// TestJumpBoundLocked_IsExactAndSaturates: the bound is tip + OutlierThreshold + the chain's margin per
 // block time since the tip block was taken, to the block, and it saturates rather than overflow when the
 // tip or the time is extreme.
 func TestJumpBoundLocked_IsExactAndSaturates(t *testing.T) {
@@ -625,11 +625,11 @@ func TestJumpBoundLocked_IsExactAndSaturates(t *testing.T) {
 	cs.SetLatestBlock(1_000_000)
 	require.Equal(t, int64(1_000_000)+cs.cfg.OutlierThreshold, cs.jumpBoundLocked(clk.now()), "no time, no blocks")
 	clk.advance(3 * slowChainBlockTime / 10)
-	require.Equal(t, int64(1_000_000)+cs.cfg.OutlierThreshold+3*soleVoterJumpMargin/10, cs.jumpBoundLocked(clk.now()))
+	require.Equal(t, int64(1_000_000)+cs.cfg.OutlierThreshold+3*cs.jumpMargin/10, cs.jumpBoundLocked(clk.now()))
 	clk.advance(slowChainBlockTime)
-	require.Equal(t, int64(1_000_000)+cs.cfg.OutlierThreshold+13*soleVoterJumpMargin/10, cs.jumpBoundLocked(clk.now()))
+	require.Equal(t, int64(1_000_000)+cs.cfg.OutlierThreshold+13*cs.jumpMargin/10, cs.jumpBoundLocked(clk.now()))
 	cs.SetLatestBlock(1_000_000) // a confirmation does not move the block the bound counts from
-	require.Equal(t, int64(1_000_000)+cs.cfg.OutlierThreshold+13*soleVoterJumpMargin/10, cs.jumpBoundLocked(clk.now()))
+	require.Equal(t, int64(1_000_000)+cs.cfg.OutlierThreshold+13*cs.jumpMargin/10, cs.jumpBoundLocked(clk.now()))
 
 	tiny := NewWithClock("TINY", Config{AverageBlockTime: time.Nanosecond, StalenessWindow: time.Hour}, clk.now)
 	tiny.SetLatestBlock(1)
@@ -640,4 +640,24 @@ func TestJumpBoundLocked_IsExactAndSaturates(t *testing.T) {
 	high.SetLatestBlock(math.MaxInt64 - 10)
 	require.Equal(t, int64(math.MaxInt64), high.jumpBoundLocked(clk.now()), "a tip near the top of the range")
 	require.Equal(t, 6*time.Minute, high.cfg.AverageBlockTime, "a config without a block time takes StalenessWindow's")
+}
+
+// TestSoleVoterJumpMargin_StormChainsAreTheKnownStormTestnets pins the chains that get the storm margin:
+// the bitcoin testnets (testnet3 and testnet4) and the bitcoin-cash testnet, by their spec indices, and
+// nothing else. Adding a chain here loosens its bound to stormChainJumpMargin; a mainnet never storms, so
+// it should not be one.
+func TestSoleVoterJumpMargin_StormChainsAreTheKnownStormTestnets(t *testing.T) {
+	storm := make([]string, 0, len(stormChains))
+	for chainID := range stormChains {
+		storm = append(storm, chainID)
+	}
+	require.ElementsMatch(t, []string{"BTCT", "BTCT4", "BCHT"}, storm)
+	for _, chainID := range storm {
+		require.Equal(t, int64(stormChainJumpMargin), soleVoterJumpMarginFor(chainID), chainID)
+	}
+	for _, chainID := range []string{"BTC", "BCH", "BTCS", "ETH1", "SEP1", "btct", ""} {
+		require.Equal(t, int64(soleVoterJumpMargin), soleVoterJumpMarginFor(chainID), "%q", chainID)
+	}
+	require.Equal(t, int64(2000), int64(stormChainJumpMargin))
+	require.Equal(t, int64(1000), int64(soleVoterJumpMargin))
 }

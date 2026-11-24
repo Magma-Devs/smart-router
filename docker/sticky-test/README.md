@@ -16,7 +16,7 @@ Exit codes: `0` pass, `1` an assertion failed, `2` the harness itself is untrust
 
 ## What it proves
 
-A request carrying `lava-stickiness: <id>` reaches the same upstream no matter which replica
+A request carrying `router-stickiness: <id>` reaches the same upstream no matter which replica
 serves it. Three replicas behind a plain round-robin ingress mean a session lands on a
 different pod almost every request, which is exactly the arrangement that used to break it.
 
@@ -163,7 +163,7 @@ infrastructure disturbed — a replica restarted, the registry stopped and start
 | Customer sequence across replicas | head-then-fetch over 3 replicas: both on one upstream, no false gaps | yes |
 | Session id on every call | the id must be on the head request too, not only the fetch | yes |
 | Concurrent requests on one id | simultaneous requests for one id do not split across upstreams | yes |
-| `lava-select-provider` beats a claim | naming a provider explicitly still wins | no, by design |
+| `router-select-provider` beats a claim | naming a provider explicitly still wins | no, by design |
 | Claims hold before a restart | each id stays on one upstream across all 3 replicas; records the claims | yes |
 | A replica restarts | the restarted pod, its table empty, adopts the claims made before the restart | yes |
 | Registry unreachable | sticky fails closed; traffic without the header is unaffected | yes |
@@ -194,12 +194,12 @@ keep its upstream. It used to make its claim after the restart, which tested a f
 an adopted one. Run by hand against a `KEEP=1` stack, the order is the same: `claims-before-restart`,
 `docker compose -f docker-compose.falsegap.yml restart router-a`, `restarted-pod`.
 
-**Reading a failure.** Which upstream answered is read from the router's `Lava-Provider-Address`,
-not from the `servedBy` the fake writes into the body: a reply from the response cache carries the
-body of whichever upstream filled the cache, and its header says `Cached`. A sticky reply that
+**Reading a failure.** The harness reads `Router-Provider-Address` to identify the upstream and
+fails if a successful reply omits it. On a cache hit, the fake node's `servedBy` field still names
+the upstream that filled the cache, while the header says `Cached`. A sticky reply that
 says `Cached` fails the scenario as a MAG-4122 regression instead of being counted as an upstream.
 A false gap in a round that carries the id on both calls prints both replies' upstream,
-`Lava-Retries` and replica, and names the path that produced it.
+`Router-Retries` and replica, and names the path that produced it.
 
 **Refused rounds are not gaps.** A pinned call fails rather than move to another upstream when
 the router believes the pinned one is more than 10 blocks behind the tip (MAG-4123). The fakes
@@ -211,5 +211,5 @@ answered, because too few are then left to judge the pin.
 
 **Closed gap.** A sticky request used to be answered from the response cache before any upstream
 was chosen, so the pin was not consulted: on a cold start, 24 sticky requests produced 19 claim
-resolutions. A request carrying `lava-stickiness`, `lava-select-provider` or `lava-providers-block`
+resolutions. A request carrying `router-stickiness`, `router-select-provider` or `router-providers-block`
 no longer reads the cache (MAG-3864, MAG-3520), so every sticky request resolves a claim.

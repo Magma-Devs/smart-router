@@ -121,21 +121,21 @@ func TestPublishServingTier_ProviderOutCarriesTheFailedCheck(t *testing.T) {
 func TestPublishServingTier_RefusedServiceOfAPairedProvider(t *testing.T) {
 	const spec = "VERIFYFAILEDSERVICE"
 	const chainKey = spec + "jsonrpc" // RPCEndpoint.Key()
-	refused := map[string][]metrics.ProviderVerificationFailure{"lava": {{Scope: metrics.VerificationScopeService, Service: "archive", Check: "pruning"}}}
+	refused := map[string][]metrics.ProviderVerificationFailure{"llama": {{Scope: metrics.VerificationScopeService, Service: "archive", Check: "pruning"}}}
 	inputs := &chainReverifyInputs{
-		configuredBackup: []*routersession.RPCStaticProviderEndpoint{{Name: "lava"}},
+		configuredBackup: []*routersession.RPCStaticProviderEndpoint{{Name: "llama"}},
 		refusedFor: func(p *routersession.RPCStaticProviderEndpoint) []metrics.ProviderVerificationFailure {
 			return refused[p.Name]
 		},
 	}
 	rpsr := newVerificationFailedRouter(t, spec, inputs)
-	rpsr.backupProviderSessions[chainKey] = sessionsFor("lava")
+	rpsr.backupProviderSessions[chainKey] = sessionsFor("llama")
 
 	rpsr.publishServingTierLocked(chainKey)
-	require.Equal(t, []string{"lava|backup|service|archive|pruning|PartialFail"}, failingSeries(t, spec))
+	require.Equal(t, []string{"llama|backup|service|archive|pruning|PartialFail"}, failingSeries(t, spec))
 
 	// archive passes again at the next epoch: the series clears.
-	refused["lava"] = nil
+	refused["llama"] = nil
 	rpsr.publishServingTierLocked(chainKey)
 	require.Empty(t, verificationFailedSeries(t, spec))
 }
@@ -146,15 +146,15 @@ func TestPublishServingTier_VerificationFailedKeepsTiersApart(t *testing.T) {
 	const spec = "VERIFYFAILEDTIERS"
 	const chainKey = spec + "jsonrpc" // RPCEndpoint.Key()
 	inputs := &chainReverifyInputs{
-		configuredStatic: []*routersession.RPCStaticProviderEndpoint{{Name: "lava"}},
-		configuredBackup: []*routersession.RPCStaticProviderEndpoint{{Name: "lava"}},
+		configuredStatic: []*routersession.RPCStaticProviderEndpoint{{Name: "llama"}},
+		configuredBackup: []*routersession.RPCStaticProviderEndpoint{{Name: "llama"}},
 	}
 	rpsr := newVerificationFailedRouter(t, spec, inputs)
-	rpsr.providerSessions[chainKey] = sessionsFor("lava")
-	inputs.noteFailure(reverifyTierBackup, "lava", &chainlib.VerificationFailure{Check: chainlib.CheckUnsupportedAddon, Err: errors.New("no addon")})
+	rpsr.providerSessions[chainKey] = sessionsFor("llama")
+	inputs.noteFailure(reverifyTierBackup, "llama", &chainlib.VerificationFailure{Check: chainlib.CheckUnsupportedAddon, Err: errors.New("no addon")})
 
 	rpsr.publishServingTierLocked(chainKey)
-	require.Equal(t, []string{"lava|backup|provider||unsupported-addon|Fail"}, failingSeries(t, spec))
+	require.Equal(t, []string{"llama|backup|provider||unsupported-addon|Fail"}, failingSeries(t, spec))
 }
 
 // An error that carries no check is published as unknown rather than dropped: the
@@ -251,7 +251,7 @@ func TestRevalidateTier_NotesAndCountsTheFailedCheck(t *testing.T) {
 }
 
 func applyReverificationKeep(inputs *chainReverifyInputs, fresh map[uint64]*routersession.ConsumerSessionsWithProvider) map[uint64]*routersession.ConsumerSessionsWithProvider {
-	next, _, _ := applyReverification(context.Background(), inputs, fresh, reverifyTierStatic, 1)
+	next, _, _ := probeAndApplyReverification(context.Background(), inputs, fresh, reverifyTierStatic, 1)
 	return next
 }
 
@@ -266,7 +266,7 @@ func TestApplyReverification_RecordsTheFailedCheck(t *testing.T) {
 		},
 		rateLimitHoldoff: holdoff.NewRegistry(),
 	}
-	applyReverification(context.Background(), inputs, sessionsFor("tatum"), reverifyTierStatic, 1)
+	probeAndApplyReverification(context.Background(), inputs, sessionsFor("tatum"), reverifyTierStatic, 1)
 	require.Equal(t, "pruning", inputs.lastFailure["static|tatum"])
 }
 

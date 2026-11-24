@@ -36,8 +36,8 @@ const (
 	CustomerIDHeader           = "customer-id"
 	RetryListeningInterval     = 10 // seconds
 	relayMsgLogMaxChars        = 200
-	RPCProviderNodeAddressHash = "Lava-Provider-Node-Address-Hash"
-	RPCProviderNodeExtension   = "Lava-Provider-Node-Extension"
+	RPCProviderNodeAddressHash = "Router-Provider-Node-Address-Hash"
+	RPCProviderNodeExtension   = "Router-Provider-Node-Extension"
 	WebSocketExtension         = "websocket"
 )
 
@@ -747,7 +747,7 @@ func CombineEarliestRequestedBlock(currentEarliest, parsedBlock int64) int64 {
 // It is NOT how long an attempt may live — that is the processing budget, see
 // GetTimeoutForProcessing and sendRelayToDirectEndpoints.
 //
-// A caller's lava-relay-timeout replaces the computed window only once it has been bounded
+// A caller's router-relay-timeout replaces the computed window only once it has been bounded
 // (common.BoundCallerRelayTimeout), and a bounded value is always positive. The window feeds
 // time.NewTicker, and the processing budget is never shorter than it, so this is the one place both
 // hazards of an unchecked header are closed for every consumer of the window (MAG-3600).
@@ -933,11 +933,17 @@ func createAndSetupBaseAppListener(cmdFlags common.ConsumerCmdFlags, healthCheck
 	app.Use(favicon.New())
 	applyResponseCompression(app, cmdFlags.ResponseCompression)
 	app.Use(func(c *fiber.Ctx) error {
-		// we set up wild card by default.
-		c.Set("Access-Control-Allow-Origin", cmdFlags.OriginFlag)
+		// "*" by default; a --cors-origin list answers with the caller's own origin when listed.
+		origin, send, vary := common.CORSAllowOrigin(cmdFlags.OriginFlag, c.Get(fiber.HeaderOrigin))
+		if send {
+			c.Set("Access-Control-Allow-Origin", origin)
+		}
+		if vary {
+			c.Vary(fiber.HeaderOrigin)
+		}
 		// Expose selected response headers to browser JS. Access-Control-Expose-
 		// Headers must be present on the ACTUAL response (not just the preflight)
-		// for fetch() to read a non-simple header like Lava-Provider-Address.
+		// for fetch() to read a non-simple header like Router-Provider-Address.
 		// Empty flag => header omitted (only simple response headers readable).
 		if cmdFlags.ExposeHeadersFlag != "" {
 			c.Set("Access-Control-Expose-Headers", cmdFlags.ExposeHeadersFlag)

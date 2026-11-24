@@ -69,7 +69,7 @@ type DirectRPCResponse struct {
 }
 
 // DirectRPCConnection represents a direct connection to an RPC endpoint
-// (no Lava provider-relay protocol involved)
+// (no provider-relay protocol involved)
 type DirectRPCConnection interface {
 	// SendRequest sends the already-built raw request bytes and returns a response
 	// containing both data and metadata.
@@ -742,7 +742,7 @@ func NewDirectRPCConnection(
 //
 // Bare host:port is treated as gRPC for the "grpc" interface, HTTPS otherwise.
 func DetectProtocol(urlStr string, apiInterface string) (DirectRPCProtocol, error) {
-	// Handle bare host:port URLs (e.g. "lava-grpc.publicnode.com:443") before url.Parse.
+	// Handle bare host:port URLs (e.g. "cosmos-grpc.publicnode.com:443") before url.Parse.
 	// Go's url.Parse treats "word:" as scheme:opaque, so "host.com:443" becomes
 	// scheme="host.com", opaque="443" — the scheme == "" branch below is never reached.
 	// Checking for "://" is sufficient: all valid scheme URLs contain it.
@@ -1152,9 +1152,16 @@ func (g *GRPCDirectRPCConnection) SendRequest(
 		return nil, fmt.Errorf("gRPC method path not provided in headers (expected %s header)", GRPCMethodHeader)
 	}
 
-	// Lazy initialization on first request
+	// Lazy initialization on first request. A connection that could not be set up opened no
+	// stream, so no node saw the call: it is undelivered, as a refused dial on a pooled
+	// connection is (MAG-5130). Unwrapped it was an error no row names, so the client got its
+	// text instead of the router's no-answer status. A connection this router closed keeps its
+	// own error.
 	if err := g.ensureInitialized(ctx); err != nil {
-		return nil, err
+		if errors.Is(err, ErrGRPCConnectionClosed) {
+			return nil, err
+		}
+		return nil, &common.GRPCCallUndeliveredError{Err: err}
 	}
 
 	// Hold connMu in read mode across the whole checkout, not just the field read.
@@ -1241,14 +1248,15 @@ func (g *GRPCDirectRPCConnection) SendRequest(
 	outputMsg := msgFactory.NewMessage(methodDescriptor.GetOutputType())
 
 	// Invoke gRPC method - capture response headers/metadata, and the trailer a failed call's
-	// rate-limit wait may ride in (handleGRPCError). The peer is set only once a stream to the
-	// node is open; a call that failed with none never reached a node.
+	// rate-limit wait may ride in (handleGRPCError). The peer and the status frame say how far
+	// a failed call got (grpcCallReachOf).
 	var respHeaders, respTrailers metadata.MD
 	var nodePeer peer.Peer
-	err = conn.Invoke(ctx, "/"+methodPath, inputMsg, outputMsg, grpc.Header(&respHeaders), grpc.Trailer(&respTrailers), grpc.Peer(&nodePeer))
+	callCtx, statusFrame := common.WithGRPCStatusFrame(ctx)
+	err = conn.Invoke(callCtx, "/"+methodPath, inputMsg, outputMsg, grpc.Header(&respHeaders), grpc.Trailer(&respTrailers), grpc.Peer(&nodePeer))
 	if err != nil {
 		// Handle gRPC error - pass respHeaders for metadata in error response
-		return g.handleGRPCError(ctx, err, respHeaders, respTrailers, nodePeer.Addr != nil)
+		return g.handleGRPCError(ctx, err, respHeaders, respTrailers, grpcCallReachOf(&nodePeer, statusFrame))
 	}
 
 	// Marshal response to binary proto
@@ -2089,9 +2097,10 @@ func (g *GRPCDirectRPCConnection) invokeRaw(ctx context.Context, conn *grpc.Clie
 	var reply []byte
 	var respHeaders, respTrailers metadata.MD
 	var nodePeer peer.Peer
-	err := conn.Invoke(ctx, "/"+methodPath, data, &reply, grpc.ForceCodec(rawProtoCodec{}), grpc.Header(&respHeaders), grpc.Trailer(&respTrailers), grpc.Peer(&nodePeer))
+	callCtx, statusFrame := common.WithGRPCStatusFrame(ctx)
+	err := conn.Invoke(callCtx, "/"+methodPath, data, &reply, grpc.ForceCodec(rawProtoCodec{}), grpc.Header(&respHeaders), grpc.Trailer(&respTrailers), grpc.Peer(&nodePeer))
 	if err != nil {
-		return g.handleGRPCError(ctx, err, respHeaders, respTrailers, nodePeer.Addr != nil)
+		return g.handleGRPCError(ctx, err, respHeaders, respTrailers, grpcCallReachOf(&nodePeer, statusFrame))
 	}
 	return &DirectRPCResponse{
 		Data:       reply,
@@ -2125,15 +2134,82 @@ func (rawProtoCodec) Unmarshal(data []byte, v any) error {
 
 func (rawProtoCodec) Name() string { return "proto" }
 
+// grpcCallReach is how far a failed gRPC call got, which decides whose status grpc-go returned.
+type grpcCallReach int
+
+const (
+	// grpcCallUndelivered: no stream to the node was opened. grpc-go refused the call itself, and
+	// no node saw it (MAG-4355).
+	grpcCallUndelivered grpcCallReach = iota
+	// grpcCallUnanswered: the stream was open, and no status frame came back from the node.
+	grpcCallUnanswered
+	// grpcCallAnswered: the node's status frame arrived.
+	grpcCallAnswered
+)
+
+// grpcCallReachOf reads how far a failed call got. grpc-go sets the grpc.Peer call option only once
+// a stream to the node is open, and statusFrame records the frame that carries the node's status.
+func grpcCallReachOf(nodePeer *peer.Peer, statusFrame *common.GRPCStatusFrame) grpcCallReach {
+	switch {
+	case statusFrame.Received():
+		return grpcCallAnswered
+	case nodePeer.Addr != nil:
+		return grpcCallUnanswered
+	default:
+		return grpcCallUndelivered
+	}
+}
+
+// grpcNonGRPCReplyPrefixes start the status grpc-go writes for a reply that was not gRPC: a
+// gateway's HTTP error page, for example (internal/transport/http2_client.go, operateHeaders).
+// Something on the node's side did answer, so the status stays a reply.
+var grpcNonGRPCReplyPrefixes = []string{
+	"unexpected HTTP status code received from server",
+	"malformed header: missing HTTP",
+	"transport: received unexpected content-type",
+	"transport: malformed http-status",
+}
+
+// grpcLibraryEndedTheCall reports whether err is a status grpc-go wrote because the connection or
+// the stream ended, for a call whose node sent no status: UNAVAILABLE (a reset, a closed socket, a
+// failed keepalive, a draining connection), a stream the server reset without a status, or a
+// stream it closed without one (MAG-5130). A status that names ENHANCE_YOUR_CALM is left out: it
+// is the server asking the router to slow down, and the rate-limit rows read it, as before. That
+// is a stream reset with that code, and a call still in flight when the server sent a GOAWAY with
+// it and closed the connection ("received prior goaway: code: ENHANCE_YOUR_CALM"). The endpoint is
+// held off, not counted as unreachable.
+//
+// Statuses the client writes about a reply it did receive (too large, undecodable, a second
+// message for a one-reply call) are not on the list: the node answered.
+func grpcLibraryEndedTheCall(err error) bool {
+	st := status.Convert(err)
+	msg := st.Message()
+	for _, prefix := range grpcNonGRPCReplyPrefixes {
+		if strings.HasPrefix(msg, prefix) {
+			return false
+		}
+	}
+	if strings.Contains(msg, "ENHANCE_YOUR_CALM") {
+		return false
+	}
+	switch {
+	case strings.HasPrefix(msg, "stream terminated by RST_STREAM"):
+		return true
+	case msg == "server closed the stream without sending trailers":
+		return true
+	default:
+		return st.Code() == codes.Unavailable
+	}
+}
+
 // handleGRPCError handles gRPC errors and returns an appropriate response.
 //
-// nodeReached reports whether a stream to the node was open when the call failed: grpc-go sets
-// the grpc.Peer call option only then. It is false for a call grpc-go refused itself, before
-// any node saw it.
+// reach is how far the call got (grpcCallReachOf). A status is the node's answer only when the
+// node's status frame arrived, or when the status is not one grpc-go writes for a broken call.
 //
 // respHeaders and respTrailers are the reply's header and trailer metadata. Both are read to
 // recognise a rate limit; only the header block goes back in the response.
-func (g *GRPCDirectRPCConnection) handleGRPCError(ctx context.Context, err error, respHeaders, respTrailers metadata.MD, nodeReached bool) (*DirectRPCResponse, error) {
+func (g *GRPCDirectRPCConnection) handleGRPCError(ctx context.Context, err error, respHeaders, respTrailers metadata.MD, reach grpcCallReach) (*DirectRPCResponse, error) {
 	// A relay the router itself cancelled — a loser of a stateful fan-out race,
 	// or a client that disconnected — is not a node failure and must not be
 	// scored as one. grpc-go reports this as status.Error(codes.Canceled, ...),
@@ -2168,7 +2244,9 @@ func (g *GRPCDirectRPCConnection) handleGRPCError(ctx context.Context, err error
 	}
 
 	// The router's own deadline passed: a timeout, as on every HTTP transport, and the
-	// endpoint is still blamed for it. It is not the node's answer, so no response. A node
+	// endpoint is still blamed for it. It is not the node's answer, so no response. When the
+	// deadline bounding ctx is the caller's own grpc-timeout instead, the same error comes back,
+	// and common.IsClientCancellation is what keeps that one off the endpoint (D10). A node
 	// that sends DEADLINE_EXCEEDED or CANCELED itself, while the router's deadline is still
 	// open, did answer, and stays a node error below.
 	//
@@ -2180,6 +2258,19 @@ func (g *GRPCDirectRPCConnection) handleGRPCError(ctx context.Context, err error
 		return nil, fmt.Errorf("gRPC relay timed out: %w: %w", context.DeadlineExceeded, err)
 	}
 
+	// The node sent a second reply, or ended with OK and no reply at all, to a call the router made
+	// as a single-reply call: the method streams its replies, and no definition the router held
+	// said so. grpc-go ends such a call itself, with INTERNAL "cardinality violation". That is not
+	// the node's answer, nor its fault: the router asked the wrong way. So there is no response,
+	// and the error is the refusal the listener gives a stream it knows of (MAG-5133): never
+	// retried, no provider blamed. It is read before the call's reach: grpc-go ends the
+	// second-reply call without filling in the node's address, so it would otherwise pass for a
+	// call that never reached the node, and disable the endpoint. The empty stream does reach the
+	// node, and would otherwise be the node's INTERNAL, which counts toward --bench-after.
+	if singleReplyCallStreamed(err) {
+		return nil, fmt.Errorf("%w: %w", common.UnservedGRPCCallError, err)
+	}
+
 	// No stream to the node was ever opened: grpc-go refused the call itself, for a connection
 	// it could not use (a refused dial, a name that does not resolve, a failed TLS handshake),
 	// and worded it UNAVAILABLE, the code a node also sends when it is shutting down. The code
@@ -2187,8 +2278,19 @@ func (g *GRPCDirectRPCConnection) handleGRPCError(ctx context.Context, err error
 	// stays a node error below. No node saw this call, so it carries no response, and the
 	// classifier reads the wrapper as a connection fault, which disables the endpoint as
 	// `unreachable`, as the same fault on JSON-RPC does (MAG-4355).
-	if !nodeReached {
+	if reach == grpcCallUndelivered {
 		return nil, &common.GRPCCallUndeliveredError{Err: err}
+	}
+
+	// The stream was open, and the connection or the stream ended before the node sent its status:
+	// grpc-go wrote the status, UNAVAILABLE "error reading from server: ... connection reset by
+	// peer", for example. The node said nothing, so this is "no reply", not the node's answer
+	// (MAG-5130), whether the cut came before any reply byte or after the reply's headers. Like an
+	// undelivered call it carries no response, and the classifier reads it as a connection fault,
+	// so another provider is asked and this endpoint is counted. Unlike one, the request may have
+	// reached the node: a write it carried may have run, and it is not sent again.
+	if reach == grpcCallUnanswered && grpcLibraryEndedTheCall(err) {
+		return nil, common.NewGRPCReplyLostError(err)
 	}
 
 	var errorCode uint32 = common.GRPCStatusCodeOnFailedMessages
@@ -2225,6 +2327,25 @@ func (g *GRPCDirectRPCConnection) handleGRPCError(ctx context.Context, err error
 	// node failure (MAG-4915). The trailer is read here only: the response keeps the header block,
 	// so the wait stays the router's own, as an HTTP Retry-After does.
 	return response, NewGRPCStatusError(errorCode, errorMessage, err, metadata.Join(respHeaders, respTrailers))
+}
+
+// grpcStreamedReplyText begins the status text grpc-go gives a single-reply call whose server sent
+// a second message (clientStreamWrapper.RecvMsg in grpc-go's stream.go).
+const grpcStreamedReplyText = "cardinality violation: expected <EOF> for non server-streaming RPCs"
+
+// grpcEmptyStreamText is the status text grpc-go gives a single-reply call whose server ended with
+// OK and sent no message (csAttempt.recvMsg in grpc-go's stream.go): a server stream with no item.
+const grpcEmptyStreamText = "cardinality violation: received no response message from non-server-streaming RPC"
+
+// singleReplyCallStreamed reports whether err is grpc-go's own end of a single-reply call whose
+// server streamed: more than one reply, or none.
+func singleReplyCallStreamed(err error) bool {
+	statusErr, ok := status.FromError(err)
+	if !ok || statusErr.Code() != codes.Internal {
+		return false
+	}
+	message := statusErr.Message()
+	return strings.HasPrefix(message, grpcStreamedReplyText) || strings.HasPrefix(message, grpcEmptyStreamText)
 }
 
 // NewGRPCStatusError builds the error for a status a node sent. A corroborated rate limit — a

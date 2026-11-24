@@ -3,6 +3,7 @@ package routersession
 import (
 	"context"
 	"fmt"
+	"maps"
 	"slices"
 	"strconv"
 	"sync"
@@ -245,8 +246,13 @@ type Endpoint struct {
 	// accident. The endpoint is usable only when Enabled AND this map is empty (usableLocked).
 	// Nil until the first state reason is added.
 	stateReasons map[EndpointDisableReason]StateReasonRecord
-	Addons       map[string]struct{}
-	Extensions   map[string]struct{}
+	// outOfRotationCounts counts, per reason, how many times this endpoint has left rotation
+	// (MAG-5244): each Enabled→false transition under its disable reason, and each state reason
+	// added. It only goes up, so the metrics publisher can tell from it that the url went out even
+	// when it came back before the publisher looked. Nil until the first time the endpoint goes out.
+	outOfRotationCounts map[EndpointDisableReason]uint64
+	Addons              map[string]struct{}
+	Extensions          map[string]struct{}
 	// StandaloneAddons mirrors common.NodeUrl.StandaloneAddons: this endpoint
 	// serves ONLY the collections its Addons name, not those plus the base one.
 	// Set for a url whose add-on REPLACES the base api surface rather than
@@ -264,7 +270,7 @@ type Endpoint struct {
 	// it does not serve, and the vendor's 404 then reads as a verdict on the
 	// request.
 	InternalPath string
-	mu           sync.RWMutex // Protects Connections, ConnectionRefusals, Enabled, consecutiveHealthyProbes, disabledAt, disableReason, lastRecoveryPoll, probeReenabled, reenableProbeFlaps, stateReasons
+	mu           sync.RWMutex // Protects Connections, ConnectionRefusals, Enabled, consecutiveHealthyProbes, disabledAt, disableReason, lastRecoveryPoll, probeReenabled, reenableProbeFlaps, stateReasons, outOfRotationCounts
 
 	// Per-endpoint observed tip lives in the shared endpointtip store (single source of
 	// truth), keyed by chain+apiInterface+NetworkAddress — not on the Endpoint — so the
@@ -357,6 +363,9 @@ type EndpointHealthSnapshot struct {
 	// StateReasons lists the state-type reasons (head-stalled) this endpoint is out for, in a stable
 	// order, each with when it was added and the block it was recorded at. Empty when none.
 	StateReasons []StateReasonRecord
+	// OutOfRotationCounts is how many times the endpoint has left rotation, per reason, since it was
+	// created (MAG-5244). A copy; nil when it never went out.
+	OutOfRotationCounts map[EndpointDisableReason]uint64
 }
 
 // HealthSnapshot returns the endpoint's enable/recovery state under e.mu. Read-only companion to
@@ -375,6 +384,7 @@ func (e *Endpoint) HealthSnapshot() EndpointHealthSnapshot {
 		ReenableProbeFlaps:       e.reenableProbeFlaps,
 		Usable:                   e.usableLocked(),
 		StateReasons:             e.stateReasonsLocked(),
+		OutOfRotationCounts:      maps.Clone(e.outOfRotationCounts),
 	}
 }
 
@@ -499,6 +509,7 @@ func (e *Endpoint) disableLocked(at time.Time, reason EndpointDisableReason) {
 		reason = EndpointDisableUnspecified
 	}
 	e.Enabled = false
+	e.countOutOfRotationLocked(reason)
 	e.disabledAt = at
 	// Edge-triggered with disabledAt, and for the same reason: the reason belongs to the failure that
 	// actually took the endpoint out. A later failure of a different kind against an already-disabled
@@ -699,7 +710,7 @@ type RPCEndpoint struct {
 	ChainID         string `yaml:"chain-id,omitempty" json:"chain-id,omitempty" mapstructure:"chain-id"`                      // spec chain identifier
 	ApiInterface    string `yaml:"api-interface,omitempty" json:"api-interface,omitempty" mapstructure:"api-interface"`
 	TLSEnabled      bool   `yaml:"tls-enabled,omitempty" json:"tls-enabled,omitempty" mapstructure:"tls-enabled"`
-	HealthCheckPath string `yaml:"health-check-path,omitempty" json:"health-check-path,omitempty" mapstructure:"health-check-path"` // health check status code 200 path, default is common.DEFAULT_HEALTH_PATH ("/lava/health"); a websocket upgrade on it is still served as a websocket
+	HealthCheckPath string `yaml:"health-check-path,omitempty" json:"health-check-path,omitempty" mapstructure:"health-check-path"` // health check status code 200 path, default is common.DEFAULT_HEALTH_PATH ("/router/health"); a websocket upgrade on it is still served as a websocket
 }
 
 func (endpoint *RPCEndpoint) String() (retStr string) {
@@ -719,7 +730,7 @@ type ConsumerSessionsWithProvider struct {
 	MaxComputeUnits  uint64
 	UsedComputeUnits uint64
 	PairingEpoch     uint64
-	stakeSize        int64 // the stake size the provider staked (ulava)
+	stakeSize        int64 // the stake size the provider staked
 
 	// blocked provider recovery status if 0 currently not used, if 1 a session has tried resume communication with this provider
 	// if the provider is not blocked at all this field is irrelevant
@@ -860,14 +871,14 @@ func (cswp *ConsumerSessionsWithProvider) addUsedComputeUnits(cu, virtualEpoch u
 	return nil
 }
 
-// getProviderStakeSize returns the stake size (in ulava) for this provider.
+// getProviderStakeSize returns the stake size for this provider.
 func (cswp *ConsumerSessionsWithProvider) getProviderStakeSize() int64 {
 	cswp.Lock.RLock()
 	defer cswp.Lock.RUnlock()
 	return cswp.stakeSize
 }
 
-// GetProviderStakeSize returns the provider stake (in ulava) used for selection weighting.
+// GetProviderStakeSize returns the provider stake used for selection weighting.
 // Exported for cross-package callers (e.g., rpcsmartrouter) that need to copy sessions.
 func (cswp *ConsumerSessionsWithProvider) GetProviderStakeSize() int64 {
 	return cswp.getProviderStakeSize()
@@ -1355,7 +1366,7 @@ func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSes
 					// session, smart-router health, and refusal counter all agree on
 					// what "the client cancelled" means. Note: context.DeadlineExceeded
 					// is NOT exempt here — a slow/unreachable endpoint should still
-					// increment refusals.
+					// increment refusals — unless the deadline was the caller's own.
 					if common.IsClientCancellation(err, ctx) {
 						utils.FormatDebug("skipping ConnectionRefusals increment: request context canceled (client disconnect)",
 							utils.LogAttr("err", err),

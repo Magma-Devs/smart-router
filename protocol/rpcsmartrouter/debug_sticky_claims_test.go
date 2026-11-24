@@ -130,7 +130,7 @@ func readStickyClaims(t *testing.T, mux http.Handler) (map[string]stickyClaimsRo
 // reason) telling a router with the fleet registry from one without, and all seven outcome counts. The
 // ETH1 endpoint shares its registry with a peer pod that claims a session first, so its row carries the
 // adopted count a session crossing pods produces. The SOLANA endpoint serves sticky requests pod-locally
-// because nothing asked for a registry; the LAVA endpoint asked and got none, which is what a cache
+// because nothing asked for a registry; the COSMOSHUB endpoint asked and got none, which is what a cache
 // backend that cannot hold claims leaves behind.
 func TestDebugStickyClaims_ReportsEachEndpointsOutcomes(t *testing.T) {
 	registry := &stickyClaimsTestRegistry{claims: map[string]string{}}
@@ -143,7 +143,7 @@ func TestDebugStickyClaims_ReportsEachEndpointsOutcomes(t *testing.T) {
 	podLocal := stickyClaimsTestCSM(t, "SOLANA", nil)
 	stickyRequest(t, podLocal, "session-1")
 	stickyRequest(t, podLocal, "session-1")
-	refused := stickyClaimsTestCSM(t, "LAVA", nil)
+	refused := stickyClaimsTestCSM(t, "COSMOSHUB", nil)
 	refused.SetSharedStickyStore(nil, 15*time.Minute) // --shared-state on, backend cannot hold claims
 	stickyRequest(t, refused, "session-1")
 
@@ -186,11 +186,11 @@ func TestDebugStickyClaims_ReportsEachEndpointsOutcomes(t *testing.T) {
 		require.Zero(t, count, "%s: pod-local stickiness resolves no claim", outcome)
 	}
 
-	lava := rows["LAVA"]
-	require.False(t, lava.SharedSticky)
-	require.Equal(t, "--shared-state set, but the cache backend cannot hold claims", lava.SharedStickyReason,
+	hub := rows["COSMOSHUB"]
+	require.False(t, hub.SharedSticky)
+	require.Equal(t, "--shared-state set, but the cache backend cannot hold claims", hub.SharedStickyReason,
 		"asked for a registry and got none, which reads as pod-local everywhere else")
-	for outcome, count := range lava.Outcomes {
+	for outcome, count := range hub.Outcomes {
 		require.Zero(t, count, "%s: no registry, no claim resolved", outcome)
 	}
 

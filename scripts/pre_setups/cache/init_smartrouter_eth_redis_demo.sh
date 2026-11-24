@@ -198,15 +198,15 @@ relay_block() { # port, block -> body
     curl -s -m 25 -X POST "http://127.0.0.1:$1" -H 'Content-Type: application/json' \
         -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getBlockByNumber\",\"params\":[\"$2\",false],\"id\":1}"
 }
-provider_of() { # port, block -> the Lava-Provider-Address value
+provider_of() { # port, block -> the Router-Provider-Address value
     curl -s -m 25 -D- -o /dev/null -X POST "http://127.0.0.1:$1" -H 'Content-Type: application/json' \
         -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getBlockByNumber\",\"params\":[\"$2\",false],\"id\":1}" \
-        | grep -i '^lava-provider-address:' | awk '{print $2}' | tr -d '\r'
+        | grep -i '^router-provider-address:' | awk '{print $2}' | tr -d '\r'
 }
 wait_healthy() { # port — the lane returns once the backend is selected, which is
                  # BEFORE the RPC listener is serving; poll rather than guess.
     for _ in $(seq 1 45); do
-        [[ "$(curl -s -o /dev/null -w '%{http_code}' -m 10 "http://127.0.0.1:$1/lava/health")" == "200" ]] && return 0
+        [[ "$(curl -s -o /dev/null -w '%{http_code}' -m 10 "http://127.0.0.1:$1/router/health")" == "200" ]] && return 0
         sleep 1
     done
     return 1
@@ -329,7 +329,7 @@ stop_all_lanes() {
         init_smartrouter_eth_redis_demo.sh
         init_smartrouter_eth_redis_sentinel.sh
         init_smartrouter_eth_redis_multiregion.sh
-        init_smartrouter_eth_lavap_cache.sh
+        init_smartrouter_eth_sidecar_cache.sh
     )
     for lane in "${lanes[@]}"; do
         local path="${__dir}/${lane}"
@@ -630,11 +630,11 @@ if [[ "$SKIP_SMOKE" != "1" ]]; then
 
     HEALTH=""
     for _ in $(seq 1 30); do
-        HEALTH=$(curl -s -o /dev/null -w '%{http_code}' -m 10 "http://127.0.0.1:${ROUTER_PORT}/lava/health")
+        HEALTH=$(curl -s -o /dev/null -w '%{http_code}' -m 10 "http://127.0.0.1:${ROUTER_PORT}/router/health")
         [[ "$HEALTH" == "200" ]] && break
         sleep 1
     done
-    [[ "$HEALTH" == "200" ]] && note "router /lava/health" "200" || { note "router /lava/health" "$HEALTH (want 200)"; SMOKE_FAIL=1; }
+    [[ "$HEALTH" == "200" ]] && note "router /router/health" "200" || { note "router /router/health" "$HEALTH (want 200)"; SMOKE_FAIL=1; }
 
     BODY=$(relay_once || true)
     [[ "$BODY" == *'"result":"0x'* ]] && note "relay eth_blockNumber" "ok" \
@@ -712,15 +712,15 @@ UC-3  Multi-region read/write split — see docs/RESP-CACHE.md; the routing proo
 
 UC-4  Backend failure — relays keep serving, metrics flip
   # Reuse the FINALIZED request from UC-1 — the one cached in Redis right now.
-  # Lava-Provider-Address shows where the answer came from.
+  # Router-Provider-Address shows where the answer came from.
   PROV="curl -s -D- -o /dev/null -X POST http://127.0.0.1:${ROUTER_PORT}"
   \$PROV -H 'Content-Type: application/json' \\
     -d '{"jsonrpc":"2.0","method":"eth_getBlockByNumber","params":["0x1",false],"id":1}' \\
-    | grep -i Lava-Provider-Address          # -> Cached
+    | grep -i Router-Provider-Address          # -> Cached
   docker pause ${REDIS_NAME}
   \$PROV -H 'Content-Type: application/json' \\
     -d '{"jsonrpc":"2.0","method":"eth_getBlockByNumber","params":["0x1",false],"id":1}' \\
-    | grep -i Lava-Provider-Address          # -> eth-rpc-N (same answer, no error)
+    | grep -i Router-Provider-Address          # -> eth-rpc-N (same answer, no error)
   curl -s http://127.0.0.1:${METRICS_PORT}/metrics | grep smartrouter_resp_cache
   docker unpause ${REDIS_NAME}
   (use pause, not stop: the container runs with --rm)
@@ -733,7 +733,7 @@ Shared state  a second router reads what this one cached
 
 UC-5  No RESP infrastructure — its own lane (stop this one first)
   $0 --stop
-  scripts/pre_setups/cache/init_smartrouter_eth_lavap_cache.sh
+  scripts/pre_setups/cache/init_smartrouter_eth_sidecar_cache.sh
 
 Stop everything
   ${ENV_PREFIX}$0 --stop        this lane

@@ -1480,7 +1480,7 @@ func TestRestApiKeyCollapsesNamesWithTheSameShape(t *testing.T) {
 	require.Len(t, serverApis, 1)
 
 	for i := 0; i < 32; i++ {
-		api, ok := matchSpecApiByName("/cosmos/auth/v1beta1/bech32/lava@1abc/", "GET", serverApis)
+		api, ok := matchSpecApiByName("/cosmos/auth/v1beta1/bech32/cosmos1abc/", "GET", serverApis)
 		require.True(t, ok)
 		require.Equal(t, "/cosmos/auth/v1beta1/bech32/{address_bytes}", api.api.Name)
 	}
@@ -1601,6 +1601,49 @@ func BenchmarkMatchSpecApiByName(b *testing.B) {
 			for i := 0; i < b.N; i++ {
 				matchSpecApiByName(benchCase.path, "GET", serverApis)
 			}
+		})
+	}
+}
+
+// TestCreateAndSetupBaseAppListener_CORSOriginList pins the --cors-origin contract on the HTTP
+// listener: a list answers with the caller's own origin when it is listed and with no
+// Access-Control-Allow-Origin when it is not, always with Vary: Origin; "*" stays a literal "*".
+// Before, the whole list was sent as one header value, which every browser refuses.
+func TestCreateAndSetupBaseAppListener_CORSOriginList(t *testing.T) {
+	cases := []struct {
+		name       string
+		configured string
+		method     string
+		origin     string
+		wantAllow  string // "" means the header is absent
+		wantVary   bool
+	}{
+		{"list echoes a listed origin", "https://a.example,https://b.example", fiber.MethodGet, "https://b.example", "https://b.example", true},
+		{"list answers a listed preflight", "https://a.example,https://b.example", fiber.MethodOptions, "https://a.example", "https://a.example", true},
+		{"list refuses an unlisted origin", "https://a.example,https://b.example", fiber.MethodGet, "https://evil.example", "", true},
+		{"wildcard stays literal", "*", fiber.MethodGet, "https://evil.example", "*", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cmdFlags := common.ConsumerCmdFlags{
+				HeadersFlag:      "*",
+				CredentialsFlag:  "true",
+				OriginFlag:       tc.configured,
+				MethodsFlag:      "GET,POST,OPTIONS",
+				CDNCacheDuration: "86400",
+			}
+			app := createAndSetupBaseAppListener(cmdFlags, "/health", alwaysHealthyReporter{}, false, false)
+			app.Get("/", func(c *fiber.Ctx) error { return c.SendString("ok") })
+
+			req := httptest.NewRequest(tc.method, "/", nil)
+			req.Header.Set(fiber.HeaderOrigin, tc.origin)
+			resp, err := app.Test(req)
+			require.NoError(t, err)
+			defer resp.Body.Close()
+
+			require.Equal(t, tc.wantAllow, resp.Header.Get(fiber.HeaderAccessControlAllowOrigin))
+			require.Equal(t, tc.wantVary, strings.Contains(resp.Header.Get(fiber.HeaderVary), fiber.HeaderOrigin),
+				"Vary = %q", resp.Header.Get(fiber.HeaderVary))
 		})
 	}
 }

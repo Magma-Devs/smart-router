@@ -34,3 +34,12 @@ func CustomFetcherWrapperChainIDs() map[string]FetcherWrapperKind {
 	}
 	return out
 }
+
+// PollsHeadBySpecDirective reports whether a chain's tracker reads the head through the
+// spec's GET_BLOCKNUM directive (the default wrapper). A chain with a custom wrapper sends
+// its own fixed request instead, so a url of such a chain can be tracked even when the
+// collections it serves declare no GET_BLOCKNUM (MAG-5349).
+func PollsHeadBySpecDirective(chainID string) bool {
+	_, custom := fetcherWrapperKindByChainID[chainID]
+	return !custom
+}

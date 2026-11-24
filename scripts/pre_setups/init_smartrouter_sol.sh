@@ -78,7 +78,7 @@ else
 fi
 echo ""
 
-# Static Solana spec (SOLANA index). Copied from lava specs/mainnet-1/specs/solana.json.
+# Static Solana spec (SOLANA index), bundled in specs/.
 SPECS_DIR="$PROJECT_ROOT/specs/solana.json"
 echo "Using static specs: $SPECS_DIR"
 if [ ! -f "$SPECS_DIR" ]; then
@@ -89,7 +89,7 @@ fi
 # Solana HTTP RPC endpoints.
 #   export SOL_RPC_URL_1="https://your-solana-rpc/..."
 # At least one is required; 2-3 enable cross-validation / consistency testing.
-export SOL_RPC_URL_1="${SOL_RPC_URL_1:-https://g.w.lavanet.xyz:443/gateway/solana/rpc-http/YOUR_LAVA_GATEWAY_KEY}"
+export SOL_RPC_URL_1="${SOL_RPC_URL_1:-https://solana-rpc.publicnode.com}"
 export SOL_RPC_URL_2="${SOL_RPC_URL_2:-}"
 export SOL_RPC_URL_3="${SOL_RPC_URL_3:-}"
 
@@ -112,7 +112,7 @@ echo ""
 
 cat > $CONFIG_FILE <<EOF
 # Smart Router Direct RPC Configuration — Solana (SOLANA)
-# Mode: Direct connections to Solana JSON-RPC endpoints (no Lava providers!)
+# Mode: Direct connections to Solana JSON-RPC endpoints (no provider-relay network — direct upstreams)
 
 endpoints:
   - listen-address: "0.0.0.0:3360"

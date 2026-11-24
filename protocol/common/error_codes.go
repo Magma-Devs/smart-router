@@ -2,7 +2,7 @@ package common
 
 // ---------------------------------------------------------------------------
 // Layer A: Protocol Errors (Internal) — range 1000-1999
-// Errors raised from within the Lava protocol itself — not from nodes or chains.
+// Errors raised from within the router itself — not from nodes or chains.
 // ---------------------------------------------------------------------------
 
 var (
@@ -95,7 +95,7 @@ var (
 	RouterErrorRateLimited = registerError(&RouterError{
 		Code: 1020, Name: "PROTOCOL_RATE_LIMITED", Category: CategoryInternal,
 		SubCategory: SubCategoryRateLimit,
-		Description: "Lava-side rate limit exceeded", Retryable: false,
+		Description: "Router-side rate limit exceeded", Retryable: false,
 	})
 	RouterErrorMaxCUExceeded = registerError(&RouterError{
 		Code: 1021, Name: "PROTOCOL_MAX_CU_EXCEEDED", Category: CategoryInternal,
@@ -370,7 +370,7 @@ var (
 	// The only node known to send it is Sui, and only when a transaction is submitted
 	// (sui-rpc-api maps the transaction driver's Aborted category to it, plus one direct case,
 	// "already finalized but with different user signatures"). Cosmos SDK, CometBFT, ibc-go,
-	// wasmd, Lava and Concordium never send it. Sui's own definition, in sui-core's
+	// wasmd and Concordium never send it. Sui's own definition, in sui-core's
 	// transaction_driver/error.rs, is "transient failure during transaction processing that
 	// prevents the transaction from finalization. Retriable with new transaction submission",
 	// and the message a client receives starts "Transaction processing aborted (retriable with
@@ -401,6 +401,29 @@ var (
 		Code: 2019, Name: "NODE_ABORTED", Category: CategoryExternal,
 		Description: "Node aborted the operation (gRPC ABORTED); on Sui, the validators' answer to a submitted transaction, retriable by the client with a new submission", Retryable: false,
 		MayHaveReachedNode: true,
+	})
+
+	// NODE_UNRECOGNIZED_ERROR (MAG-5121): the node answered with an error the router has no row
+	// for, on GraphQL, which reads its replies by its own rows only: an error with no code or an
+	// unknown code inside a 200, or a 4xx status no row names (400, 413, 415, 422, ...). The router
+	// cannot tell whether the caller or this provider is wrong, so it asks another provider and
+	// does not blame this one: when unsure, retry without blame. The not-at-fault part rides on
+	// SubCategoryNodeCapability; UNKNOWN_ERROR cannot carry it, because the availability gate still
+	// counts that against the endpoint.
+	RouterErrorNodeUnrecognizedError = registerError(&RouterError{
+		Code: 2020, Name: "NODE_UNRECOGNIZED_ERROR", Category: CategoryExternal,
+		SubCategory: SubCategoryNodeCapability,
+		Description: "Node answered an error the router has no row for (GraphQL); another provider may serve it", Retryable: true,
+	})
+	// NODE_URL_REFUSED (MAG-5121): the endpoint's url does not serve the interface. GraphQL sends
+	// every request to one url, so an HTTP 404 or 405 there, or a redirect, says the url is wrong
+	// (a bad path in the config, or something else in front of it), not that one record or method
+	// is missing. Every request to it fails the same way until the config is fixed, so it is the
+	// endpoint's fault: retried and blamed. On REST a 404 names a missing record instead
+	// (NODE_DATA_NOT_HELD).
+	RouterErrorNodeURLRefused = registerError(&RouterError{
+		Code: 2021, Name: "NODE_URL_REFUSED", Category: CategoryExternal,
+		Description: "Endpoint url does not serve this interface (HTTP 404/405 or a redirect on GraphQL's one url)", Retryable: true,
 	})
 
 	// Bitcoin/UTXO node errors (2100-2149)

@@ -1124,7 +1124,7 @@ func TestOutlierThresholdForBlockTime(t *testing.T) {
 		{"negative block time → fixed fallback", -1, DefaultOutlierThreshold, "guard against a bogus spec value"},
 		{"slow L1 60s → floored", 60 * time.Second, outlierFloorBlocks, "1200/60=20 < floor 32; floor keeps the guard above the ~10-20 legit lead"},
 		{"ethereum 12s → historical 100", 12 * time.Second, 100, "1200/12=100; anchor keeps the one chain running today unchanged"},
-		{"cosmos/lava 6s → midrange", 6 * time.Second, 200, "1200/6=200, inside [floor,ceil]"},
+		{"cosmos 6s → midrange", 6 * time.Second, 200, "1200/6=200, inside [floor,ceil]"},
 		{"solana 0.4s → ceilinged", 400 * time.Millisecond, outlierCeilBlocks, "1200/0.4=3000 > ceil 512; ceiling keeps the guard meaningful on a fast chain"},
 		{"very fast 0.25s → ceilinged", 250 * time.Millisecond, outlierCeilBlocks, "1200/0.25=4800 > ceil 512"},
 	} {

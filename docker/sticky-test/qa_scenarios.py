@@ -7,7 +7,7 @@ pass/fail line, so a QA engineer can read the output without knowing the interna
 Every request closes its connection: a reused connection pins to one replica through the
 round-robin ingress, which would make several of these pass for the wrong reason.
 
-Which upstream answered is read from the router's Lava-Provider-Address header, not from the
+Which upstream answered is read from the router's Router-Provider-Address header, not from the
 `servedBy` the fake stamps into the body. The two differ exactly when it matters: a reply from
 the response cache carries the body of whichever upstream filled the cache, and the header says
 Cached. A sticky request never reads the cache (MAG-4122), so a Cached sticky reply is reported
@@ -28,7 +28,7 @@ INGRESS = "http://127.0.0.1:18081"
 PRIMARIES = ["upstream-primary-0", "upstream-primary-1", "upstream-primary-2"]
 # router-a, router-b and router-c behind the round-robin ingress (docker-compose.falsegap.yml).
 REPLICAS = 3
-# Lava-Provider-Address on a reply the router took from its response cache.
+# Router-Provider-Address on a reply the router took from its response cache.
 CACHED = "Cached"
 # How many session ids a check asks with when it has to fail without the registry. Without it
 # each replica picks for itself, and all three pick the same upstream at least one time in nine
@@ -51,12 +51,14 @@ class Reply:
     def __init__(self, status, headers, raw):
         self.status = status
         self.pod = headers.get("X-Router-Pod", "?")
-        self.provider = headers.get("Lava-Provider-Address", "?")
-        self.retries = int(headers.get("Lava-Retries") or 0)
+        self.provider = headers.get("Router-Provider-Address", "").strip()
+        self.retries = int(headers.get("Router-Retries") or 0)
         try:
             self.payload = json.loads(raw)
         except ValueError:
             self.payload = {}
+        if self.ok and not self.provider:
+            sys.exit("Cannot verify upstream affinity on a successful reply without Router-Provider-Address")
 
     @property
     def ok(self):
@@ -78,7 +80,7 @@ class Reply:
 
     def __str__(self):
         if self.ok:
-            return f"{self.provider} (Lava-Retries {self.retries}, pod {self.pod})"
+            return f"{self.provider} (Router-Retries {self.retries}, pod {self.pod})"
         return f"refused on pod {self.pod}, {self.error}"
 
 
@@ -86,9 +88,9 @@ def rpc(method, params, sticky=None, select=None, request_id=1, timeout=30):
     body = json.dumps({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}).encode()
     headers = {"Content-Type": "application/json", "Connection": "close"}
     if sticky:
-        headers["lava-stickiness"] = sticky
+        headers["router-stickiness"] = sticky
     if select:
-        headers["lava-select-provider"] = select
+        headers["router-select-provider"] = select
     req = urllib.request.Request(INGRESS, data=body, headers=headers, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as response:
@@ -233,6 +235,7 @@ def pinned_verdict(rounds):
     answered = [r for r in rounds if not r.refused]
     split = [r for r in answered if r.split]
     gaps = [r for r in answered if r.gap]
+    cached = sum(r.head.cached or r.fetch.cached for r in rounds)
     # Refused rounds are left out, so they shrink the sample a split is looked for in. With the
     # feature off a round agrees by chance 13 times in 36, so one answered round out of ten would
     # pass about one run in three. At least half the rounds have to be answered. With the feature
@@ -242,12 +245,13 @@ def pinned_verdict(rounds):
     lines = [
         f"head and fetch on different upstreams: {len(split)} of {len(answered)} answered rounds (must be 0)",
         f"false gaps: {len(gaps)} of {len(answered)} answered rounds (must be 0)",
+        f"rounds with a cached sticky reply: {cached} (must be 0, MAG-4122)",
         *(f"  {r}" + (f" -> false gap: {pinned_gap_cause(r)}" if r.gap else "") for r in answered if r.split or r.gap),
         *refusals(rounds),
     ]
     if not enough:
         lines.append(f"answered rounds: {len(answered)} of {len(rounds)} (must be at least half, or too few are left to judge the pin)")
-    return enough and not split and not gaps, lines
+    return enough and not split and not gaps and cached == 0, lines
 
 
 def refusals(rounds):
@@ -316,13 +320,14 @@ def s_concurrency(parallel=24):
 
 
 def s_select_provider_wins():
-    """lava-select-provider is the more specific ask and must beat a sticky claim."""
+    """router-select-provider is the more specific ask and must beat a sticky claim."""
     h = tip()
     # Establish a claim first.
     claim = fetch_block(h - 100, sticky="both-headers", request_id=1)
     other = next(p for p in PRIMARIES if p != claim.provider)
     served = fetch_block(h - 101, sticky="both-headers", select=other, request_id=2)
-    return report("lava-select-provider beats a sticky claim", claim.ok and served.ok and served.provider == other, [
+    ok = claim.ok and not claim.cached and served.ok and served.provider == other
+    return report("router-select-provider beats a sticky claim", ok, [
         f"claim resolved to: {claim}",
         f"explicitly asked for: {other}",
         f"served by: {served} (must be the explicitly named one)",

@@ -100,6 +100,16 @@ func (r *SnapshotRemote) ProtoFileContainingSymbol(name protoreflect.FullName) (
 	return protodesc.ToFileDescriptorProto(d.ParentFile()), nil
 }
 
+// HeldDescriptorByName returns name's descriptor from the snapshot the remote holds now, without
+// asking the upstream for a name the snapshot lacks (Registry.HeldDescriptorByName).
+func (r *SnapshotRemote) HeldDescriptorByName(name protoreflect.FullName) (protoreflect.Descriptor, error) {
+	snapshot, err := r.snapshot()
+	if err != nil {
+		return nil, err
+	}
+	return snapshot.FindDescriptorByName(name)
+}
+
 func (r *SnapshotRemote) Close() error {
 	return nil
 }
