@@ -118,8 +118,9 @@ GROUP_TITLES=(
   "Build process updates"
   "Other work"
 )
+DEPS_REGEX='^(feat|fix|chore)\(deps\)!?:'
 GROUP_REGEX=(
-  '^(feat|fix|chore)\(deps\)!?:'
+  "$DEPS_REGEX"
   '^feat(\(.+\))?!?:'
   '^sec(\(.+\))?!?:'
   '^(fix|refactor)(\(.+\))?!?:'
@@ -127,6 +128,8 @@ GROUP_REGEX=(
   '^(build|ci)(\(.+\))?!?:'
   '.'
 )
+# Commits left out of the grouped list. A breaking commit is listed under
+# "Breaking changes" even when it matches, and a deps commit is not left out.
 EXCLUDE_REGEX='^(test:|test\(|chore:|chore\(|Merge (pull request|remote-tracking branch|branch)|go mod tidy)'
 
 tmp_dir="$(mktemp -d)"
@@ -153,10 +156,6 @@ BREAKING_SUBJECT_RE='^[a-z]+(\([^)]*\))?!:'
 # limited to 60/hour, so the workflow passes GITHUB_TOKEN as GH_TOKEN.
 # Without a token, we still surface any (#N) baked into the subject.
 while IFS=$'\t' read -r short long subject; do
-  if [[ "$subject" =~ $EXCLUDE_REGEX ]]; then
-    continue
-  fi
-
   # Detect a breaking change. The subject `!` marker is cheap to test
   # inline; the BREAKING CHANGE: footer lives in the body, so pull the
   # body for this one commit and grep it. (We can't read the body in the
@@ -181,6 +180,14 @@ while IFS=$'\t' read -r short long subject; do
       c && /^[[:space:]]*$/   { exit }
       c                       { print }
     ' | sed -E '1 s/^BREAKING[ -]CHANGE:[[:space:]]*//' | tr '\n' ' ' | sed -E 's/[[:space:]]+/ /g; s/[[:space:]]+$//')"
+  fi
+
+  excluded=0
+  if [[ "$subject" =~ $EXCLUDE_REGEX ]] && ! [[ "$subject" =~ $DEPS_REGEX ]]; then
+    if [ "$is_breaking" = "0" ]; then
+      continue
+    fi
+    excluded=1
   fi
 
   pr_num=""
@@ -216,6 +223,9 @@ while IFS=$'\t' read -r short long subject; do
   fi
 
   for i in "${!GROUP_REGEX[@]}"; do
+    if [ "$excluded" = "1" ]; then
+      break
+    fi
     if [[ "$subject" =~ ${GROUP_REGEX[$i]} ]]; then
       printf -- '- %s [`%s`]\n' "$subject_rendered" "$short" >> "$tmp_dir/g$i"
       printf '[`%s`]: %s/commit/%s\n' "$short" "$REPO_URL" "$long" >> "$tmp_dir/refs"
