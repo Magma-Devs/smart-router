@@ -107,6 +107,9 @@ func (apip *RestChainParser) ParseMsg(urlPath string, data []byte, connectionTyp
 	}
 	// add spec path to rest message so we can extract the requested block.
 	restMessage.SpecPath = apiCont.api.Name
+	// Set before newParsedChainMessage below: it keeps restMessage.CheckResponseError as a method
+	// value, which copies restMessage at that point.
+	restMessage.IsWrite = api.Category.Stateful == common.CONSISTENCY_SELECT_ALL_PROVIDERS
 	parsedInput := parser.NewParsedInput()
 	if overwriteReqBlock == "" {
 		// Fetch requested block, it is used for data reliability

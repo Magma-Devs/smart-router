@@ -29,6 +29,9 @@ type RestMessage struct {
 	Msg      []byte
 	Path     string
 	SpecPath string
+	// IsWrite is set by the parser when the spec marks the api as a write (stateful: sent to every
+	// provider). A write's 2xx is read more strictly than a read's: see CheckResponseError.
+	IsWrite bool
 	chainproxy.BaseMessage
 }
 
@@ -48,20 +51,66 @@ func (rm *RestMessage) GetRawRequestHash() ([]byte, error) {
 // it adds on JSON-RPC: a write broadcast keeps waiting for a sibling's success instead of taking
 // the first refusal as the result, and the error registry classifies the reply — its REST rows
 // decide whether a read is retried elsewhere and whether the endpoint is scored. A 2xx is a
-// success unless its body carries a Cosmos transaction error, or it is Tron refusing a broadcast
-// transaction (checkTronBroadcast, MAG-5323).
+// success unless its body carries a Cosmos transaction error, it is Tron refusing a broadcast
+// transaction (checkTronBroadcast, MAG-5323), or the request is a write and the body is an HTML
+// page (RestWriteReplyIsHTMLPage, MAG-3971).
 //
 // A status of 0 is "not set" — a cache entry written before statuses were stored, a test
 // fixture, gRPC's codes.OK on the shared RelayResult — and reads as a success, the way the
 // health gate reads it. A REST upstream always answers with a real status.
 func (jm RestMessage) CheckResponseError(data []byte, httpStatusCode int) (hasError bool, errorMessage string) {
 	if httpStatusCode == 0 || (httpStatusCode >= 200 && httpStatusCode < 300) {
+		if jm.IsWrite && httpStatusCode != 0 {
+			if isHTML, message := RestWriteReplyIsHTMLPage(data); isHTML {
+				return true, message
+			}
+		}
 		if cosmosTxErr, errMsg := checkCosmosTxError(data); cosmosTxErr {
 			return cosmosTxErr, errMsg
 		}
 		return checkTronBroadcast(jm.apiPath(), data)
 	}
 	return true, extractErrorMessage(data, httpStatusCode)
+}
+
+// RestWriteReplyIsHTMLPage reports whether the body of a 2xx reply to a REST write is an HTML page,
+// and if so the message the node error carries (MAG-3971): the first byte after any whitespace is
+// `<`. Such a page comes from a CDN or WAF in front of the node (a Cloudflare challenge, a
+// maintenance page), not from the node: no chain answers a write with HTML.
+//
+// A write goes to every provider at once, and the first success ends the broadcast. Read as a
+// success, an HTML 200 that arrived first became the client's reply, while a sibling that answered
+// the real result (Horizon's 201 PENDING with the hash) was cut off. As a node error, the broadcast
+// keeps waiting for a sibling's answer. When every provider answers the same, a provider's reply
+// still goes back to the client unchanged.
+//
+// An empty 2xx is NOT matched, though a gateway can send one too: an empty 2xx is the normal
+// success of Ethereum Beacon's writes (block publish, attestations) and of Algorand's
+// /v2/transactions/async. As a node error it would wait for every sibling, and beside a sibling
+// that hung or failed it turned an accepted write into an "unclear" reply. Telling the two apart
+// needs the spec to say which write endpoints always answer with a body.
+//
+// Every other body stays a success, because real chains answer a write with it: plain text
+// (Esplora's txid, Arweave's `OK`), binary (Aptos BCS), and any JSON value, a bare string included
+// (Stacks, Tezos, Cardano). The response headers (Content-Type, Cloudflare's cf-mitigated) are not
+// read: CheckResponseError receives only the body and the status.
+func RestWriteReplyIsHTMLPage(data []byte) (isHTML bool, message string) {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) > 0 && trimmed[0] == '<' {
+		return true, "HTML page in place of the node's reply to a write"
+	}
+	return false, ""
+}
+
+// IsHTMLPageInPlaceOfAWriteReply reports whether a 2xx reply to this request is a write answered
+// with an HTML page (RestWriteReplyIsHTMLPage). The sender marks such a reply a node error, as it
+// does a refused transaction (RefusesTransaction).
+func (jm RestMessage) IsHTMLPageInPlaceOfAWriteReply(data []byte) bool {
+	if !jm.IsWrite {
+		return false
+	}
+	isHTML, _ := RestWriteReplyIsHTMLPage(data)
+	return isHTML
 }
 
 // RefusesTransaction reports whether a 2xx reply is the node refusing the transaction the request
