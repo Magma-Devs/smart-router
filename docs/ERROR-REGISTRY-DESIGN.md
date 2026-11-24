@@ -743,6 +743,13 @@ stays "unclear". Blame and retry are unchanged by this step — the status rows 
 them. Since MAG-4481 a read that fails on that old path still reaches the client as the node's own
 status and body; only a write whose outcome is unclear gets the router's 500.
 
+An attempt that fails on that path is recorded (the coded log line, the error metric, relay_end's
+`error_code`, the unclear-write check) by `relaycore`'s `setErrorResponse`, which reads the error's
+text, `HTTP 507 Insufficient Storage`, on the gRPC table. Those text rows name only the statuses
+`httpStatusRows` lists, so on REST a status they leave as `UNKNOWN_ERROR` is read by its status on
+the table above instead: a `505`–`599` is recorded as `NODE_UNLISTED_SERVER_ERROR`, as the sender
+files it, and its `MayHaveReachedNode` keeps a write answered with one "unclear" (MAG-5490).
+
 ### 9.3 Decisions taken in review
 
 Raised on PR #448 and settled there. Recorded because each one is a place where the obvious

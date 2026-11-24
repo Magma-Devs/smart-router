@@ -1,6 +1,7 @@
 package relaycore
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -10,6 +11,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	common "github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/parser"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 )
@@ -66,15 +68,26 @@ func NewResultsManager(guid uint64, chainID string) ResultsManager {
 	}
 }
 
-func (rp *ResultsManagerInst) setErrorResponse(response *RelayResponse) {
+func (rp *ResultsManagerInst) setErrorResponse(response *RelayResponse, protocolMessage chainlib.ProtocolMessage) {
 	rp.lock.Lock()
 	defer rp.lock.Unlock()
 	// Protocol errors are plain Go errors (nothing in this fork carries an sdkerrors ABCI code any
 	// more), so they are classified by connection shape and message text. TransportGRPC is the
 	// historical choice for the message-based fallback and is kept so the verdicts do not move.
+	//
+	// One exception, for what that text cannot name: a REST attempt that failed on the upstream's
+	// own status (relayInnerDirect's status branch: a 5xx not read as the node's reply). Its text is
+	// "HTTP 507 Insufficient Storage", and the text rows name only the statuses httpStatusRows lists,
+	// so a 505 to 599 was UNKNOWN_ERROR here while the sender and the health gate filed it as
+	// NODE_UNLISTED_SERVER_ERROR. Such an error is read by its status on the REST table, which is
+	// what the log line, the error metric and relay_end report (MAG-5490). Only an UNKNOWN_ERROR
+	// verdict is re-read, so every status the text rows name keeps its name.
 	var classified *common.RouterError
 	if response.Err != nil {
 		classified = common.ClassifyError(common.DetectConnectionError(response.Err), common.ChainFamilyUnknown, common.TransportGRPC, 0, response.Err.Error())
+		if status, ok := restUpstreamStatus(response.Err, protocolMessage); ok && classified == common.RouterErrorUnknown {
+			classified = common.ClassifyError(nil, common.GetChainFamilyOrDefault(rp.chainID), common.TransportREST, status, "")
+		}
 	}
 	// This is a protocol-layer error (session not found, consumer blocked, etc.),
 	// not a node-side error. Pass "" as chainErrorMessage so the chain_error_message
@@ -87,6 +100,23 @@ func (rp *ResultsManagerInst) setErrorResponse(response *RelayResponse) {
 		utils.Attribute{Key: "providerTrailer", Value: response.RelayResult.ProviderTrailer},
 	)
 	rp.protocolResponseErrors.AddError(RelayError{Err: response.Err, ProviderInfo: response.RelayResult.ProviderInfo, Response: response, RouterError: classified})
+}
+
+// restUpstreamStatus is the status a REST upstream answered with, when err is a REST attempt's
+// failure on that status (routersession.HTTPStatusError). GraphQL, which classifies by the REST
+// table too, is left out: a write's failure on its status has the same gap, outside MAG-5490.
+func restUpstreamStatus(err error, protocolMessage chainlib.ProtocolMessage) (int, bool) {
+	if protocolMessage == nil {
+		return 0, false
+	}
+	if collection := protocolMessage.GetApiCollection(); collection == nil || collection.CollectionData.ApiInterface != spectypes.APIInterfaceRest {
+		return 0, false
+	}
+	var statusErr *routersession.HTTPStatusError
+	if !errors.As(err, &statusErr) || statusErr == nil {
+		return 0, false
+	}
+	return statusErr.StatusCode, true
 }
 
 // only when locked
@@ -318,7 +348,7 @@ func (rp *ResultsManagerInst) SetResponse(response *RelayResponse, protocolMessa
 		return nil
 	}
 	if response.Err != nil {
-		rp.setErrorResponse(response)
+		rp.setErrorResponse(response, protocolMessage)
 	} else {
 		return rp.setValidResponse(response, protocolMessage)
 	}
