@@ -7,7 +7,8 @@
 #   - ### Highlights  (Gemini draft, then $EDITOR for human review)
 #   - ### Changes     (grouped commit bullets, each tagged with [hash])
 #       leads with a "#### ⚠ Breaking changes" group when any commit is
-#       breaking; the same commits also appear under their normal group
+#       breaking; the same commits also appear under their normal group,
+#       except one EXCLUDE_REGEX would drop, which is listed as breaking only
 #   - reference-link blob mapping [hash] -> commit URL
 #
 # Breaking changes are detected from BOTH conventional-commit conventions:
@@ -246,7 +247,8 @@ sort -u -o "$tmp_dir/refs" "$tmp_dir/refs"
 changes_md=""
 # Breaking changes lead the section so a reader scanning the changelog
 # sees what will break before the routine feature/fix bullets. The same
-# commits still also appear under their normal conventional-commit group.
+# commits still also appear under their normal conventional-commit group,
+# except those EXCLUDE_REGEX drops (a chore(x)!: commit), which appear here only.
 if [ -s "$tmp_dir/breaking" ]; then
   changes_md+=$'\n'"#### ⚠ Breaking changes"$'\n'
   changes_md+="$(cat "$tmp_dir/breaking")"$'\n'
