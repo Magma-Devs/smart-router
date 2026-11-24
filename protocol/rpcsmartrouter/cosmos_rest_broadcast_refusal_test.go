@@ -85,7 +85,7 @@ func TestRESTListener_CosmosBroadcastRefusal(t *testing.T) {
 				_, _ = w.Write([]byte(reply))
 			}
 			parser, _, _, closeServer, mockEndpoint, err := chainlib.CreateChainLibMocks(
-				ctx, "LAVA", spectypes.APIInterfaceRest, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				ctx, "COSMOSHUB", spectypes.APIInterfaceRest, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					defer markRefuserAnswered()
 					serve(w, r, tc.refuserReply)
 				}), nil, "../../", nil)
@@ -116,7 +116,7 @@ func TestRESTListener_CosmosBroadcastRefusal(t *testing.T) {
 			refuser.StaticProvider = true
 			laterProvider := routersession.NewConsumerSessionWithProvider("later", []*routersession.Endpoint{laterEndpoint}, 100000, 1, 1)
 			laterProvider.StaticProvider = true
-			sessionManager, rpcEndpoint := createTestSessionManager("LAVA", spectypes.APIInterfaceRest)
+			sessionManager, rpcEndpoint := createTestSessionManager("COSMOSHUB", spectypes.APIInterfaceRest)
 			rpcEndpoint.NetworkAddress = "127.0.0.1:0"
 			require.NoError(t, sessionManager.UpdateAllProviders(1,
 				map[uint64]*routersession.ConsumerSessionsWithProvider{0: refuser, 1: laterProvider}, nil))
