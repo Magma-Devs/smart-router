@@ -11,7 +11,7 @@ const UnixSocketPrefix = "unix:"
 
 // JoinURLPath joins base URL and path robustly (handles slashes and query params correctly).
 // When path is absolute (starts with /), it is appended to the base URL's path so that
-// base paths like /gateway/lava/rest/KEY are preserved (ResolveReference would replace them).
+// base paths like /gateway/cosmoshub/rest/KEY are preserved (ResolveReference would replace them).
 // A path that parses with a scheme, host or userinfo is still a path on the base URL's host
 // (MAG-3970): the join never changes the base's scheme, host or userinfo.
 func JoinURLPath(base, path string) (string, error) {
@@ -43,7 +43,7 @@ func JoinURLPath(base, path string) (string, error) {
 		pathURL = &url.URL{Path: unescaped, RawQuery: rawQuery}
 	}
 
-	// If path is absolute, append it to base path instead of replacing (preserves e.g. /gateway/lava/rest/KEY).
+	// If path is absolute, append it to base path instead of replacing (preserves e.g. /gateway/cosmoshub/rest/KEY).
 	if strings.HasPrefix(pathURL.Path, "/") {
 		basePath := strings.TrimSuffix(baseURL.Path, "/")
 		relPath := strings.TrimPrefix(pathURL.Path, "/")

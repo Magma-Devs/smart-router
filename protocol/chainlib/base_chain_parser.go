@@ -587,6 +587,21 @@ func (apip *BaseChainParser) getSupportedApi(apiKey ApiKey) (*ApiContainer, erro
 	return &apiCont, nil
 }
 
+// specEntry returns the spec's own entry for apiKey and the collection it came from, switched off
+// or not, and logs nothing. ok is false when the spec does not list it.
+func (apip *BaseChainParser) specEntry(apiKey ApiKey) (api *spectypes.Api, collection *spectypes.ApiCollection, ok bool) {
+	if apip == nil {
+		return nil, nil, false
+	}
+	apip.rwLock.RLock()
+	defer apip.rwLock.RUnlock()
+	apiCont, ok := apip.serverApis[apiKey]
+	if !ok || apiCont.api == nil {
+		return nil, nil, false
+	}
+	return apiCont.api, apip.apiCollections[apiCont.collectionKey], true
+}
+
 // ApiHasStatefulCategory reports whether any supported API named `name` is a write / stateful method
 // (Category.Stateful == CONSISTENCY_SELECT_ALL_PROVIDERS). Used by the cross-validation policy guard to
 // reject an enabled per-method CV policy on a write method, where cross-validating the response is a
@@ -757,6 +772,19 @@ func (bcp *BaseChainParser) ReplyHeaderDirectives() []*spectypes.Header {
 	bcp.rwLock.RLock()
 	defer bcp.rwLock.RUnlock()
 	return bcp.replyHeaders
+}
+
+// FinalityField returns the spec's finality field declaration (spectypes.Spec.FinalityField):
+// the reply field by which a node says whether its answer is final and the value that means
+// final, or two empty strings when the chain's spec names none. One implementation for every
+// API interface, since the declaration is the chain's and not an interface's.
+func (bcp *BaseChainParser) FinalityField() (path, finalValue string) {
+	if bcp == nil {
+		return "", ""
+	}
+	bcp.rwLock.RLock()
+	defer bcp.rwLock.RUnlock()
+	return bcp.spec.FinalityField()
 }
 
 // addServerApi stores apiContainer under key. An enabled api always replaces a disabled one

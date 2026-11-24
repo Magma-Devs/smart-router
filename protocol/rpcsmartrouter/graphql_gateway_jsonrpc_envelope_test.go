@@ -54,9 +54,11 @@ func newGatewayTestGraphQLParser(t *testing.T) chainlib.ChainParser {
 }
 
 // TestGraphQLDirectRelay_GatewayJSONRPCEnvelope (MAG-4379) drives replies through the direct sender,
-// the path every live relay takes. A JSON-RPC envelope under a status the registry files as the
-// caller's is the gateway refusing the route: retryable, not the endpoint's fault. Every other
-// status keeps its own verdict, and the node's own GraphQL answer under a 400 stays the caller's.
+// the path every live relay takes. A JSON-RPC envelope under a 400 or a 422 is the gateway refusing
+// the request: retryable, not the endpoint's fault. Since MAG-5121 a read gets that from GraphQL's
+// own status table, where every 4xx it does not name is "another provider may serve it". Every
+// other status keeps its own verdict, and the node's own GraphQL answer under a 400 stays the
+// caller's.
 func TestGraphQLDirectRelay_GatewayJSONRPCEnvelope(t *testing.T) {
 	ctx := context.Background()
 	chainParser := newGatewayTestGraphQLParser(t)
@@ -108,11 +110,12 @@ func TestGraphQLDirectRelay_GatewayJSONRPCEnvelope(t *testing.T) {
 			wantCapability: true,
 		},
 		{
-			name:          "a JSON-RPC envelope under a 404 keeps the not-held row",
+			// GraphQL has one url, so a 404 says the url is wrong, whatever the body (MAG-5121).
+			name:          "a JSON-RPC envelope under a 404 is a wrong url, the endpoint's fault",
 			status:        http.StatusNotFound,
 			reply:         gatewayWrongPathReply,
 			wantNodeError: true,
-			wantDataScope: true,
+			wantAtFault:   true,
 		},
 		{
 			name:          "a JSON-RPC envelope under a 500 is still the endpoint's fault",

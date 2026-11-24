@@ -465,6 +465,45 @@ func TestPatchCrossValidationRecordStraggler_NotReceivedKeepsNoGroup(t *testing.
 // TestCrossValidationRecord_LineFollowsLogFormat writes a record in a fresh process, in the order a
 // router runs: package init, then RunE applies --log-format, then the first record. A logger chosen
 // at package init missed the flag and wrote every record as console text beside JSON lines.
+// MAG-2788: the record's method reaches Loki as the router wrote it, so a reader can filter on it.
+// The fleet's collector rewrites a value that starts with "/" as /REDACTED, so a REST path is written
+// without its slash. An unlisted REST path is the caller's own and may carry a credential, so it is
+// withheld, as relay_end withholds it.
+func TestCrossValidationRecordMethod_SurvivesTheCollector(t *testing.T) {
+	noop := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	restParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(context.Background(), "COSMOSHUB", spectypes.APIInterfaceRest, noop, nil, "../../", nil)
+	if closeServer != nil {
+		t.Cleanup(closeServer)
+	}
+	require.NoError(t, err)
+	rest := func(path string) chainlib.ProtocolMessage {
+		chainMsg, err := restParser.ParseMsg(path, nil, http.MethodGet, nil, extensionslib.ExtensionInfo{})
+		require.NoError(t, err, path)
+		return chainlib.NewProtocolMessage(chainMsg, nil, nil, "test-dapp", "127.0.0.1")
+	}
+	jsonRPC := ethProtocolMessage(t, ethJsonRPCParser(t), `{"jsonrpc":"2.0","id":1,"method":"eth_getBalance","params":["0x1111111111111111111111111111111111111111","0x64"]}`, 100)
+
+	for _, tc := range []struct {
+		name         string
+		msg          chainlib.ProtocolMessage
+		apiInterface string
+		want         string
+	}{
+		{"a listed REST path keeps its spec name", rest("/cosmos/bank/v1beta1/balances/cosmos1qqqsyqcyq5rqwzqf"), spectypes.APIInterfaceRest, "cosmos/bank/v1beta1/balances/{address}"},
+		{"an unlisted REST path is withheld", rest("/v1/AbC123SecretKey/status?apikey=AbC123SecretKey"), spectypes.APIInterfaceRest, "Default-REDACTED"},
+		{"a JSON-RPC method is unchanged", jsonRPC, spectypes.APIInterfaceJsonRPC, "eth_getBalance"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := buildCrossValidationRecord(crossValidationRecordInputs{ApiInterface: tc.apiInterface, Method: crossValidationRecordMethod(tc.msg, tc.apiInterface)})
+			require.Equal(t, tc.want, rec.Method)
+			line, err := json.Marshal(rec)
+			require.NoError(t, err)
+			require.Equal(t, string(line), collectorBarePathRedaction.ReplaceAllString(string(line), "${1}REDACTED"), "the collector leaves the record as it is")
+			require.NotContains(t, string(line), "AbC123SecretKey")
+		})
+	}
+}
+
 func TestCrossValidationRecord_LineFollowsLogFormat(t *testing.T) {
 	if format := os.Getenv("CV_RECORD_LOG_FORMAT_CHILD"); format != "" {
 		utils.JsonFormat = format == "json" // what RunE does with --log-format
@@ -505,7 +544,7 @@ func TestCrossValidationRecord_LineFollowsLogFormat(t *testing.T) {
 // TestCrossValidationRecord_FailFastBeforeDispatch sends a request the capacity guard refuses before
 // any provider is asked (max-participants 5 against three paired providers) through SendParsedRelay.
 // crossValidationFailFast counts it as a failed cross-validated request, but the path returns before
-// appendHeadersToRelayResult, so it produced no record, and its reply had no Lava-Guid to name one.
+// appendHeadersToRelayResult, so it produced no record, and its reply had no Router-Guid to name one.
 func TestCrossValidationRecord_FailFastBeforeDispatch(t *testing.T) {
 	rand.InitRandomSeed()
 	ctx := utils.WithUniqueIdentifier(context.Background(), 771200001)
@@ -548,5 +587,5 @@ func TestCrossValidationRecord_FailFastBeforeDispatch(t *testing.T) {
 	require.Empty(t, rec.Endpoints, "no provider was asked")
 	require.Equal(t, "", rec.ServedDigest)
 	require.Equal(t, "771200001", rec.RequestID)
-	require.Equal(t, rec.RequestID, pinOverrideReplyHeader(result, common.GUID_HEADER_NAME), "the reply names the record in Lava-Guid")
+	require.Equal(t, rec.RequestID, pinOverrideReplyHeader(result, common.GUID_HEADER_NAME), "the reply names the record in Router-Guid")
 }

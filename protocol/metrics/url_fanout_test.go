@@ -23,7 +23,6 @@ func newSmartRouterForURLFanoutTest() *SmartRouterMetricsManager {
 		endpointFetchLatestFails:   prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_endpoint_fetch_latest_fails"}, endpointLabels),
 		endpointFetchBlockSuccess:  prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_endpoint_fetch_block_success"}, endpointLabels),
 		endpointFetchBlockFails:    prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_endpoint_fetch_block_fails"}, endpointLabels),
-		endpointOverallHealth:      prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "t_sr_endpoint_overall_health"}, endpointLabels),
 		urlToProviderNames:         make(map[string][]string),
 	}
 }
@@ -33,7 +32,7 @@ func newSmartRouterForURLFanoutTest() *SmartRouterMetricsManager {
 // to return both, so URL-keyed metric emissions reach every provider.
 func TestResolveProviderNames_FansOutAcrossSharedURL(t *testing.T) {
 	m := newSmartRouterForURLFanoutTest()
-	const sharedURL = "https://base.lava.build:443/"
+	const sharedURL = "https://base.example.com:443/"
 
 	m.RegisterEndpoint("BASE", "jsonrpc", sharedURL, "endpoint1")
 	m.RegisterEndpoint("BASE", "jsonrpc", sharedURL, "endpoint2")
@@ -80,7 +79,7 @@ func TestResolveProviderNames_FallsBackToInput(t *testing.T) {
 // last-registered provider got the metric — the rest stayed at zero.
 func TestSetEndpointLatestBlock_FansOutAcrossSharedURL(t *testing.T) {
 	m := newSmartRouterForURLFanoutTest()
-	const sharedURL = "https://base.lava.build:443/"
+	const sharedURL = "https://base.example.com:443/"
 	const block int64 = 44615090
 
 	m.RegisterEndpoint("BASE", "jsonrpc", sharedURL, "endpoint1")

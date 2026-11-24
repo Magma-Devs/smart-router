@@ -1,5 +1,5 @@
 # Smart Router Direct RPC Configuration — Hyperliquid (HYPERLIQUID)
-# Mode: Direct connection to the public Hyperliquid EVM JSON-RPC endpoint (no Lava providers!)
+# Mode: Direct connection to the public Hyperliquid EVM JSON-RPC endpoint (no provider-relay network — direct upstreams)
 #
 # Upstream: the official Hyperliquid EVM RPC (rpc.hyperliquid.xyz/evm), HTTP.
 # It's a standard EVM JSON-RPC (eth_chainId == 0x3e7 / 999) but serves no

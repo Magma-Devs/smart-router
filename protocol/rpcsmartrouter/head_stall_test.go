@@ -46,19 +46,17 @@ type stallHarness struct {
 	obs       stallObs
 	state     headStallState
 	recovered []string
-	health    map[string]bool
 	grace     time.Duration
 }
 
 func newStallHarness() *stallHarness {
-	return &stallHarness{obs: stallObs{}, health: map[string]bool{}, grace: stallGrace}
+	return &stallHarness{obs: stallObs{}, grace: stallGrace}
 }
 
 func (h *stallHarness) step(t *testing.T, now time.Time, endpoints ...*routersession.EndpointWithDirectConnection) headStallResult {
 	t.Helper()
 	return runHeadStallStep(endpoints, h.obs.get, stallN, h.grace, now,
 		func(p string) { h.recovered = append(h.recovered, p) },
-		func(p string, healthy bool) { h.health[p] = healthy },
 		&h.state, nil)
 }
 
@@ -77,7 +75,7 @@ func stalled(t *testing.T, e *routersession.EndpointWithDirectConnection) bool {
 var stallNow = time.Unix(1_900_000_000, 0)
 
 // The Polygon shape: one primary frozen, one fresh backup. The primary goes out at exactly N cycles,
-// not N-1, its gauge goes to 0, and its repeat votes are now refused.
+// not N-1, and its repeat votes are now refused.
 func TestHeadStall_PrimaryOutAtN_BackupTakesOver(t *testing.T) {
 	h := newStallHarness()
 	primary := ep("https://primary", "customer-node", true)
@@ -93,7 +91,6 @@ func TestHeadStall_PrimaryOutAtN_BackupTakesOver(t *testing.T) {
 	require.True(t, stalled(t, primary))
 	require.False(t, primary.Endpoint.IsUsable())
 	require.True(t, primary.Endpoint.IsEnabled(), "the event slot is untouched")
-	require.Equal(t, false, h.health["customer-node"])
 	require.True(t, h.state.isStalled("https://primary"))
 	rec, _ := primary.Endpoint.StateReason(routersession.EndpointDisableHeadStalled)
 	require.Equal(t, int64(1000), rec.Block)
@@ -105,7 +102,7 @@ func TestHeadStall_PrimaryOutAtN_BackupTakesOver(t *testing.T) {
 
 // It comes back only when it answers ABOVE the stuck block — not when the counter restarts, which
 // also happens when its tracker is recreated (H2). Coming back returns the provider to the valid
-// list (H1) and its gauge to 1.
+// list (H1).
 func TestHeadStall_RemovedOnlyAboveStuckBlock(t *testing.T) {
 	h := newStallHarness()
 	primary := ep("https://primary", "customer-node", true)
@@ -124,7 +121,6 @@ func TestHeadStall_RemovedOnlyAboveStuckBlock(t *testing.T) {
 	require.False(t, stalled(t, primary))
 	require.True(t, primary.Endpoint.IsUsable())
 	require.Equal(t, []string{"customer-node"}, h.recovered)
-	require.Equal(t, true, h.health["customer-node"])
 	require.False(t, h.state.isStalled("https://primary"))
 }
 
@@ -152,8 +148,8 @@ func TestHeadStall_NeverEmptyKeepsTheLastUsable(t *testing.T) {
 }
 
 // A quiet chain (a testnet with no traffic, a halt) makes no block for N cycles, so every url answers
-// the same block. None of them is behind, so none is marked and no health gauge is touched: holding
-// them at 0 would page on-call through EndpointHealthDegraded (critical after 15 minutes).
+// the same block. None of them is behind, so none is marked: marking them would take every url out
+// of rotation for nothing.
 func TestHeadStall_QuietChainMarksNothing(t *testing.T) {
 	h := newStallHarness()
 	a := ep("https://a", "vendor-a", true)
@@ -166,7 +162,6 @@ func TestHeadStall_QuietChainMarksNothing(t *testing.T) {
 	require.False(t, stalled(t, a))
 	require.False(t, stalled(t, b))
 	require.False(t, stalled(t, c))
-	require.Empty(t, h.health, "no gauge is written for a quiet chain")
 
 	// The chain moves again and only b follows: a and c are now behind and go out.
 	h.obs["https://b"] = stuckAt(1001, 0)
@@ -301,27 +296,6 @@ func TestHeadStall_ArchiveURLListedTwiceGoesOutAndBackTogether(t *testing.T) {
 	require.True(t, stalled(t, freshPlain))
 }
 
-// When a stalled url comes back, the provider's gauge returns to 1 only if every one of its urls is
-// usable: here a sibling url is still disabled for node errors, so the gauge stays at 0.
-func TestHeadStall_GaugeStaysDownWhileASiblingIsOut(t *testing.T) {
-	h := newStallHarness()
-	stuck := ep("https://vendor/rpc", "vendor", true)
-	sibling := ep("https://vendor/rpc2", "vendor", true)
-	sibling.Endpoint.Enabled = false // sibling out for node-error
-	other := ep("https://other", "other", true)
-	h.obs["https://vendor/rpc"] = stuckAt(1000, stallN)
-	h.obs["https://other"] = stuckAt(9000, 0)
-	h.step(t, stallNow, stuck, sibling, other)
-	require.Equal(t, false, h.health["vendor"])
-
-	h.obs["https://vendor/rpc"] = stuckAt(1001, 0)
-	h.step(t, stallNow.Add(5*time.Second), stuck, sibling, other)
-	require.False(t, stalled(t, stuck))
-	_, set := h.health["vendor"]
-	require.True(t, set)
-	require.Equal(t, false, h.health["vendor"], "the sibling still has a reason, so the gauge stays 0")
-}
-
 // A head-stalled endpoint's REPEAT vote no longer refreshes the chain tip, while the same repeat
 // from an endpoint that is not stalled still does, and a higher block from the stalled one still
 // counts.
@@ -446,7 +420,7 @@ func TestOnTipObservation_StalledRepeatsNoLongerPinTheTip(t *testing.T) {
 // The operator reset is the one route that clears state reasons (D8), and it zeroes the stall
 // counters with them so the next probe cycle does not re-add head-stalled from the evidence the
 // operator just discarded (H11).
-func TestResetEndpointHealthAndGauge_ClearsHeadStalled(t *testing.T) {
+func TestResetEndpointHealth_ClearsHeadStalled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -486,7 +460,7 @@ func TestResetEndpointHealthAndGauge_ClearsHeadStalled(t *testing.T) {
 		sessionManagers: map[string]*routersession.ConsumerSessionManager{"k": f.csm},
 		rpcServers:      map[string]*RPCSmartRouterServer{"k": f.server},
 	}
-	resetEndpointHealthAndGauge(debugMuxDeps{router: router})
+	resetEndpointHealth(debugMuxDeps{router: router})
 
 	require.True(t, stuck.IsUsable())
 	require.False(t, f.server.headStall.isStalled(stuck.NetworkAddress))
@@ -495,24 +469,6 @@ func TestResetEndpointHealthAndGauge_ClearsHeadStalled(t *testing.T) {
 	obs, _ := f.monitor.GetObservation(frozen.URL)
 	require.Zero(t, obs.SameBlockCycles, "the operator reset must zero the stall counter")
 	require.Equal(t, int64(1000), obs.HighestBlockSeen, "the blocks seen are kept")
-}
-
-// The probe step is the only writer of the head-stall gauge: an outside write back to 1 (the epoch
-// reset, or a relay success on a sibling url) is corrected on the next cycle while a url is stalled.
-func TestHeadStall_GaugeReassertedEveryCycle(t *testing.T) {
-	h := newStallHarness()
-	stuck := ep("https://primary", "p", true)
-	other := backupEp("https://backup", "b")
-	h.obs["https://primary"] = stuckAt(1000, stallN)
-	h.obs["https://backup"] = stuckAt(9000, 0)
-	h.step(t, stallNow, stuck, other)
-	require.Equal(t, false, h.health["p"])
-
-	h.health["p"] = true // the epoch reset writes 1
-	h.step(t, stallNow.Add(5*time.Second), stuck, other)
-	require.Equal(t, false, h.health["p"], "the next cycle puts it back to 0")
-	_, touched := h.health["b"]
-	require.False(t, touched, "a provider with nothing stalled is never written by this step")
 }
 
 // A pairing rebuild replaces Endpoint objects; the new ones hold no state reason. The stalled url
@@ -556,7 +512,6 @@ func TestHeadStall_SlowChain_NewBlockMarksNobody(t *testing.T) {
 	require.Equal(t, headStallResult{}, h.step(t, stallNow, a, b, c))
 	require.False(t, stalled(t, a), "one block behind for a few seconds is the normal state of a slow chain")
 	require.False(t, stalled(t, b))
-	require.Empty(t, h.health, "no gauge is written")
 }
 
 // A slow chain's real stall is still caught, at the grace and not before.

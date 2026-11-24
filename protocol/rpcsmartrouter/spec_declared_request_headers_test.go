@@ -39,8 +39,8 @@ func TestDirectRelaySendsTheSpecDeclaredRequestHeaders(t *testing.T) {
 	}{
 		{name: "jsonrpc", specIndex: "ETH1", apiInterface: spectypes.APIInterfaceJsonRPC, connectionType: http.MethodPost, body: ethBlockNumber, reply: singleReply},
 		{name: "jsonrpc batch", specIndex: "ETH1", apiInterface: spectypes.APIInterfaceJsonRPC, connectionType: http.MethodPost, body: "[" + ethBlockNumber + "," + ethChainID + "]", reply: batchReply},
-		{name: "tendermintrpc", specIndex: "LAVA", apiInterface: spectypes.APIInterfaceTendermintRPC, body: tmStatus, reply: singleReply},
-		{name: "tendermintrpc batch", specIndex: "LAVA", apiInterface: spectypes.APIInterfaceTendermintRPC, body: "[" + tmStatus + "," + tmAbciInfo + "]", reply: batchReply},
+		{name: "tendermintrpc", specIndex: "COSMOSHUB", apiInterface: spectypes.APIInterfaceTendermintRPC, body: tmStatus, reply: singleReply},
+		{name: "tendermintrpc batch", specIndex: "COSMOSHUB", apiInterface: spectypes.APIInterfaceTendermintRPC, body: "[" + tmStatus + "," + tmAbciInfo + "]", reply: batchReply},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

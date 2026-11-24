@@ -362,7 +362,7 @@ func TestAppendHeadersToRelayResultIntegration(t *testing.T) {
 // TestAppendHeadersToRelayResult_DisagreeingOnQuorumFailure covers the failure semantics of the
 // disagreeing-providers header: when successful responses come back but fail to form a quorum, every
 // successful provider is in conflict (there is no consensus to agree with), so all of them must appear in
-// lava-cross-validation-disagreeing-providers — not just node/protocol-error providers.
+// router-cross-validation-disagreeing-providers — not just node/protocol-error providers.
 func TestAppendHeadersToRelayResult_DisagreeingOnQuorumFailure(t *testing.T) {
 	ctx := context.Background()
 	hashA := [32]byte{1}
@@ -510,7 +510,7 @@ func TestAppendHeadersToRelayResult_PluralityOnQuorumFailure(t *testing.T) {
 
 // TestAppendHeadersToRelayResult_PendingProvidersOnEarlyExit pins the MAG-2187 header contract at reply
 // time: with threshold=2 met by the first two responders and the third provider's response still in
-// flight, the straggler must appear in lava-cross-validation-pending-providers — NOT silently vanish —
+// flight, the straggler must appear in router-cross-validation-pending-providers — NOT silently vanish —
 // while disagreeing-providers stays confirmed-dissent-only (empty here: nobody the router heard from
 // dissented).
 func TestAppendHeadersToRelayResult_PendingProvidersOnEarlyExit(t *testing.T) {
@@ -563,10 +563,10 @@ func TestAppendHeadersToRelayResult_PendingProvidersOnEarlyExit(t *testing.T) {
 	require.Equal(t, "provider@provider3", pendingHeader.Value)
 }
 
-// TestAppendHeadersToRelayResult_ExhaustedTransportErrors covers the Lava-Provider-Address contract on
+// TestAppendHeadersToRelayResult_ExhaustedTransportErrors covers the Router-Provider-Address contract on
 // the all-transport-errors path (MAG-2351): every attempt failed at the protocol level, the returned
 // error body comes from the best protocol error, and the header must list each attempted provider
-// exactly once with the response-source provider last — entry count == Lava-Retries + 1. Before the
+// exactly once with the response-source provider last — entry count == Router-Retries + 1. Before the
 // fix, buildFailureResult packed the comma-joined unwanted list into ProviderInfo.ProviderAddress and
 // the chain builder appended that whole blob as the resolver, roughly doubling the header.
 func TestAppendHeadersToRelayResult_ExhaustedTransportErrors(t *testing.T) {
@@ -609,7 +609,7 @@ func TestAppendHeadersToRelayResult_ExhaustedTransportErrors(t *testing.T) {
 }
 
 // TestAppendHeadersToRelayResult_FailureReasonHeader verifies that a cross-validation failure surfaces a
-// distinguishable lava-cross-validation-failure-reason header (so clients can tell diversity-unmet from
+// distinguishable router-cross-validation-failure-reason header (so clients can tell diversity-unmet from
 // an ordinary no-agreement).
 func TestAppendHeadersToRelayResult_FailureReasonHeader(t *testing.T) {
 	ctx := context.Background()
@@ -1108,7 +1108,7 @@ func TestAppendHeadersToRelayResult_GroupLabelsInertWithoutPolicy(t *testing.T) 
 		"populating ProviderGroup must not change CV headers when no group-diversity policy is configured (UC-7)")
 }
 
-// TestRetryCountHeader verifies that the Lava-Retries header correctly reflects
+// TestRetryCountHeader verifies that the Router-Retries header correctly reflects
 // actual retry attempts (total attempts - 1), not raw error counts.
 func TestRetryCountHeader(t *testing.T) {
 	ctx := context.Background()
@@ -1339,7 +1339,7 @@ func TestRetryCountHeader(t *testing.T) {
 // another succeeds is expected race-loss, not a retry.
 //
 // Bug repro: send eth_sendRawTransaction with {P1 down, P2 success, P3 success}.
-// Pre-fix the response carried Lava-Retries: 1, which fed false positives into
+// Pre-fix the response carried Router-Retries: 1, which fed false positives into
 // operator dashboards monitoring stateful traffic.
 func TestRetryCountHeaderStatefulFanoutAbsorption(t *testing.T) {
 	ctx := context.Background()
@@ -1382,18 +1382,18 @@ func TestRetryCountHeaderStatefulFanoutAbsorption(t *testing.T) {
 		}, "eth_sendRawTransaction", nil, true)
 
 		retryHeader := findHeader(relayResult.Reply.Metadata, common.RETRY_COUNT_HEADER_NAME)
-		require.Nil(t, retryHeader, "stateful fan-out must absorb in-batch failures: no Lava-Retries header expected")
+		require.Nil(t, retryHeader, "stateful fan-out must absorb in-batch failures: no Router-Retries header expected")
 
 		// Provider-Address rebuild is gated on retries>0 to keep MAG-1653 Bug #2's
 		// invariant (entry count == retries+1). For retries=0 the header must
 		// stay at the single winning provider; the loser is reported via
-		// lava-fast-tx-participants instead.
+		// router-fast-tx-participants instead.
 		providerHeader := findHeader(relayResult.Reply.Metadata, common.PROVIDER_ADDRESS_HEADER_NAME)
 		require.NotNil(t, providerHeader)
 		require.Equal(t, "provider@simprovider2", providerHeader.Value)
 	})
 
-	t.Run("stateful fan-out all healthy - no Lava-Retries header", func(t *testing.T) {
+	t.Run("stateful fan-out all healthy - no Router-Retries header", func(t *testing.T) {
 		// Acceptance criterion 2: no regression for the all-healthy fan-out case.
 		// Three successes in one batch must not produce any retry header.
 		relayProcessor := &MockRelayProcessorForHeaders{
@@ -1420,12 +1420,12 @@ func TestRetryCountHeaderStatefulFanoutAbsorption(t *testing.T) {
 		}, "eth_sendRawTransaction", nil, true)
 
 		retryHeader := findHeader(relayResult.Reply.Metadata, common.RETRY_COUNT_HEADER_NAME)
-		require.Nil(t, retryHeader, "all-healthy stateful fan-out must not emit Lava-Retries")
+		require.Nil(t, retryHeader, "all-healthy stateful fan-out must not emit Router-Retries")
 	})
 
 	t.Run("stateless one error then success - retries still counted (regression guard)", func(t *testing.T) {
 		// The absorption rule is scoped to Stateful; sequential-retry semantics
-		// for Stateless must continue to increment Lava-Retries. Without this
+		// for Stateless must continue to increment Router-Retries. Without this
 		// guard a future change collapsing the Stateless branch into Stateful's
 		// would silently zero out the counter for the most common path.
 		relayProcessor := &MockRelayProcessorForHeaders{
@@ -1455,11 +1455,11 @@ func TestRetryCountHeaderStatefulFanoutAbsorption(t *testing.T) {
 	})
 }
 
-// TestHedgeTriggeredHeader covers MAG-1818: lava-hedge-triggered must appear
+// TestHedgeTriggeredHeader covers MAG-1818: router-hedge-triggered must appear
 // (Value="true") iff analytics.HedgeCount > 0, and must be omitted otherwise.
-// This signal is independent of Lava-Retries — the test framework needs to
+// This signal is independent of Router-Retries — the test framework needs to
 // distinguish "hedge fired" from "classical retry" without inferring from
-// Lava-Retries + Lava-Provider-Address.
+// Router-Retries + Router-Provider-Address.
 func TestHedgeTriggeredHeader(t *testing.T) {
 	ctx := context.Background()
 
@@ -1537,7 +1537,7 @@ func TestHedgeTriggeredHeader(t *testing.T) {
 
 // TestCacheServedResponseHeaders is a regression for MAG-1653 Bug #2: when a
 // relay is resolved by a cache hit during the retry loop, "Cached" must remain
-// in Lava-Provider-Address so the entry count stays consistent with Lava-Retries.
+// in Router-Provider-Address so the entry count stays consistent with Router-Retries.
 // (Previously the retry-path rebuild explicitly excluded "Cached", overwriting
 // the header with only the failed provider names.)
 func TestCacheServedResponseHeaders(t *testing.T) {
@@ -1615,7 +1615,7 @@ func TestCacheServedResponseHeaders(t *testing.T) {
 	})
 }
 
-// TestResolverAlwaysLastInProviderHeader hardens the Lava-Provider-Address
+// TestResolverAlwaysLastInProviderHeader hardens the Router-Provider-Address
 // contract: the last entry in the comma-separated chain must always be the
 // address that resolved the response, even when that address also appears
 // earlier in successResults / nodeErrors (which can happen under hedging
@@ -2078,7 +2078,7 @@ type MockProtocolMessage struct {
 	requestedBlock int64 // configurable requested block, defaults to 0
 	userData       common.UserData
 	// directiveHeaders drives the per-request debug gate in appendHeadersToRelayResult
-	// (lava-debug-relay). Nil means an ordinary client request.
+	// (router-debug-relay). Nil means an ordinary client request.
 	directiveHeaders map[string]string
 	// repliesAreNodeErrors makes CheckResponseError report every reply as a node error. Default
 	// false, so every existing test keeps filing replies as successes. Without it this mock cannot
@@ -3251,7 +3251,7 @@ func (cvGuardMetrics) SetRelayNodeErrorMetric(chainId, apiInterface, providerAdd
 }
 func (cvGuardMetrics) SetRelayNodeResultMetric(chainId, apiInterface, providerAddress, method string) {
 }
-func (cvGuardMetrics) GetChainIdAndApiInterface() (string, string) { return "LAVA", "rest" }
+func (cvGuardMetrics) GetChainIdAndApiInterface() (string, string) { return "COSMOSHUB", "rest" }
 
 // TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesAllSessions is the
 // regression catch for commit 97266e4. When filterEndpointsByConsistency drops
@@ -3277,7 +3277,7 @@ func TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesAllSessions(t *t
 		w.WriteHeader(http.StatusOK)
 	})
 	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(
-		ctx, "LAVA", spectypes.APIInterfaceRest, noopHandler, nil, "../../", nil)
+		ctx, "COSMOSHUB", spectypes.APIInterfaceRest, noopHandler, nil, "../../", nil)
 	if closeServer != nil {
 		defer closeServer()
 	}
@@ -3290,15 +3290,15 @@ func TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesAllSessions(t *t
 	userData := common.UserData{DappId: "test", ConsumerIp: "1.2.3.4"}
 	chainTip := seedChainTip(200)
 
-	// Tips live in the shared endpointtip store, keyed LAVA|rest|url (matching the rpcss
+	// Tips live in the shared endpointtip store, keyed COSMOSHUB|rest|url (matching the rpcss
 	// listenEndpoint below). Reset first so other tests' entries can't interfere.
 	endpointtip.Default().Reset()
 	syncedEp := &routersession.Endpoint{NetworkAddress: "http://synced:8545"}
-	seedEndpointTip("LAVA", "rest", "http://synced:8545", 195)
+	seedEndpointTip("COSMOSHUB", "rest", "http://synced:8545", 195)
 	staleEp1 := &routersession.Endpoint{NetworkAddress: "http://stale1:8545"}
-	seedEndpointTip("LAVA", "rest", "http://stale1:8545", 50)
+	seedEndpointTip("COSMOSHUB", "rest", "http://stale1:8545", 50)
 	staleEp2 := &routersession.Endpoint{NetworkAddress: "http://stale2:8545"}
-	seedEndpointTip("LAVA", "rest", "http://stale2:8545", 50)
+	seedEndpointTip("COSMOSHUB", "rest", "http://stale2:8545", 50)
 
 	mkSession := func(addr string, ep *routersession.Endpoint) *routersession.SingleConsumerSession {
 		return &routersession.SingleConsumerSession{
@@ -3344,8 +3344,8 @@ func TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesAllSessions(t *t
 		sm)
 
 	// Real session manager — OnSessionFailure runs against it for the 2 dropped sessions.
-	rpcEndpoint := &routersession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "rest"}
-	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "LAVA")
+	rpcEndpoint := &routersession.RPCEndpoint{ChainID: "COSMOSHUB", ApiInterface: "rest"}
+	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "COSMOSHUB")
 	sessionManager := routersession.NewConsumerSessionManager(
 		rpcEndpoint, optimizer, nil, "test-router",
 		routersession.NewActiveSubscriptionProvidersStorage())
@@ -3612,7 +3612,7 @@ func appendHeadersForCacheHit(t *testing.T, server *RPCSmartRouterServer, report
 	return relayResult.Reply.Metadata
 }
 
-// The Lava-Cache-Backend header names the node that served a hit. It exposes an
+// The Router-Cache-Backend header names the node that served a hit. It exposes an
 // internal infrastructure address, so it must appear ONLY under --debug-relays — and
 // it must name the backend of the tier that ACTUALLY served (MAG-3540). It used to
 // report the primary's address unconditionally, so an entry the secondary served was

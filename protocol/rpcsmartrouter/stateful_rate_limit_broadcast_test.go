@@ -64,10 +64,10 @@ func eth1WriteParser(t *testing.T) chainlib.ChainParser {
 	return chainParser
 }
 
-func lavaRESTWriteParser(t *testing.T) chainlib.ChainParser {
+func restWriteParser(t *testing.T) chainlib.ChainParser {
 	t.Helper()
 	noop := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
-	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(context.Background(), "LAVA", spectypes.APIInterfaceRest, noop, nil, "../../", nil)
+	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(context.Background(), "COSMOSHUB", spectypes.APIInterfaceRest, noop, nil, "../../", nil)
 	if closeServer != nil {
 		t.Cleanup(closeServer)
 	}
@@ -115,7 +115,7 @@ var writeInterfaceCases = []writeInterfaceCase{
 		success: `{"jsonrpc":"2.0","id":1,"result":"0xabc"}`,
 	},
 	{
-		name: "rest", chainID: "LAVA", apiInterface: spectypes.APIInterfaceRest, parser: lavaRESTWriteParser,
+		name: "rest", chainID: "COSMOSHUB", apiInterface: spectypes.APIInterfaceRest, parser: restWriteParser,
 		method: http.MethodPost, path: "/cosmos/tx/v1beta1/txs", body: `{"tx_bytes":"dHg=","mode":"BROADCAST_MODE_SYNC"}`,
 		success: `{"tx_response":{"code":0,"txhash":"ABC"}}`,
 	},
@@ -206,12 +206,19 @@ func newWriteServer(t *testing.T, tc writeInterfaceCase, chainParser chainlib.Ch
 
 func sendWrite(t *testing.T, tc writeInterfaceCase, chainParser chainlib.ChainParser, server *RPCSmartRouterServer) (*common.RelayResult, error) {
 	t.Helper()
+	return sendWriteWithDirectives(t, tc, chainParser, server, nil)
+}
+
+// sendWriteWithDirectives is sendWrite with the request's router-* directive headers, such as a
+// router-select-provider pin.
+func sendWriteWithDirectives(t *testing.T, tc writeInterfaceCase, chainParser chainlib.ChainParser, server *RPCSmartRouterServer, directives map[string]string) (*common.RelayResult, error) {
+	t.Helper()
 	ctx := context.Background()
 	chainMessage, err := chainParser.ParseMsg(tc.path, []byte(tc.body), tc.method, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 	require.NoError(t, err)
 	relayData := relayprotocol.NewRelayData(ctx, tc.method, tc.path, []byte(tc.body), 0, spectypes.NOT_APPLICABLE, tc.apiInterface,
 		chainMessage.GetRPCMessage().GetHeaders(), chainlib.GetAddon(chainMessage), common.GetExtensionNames(chainMessage.GetExtensions()))
-	protocolMessage := chainlib.NewProtocolMessage(chainMessage, nil, relayData, "dapp", "1.2.3.4")
+	protocolMessage := chainlib.NewProtocolMessage(chainMessage, directives, relayData, "dapp", "1.2.3.4")
 	require.Equal(t, uint32(common.CONSISTENCY_SELECT_ALL_PROVIDERS), chainlib.GetStateful(protocolMessage),
 		"setup: the request must be a write on this interface, or this measures nothing")
 

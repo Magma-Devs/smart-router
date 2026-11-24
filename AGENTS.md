@@ -108,7 +108,7 @@ Health status OK
 Router listener health:
 
 ```bash
-curl -i http://localhost:3360/lava/health
+curl -i http://localhost:3360/router/health
 ```
 
 Expected success:
@@ -217,8 +217,8 @@ explicitly asks for them.
   secrets.
 - The router listens over HTTP locally. Put TLS, client authentication, and rate
   limiting in a reverse proxy for non-local deployments.
-- Do not expose the local dashboard with default `admin` / `password`
-  credentials.
+- Do not expose the local dashboard: it has no sign-in unless you enable its
+  auth (`AUTH_MODE=enabled`, see that repo's README).
 
 ## Agent behavior rules
 
@@ -243,7 +243,7 @@ A local run is healthy when all of these are true:
 - The compose stack exposes `3360-3367` and `7779`.
 - `curl -i http://localhost:7779/metrics/overall-health` returns `200` with
   `Health status OK`.
-- `curl -i http://localhost:3360/lava/health` returns `200` with
+- `curl -i http://localhost:3360/router/health` returns `200` with
   `Health status OK`.
 - `eth_blockNumber` against `http://localhost:3360` returns HTTP 200 and a real
   block number.

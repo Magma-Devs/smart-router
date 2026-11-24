@@ -162,7 +162,7 @@ unhealthy the router re-probes every `--relays-health-unhealthy-interval`
 
 ### `smartrouter_eth.yml` — Ethereum (default)
 
-2 upstreams (PublicNode + Tenderly), each HTTP + WS. No Lava endpoints.
+2 upstreams (PublicNode + Tenderly), each HTTP + WS.
 
 ### `smartrouter_eth_cached.yml` — Ethereum with cache
 
@@ -176,7 +176,7 @@ each on port `3360` and HTTP-only. The compose command passes
 `--skip-websocket-verification`, which only matters for ws(s) urls: since MAG-3950 an
 HTTP-only provider serves without subscriptions whatever the flag says, and on a chain
 that subscribes (Solana) it publishes `service=websocket`, `check=missing-url`. Upstreams are PublicNode and each
-chain's official/community endpoint; no Lava endpoints.
+chain's official/community endpoint.
 
 ### `smartrouter_cosmos.yml` — Cosmos Hub (REST + gRPC + Tendermint RPC)
 
