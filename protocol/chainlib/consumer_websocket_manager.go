@@ -112,8 +112,8 @@ const (
 	DefaultWebSocketKeepAliveInterval = 30 * time.Second
 	DefaultWebSocketWriteTimeout      = 10 * time.Second
 
-	WebSocketRateLimitHeader            = "x-lava-websocket-rate-limit"
-	WebSocketOpenConnectionsLimitHeader = "x-lava-websocket-open-connections-limit"
+	WebSocketRateLimitHeader            = "x-router-websocket-rate-limit"
+	WebSocketOpenConnectionsLimitHeader = "x-router-websocket-open-connections-limit"
 )
 
 type ConsumerWebsocketManager struct {
@@ -563,7 +563,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 						// time out (~15s). The
 						// JSON-RPC envelope is safe here: ConsumerWebsocketManager is
 						// only constructed by jsonRPC.go and tendermintRPC.go, both
-						// JSON-RPC-shaped. Mirrors lavanet/lava#2296.
+						// JSON-RPC-shaped.
 						responseData = buildUnsubscribeSuccessReply(msg)
 						if responseData == nil {
 							// A notification gets no reply (JSON-RPC 2.0 §4.1).

@@ -148,8 +148,8 @@ func (s *State) collectForChain(group []Listener, tier string) Nav {
 }
 
 // roundProviderName derives the provider name for one interface of a round-backend
-// from the user's single base name: <base>-<iface> (lower-cased). So base "lav1-1"
-// over jsonrpc/rest/tendermintrpc yields lav1-1-jsonrpc, lav1-1-rest, … — distinct
+// from the user's single base name: <base>-<iface> (lower-cased). So base "hub-1"
+// over jsonrpc/rest/tendermintrpc yields hub-1-jsonrpc, hub-1-rest, … — distinct
 // per interface, and distinct across rounds as long as the base differs.
 func roundProviderName(base, iface string) string {
 	return fmt.Sprintf("%s-%s", base, strings.ToLower(iface))
@@ -530,7 +530,7 @@ func (s *State) collectOneUpstream(l Listener, required bool) (emit.Upstream, Na
 			// gate applies. The probe pairs the ws url with the http base on ONE
 			// upstream (a ws-only provider can't be probed — the router always needs
 			// the base collection), so it's a single round-trip that doesn't trip
-			// lava.build's per-connection ws burst cap. On failure, let the user keep
+			// a provider's per-connection ws burst cap. On failure, let the user keep
 			// it anyway (Esc=keep).
 			if !s.gateWS(l, url, ws) {
 				keep, nav := confirmNav("      keep this ws url anyway?", false)
@@ -587,7 +587,7 @@ func (s *State) probeLive(url, chain, iface string, auth *emit.Auth) (ok bool, d
 // with its http base on ONE upstream — NOT the ws url alone: the router refuses a
 // provider with no http url, and pairing reproduces the real emitted config, so
 // health verifies the exact shape that boots.
-// One config probe is a single short round-trip, so it stays under lava.build's
+// One config probe is a single short round-trip, so it stays under a provider's
 // per-connection ws burst cap (which only trips on many rapid reqs on one conn —
 // that's the router's full STARTUP verification, not this one check). The verdict
 // is read from env.WSLive(), which judges the ws node-url row(s) specifically — the

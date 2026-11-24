@@ -1,7 +1,7 @@
 // Package chainstate provides the per-chain "current chain head" (tip) for the smart
-// router (MAG-2160 / Topic C). It is built in-tree (referencing lavanet/lava's
-// protocol/chainstate, not importing it) and replaces the three unreconciled "latest block"
-// sources — the global ChainTracker, the relay-fed estimator, and the monotonic atomic.
+// router (MAG-2160 / Topic C). It is built in-tree and replaces the three unreconciled
+// "latest block" sources — the global ChainTracker, the relay-fed estimator, and the
+// monotonic atomic.
 //
 // ChainState is a data-plane component: it observes (cheap monotonic + outlier-guarded
 // writes from the relay-harvest and poll paths) and aggregates (a strict-majority consensus

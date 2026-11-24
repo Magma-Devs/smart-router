@@ -51,9 +51,13 @@ work otherwise.
    (health) or chosen explicitly. Optional per-endpoint **auth** (`${VAR}` in a
    gitignored `.env`).
 4. **Backups · Cache · Dashboard** — optional `backup-direct-rpc` tier; the
-   cache sidecar; the Prometheus + dashboard overlay. When the dashboard is
-   enabled, the run output prints its access info: **UI <http://localhost:3000>,
-   login `admin` / `password`**, API on `:8000`, Prometheus on `:9090`.
+   cache sidecar; the observability dashboard. The dashboard is not an overlay
+   of this repo: it runs from a
+   [smart-router-dashboard](https://github.com/Magma-Devs/smart-router-dashboard)
+   checkout and reads this router's metrics on `:7779`. When it is enabled, the
+   run output prints the command to start it there (it mounts your rendered
+   config, so the dashboard shows these upstreams) and its UI,
+   <http://localhost:3000>.
 5. **Save** — writes `config/local/<name>.template.yml` + `.env` + the rendered
    `<name>.yml` (gitignored), lints it, then runs a full `health <config>` pass
    over everything (http + ws + addons) so a green wizard = a config that runs.
@@ -61,7 +65,7 @@ work otherwise.
    `docker compose up --build`, then smoke-tests each listener via `health`. The
    `up` command layers a generated `<name>.compose.override.yml` (beside the
    config) that publishes exactly the ports this config's listeners bind — so the
-   base compose keeps its example ports (3360-3362) and the wizard's ports are
+   base compose keeps its example ports (3360-3367) and the wizard's ports are
    simply added on top. It also sets `SR_SPEC` when the catalog came from remote
    (see below) so the container resolves chains absent from the bundled `specs/`.
 
@@ -72,7 +76,7 @@ The base compose passes `--use-static-spec ${SR_SPEC:-specs/}`. Two valid values
 | `SR_SPEC` | Meaning |
 | --- | --- |
 | `specs/` *(default)* | The lava-specs snapshot **bundled into the image**. Covers the chains in the repo's `specs/` dir (the bundled examples). |
-| `https://github.com/magma-Devs/lava-specs/tree/main` | The **live lava-specs GitHub repo**. Resolves every chain in the catalog, including ones not bundled (e.g. `LAV1`). The router fetches + caches these at startup. |
+| `https://github.com/magma-Devs/lava-specs/tree/main` | The **live lava-specs GitHub repo**. Resolves every chain in the catalog, including ones not bundled (e.g. `OSMOSIS`). The router fetches + caches these at startup. |
 
 The wizard sets it automatically: `specs/` when its chain catalog came from the
 local source, the GitHub URL when it came from remote. You can override it by

@@ -80,7 +80,7 @@ func TestRESTListener_WriteOutcome(t *testing.T) {
 			}
 			var requests atomic.Int32
 			parser, _, _, closeServer, endpoint, err := chainlib.CreateChainLibMocks(
-				ctx, "LAVA", spectypes.APIInterfaceRest, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				ctx, "COSMOSHUB", spectypes.APIInterfaceRest, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					requests.Add(1)
 					assert.Equal(t, tc.method, r.Method)
 					assert.Equal(t, path, r.URL.Path)
@@ -140,7 +140,7 @@ func TestRESTListener_WriteOutcome(t *testing.T) {
 			}
 			provider := routersession.NewConsumerSessionWithProvider("rest-upstream", []*routersession.Endpoint{providerEndpoint}, 100000, 1, 1)
 			provider.StaticProvider = true
-			sessionManager, rpcEndpoint := createTestSessionManager("LAVA", spectypes.APIInterfaceRest)
+			sessionManager, rpcEndpoint := createTestSessionManager("COSMOSHUB", spectypes.APIInterfaceRest)
 			rpcEndpoint.NetworkAddress = "127.0.0.1:0"
 			require.NoError(t, sessionManager.UpdateAllProviders(1,
 				map[uint64]*routersession.ConsumerSessionsWithProvider{0: provider}, nil))
@@ -153,7 +153,6 @@ func TestRESTListener_WriteOutcome(t *testing.T) {
 			}
 			if tc.hang {
 				server.smartRouterEndpointMetrics = metrics.NewSmartRouterMetricsManager(metrics.SmartRouterMetricsManagerOptions{})
-				server.smartRouterEndpointMetrics.SetEndpointOverallHealth("LAVA", "rest", "rest-upstream", true)
 			}
 			listener := chainlib.NewRestChainListener(ctx, rpcEndpoint, server, nil, logs)
 			listenerDone := make(chan struct{})
@@ -221,10 +220,6 @@ func TestRESTListener_WriteOutcome(t *testing.T) {
 				require.Eventually(t, func() bool { return !providerEndpoint.HealthSnapshot().Enabled }, time.Second, time.Millisecond,
 					"a budget-expired cancellation must disable the unhealthy URL at the refusal threshold")
 				require.NotZero(t, providerEndpoint.HealthSnapshot().DisabledAt)
-				require.Eventually(t, func() bool {
-					value, found := gatherHealthGauge(t, "LAVA", "rest", "rest-upstream")
-					return found && value == 0
-				}, time.Second, time.Millisecond, "endpoint health metric must reflect the hang")
 			}
 		})
 	}

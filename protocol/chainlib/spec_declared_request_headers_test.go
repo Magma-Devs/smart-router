@@ -96,11 +96,11 @@ func TestSpecDeclaredRequestHeadersAreSentOnEveryInterface(t *testing.T) {
 	}{
 		{name: "jsonrpc", specIndex: "ETH1", apiInterface: spectypes.APIInterfaceJsonRPC, connectionType: http.MethodPost, body: ethBlockNumber},
 		{name: "jsonrpc batch", specIndex: "ETH1", apiInterface: spectypes.APIInterfaceJsonRPC, connectionType: http.MethodPost, body: "[" + ethBlockNumber + "," + ethChainID + "]"},
-		{name: "tendermintrpc", specIndex: "LAVA", apiInterface: spectypes.APIInterfaceTendermintRPC, body: tmStatus},
-		{name: "tendermintrpc uri", specIndex: "LAVA", apiInterface: spectypes.APIInterfaceTendermintRPC, url: "status?"},
-		{name: "tendermintrpc batch", specIndex: "LAVA", apiInterface: spectypes.APIInterfaceTendermintRPC, body: "[" + tmStatus + "," + tmAbciInfo + "]"},
-		{name: "rest", specIndex: "LAVA", apiInterface: spectypes.APIInterfaceRest, url: "/cosmos/base/tendermint/v1beta1/blocks/latest", connectionType: http.MethodGet},
-		{name: "grpc", specIndex: "LAVA", apiInterface: spectypes.APIInterfaceGrpc, url: "cosmos.base.tendermint.v1beta1.Service/GetLatestBlock"},
+		{name: "tendermintrpc", specIndex: "COSMOSHUB", apiInterface: spectypes.APIInterfaceTendermintRPC, body: tmStatus},
+		{name: "tendermintrpc uri", specIndex: "COSMOSHUB", apiInterface: spectypes.APIInterfaceTendermintRPC, url: "status?"},
+		{name: "tendermintrpc batch", specIndex: "COSMOSHUB", apiInterface: spectypes.APIInterfaceTendermintRPC, body: "[" + tmStatus + "," + tmAbciInfo + "]"},
+		{name: "rest", specIndex: "COSMOSHUB", apiInterface: spectypes.APIInterfaceRest, url: "/cosmos/base/tendermint/v1beta1/blocks/latest", connectionType: http.MethodGet},
+		{name: "grpc", specIndex: "COSMOSHUB", apiInterface: spectypes.APIInterfaceGrpc, url: "cosmos.base.tendermint.v1beta1.Service/GetLatestBlock"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -177,9 +177,9 @@ func TestHeadersStayNilWithoutADeclaredHeader(t *testing.T) {
 	}{
 		{name: "jsonrpc", specIndex: "ETH1", apiInterface: spectypes.APIInterfaceJsonRPC, connectionType: http.MethodPost, body: ethBlockNumber},
 		{name: "jsonrpc batch", specIndex: "ETH1", apiInterface: spectypes.APIInterfaceJsonRPC, connectionType: http.MethodPost, body: "[" + ethBlockNumber + "," + ethChainID + "]"},
-		{name: "tendermintrpc", specIndex: "LAVA", apiInterface: spectypes.APIInterfaceTendermintRPC, body: tmStatus},
-		{name: "tendermintrpc uri", specIndex: "LAVA", apiInterface: spectypes.APIInterfaceTendermintRPC, url: "status?"},
-		{name: "tendermintrpc batch", specIndex: "LAVA", apiInterface: spectypes.APIInterfaceTendermintRPC, body: "[" + tmStatus + "," + tmAbciInfo + "]"},
+		{name: "tendermintrpc", specIndex: "COSMOSHUB", apiInterface: spectypes.APIInterfaceTendermintRPC, body: tmStatus},
+		{name: "tendermintrpc uri", specIndex: "COSMOSHUB", apiInterface: spectypes.APIInterfaceTendermintRPC, url: "status?"},
+		{name: "tendermintrpc batch", specIndex: "COSMOSHUB", apiInterface: spectypes.APIInterfaceTendermintRPC, body: "[" + tmStatus + "," + tmAbciInfo + "]"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
