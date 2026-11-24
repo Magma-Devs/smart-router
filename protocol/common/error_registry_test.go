@@ -738,8 +738,10 @@ func TestMatcher_HTTPStatusContains(t *testing.T) {
 	assert.True(t, m.Matches(0, "HTTP 429"), "the REST fallback message")
 	assert.True(t, m.Matches(0, "429 Too Many Requests: {\"error\":\"slow down\"}"), "rpcclient.HTTPError's status line")
 	assert.True(t, m.Matches(0, "Disallowed status code error (429): websocket: bad handshake"), "StatusCodeError429")
-	assert.True(t, m.Matches(0, "websocket: bad handshake (HTTP status 429)"), "a refused WebSocket handshake")
-	assert.True(t, m500.Matches(0, "upstream returned a node error (HTTP 500)"), "a relay's failure")
+	// A status inside the text is not read, not even in parentheses: a node can write "(HTTP 500)" too.
+	assert.False(t, m.Matches(0, "websocket: bad handshake (HTTP status 429)"), "in parentheses, inside the text")
+	assert.False(t, m500.Matches(0, "upstream returned a node error (HTTP 500)"), "in parentheses, at the end")
+	assert.False(t, m500.Matches(0, "failed to execute message; message index: 0: dependency check failed (HTTP 500)"), "in parentheses, in a node's log")
 	assert.True(t, m500.Matches(0, "unexpected HTTP status code received from server: 500 (Internal Server Error)"), "grpc-go's gateway status")
 	assert.True(t, m500.Matches(0, `{"error_message":"unexpected HTTP status code received from server: 500 (Internal Server Error)","error_code":2}`),
 		"grpc-go's gateway status in the router's record of a gRPC node error")

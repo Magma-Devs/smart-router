@@ -31,6 +31,11 @@ func TestHTTPStatusRows_NodeTextIsNotAStatus(t *testing.T) {
 		{"Tendermint abci log, code 200", ChainFamilyCosmosSDK, TransportJsonRPC, 200, "failed to execute message; message index: 0: port transfer, channel-429: channel not found", RouterErrorNodeRateLimited},
 		{"gRPC UNKNOWN", ChainFamilyCosmosSDK, TransportGRPC, 2, balance, RouterErrorNodeInternalError},
 		{"gRPC UNKNOWN, no family", ChainFamilyUnknown, TransportGRPC, 2, balance, RouterErrorNodeInternalError},
+		// A status in parentheses is the node's text too.
+		{"REST 200, (HTTP 503)", ChainFamilyUnknown, TransportREST, 200, "failed to execute message; message index: 0: dependency check failed (HTTP 503)", RouterErrorNodeServiceUnavailable},
+		{"REST 200, (HTTP 429)", ChainFamilyCosmosSDK, TransportREST, 200, "failed to execute message; message index: 0: dependency check failed (HTTP 429)", RouterErrorNodeRateLimited},
+		{"Tendermint abci log, (HTTP status 503)", ChainFamilyCosmosSDK, TransportJsonRPC, 200, "dependency check failed (HTTP status 503)", RouterErrorNodeServiceUnavailable},
+		{"gRPC UNKNOWN, (HTTP 500)", ChainFamilyCosmosSDK, TransportGRPC, 2, "dependency check failed (HTTP 500)", RouterErrorNodeInternalError},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := ClassifyError(nil, tc.family, tc.transport, tc.code, tc.message)
@@ -61,6 +66,6 @@ func TestHTTPStatusRows_TheRoutersStatusStillDecides(t *testing.T) {
 		ClassifyError(nil, ChainFamilyUnknown, TransportGRPC, 2, "unexpected HTTP status code received from server: 500 (Internal Server Error); malformed header: missing HTTP content-type"),
 		"grpc-go's status for a gateway's HTTP 500")
 	require.Same(t, RouterErrorNodeServiceUnavailable,
-		ClassifyError(nil, ChainFamilyEVM, TransportJsonRPC, 0, "websocket: bad handshake (HTTP status 503)"),
-		"a WebSocket upgrade the endpoint refused")
+		ClassifyError(nil, ChainFamilyEVM, TransportJsonRPC, -1, "HTTP 503: upstream (HTTP 429) said slow down"),
+		"the router's status decides, not one in the node's text after it")
 }

@@ -36,6 +36,20 @@ func TestRelayInnerDirect_NumbersInACosmosLogAreNotAStatus(t *testing.T) {
 			result, refusals, _ := h.relay(t)
 			require.False(t, isRateLimitedRelayOutcome(nil, result), "channel-429 is no rate limit, so no provider is held off")
 			require.Zero(t, refusals)
+
+			// A status in parentheses inside the log is the node's text too.
+			h = newRESTBenchHarness(t, chainID, http.StatusOK,
+				`{"tx_response":{"height":"0","txhash":"5C504ED4","codespace":"sdk","code":18,"raw_log":"failed to execute message; message index: 0: dependency check failed (HTTP 503)"}}`)
+			for i := 0; i < 50; i++ {
+				_, refusals, enabled := h.relay(t)
+				require.Zero(t, refusals, "(HTTP 503) reply #%d must not count against the endpoint", i)
+				require.True(t, enabled, "(HTTP 503) reply #%d", i)
+			}
+			h = newRESTBenchHarness(t, chainID, http.StatusOK,
+				`{"tx_response":{"height":"0","txhash":"5C504ED4","codespace":"sdk","code":18,"raw_log":"failed to execute message; message index: 0: dependency check failed (HTTP 429)"}}`)
+			result, refusals, _ = h.relay(t)
+			require.False(t, isRateLimitedRelayOutcome(nil, result), "(HTTP 429) in the log is no rate limit")
+			require.Zero(t, refusals)
 		})
 	}
 }

@@ -626,8 +626,14 @@ func CodeAndMessage(code int, substring string) ErrorMatcher {
 // provider off (MAG-5324). Prefer structured status codes (CodeEquals) when the HTTP status is
 // available as an int.
 //
-// The status must follow one of httpStatusLeads at the start of the message, or one of
-// httpStatusInnerLeads anywhere, and end at a character that is neither a letter nor a digit.
+// The status must follow one of httpStatusLeads at the start of the message, and end at a character
+// that is neither a letter nor a digit. A status anywhere else is not read, not even one in
+// parentheses: a node's text can say "(HTTP 503)" as well, and read there it blamed the endpoint as
+// "500uatom" did. The router writes one only in a refused WebSocket upgrade's text ("websocket: bad
+// handshake (HTTP status 503)") and in the reasons it releases a session with ("upstream returned a
+// node error (HTTP 503)"). The reasons reach only UsedProviders.RemoveUsed, which decides the same
+// either way, and the upgrade's text only relay_end's record of a subscription attempt, which keeps
+// a 429 by its "Too Many Requests" and records a refused 5xx as UNKNOWN_ERROR.
 type httpStatusMatcher struct {
 	status string
 }
@@ -651,11 +657,6 @@ var httpStatusLeads = []string{"http status ", "http ", GRPCGatewayStatusText + 
 // classifies: a gateway's HTTP 500 is read as a 500 in the record too, not only by the sender.
 const grpcNodeErrorRecordLead = `{"error_message":"`
 
-// httpStatusInnerLeads are what the router writes before a status it adds in parentheses to an
-// error it wraps: a refused WebSocket handshake ("websocket: bad handshake (HTTP status 503)"), a
-// relay's failure ("upstream returned a node error (HTTP 503)"). Lowercase.
-var httpStatusInnerLeads = []string{"(http status ", "(http "}
-
 func (m httpStatusMatcher) Matches(errorCode int, errorMessage string) bool {
 	return m.matchesLowered(errorCode, strings.ToLower(errorMessage))
 }
@@ -665,18 +666,6 @@ func (m httpStatusMatcher) matchesLowered(_ int, loweredMessage string) bool {
 	for _, lead := range httpStatusLeads {
 		if rest, ok := strings.CutPrefix(start, lead); ok && m.startsWithStatus(rest) {
 			return true
-		}
-	}
-	for _, lead := range httpStatusInnerLeads {
-		for msg := loweredMessage; ; {
-			_, rest, found := strings.Cut(msg, lead)
-			if !found {
-				break
-			}
-			if m.startsWithStatus(rest) {
-				return true
-			}
-			msg = rest
 		}
 	}
 	return false
