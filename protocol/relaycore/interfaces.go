@@ -48,9 +48,10 @@ type ChainIdAndApiInterfaceGetter interface {
 
 // NodeErrorRecorder is implemented by a ChainIdAndApiInterfaceGetter that keeps the router's own
 // count of node errors (RelayErrorTally, MAG-4718). handleResponse records each node error it
-// meters through it, beside the metric rather than inside it.
+// meters through it, beside the metric rather than inside it. It is given the request, not a
+// method name, so the recorder names the request as its other debug routes do (MAG-5422).
 type NodeErrorRecorder interface {
-	RecordNodeError(chainID, apiInterface, providerAddress, method string)
+	RecordNodeError(chainID, apiInterface, providerAddress string, protocolMessage chainlib.ProtocolMessage)
 }
 
 // RelayStateSendInstructions struct for relay instructions

@@ -2179,9 +2179,10 @@ func (rpcss *RPCSmartRouterServer) GetChainIdAndApiInterface() (string, string) 
 }
 
 // RecordNodeError is relaycore.NodeErrorRecorder: the relay processor counts each node error it
-// meters into the router's own tally (MAG-4718).
-func (rpcss *RPCSmartRouterServer) RecordNodeError(chainID, apiInterface, providerAddress, method string) {
-	rpcss.relayErrors.RecordNodeError(chainID, apiInterface, providerAddress, method)
+// meters into the router's own tally (MAG-4718), under the request's name as relay_end gives it
+// (relayAnswerMethod, MAG-5422).
+func (rpcss *RPCSmartRouterServer) RecordNodeError(chainID, apiInterface, providerAddress string, protocolMessage chainlib.ProtocolMessage) {
+	rpcss.relayErrors.RecordNodeError(chainID, apiInterface, providerAddress, relayAnswerMethod(protocolMessage, apiInterface))
 }
 
 func (rpcss *RPCSmartRouterServer) ProcessRelaySend(ctx context.Context, protocolMessage chainlib.ProtocolMessage, analytics *metrics.RelayMetrics) (*relaycore.RelayProcessor, error) {
@@ -6350,7 +6351,8 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		silentThroughWindow := relayTimeout > 0 && relayLatency >= relayTimeout
 		if !routerHealthCheck && chainlib.GetStateful(chainMessage) != common.CONSISTENCY_SELECT_ALL_PROVIDERS &&
 			isProtocolFailure(rpcss.directRelayTransport(directConnection), err, isClientCancel, budgetExpired, silentThroughWindow) {
-			rpcss.relayErrors.RecordProtocolError(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointName, chainMessage.GetApi().Name)
+			rpcss.relayErrors.RecordProtocolError(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointName,
+				relayEndMethod(chainMessage.GetApi().Name, requestNamedByURL(rpcss.listenEndpoint.ApiInterface, originalRequestData)))
 		}
 
 		// Apply health tracking based on error classification.
@@ -6792,7 +6794,7 @@ func (rpcss *RPCSmartRouterServer) watchCrossValidationStragglers(ctx context.Co
 			ChainID:         chainId,
 			ApiInterface:    apiInterface,
 			RequestID:       crossValidationRequestID(ctx),
-			Method:          apiName,
+			Method:          relayEndMethod(apiName, relayEndNamedByURL(protocolMessage, apiInterface)),
 			ProviderAddress: straggler.ProviderAddress,
 			ProviderGroup:   group,
 			Outcome:         straggler.Outcome,
@@ -6969,7 +6971,7 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 					ChainID:         chainId,
 					ApiInterface:    apiInterface,
 					RequestID:       requestID,
-					Method:          apiName,
+					Method:          relayEndMethod(apiName, relayEndNamedByURL(protocolMessage, apiInterface)),
 					ProviderAddress: outlier.ProviderInfo.ProviderAddress,
 					ProviderGroup:   group,
 					// A reply-time content outlier is by construction a dissent: crossValidationSuccessOutliers
