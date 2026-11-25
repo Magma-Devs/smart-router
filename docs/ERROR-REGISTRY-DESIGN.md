@@ -57,7 +57,7 @@ Errors returned by the blockchain node itself (not execution/state errors).
 | **Generic Node Errors (2000-2099)** |||||
 | 2001 | `NODE_METHOD_NOT_FOUND` | Node reports the method is not on its surface; another provider may serve it (SubCategoryNodeCapability, MAG-2771) | Yes | JSON-RPC -32601 |
 | 2002 | `NODE_METHOD_NOT_SUPPORTED` | Method exists but is DISABLED on this specific node (provider tier / policy / admin config), or a part of it is, such as the pending block tag (MAG-5021). Retryable on a different provider (SubCategoryNodeCapability) | Yes | JSON-RPC -32004 / MessageContains("method not supported" / "pending state is not supported") |
-| 2003 | `NODE_INTERNAL_ERROR` | Internal node error | Yes | JSON-RPC -32603 |
+| 2003 | `NODE_INTERNAL_ERROR` | Internal node error. CometBFT's -32603 is read with its `data` first, and the reasons rule 3 below names get their own codes (MAG-5325) | Yes | JSON-RPC -32603 |
 | 2004 | `NODE_SERVER_ERROR` | Generic server error | Yes | JSON-RPC -32000 |
 | 2005 | `NODE_RATE_LIMITED` | Rate limited by node (SubCategoryRateLimit) | Yes | HTTP 429 / JSON-RPC code 429 / MessageContains("rate limit", "too many requests") |
 | 2006 | `NODE_SERVICE_UNAVAILABLE` | Node temporarily unavailable | Yes | HTTP 503 |
@@ -73,9 +73,10 @@ Errors returned by the blockchain node itself (not execution/state errors).
 | 2016 | `NODE_UNAUTHORIZED` | Upstream rejected router credentials (HTTP 401); another provider may serve it (SubCategoryNodeCapability, MAG-2771) | Yes | JSON-RPC and gRPC `HTTPStatusContains(401)`. A REST HTTP 401 is 2018 — see §9 |
 | 2018 | `NODE_ACCESS_DENIED` | Endpoint refused the router itself — credentials, plan or quota, WAF or IP rule, proxy auth, protocol, region | Yes | REST HTTP 401, 402, 403, 407, 426, 451 |
 | 2017 | `NODE_DATA_NOT_HELD` | Endpoint does not hold the requested data — pruned or never existed (SubCategoryDataScope) | Yes | gRPC 5, gRPC 11 |
-| 2019 | `NODE_ABORTED` | Node aborted the operation. On Sui (the only sender), the validators' answer to a submitted transaction: consensus rejection, expired status, an input object that does not exist yet, already finalized under other signatures, or another transient processing failure. Sui's own message calls it retriable with another submission, which is the client's call; not evidence against the endpoint, so not scored | No | gRPC 10 |
+| 2019 | `NODE_ABORTED` | Node aborted the operation. On Sui, the validators' answer to a submitted transaction: consensus rejection, expired status, an input object that does not exist yet, already finalized under other signatures, or another transient processing failure. Sui's own message calls it retriable with another submission, which is the client's call; not evidence against the endpoint, so not scored. CometBFT's `broadcast_tx_commit` answers the same kind with -32603 "timed out waiting for tx to be included in a block": the transaction passed CheckTx and may still land (MAG-5325) | No | gRPC 10; CometBFT -32603 commit timeout |
 | 2020 | `NODE_UNRECOGNIZED_ERROR` | GraphQL only (MAG-5121): an error the router has no row for, an error with no code or an unknown code inside a 200, or a 4xx status GraphQL's status table does not name (400, 409, 410, 413, 415, 422, ...). The router cannot tell whose mistake it is, so it asks another provider and does not blame this one; when every provider says the same, a provider's reply is served as is | Yes | GraphQL |
 | 2021 | `NODE_URL_REFUSED` | GraphQL only (MAG-5121): HTTP 404, 405 or a redirect on GraphQL's one url. Says the configured url is wrong, so every request to it fails the same way: retried and blamed on the endpoint | Yes | HTTP 404, 405, 3xx (GraphQL) |
+| 2022 | `NODE_UNLISTED_SERVER_ERROR` | REST (MAG-5490): a 5xx no status row names. A provider fault: retried and blamed. May have reached the node, like a 502 or 504 | Yes | HTTP 505–511, 528, 529, 531–599 (REST) |
 
 > **SubCategoryDataScope is no longer 2017 alone.** FAILOVER-TASKS section 2 extended it to every
 > "the answer you want is not here" code: 2012, 2013, 3201-3206, and the chain-specific not-found
@@ -105,10 +106,10 @@ Uses a **tiered classification system** (see Section 3 for details):
 | 3004 | `CHAIN_GAS_TOO_LOW` | Intrinsic gas too low | No | EVM |
 | 3005 | `CHAIN_GAS_LIMIT_EXCEEDED` | Exceeds block gas limit | No | EVM |
 | 3006 | `CHAIN_TX_UNDERPRICED` | Transaction gas price too low | No | EVM |
-| 3007 | `CHAIN_TX_ALREADY_KNOWN` | Transaction already in mempool | No | EVM, Starknet, XRP |
+| 3007 | `CHAIN_TX_ALREADY_KNOWN` | Transaction already in mempool | No | EVM, Starknet, XRP, Cosmos, Tron |
 | 3008 | `CHAIN_TX_REPLACEMENT_UNDERPRICED` | Replacement tx gas too low | No | EVM |
 | 3009 | `CHAIN_MEMPOOL_FULL` | Mempool/tx pool is full | No | EVM, Cosmos |
-| 3010 | `CHAIN_TX_TOO_LARGE` | Transaction exceeds size limit | No | EVM, Solana |
+| 3010 | `CHAIN_TX_TOO_LARGE` | Transaction exceeds size limit | No | EVM, Solana, Cosmos, Tron |
 | 3011 | `CHAIN_MAX_FEE_BELOW_BASE` | Max fee per gas below base fee | No | EVM (EIP-1559) |
 | 3012 | `CHAIN_INVALID_SEQUENCE` | Invalid sequence (Cosmos nonce equivalent) | No | Cosmos |
 | 3013 | `CHAIN_INSUFFICIENT_FEE` | Insufficient fee | No | Cosmos |
@@ -320,6 +321,8 @@ type ErrorMatcher interface {
 // MessageContains("nonce too low") — substring match in error message
 // MessageRegex(`missing.*storage`) — regex match
 // HTTPStatusEquals(429)           — HTTP status code match
+// HTTPStatusContains(429)         — a status the router wrote into the message ("HTTP 429: …"),
+//                                   never a number in the node's own text (MAG-5324)
 // GRPCCodeEquals(codes.Unavailable) — gRPC status code match
 ```
 
@@ -333,6 +336,9 @@ func DetectConnectionError(err error) *RouterError {
     // net.Error timeout check
     // String fallback for non-%w wrapped errors ("context deadline exceeded", "context canceled")
     // ECONNREFUSED via net.OpError
+    // GRPCReplyLostError: a gRPC call whose connection or stream ended after the stream to the
+    // node opened and before the node's status arrived; read before the string rows, which may
+    // name it only with a code that says the request may have reached the node (1005), else 1006
     // GRPCCallUndeliveredError: a gRPC call the router's own client failed before any stream
     // to the node was open; its text is read by the layers above first, and what no row
     // names lands on PROTOCOL_PROVIDER_UNAVAILABLE (1012)
@@ -343,12 +349,29 @@ func DetectConnectionError(err error) *RouterError {
 
 A gRPC status needs the wrapper because grpc-go words a connection it could not use as `UNAVAILABLE`, the code a node also sends when it is shutting down; the code alone cannot tell the two apart. `routersession.GRPCDirectRPCConnection` reads the stream instead (`grpc.Peer` is set only once a stream to the node is open) and wraps the status in `GRPCCallUndeliveredError` when there was none, so a refused gRPC dial disables its endpoint as `unreachable`, as a refused JSON-RPC dial does. A node's own `UNAVAILABLE` arrives on an open stream and stays `NODE_SERVICE_UNAVAILABLE` (2006).
 
+An open stream is not enough on its own: grpc-go also writes `UNAVAILABLE` when the connection breaks during the call ("error reading from server: ... connection reset by peer"). The connection's stats handler records whether the node's status frame arrived (`common.GRPCStatusFrame`). When it did not, a status grpc-go writes for a broken call (`UNAVAILABLE`, a stream reset, a stream closed without a status) is wrapped in `GRPCReplyLostError`: no reply, `PROTOCOL_CONNECTION_RESET` (1005) or `PROTOCOL_CONNECTION_CLOSED` (1006), so another provider is asked, the endpoint is counted, and a write it carried may have run (MAG-5130). A status that names `ENHANCE_YOUR_CALM` is not wrapped: a server asking the router to slow down, by a stream reset or by a GOAWAY before it closed the connection, stays a rate limit, and the endpoint is held off, not counted. The wrapper's text has the socket's addresses replaced. A gateway's non-gRPC HTTP reply stays a reply. When no provider answered, the gRPC listener replies `UNAVAILABLE` (`DEADLINE_EXCEEDED` when a provider timed out and none answered) with "no provider answered the request" and the guid in `router-guid`, never the transport error.
+
 ### Matching Rules
 
 1. **`GenericErrorMappings` is evaluated in declaration order — first match wins.** Matchers MUST be ordered most-specific first. A broader matcher placed before a narrower one will shadow it silently.
 2. **Safety nets (required in Phase 1):**
    - **Shadow detection test:** A unit test that iterates every pair of matchers and fails if a broader matcher appears before a narrower one it would shadow.
    - **Real-world fixture tests:** A `testdata/` directory containing actual error responses captured from each node client (Geth, Erigon, Nethermind, Solana validator, Bitcoin Core, etc.). Table-driven tests run every fixture through `ClassifyError` and assert the expected router error code. When a new client variant surfaces in production as `UNKNOWN_ERROR`, its message is added to the fixtures.
+3. **A JSON-RPC internal error (-32603) is read with its `data` (MAG-5325).** CometBFT answers most failures as -32603 "Internal error" with the reason in `data`, so the text classified is `common.JSONRPCErrorText`'s "Internal error: <data>", in a 2xx (the JSON-RPC and Tendermint readers, batch elements included) and under a 5xx (`ExtractNodeErrorDetails`). Every other code keeps its message alone, so a revert's hex `data` never reaches the message rows. CometBFT's rows run before the -32603 row on the JSON-RPC table, by CometBFT's own sentences, on every chain family: 28 of the 48 chains that serve Tendermint RPC have no Cosmos SDK family. They read a sentence only where the readers write it (at the start of the text, behind "HTTP <status>: ", or at the start of a batch element), and only under -32603 or under the HTTP status a batch or the sender's status pass is classified with. A text the revert row reads as a revert is left to it: a reply under any other code keeps its verdict.
+
+   | `data` (cometbft v0.38) | Code |
+   | --- | --- |
+   | `tx already exists in cache` | 3007 `CHAIN_TX_ALREADY_KNOWN` |
+   | `mempool is full: …`, `mempool is still rechecking …` | 3009 `CHAIN_MEMPOOL_FULL` |
+   | `Tx too large. Max size is …` | 3010 `CHAIN_TX_TOO_LARGE` |
+   | `tx pre check: tx size is too big: …` | 3010 `CHAIN_TX_TOO_LARGE` |
+   | `height N is not available, lowest height is M` | 3204 `CHAIN_STATE_PRUNED` |
+   | `height N must be less than or equal to the current blockchain height M` | 3201 `CHAIN_BLOCK_NOT_FOUND` |
+   | `tx (HASH) not found` | 3202 `CHAIN_TX_NOT_FOUND` |
+   | `timed out waiting for tx to be included in a block` | 2019 `NODE_ABORTED` |
+   | anything else | 2003 `NODE_INTERNAL_ERROR`, as before |
+
+   `broadcast_tx_commit` prefixes a mempool refusal with `error on broadcastTxCommit: `; the rows allow it. A batch is classified with its HTTP status for a code. A row anchored on an element's "Internal error: " gives an element's internal error with a sentence above the verdict it gets alone; with any other data it keeps main's batch verdict, `UNKNOWN_ERROR`, and the data reaches no row after it. A batch's text joins its elements' messages, which may echo the caller, so that row blames no endpoint.
 
 ### Mapping Registration
 
@@ -652,7 +675,8 @@ _Blocked on protocol upgrade: sdkerrors carry ABCI codes used in the gRPC wire f
 | **TON** | Partial — TVM exit codes + custom HTTP | Yes (3 codes) | Lite-server timeout retryable, message expired retryable |
 | **Aptos** | Partial — custom REST error format | No (generic codes sufficient) | Error format differs but semantics map to generic codes |
 | **Stellar** | Yes — typed error URIs + result_codes | No (generic codes sufficient) | REST-based, HTTP codes sufficient for retry decisions |
-| **Cosmos SDK** | Standard — tx_response.code | No (generic codes sufficient) | Standard patterns, well-covered by generic tier |
+| **Cosmos SDK** | Standard — tx_response.code | No (generic codes sufficient) | Standard patterns, well-covered by generic tier. A broadcast refusal is classified by its code (§10) |
+| **Tron** | Partial — a broadcast's response code inside a 200 | No (generic codes sufficient) | §10 |
 
 ## 9. REST replies: any status outside 2xx is a node error
 
@@ -666,8 +690,11 @@ and a bad address as a 500, the sidecar a missing block hash as a 500. Every one
 node answering "no". Investigation evidence is recorded in MAG-3972, MAG-3974 and MAG-3976.
 
 So `RestMessage.CheckResponseError` treats **every status outside 2xx as a node error** (a 429
-keeps its rate-limit handling; a 2xx is a success unless its body carries a Cosmos transaction
-error; a status of 0 is "not set" and reads as a success). The body travels to the caller
+keeps its rate-limit handling; a 2xx is a success unless it answers a stateful write, or a
+`POST /cosmos/tx/v1beta1/txs` that the chain's spec does not list, with a Cosmos transaction error —
+a read's `tx_response.code`, such as a GET of a transaction that ran out of gas, is the
+transaction's record and not a node error (MAG-5326); a status of 0 is "not set" and reads as a
+success). The body travels to the caller
 unchanged. What "node error" changes is the same as on JSON-RPC:
 
 - A write broadcast keeps waiting for a sibling's success instead of taking the first refusal
@@ -727,9 +754,10 @@ The generic REST rows, for every chain:
 | `413` | `USER_REQUEST_TOO_LARGE` | no | no |
 | `422` | `USER_INVALID_PARAMS` | no | no |
 | `429` | `NODE_RATE_LIMITED` | yes | no (capacity) |
-| `500` `503` `520`–`530`, otherwise | `NODE_INTERNAL_ERROR` / `NODE_SERVICE_UNAVAILABLE` / `NODE_SERVER_ERROR` | yes | **yes** |
+| `500` `503` `520`–`527` `530`, otherwise | `NODE_INTERNAL_ERROR` / `NODE_SERVICE_UNAVAILABLE` / `NODE_SERVER_ERROR` | yes | **yes** |
 | `501` | `NODE_UNIMPLEMENTED` | yes | no (node-capability) |
 | `502` `504` | `NODE_BAD_GATEWAY` / `NODE_GATEWAY_TIMEOUT` | yes | yes |
+| any other `5xx` (`505`–`511`, `528`, `529`, `531`–`599`) | `NODE_UNLISTED_SERVER_ERROR` (2022) | yes | yes |
 | no row (including every `3xx`) | `UNKNOWN_ERROR` | yes | no, but **scored** by the availability gate |
 
 Two rules hold the "at fault" column together:
@@ -764,6 +792,13 @@ stays "unclear". Blame and retry are unchanged by this step — the status rows 
 them. Since MAG-4481 a read that fails on that old path still reaches the client as the node's own
 status and body; only a write whose outcome is unclear gets the router's 500.
 
+An attempt that fails on that path is recorded (the coded log line, the error metric, relay_end's
+`error_code`, the unclear-write check) by `relaycore`'s `setErrorResponse`, which reads the error's
+text, `HTTP 507 Insufficient Storage`, on the gRPC table. Those text rows name only the statuses
+`httpStatusRows` lists, so on REST a status they leave as `UNKNOWN_ERROR` is read by its status on
+the table above instead: a `505`–`599` is recorded as `NODE_UNLISTED_SERVER_ERROR`, as the sender
+files it, and its `MayHaveReachedNode` keeps a write answered with one "unclear" (MAG-5490).
+
 ### 9.3 Decisions taken in review
 
 Raised on PR #448 and settled there. Recorded because each one is a place where the obvious
@@ -795,7 +830,10 @@ reading was the wrong one.
 ### 9.4 Not covered by this rule, on purpose
 
 - Tron and TON report errors inside a 200 body (`{"Error":…}`, `{"code":"SIGERROR"}`,
-  `{"ok":false}`) and need a body check per chain family — §5 step 2, a separate decision.
+  `{"ok":false}`) and need a body check per chain family — §5 step 2, a separate decision. Tron's
+  broadcast refusal (`{"code":"SIGERROR"}` on `/wallet/broadcasttransaction` and
+  `/wallet/broadcasthex`) is read since MAG-5323 (§10); `{"Error":…}` and TON's `{"ok":false}` are
+  not. TON's `/sendBoc` refuses with a 500, which this section already reads.
 - An empty or non-JSON **2xx** is still served as the answer and still ends a broadcast
   (MAG-3971). The fix site is the sender's existing malformed-2xx guard, not
   `CheckResponseError`, which cannot see whether the request is a write.
@@ -803,3 +841,66 @@ reading was the wrong one.
   node's reply (MAG-4060).
 - Cross-validation counts only successes toward a quorum, so on a REST interface under a CV
   policy identical not-found answers no longer form one. No tenant runs CV on REST today.
+
+## 10. A broadcast refused inside a success (MAG-5323)
+
+Four write paths answer a refused transaction with HTTP 200 or gRPC OK. Read as a success, the
+refusal ended a stateful broadcast whenever it arrived first, while another node took the
+transaction. Each is now a node error, read on its request only (the method or path, never the
+chain), as XRPL's submit is (MAG-4033):
+
+| Path | Refusal | Not a refusal |
+| --- | --- | --- |
+| Tendermint RPC `broadcast_tx_sync` | `result.code` ≠ 0 | |
+| Tendermint RPC `broadcast_tx_commit` | `result.check_tx.code` ≠ 0 | `result.tx_result.code` ≠ 0: the transaction ran |
+| gRPC `cosmos.tx.v1beta1.Service/BroadcastTx` | `tx_response.code` ≠ 0 at height 0 | a height: `BROADCAST_MODE_BLOCK` (before SDK v0.47), the transaction ran |
+| Tron `/wallet/broadcasttransaction`, `/wallet/broadcasthex` | `result` false or absent, with a `code` other than `SUCCESS` | |
+| REST `POST /cosmos/tx/v1beta1/txs` | `tx_response.code` ≠ 0 at height 0 | a height: `BROADCAST_MODE_BLOCK` (before SDK v0.47), the transaction ran; a GET of a transaction |
+
+`broadcast_tx_async` answers before CheckTx and is not read. A Tendermint batch keeps the batch rule.
+
+The reader writes the message the registry classifies: `cosmos tx refused: code <code>, codespace
+<codespace>: <log>` and `tron tx refused: <code>: <message>`. Their rows are Tier-1 on the
+transports the readers run on (CANTO serves Cosmos interfaces and is an EVM chain), and the Cosmos
+rows also open the CosmosSDK Tier-2 list, so the code decides before a log's words. Each set ends
+in a catch-all, so a refusal is never `UNKNOWN_ERROR`, which is retried and scored.
+
+| Refusal | Code | At fault |
+| --- | --- | --- |
+| Cosmos `sdk` 32 | `CHAIN_INVALID_SEQUENCE` | no |
+| Cosmos `sdk` 19 | `CHAIN_TX_ALREADY_KNOWN` | no |
+| Cosmos `sdk` 13 | `CHAIN_INSUFFICIENT_FEE` | no |
+| Cosmos `sdk` 5 | `CHAIN_INSUFFICIENT_FUNDS` | no |
+| Cosmos `sdk` 4 | `CHAIN_INVALID_SIGNATURE` | no |
+| Cosmos `sdk` 9 | `CHAIN_ACCOUNT_NOT_FOUND` | no |
+| Cosmos `sdk` 11 | `CHAIN_OUT_OF_GAS` | no |
+| Cosmos `sdk` 20 | `CHAIN_MEMPOOL_FULL` | no |
+| Cosmos `sdk` 21 | `CHAIN_TX_TOO_LARGE` | no |
+| any other Cosmos code or codespace | `CHAIN_TX_REJECTED` | no |
+| Tron `SIGERROR` | `CHAIN_INVALID_SIGNATURE` | no |
+| Tron `DUP_TRANSACTION_ERROR` | `CHAIN_TX_ALREADY_KNOWN` | no |
+| Tron `TOO_BIG_TRANSACTION_ERROR` | `CHAIN_TX_TOO_LARGE` | no |
+| Tron `BANDWITH_ERROR` | `CHAIN_INSUFFICIENT_FUNDS` | no |
+| Tron `SERVER_BUSY` | `NODE_RATE_LIMITED` (held off) | no |
+| Tron `NOT_ENOUGH_EFFECTIVE_CONNECTION` with "P2P broadcast failed." | `CHAIN_TX_ALREADY_KNOWN` | no |
+| Tron `NO_CONNECTION`, any other `NOT_ENOUGH_EFFECTIVE_CONNECTION` | `NODE_SERVICE_UNAVAILABLE` | **yes** |
+| any other Tron code | `CHAIN_TX_REJECTED` | no |
+
+A refusal about the transaction is no fault of the node, though some are the node's own view of it:
+a lagging node's sequence (32), its minimum gas price (13), its mempool (19, 20). It neither resets
+the endpoint's failure count nor adds to it, and it is never an availability failure. It closes the
+session as an answer, as every non-retryable node error does, so on Tron, whose broadcasts are not
+hanging apis, it still gives the optimizer an availability sample with the refusal's latency. Only a
+refusal that comes after a sibling's acceptance is released without a score. A Tron node with too
+few peers broadcasts nothing, which is its health, as XRPL's `noNetwork` is. "P2P broadcast failed."
+is not that: java-tron sends it after it took the transaction into its pending pool, when every peer
+had already announced the transaction, so the node holds it and is not blamed. Every refusal sets
+`router-identified-node-error: true` when it reaches the client, and is counted in
+`smartrouter_errors_total` under its code. A gRPC refusal is the node's protobuf message, so it is
+not redacted: a rewritten string would break it.
+
+A Cosmos REST `POST /cosmos/tx/v1beta1/txs` refusal was already a node error to the relay processor
+(§9). The sender now flags it too, and it is classified by its code, because the `raw_log` alone is
+empty on some refusals (MAG-5451). A GET of a transaction that was included and failed answers the
+same shape. It is the answer, an error to neither the relay processor nor the sender (§9, MAG-5326).
+

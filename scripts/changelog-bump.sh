@@ -39,7 +39,7 @@ set -euo pipefail
 
 # Smart-router initial-import commit. Used as the "since" marker for the
 # first release after v0.0.0-alpha is deleted, so the changelog does not
-# walk into the imported lavanet/lava upstream history.
+# walk into the imported upstream history.
 FORK_BASE="10a450617b7ee6d1aff724030f3a55b60a694533"
 
 REPO_URL="${REPO_URL:-https://github.com/magma-Devs/smart-router}"

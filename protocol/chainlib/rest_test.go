@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,6 +22,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
+	specutils "github.com/magma-Devs/smart-router/utils/keeper"
 	"github.com/magma-Devs/smart-router/utils/rand"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -57,7 +59,7 @@ func TestRestChainProxy(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprint(w, `{"block": { "header": {"height": "244591"}}}`)
 	})
-	chainParser, chainProxy, chainFetcher, closeServer, _, err := CreateChainLibMocks(ctx, "LAVA", spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
+	chainParser, chainProxy, chainFetcher, closeServer, _, err := CreateChainLibMocks(ctx, "COSMOSHUB", spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 	require.NoError(t, err)
 	require.NotNil(t, chainParser)
 	require.NotNil(t, chainProxy)
@@ -88,7 +90,7 @@ func TestParsingRequestedBlocksHeadersRest(t *testing.T) {
 			fmt.Fprint(w, `{"block": { "header": {"height": "244591"}}}`)
 		}
 	})
-	chainParser, chainRouter, _, closeServer, _, err := CreateChainLibMocks(ctx, "LAVA", spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
+	chainParser, chainRouter, _, closeServer, _, err := CreateChainLibMocks(ctx, "COSMOSHUB", spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 	require.NoError(t, err)
 	defer func() {
 		if closeServer != nil {
@@ -158,7 +160,7 @@ func TestSettingRequestedBlocksHeadersRest(t *testing.T) {
 		}
 		fmt.Fprint(w, `{"block": { "header": {"height": "244591"}}}`)
 	})
-	chainParser, chainRouter, _, closeServer, _, err := CreateChainLibMocks(ctx, "LAVA", spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
+	chainParser, chainRouter, _, closeServer, _, err := CreateChainLibMocks(ctx, "COSMOSHUB", spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 	require.NoError(t, err)
 	defer func() {
 		if closeServer != nil {
@@ -216,7 +218,7 @@ func TestSettingRequestedBlocksHeadersRest(t *testing.T) {
 }
 
 func TestRegexParsing(t *testing.T) {
-	chainParser, _, _, closeServer, _, err := CreateChainLibMocks(context.Background(), "LAVA", spectypes.APIInterfaceRest, nil, nil, "../../", nil)
+	chainParser, _, _, closeServer, _, err := CreateChainLibMocks(context.Background(), "COSMOSHUB", spectypes.APIInterfaceRest, nil, nil, "../../", nil)
 	require.NoError(t, err)
 	defer func() {
 		if closeServer != nil {
@@ -225,8 +227,8 @@ func TestRegexParsing(t *testing.T) {
 	}()
 	for _, api := range []string{
 		"/cosmos/staking/v1beta1/delegations/",
-		"/lavanet/lava/pairing/provider/lava@1e9ma89h83azrfnqqy0u255zqxq0xluza6ydf9n/",
-		"/lavanet/lava/pairing/provider/lava@1e9ma89h83azrfnqqy0u255zqxq0xluza6ydf9n/ETH1",
+		"/cosmos/distribution/v1beta1/delegators/cosmos1e9ma89h83azrfnqqy0u255zqxq0xluza6ydf9n/rewards/",
+		"/cosmos/distribution/v1beta1/delegators/cosmos1e9ma89h83azrfnqqy0u255zqxq0xluza6ydf9n/rewards/cosmosvaloper1e9ma89h83azrfnqqy0u255zqxq0xluzaq8wk3d",
 	} {
 		_, err := chainParser.ParseMsg(api, nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 		require.NoError(t, err)
@@ -234,8 +236,8 @@ func TestRegexParsing(t *testing.T) {
 	// A trailing slash is optional: the spec names this api without one, and the request
 	// resolves to it rather than falling through to the synthetic Default- api.
 	for api, expectedApiName := range map[string]string{
-		"/cosmos/staking/v1beta1/delegations/lava@17ym998u666u8w2qgjd5m7w7ydjqmu3mlgl7ua2":  "/cosmos/staking/v1beta1/delegations/{delegator_addr}",
-		"/cosmos/staking/v1beta1/delegations/lava@17ym998u666u8w2qgjd5m7w7ydjqmu3mlgl7ua2/": "/cosmos/staking/v1beta1/delegations/{delegator_addr}",
+		"/cosmos/staking/v1beta1/delegations/cosmos17ym998u666u8w2qgjd5m7w7ydjqmu3mlgl7ua2":  "/cosmos/staking/v1beta1/delegations/{delegator_addr}",
+		"/cosmos/staking/v1beta1/delegations/cosmos17ym998u666u8w2qgjd5m7w7ydjqmu3mlgl7ua2/": "/cosmos/staking/v1beta1/delegations/{delegator_addr}",
 	} {
 		chainMessage, err := chainParser.ParseMsg(api, nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 		require.NoError(t, err)
@@ -343,7 +345,7 @@ func TestRestChainListener_HealthPathNeverReachesTheRelay(t *testing.T) {
 			require.NoError(t, err)
 			endpoint := &routersession.RPCEndpoint{
 				NetworkAddress:  "127.0.0.1:0",
-				ChainID:         "LAV1",
+				ChainID:         "COSMOSHUB",
 				ApiInterface:    "rest",
 				HealthCheckPath: healthPath,
 			}
@@ -434,7 +436,7 @@ func TestRestChainListener_RelaysTheBodyOfMethodsThatCarryOne(t *testing.T) {
 	require.NoError(t, err)
 	endpoint := &routersession.RPCEndpoint{
 		NetworkAddress:  "127.0.0.1:0",
-		ChainID:         "LAV1",
+		ChainID:         "COSMOSHUB",
 		ApiInterface:    "rest",
 		HealthCheckPath: common.DEFAULT_HEALTH_PATH,
 	}
@@ -499,7 +501,7 @@ func TestRestListener_UndeclaredVerbIs501OnEveryHandler(t *testing.T) {
 	require.NoError(t, err)
 	listener := NewRestChainListener(ctx, &routersession.RPCEndpoint{
 		NetworkAddress:  "127.0.0.1:0",
-		ChainID:         "LAV1",
+		ChainID:         "COSMOSHUB",
 		ApiInterface:    "rest",
 		HealthCheckPath: common.DEFAULT_HEALTH_PATH,
 	}, &restRefusingRelayStub{}, alwaysHealthyReporter{}, logger)
@@ -525,4 +527,69 @@ func TestRestListener_UndeclaredVerbIs501OnEveryHandler(t *testing.T) {
 			require.Equal(t, http.StatusNotImplemented, resp.StatusCode, "%s: %s", method, body)
 		})
 	}
+}
+
+// cosmosHubRESTParser is COSMOSHUB's REST parser from the bundled specs. Without listBroadcast, the
+// spec loses POST /cosmos/tx/v1beta1/txs, as THORCHAIN's lists no broadcast today (its REST POST
+// collection names decode, encode and simulate only), and the broadcast is relayed as an unlisted
+// read (defaultApiContainer).
+func cosmosHubRESTParser(t *testing.T, listBroadcast bool) ChainParser {
+	t.Helper()
+	spec, err := specutils.GetSpecFromLocalDirs([]string{"../../specs/"}, "COSMOSHUB")
+	require.NoError(t, err)
+	if !listBroadcast {
+		dropped := 0
+		for _, collection := range spec.ApiCollections {
+			if collection.CollectionData.ApiInterface != spectypes.APIInterfaceRest || collection.CollectionData.Type != http.MethodPost {
+				continue
+			}
+			collection.Apis = slices.DeleteFunc(collection.Apis, func(api *spectypes.Api) bool {
+				if api.Name == "/cosmos/tx/v1beta1/txs" {
+					dropped++
+					return true
+				}
+				return false
+			})
+		}
+		require.Equal(t, 1, dropped, "COSMOSHUB lists the broadcast once")
+	}
+	parser, err := NewChainParser(spectypes.APIInterfaceRest)
+	require.NoError(t, err)
+	parser.SetSpec(spec)
+	return parser
+}
+
+// A POST to Cosmos SDK's broadcast path is the broadcast, whose tx_response.code is the node's verdict
+// on the transaction, whether the spec lists it as a stateful write or not (MAG-5326). A GET of the
+// same path is the search by events, a read.
+func TestRestParseMsg_TheCosmosBroadcastPathIsABroadcast(t *testing.T) {
+	refusal := []byte(`{"tx_response":{"height":"0","txhash":"ABCDEF","codespace":"sdk","code":32,"raw_log":"account sequence mismatch"}}`)
+	listed, unlisted := cosmosHubRESTParser(t, true), cosmosHubRESTParser(t, false)
+	cases := []struct {
+		name          string
+		parser        ChainParser
+		method, path  string
+		wantBroadcast bool
+	}{
+		{"listed as a stateful write", listed, http.MethodPost, "/cosmos/tx/v1beta1/txs", true},
+		{"not listed", unlisted, http.MethodPost, "/cosmos/tx/v1beta1/txs", true},
+		{"not listed, with a trailing slash", unlisted, http.MethodPost, "/cosmos/tx/v1beta1/txs/", true},
+		{"not listed, with a query", unlisted, http.MethodPost, "/cosmos/tx/v1beta1/txs?x=1", true},
+		{"the search by events", unlisted, http.MethodGet, "/cosmos/tx/v1beta1/txs?events=tx.height%3D17", false},
+		{"another POST", unlisted, http.MethodPost, "/cosmos/tx/v1beta1/simulate", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			msg, err := tc.parser.ParseMsg(tc.path, []byte(`{"tx_bytes":"CpIB","mode":"BROADCAST_MODE_SYNC"}`), tc.method, nil, extensionslib.ExtensionInfo{})
+			require.NoError(t, err)
+			restMessage, ok := msg.GetRPCMessage().(*rpcInterfaceMessages.RestMessage)
+			require.True(t, ok)
+			require.Equal(t, tc.wantBroadcast, restMessage.Broadcast)
+			hasError, _ := msg.CheckResponseError(refusal, http.StatusOK)
+			require.Equal(t, tc.wantBroadcast, hasError, "a tx_response.code is the node's error on the broadcast only")
+		})
+	}
+	msg, err := unlisted.ParseMsg("/cosmos/tx/v1beta1/txs", nil, http.MethodPost, nil, extensionslib.ExtensionInfo{})
+	require.NoError(t, err)
+	require.True(t, strings.HasPrefix(msg.GetApi().Name, DefaultApiName), "the spec without the broadcast relays it as an unlisted read")
 }

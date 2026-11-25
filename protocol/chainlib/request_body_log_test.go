@@ -125,7 +125,7 @@ func serveWithFlags(t *testing.T, newListener newTestListener, apiInterface stri
 	require.NoError(t, err)
 	listener := newListener(ctx, &routersession.RPCEndpoint{
 		NetworkAddress:  "127.0.0.1:0",
-		ChainID:         "LAV1",
+		ChainID:         "COSMOSHUB",
 		ApiInterface:    apiInterface,
 		HealthCheckPath: common.DEFAULT_HEALTH_PATH,
 	}, relay, logger)

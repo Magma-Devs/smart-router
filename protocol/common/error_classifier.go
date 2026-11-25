@@ -6,11 +6,14 @@ import (
 	"io"
 	"net"
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
+	"google.golang.org/grpc/status"
 )
 
 // ---------------------------------------------------------------------------
@@ -59,7 +62,9 @@ var chainErrorMappings = map[ChainFamily][]errorMapping{
 		{MessageContains("double spend"), RouterErrorChainDoubleSpend},
 		{MessageContains("txn-mempool-conflict"), RouterErrorChainDoubleSpend}, // Bitcoin Core specific
 	},
-	ChainFamilyCosmosSDK: {
+	// A refused broadcast's code decides first (cosmosTxRefusalRows): its log is free text, and the
+	// rows below would otherwise read it.
+	ChainFamilyCosmosSDK: slices.Concat(cosmosTxRefusalRows, []errorMapping{
 		// Cosmos SDK transaction errors. These must be Tier-2 (not Tier-1)
 		// because "insufficient fee" also collides with Starknet's dedicated
 		// CHAIN_STARKNET_INSUFFICIENT_FEE (code 53) which is handled in the
@@ -72,7 +77,7 @@ var chainErrorMappings = map[ChainFamily][]errorMapping{
 		// Generic Tier-1 doesn't carry this matcher because EVM uses different
 		// phrasing and would false-match contract calls against unfunded addresses.
 		{MessageContains("account not found"), RouterErrorChainAccountNotFound},
-	},
+	}),
 	ChainFamilyStarknet: {
 		// Source: Starknet JSON-RPC spec error codes
 		{CodeEquals(1), RouterErrorChainStarknetFailedToReceiveTx},
@@ -249,6 +254,124 @@ func chainInterfaceVerdict(table map[ChainFamily]map[TransportType][]errorMappin
 }
 
 // ---------------------------------------------------------------------------
+// A node's refusal of a broadcast transaction, inside an ordinary reply (MAG-5323, MAG-5451)
+// ---------------------------------------------------------------------------
+//
+// Tendermint RPC's broadcast_tx_sync and broadcast_tx_commit, Cosmos gRPC's BroadcastTx, Cosmos
+// REST's POST /cosmos/tx/v1beta1/txs, and Tron's /wallet/broadcasttransaction and
+// /wallet/broadcasthex answer a refused transaction with HTTP 200 or gRPC OK. rpcInterfaceMessages
+// flags those replies and writes a message that starts with what the node said, through
+// CosmosTxRefusalMessage and TronTxRefusalMessage, and the rows below classify that message. Each
+// set ends in a catch-all, so a flagged refusal is never UNKNOWN_ERROR: that is retryable and
+// scored by the availability gate, which would blame a node for a client's re-sent transaction.
+//
+// The readers are chosen by the request (the method, the path), not by the chain, so the rows are
+// Tier-1 on the transports those readers run on: CANTO serves Cosmos interfaces and is an EVM
+// chain. The Cosmos rows also open the CosmosSDK Tier-2 list, where they must come before the rows
+// that read a log's words. Anchored on a prefix no node writes, they match nothing else.
+
+// cosmosTxRefusalPrefix starts every message CosmosTxRefusalMessage writes.
+const cosmosTxRefusalPrefix = "cosmos tx refused: code "
+
+// CosmosTxRefusalMessage is the message a Cosmos node's refusal of a broadcast transaction is
+// classified by: its ABCI code, its codespace, and its log, which a refusal the SDK converts from a
+// CometBFT error (tx already in mempool, mempool is full, tx too large) does not have.
+//
+//	cosmos tx refused: code 32, codespace sdk: account sequence mismatch, expected 7, got 6: incorrect account sequence
+func CosmosTxRefusalMessage(codespace string, code uint32, log string) string {
+	message := cosmosTxRefusalPrefix + strconv.FormatUint(uint64(code), 10)
+	if codespace != "" {
+		message += ", codespace " + codespace
+	}
+	if log != "" {
+		message += ": " + log
+	}
+	return message
+}
+
+// sdkTxRefused matches CosmosTxRefusalMessage's message for one code of the Cosmos SDK's own
+// codespace, sdk, with or without the direct-RPC sender's "HTTP <status>: " prefix.
+func sdkTxRefused(code uint32) ErrorMatcher {
+	return MessageRegex(`^(?:HTTP \d+: )?` + regexp.QuoteMeta(cosmosTxRefusalPrefix+strconv.FormatUint(uint64(code), 10)+", codespace sdk") + `(?::|$)`)
+}
+
+// cosmosTxRefusalRows classify a refused Cosmos transaction by its code (cosmos-sdk
+// types/errors/errors.go). A broadcast's code is CheckTx's, so it comes from the ante handler, or
+// from the SDK's conversion of a CometBFT error. Each is about the transaction or the chain, never
+// the node's health, so every row is a non-retryable chain error that keeps the availability gate
+// off the node. Some are the node's own view of the transaction: a lagging node's sequence (32),
+// its minimum gas price (13), its mempool (19, 20); the registry already answers "mempool is full"
+// with CHAIN_MEMPOOL_FULL, not at fault.
+var cosmosTxRefusalRows = []errorMapping{
+	{sdkTxRefused(32), RouterErrorChainInvalidSequence},  // ErrWrongSequence: account sequence mismatch
+	{sdkTxRefused(19), RouterErrorChainTxAlreadyKnown},   // ErrTxInMempoolCache: tx already in mempool
+	{sdkTxRefused(13), RouterErrorChainInsufficientFee},  // ErrInsufficientFee
+	{sdkTxRefused(5), RouterErrorChainInsufficientFunds}, // ErrInsufficientFunds
+	{sdkTxRefused(4), RouterErrorChainInvalidSignature},  // ErrUnauthorized: signature verification failed
+	{sdkTxRefused(9), RouterErrorChainAccountNotFound},   // ErrUnknownAddress: the signer's account does not exist
+	{sdkTxRefused(11), RouterErrorChainOutOfGas},         // ErrOutOfGas, in the ante handler
+	{sdkTxRefused(20), RouterErrorChainMempoolFull},      // ErrMempoolIsFull
+	{sdkTxRefused(21), RouterErrorChainTxTooLarge},       // ErrTxTooLarge
+	// Any other code, of any codespace: a module's own refusal, a timeout height, a bad memo.
+	{MessageRegex(`^(?:HTTP \d+: )?` + regexp.QuoteMeta(cosmosTxRefusalPrefix) + `\d`), RouterErrorChainTxRejected},
+}
+
+// tronTxRefusalPrefix starts every message TronTxRefusalMessage writes.
+const tronTxRefusalPrefix = "tron tx refused: "
+
+// TronTxRefusalMessage is the message a Tron node's refusal of a broadcast transaction is classified
+// by: its response code (java-tron's Return.response_code) and its message.
+//
+//	tron tx refused: SIGERROR: Validate signature error: miss sig or contract
+func TronTxRefusalMessage(code, message string) string {
+	if message == "" {
+		return tronTxRefusalPrefix + code
+	}
+	return tronTxRefusalPrefix + code + ": " + message
+}
+
+// tronTxRefused matches TronTxRefusalMessage's message for any of the given response codes, with or
+// without the direct-RPC sender's "HTTP <status>: " prefix.
+func tronTxRefused(codes ...string) ErrorMatcher {
+	return MessageRegex(`^(?:HTTP \d+: )?` + regexp.QuoteMeta(tronTxRefusalPrefix) + `(?:` + strings.Join(codes, "|") + `)(?::|$)`)
+}
+
+// tronTxRefusedSaying matches TronTxRefusalMessage's message for one response code and one exact
+// message, with or without the direct-RPC sender's "HTTP <status>: " prefix.
+func tronTxRefusedSaying(code, message string) ErrorMatcher {
+	return MessageRegex(`^(?:HTTP \d+: )?` + regexp.QuoteMeta(TronTxRefusalMessage(code, message)) + `$`)
+}
+
+// tronTxRefusalRows classify a refused Tron transaction by its response code. java-tron checks the
+// node before the transaction:
+//   - NO_CONNECTION, NOT_ENOUGH_EFFECTIVE_CONNECTION: the node has too few peers to broadcast
+//     anything. That is the node's health, as XRPL's noNetwork is: retried elsewhere, and at fault.
+//   - SERVER_BUSY: too many transactions pending. Healthy but busy, as XRPL's tooBusy: held off,
+//     not scored, and nothing was broadcast.
+//
+// One NOT_ENOUGH_EFFECTIVE_CONNECTION comes after the transaction instead: "P2P broadcast failed."
+// java-tron sends it once pushTransaction has taken the transaction into the node's pending pool,
+// when no peer still needed it from this node, because each had already announced it
+// (Wallet.broadcastTransaction, AdvService.fastBroadcastTransaction). The node and its peers hold
+// the transaction, which is what a node sees when another node of the same broadcast spread it
+// first. That is neither the node's health nor a refusal: it is read as a transaction already known.
+//
+// Every other code is about the transaction, the same from every node, and keeps the availability
+// gate off the node: a bad signature, a transaction already known, one too big, an account that
+// cannot pay for its bandwidth, and, through the catch-all, CONTRACT_VALIDATE_ERROR,
+// CONTRACT_EXE_ERROR, TAPOS_ERROR, TRANSACTION_EXPIRATION_ERROR, BLOCK_UNSOLIDIFIED and OTHER_ERROR.
+var tronTxRefusalRows = []errorMapping{
+	{tronTxRefusedSaying("NOT_ENOUGH_EFFECTIVE_CONNECTION", "P2P broadcast failed."), RouterErrorChainTxAlreadyKnown},
+	{tronTxRefused("NO_CONNECTION", "NOT_ENOUGH_EFFECTIVE_CONNECTION"), RouterErrorNodeServiceUnavailable},
+	{tronTxRefused("SERVER_BUSY"), RouterErrorNodeRateLimited},
+	{tronTxRefused("SIGERROR"), RouterErrorChainInvalidSignature},
+	{tronTxRefused("DUP_TRANSACTION_ERROR"), RouterErrorChainTxAlreadyKnown},
+	{tronTxRefused("TOO_BIG_TRANSACTION_ERROR"), RouterErrorChainTxTooLarge},
+	{tronTxRefused("BANDWITH_ERROR"), RouterErrorChainInsufficientFunds}, //nolint:misspell // java-tron's spelling
+	{MessageRegex(`^(?:HTTP \d+: )?` + regexp.QuoteMeta(tronTxRefusalPrefix)), RouterErrorChainTxRejected},
+}
+
+// ---------------------------------------------------------------------------
 // Tier 1: Generic error mappings, partitioned by transport type.
 // Evaluated in declaration order — first match wins.
 // Matchers MUST be ordered most-specific first.
@@ -273,6 +396,33 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 		{CodeAndMessage(-32600, "unsupported method"), RouterErrorNodeMethodNotSupported},
 		{CodeEquals(-32600), RouterErrorUserInvalidRequest},
 		{CodeEquals(-32602), RouterErrorUserInvalidParams},
+		// CometBFT's -32603 "Internal error", by the reason in its data (MAG-5325; cometbft v0.38
+		// mempool/errors.go, rpc/core). None is the endpoint failing: the transaction is a
+		// duplicate, too big, or met a full mempool; the height or transaction is outside what
+		// this node holds, and another node may hold it; or the transaction passed CheckTx and was
+		// not committed within the node's timeout, which says nothing of the node and leaves the
+		// transaction able to land (NODE_ABORTED, as Sui's answer of the same kind). Any other
+		// data stays NODE_INTERNAL_ERROR below.
+		{cometBFTInternalError(`tx already exists in cache`), RouterErrorChainTxAlreadyKnown},
+		{cometBFTInternalError(`mempool is (?:full|still rechecking)`), RouterErrorChainMempoolFull},
+		{cometBFTInternalError(`Tx too large\. Max size is`), RouterErrorChainTxTooLarge},
+		// The mempool's pre-check against the block's data size (mempool.PreCheckMaxBytes, set from the
+		// consensus params, so every node of the chain says the same).
+		{cometBFTInternalError(`tx pre check: tx size is too big`), RouterErrorChainTxTooLarge},
+		{cometBFTInternalError(`height \d+ is not available, lowest height is`), RouterErrorChainStatePruned},
+		{cometBFTInternalError(`height \d+ must be less than or equal to the current blockchain height`), RouterErrorChainBlockNotFound},
+		{cometBFTInternalError(`tx \([0-9A-Fa-f]*\) not found`), RouterErrorChainTxNotFound},
+		{cometBFTInternalError(`timed out waiting for tx to be included in a block`), RouterErrorNodeAborted},
+		// A batch is classified with its HTTP status for a code, so the -32603 row below never
+		// reaches an element, and on main a batch's internal error was UNKNOWN_ERROR: retried, and
+		// not the endpoint's fault. An element's internal error whose data no row above reads keeps
+		// that verdict, and its data reaches no message row after this one. Not NODE_INTERNAL_ERROR:
+		// a batch joins its elements' texts, and an element that echoes what the caller sent can
+		// write this row's words, so the row must not blame anyone. Anchored on an element's start,
+		// so a 4xx's status pass ("HTTP 413: ...") still reaches its status row; a single reply's
+		// own JSON-RPC code skips it, and so does a revert, which the revert row below reads first
+		// (batchElementInternalError).
+		{batchElementInternalError(), RouterErrorUnknown},
 		{CodeEquals(-32603), RouterErrorNodeInternalError},
 
 		// EIP-1474 server error codes
@@ -624,8 +774,8 @@ func grpcProviderFaultMappings() []errorMapping {
 // httpStatusRows is the one list of HTTP error statuses the registry knows, with the verdict each
 // row form gives it. byCode is the CodeEquals verdict, appended to the REST table only (see init),
 // where the error code is the HTTP status itself. byMessage is the HTTPStatusContains verdict,
-// for a status that reaches the classifier as digits in the message (e.g. "HTTP status 429"); every
-// transport gets it. The two agree except on 401 and 404, which split on purpose.
+// for a status the router wrote into the message (e.g. "HTTP 429: …"), never one in the node's own
+// text (MAG-5324); every transport gets it. The two agree except on 401 and 404, which split on purpose.
 var httpStatusRows = []struct {
 	status    int
 	byCode    *RouterError
@@ -675,7 +825,7 @@ func httpStatusCodeMappings() []errorMapping {
 }
 
 // httpStatusMessageMappings returns HTTPStatusContains matchers for common HTTP error status codes.
-// These match status codes appearing as substrings in error messages (e.g., "HTTP status 429").
+// These match a status the router wrote into an error message (e.g., "HTTP 429: …").
 func httpStatusMessageMappings() []errorMapping {
 	mappings := make([]errorMapping, 0, len(httpStatusRows))
 	for _, row := range httpStatusRows {
@@ -688,11 +838,22 @@ func httpStatusMessageMappings() []errorMapping {
 // any reader can observe the map, so the runtime invariant ("read-only after
 // package init") holds. Do not add mutations outside this function.
 func init() {
+	// A broadcast's refusal opens the table of each transport its reader runs on: Tendermint RPC
+	// (JSON-RPC) and gRPC for Cosmos, REST for Cosmos and Tron. Their messages start with a prefix no
+	// node writes, so they shadow no row below, and first, no row below reads the node's free text.
+	genericErrorMappings[TransportJsonRPC] = slices.Concat(cosmosTxRefusalRows, genericErrorMappings[TransportJsonRPC])
+	genericErrorMappings[TransportGRPC] = slices.Concat(cosmosTxRefusalRows, genericErrorMappings[TransportGRPC])
+	genericErrorMappings[TransportREST] = slices.Concat(cosmosTxRefusalRows, tronTxRefusalRows, genericErrorMappings[TransportREST])
+
 	// Append shared HTTP status message matchers to JSON-RPC transport
 	genericErrorMappings[TransportJsonRPC] = append(genericErrorMappings[TransportJsonRPC], httpStatusMessageMappings()...)
 
-	// Append both CodeEquals and HTTPStatusContains matchers to REST transport
+	// Append both CodeEquals and HTTPStatusContains matchers to REST transport, with a 5xx no
+	// status row names between them: every 5xx but 501 is a provider fault (rulebook Part V 3.1 P8),
+	// and a 505 or a 599 was UNKNOWN_ERROR, recorded as nobody's fault (MAG-5490). It follows the
+	// CodeEquals rows, so a listed 5xx keeps its own verdict.
 	genericErrorMappings[TransportREST] = append(genericErrorMappings[TransportREST], httpStatusCodeMappings()...)
+	genericErrorMappings[TransportREST] = append(genericErrorMappings[TransportREST], errorMapping{CodeInRange(500, 599), RouterErrorNodeUnlistedServerError})
 	genericErrorMappings[TransportREST] = append(genericErrorMappings[TransportREST], httpStatusMessageMappings()...)
 
 	// Append HTTPStatusContains matchers to gRPC transport — HTTP status codes can appear
@@ -949,6 +1110,20 @@ func DetectConnectionError(err error) *RouterError {
 	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 		return RouterErrorConnectionClosed
 	}
+	// A gRPC call whose connection ended after the request went out and before the node's status
+	// came back (MAG-5130). Read before the string table: the request may have reached the node,
+	// so only a row that says so may name it, never one for a connection that never opened.
+	var lost *GRPCReplyLostError
+	if errors.As(err, &lost) {
+		msg := strings.ToLower(err.Error())
+		if strings.Contains(msg, "rst_stream") {
+			return RouterErrorConnectionReset
+		}
+		if le := detectConnectionErrorFromString(msg); le != nil && le.MayHaveReachedNode {
+			return le
+		}
+		return RouterErrorConnectionClosed
+	}
 
 	// Layer 2: string fallback for errors wrapped without %w.
 	if le := detectConnectionErrorFromString(strings.ToLower(err.Error())); le != nil {
@@ -994,7 +1169,8 @@ func DetectConnectionError(err error) *RouterError {
 // dial disable its endpoint as `unreachable`, as a refused JSON-RPC dial does, rather than as
 // `node-error` through the registry's row for a node-sent UNAVAILABLE.
 type GRPCCallUndeliveredError struct {
-	// Err is the status grpc-go returned, kept for logs and for the text rows above.
+	// Err is the status grpc-go returned, or the error that kept the connection from being set
+	// up, kept for logs and for the text rows above.
 	Err error
 }
 
@@ -1004,6 +1180,42 @@ func (e *GRPCCallUndeliveredError) Error() string {
 
 // Unwrap keeps the gRPC status reachable, so status.FromError and errors.Is still see it.
 func (e *GRPCCallUndeliveredError) Unwrap() error { return e.Err }
+
+// GRPCReplyLostError marks a gRPC status the router's own client produced after the call reached
+// the node: the stream was open, then the connection or the stream ended before the node's status
+// arrived (MAG-5130). No node answered, so it is "no reply", a connection fault like a reset on
+// JSON-RPC, never the node's answer. The request may have reached the node, so a write it carried
+// may have run.
+//
+// grpc-go words such a status with the socket's addresses ("read tcp <router>-><node>: ..."). They
+// are replaced before the status is kept, so neither the client nor a log line built from the error
+// gets them.
+type GRPCReplyLostError struct {
+	// Err is grpc-go's status, its message without addresses.
+	Err error
+}
+
+// NewGRPCReplyLostError wraps grpc-go's status for a call the node never answered.
+func NewGRPCReplyLostError(err error) *GRPCReplyLostError {
+	st := status.Convert(err)
+	return &GRPCReplyLostError{Err: status.Error(st.Code(), RedactSocketAddresses(st.Message()))}
+}
+
+func (e *GRPCReplyLostError) Error() string {
+	return "gRPC call ended before the node answered: " + e.Err.Error()
+}
+
+// Unwrap keeps the gRPC status reachable, so status.FromError still sees it.
+func (e *GRPCReplyLostError) Unwrap() error { return e.Err }
+
+// socketAddressInText is an IP address in a socket error, with its port when it has one: IPv4,
+// or IPv6 in brackets, the way Go's net package writes a connection's two ends.
+var socketAddressInText = regexp.MustCompile(`\[[0-9A-Fa-f:.%]*:[0-9A-Fa-f:.%]*\](?::\d+)?|\b\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?\b`)
+
+// RedactSocketAddresses replaces each IP address in text, and its port, with "[address]".
+func RedactSocketAddresses(text string) string {
+	return socketAddressInText.ReplaceAllString(text, "[address]")
+}
 
 // stringConnectionFallback is one row of the string-fallback table used by
 // detectConnectionErrorFromString. The first matching row wins, so ordering

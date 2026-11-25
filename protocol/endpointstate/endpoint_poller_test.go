@@ -55,7 +55,7 @@ func TestBlockNumRequestBody(t *testing.T) {
 // and returns the real response payload.
 func TestEndpointPoller_CustomMessage_POSTDelegatesToConnection(t *testing.T) {
 	const (
-		url        = "https://solana.lava.build:443/"
+		url        = "https://solana.example.com:443/"
 		svmRequest = `{"jsonrpc":"2.0","id":1,"method":"getLatestBlockhash","params":[{"commitment":"finalized"}]}`
 		svmResp    = `{"jsonrpc":"2.0","id":1,"result":{"context":{"slot":100},"value":{"blockhash":"abc","lastValidBlockHeight":42}}}`
 	)
@@ -104,7 +104,7 @@ func TestEndpointMonitor_ForcesBlocksToSave1ForSolana(t *testing.T) {
 		{"SOLANAT", 1, "Solana testnet uses the same SVMChainTracker"},
 		{"KOII", 1, "KOII is a Solana fork — same chain tracker family"},
 		{"ETH", 10, "EVM chains keep the caller-requested blocksToSave"},
-		{"LAVA", 10, "non-SVM chains keep the caller-requested blocksToSave"},
+		{"COSMOSHUB", 10, "non-SVM chains keep the caller-requested blocksToSave"},
 	} {
 		t.Run(tc.chainID, func(t *testing.T) {
 			m := NewEndpointMonitor(ctx, EndpointChainTrackerConfig{
@@ -127,7 +127,7 @@ func TestEndpointMonitor_ForcesBlocksToSave1ForSolana(t *testing.T) {
 // a QoS penalty, instead of being pre-empted by a latched health bit.)
 func TestEndpointPoller_CustomMessage_PropagatesMissingConnection(t *testing.T) {
 	fetcher := NewEndpointPoller(
-		&routersession.Endpoint{NetworkAddress: "https://solana.lava.build:443/", Enabled: true},
+		&routersession.Endpoint{NetworkAddress: "https://solana.example.com:443/", Enabled: true},
 		nil, // no direct connection
 		nil,
 		"SOLANA",

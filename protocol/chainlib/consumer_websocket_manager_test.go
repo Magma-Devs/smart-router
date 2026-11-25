@@ -15,7 +15,7 @@ import (
 // successful eth_unsubscribe / unsubscribe echoes the caller's JSON-RPC id
 // verbatim (per spec §4.2) and returns result:true. Without the synthesized
 // reply, clients hang on recv() until they time out (~15s) because provider
-// relays do not surface an unsubscribe ack frame. Mirrors lavanet/lava#2296.
+// relays do not surface an unsubscribe ack frame.
 func TestBuildUnsubscribeSuccessReply(t *testing.T) {
 	cases := []struct {
 		name string
