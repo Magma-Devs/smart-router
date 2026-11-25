@@ -682,8 +682,11 @@ and a bad address as a 500, the sidecar a missing block hash as a 500. Every one
 node answering "no". Investigation evidence is recorded in MAG-3972, MAG-3974 and MAG-3976.
 
 So `RestMessage.CheckResponseError` treats **every status outside 2xx as a node error** (a 429
-keeps its rate-limit handling; a 2xx is a success unless its body carries a Cosmos transaction
-error; a status of 0 is "not set" and reads as a success). The body travels to the caller
+keeps its rate-limit handling; a 2xx is a success unless it answers a stateful write, or a
+`POST /cosmos/tx/v1beta1/txs` that the chain's spec does not list, with a Cosmos transaction error —
+a read's `tx_response.code`, such as a GET of a transaction that ran out of gas, is the
+transaction's record and not a node error (MAG-5326); a status of 0 is "not set" and reads as a
+success). The body travels to the caller
 unchanged. What "node error" changes is the same as on JSON-RPC:
 
 - A write broadcast keeps waiting for a sibling's success instead of taking the first refusal
@@ -876,5 +879,5 @@ not redacted: a rewritten string would break it.
 A Cosmos REST `POST /cosmos/tx/v1beta1/txs` refusal was already a node error to the relay processor
 (§9). The sender now flags it too, and it is classified by its code, because the `raw_log` alone is
 empty on some refusals (MAG-5451). A GET of a transaction that was included and failed answers the
-same shape; it keeps its old flag and its `raw_log` message (MAG-5326).
+same shape. It is the answer, an error to neither the relay processor nor the sender (§9, MAG-5326).
 
