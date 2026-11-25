@@ -36,12 +36,42 @@ func longBodyWithRunesAtTheCuts() (body, logged string) {
 	return a + "€" + strings.Repeat("b", 100) + "€" + c, a + "...truncated..." + c
 }
 
+// longProtobufBodyWithRunesAtTheCuts is longBodyWithRunesAtTheCuts for the gRPC listener, which
+// refuses a body that is not a protobuf message. Every byte is still printable: the body is a run of
+// length-delimited fields, each a tag 'z' (field 15), a one-byte length and its value, and the runes
+// at the cuts sit inside one field's value.
+func longProtobufBodyWithRunesAtTheCuts() (body, logged string) {
+	head, tail := relayMsgLogMaxChars-relayMsgLogMaxChars/3, relayMsgLogMaxChars/3
+	// fields fills size bytes with fields of 34 to 128 bytes, so each length is printable.
+	fields := func(size int, filler string) string {
+		var out strings.Builder
+		for size > 0 {
+			field := min(size, 128)
+			if rest := size - field; rest > 0 && rest < 34 {
+				field = size - 34
+			}
+			out.WriteString("z" + string(rune(field-2)) + strings.Repeat(filler, field-2))
+			size -= field
+		}
+		return out.String()
+	}
+	runes := "€" + strings.Repeat("b", 100) + "€"
+	// The field holding the runes starts two bytes before the head's cut, so its first rune spans it.
+	suffix := fields(tail-2, "c")
+	body = fields(head-3, "a") + "z" + string(rune(len(runes))) + runes + suffix
+	return body, body[:head-1] + "...truncated..." + suffix
+}
+
 func TestRelayBodyForLog(t *testing.T) {
 	body, logged := longBodyWithRunesAtTheCuts()
 	require.Equal(t, logged, relayBodyForLog(body, false))
 	require.True(t, utf8.ValidString(relayBodyForLog(body, false)))
 	require.Equal(t, body, relayBodyForLog(body, true), "--debug-relays logs the whole body")
 	require.Equal(t, `{"id":1}`, relayBodyForLog(`{"id":1}`, false), "a short body is logged whole")
+
+	body, logged = longProtobufBodyWithRunesAtTheCuts()
+	require.NoError(t, validProtobufWireFormat([]byte(body)))
+	require.Equal(t, logged, relayBodyForLog(body, false))
 }
 
 // failingRelay fails every request, so a listener writes its request line and then its failure
@@ -95,7 +125,7 @@ func serveWithFlags(t *testing.T, newListener newTestListener, apiInterface stri
 	require.NoError(t, err)
 	listener := newListener(ctx, &routersession.RPCEndpoint{
 		NetworkAddress:  "127.0.0.1:0",
-		ChainID:         "LAV1",
+		ChainID:         "COSMOSHUB",
 		ApiInterface:    apiInterface,
 		HealthCheckPath: common.DEFAULT_HEALTH_PATH,
 	}, relay, logger)
@@ -295,6 +325,11 @@ func TestListeners_LogTheBodyCutUnlessDebugRelays(t *testing.T) {
 		})
 
 		t.Run(name("grpc stream subscribe"), func(t *testing.T) {
+			// The subscribe is parsed, so its body has to be a protobuf message.
+			body, want := longProtobufBodyWithRunesAtTheCuts()
+			if debugRelays {
+				want = body
+			}
 			utils.ClearDebugLogBuffer()
 			manager := newStubGRPCSubscriptionManager()
 			manager.startErr = errors.New("no upstream answered")

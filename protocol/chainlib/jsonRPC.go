@@ -13,6 +13,7 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/websocket/v2"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
+	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
@@ -111,6 +112,10 @@ func (apip *JsonRPCChainParser) ParseMsg(url string, data []byte, connectionType
 	var blockFold requestedBlockFold
 	blockHashes := []string{}
 	parsedDefault := true
+	// This batch walk and TendermintChainParser.ParseMsg's share two blocks, an element's requested
+	// block and the batch's combined api, and stay two walks until an owner question is answered: a
+	// one-element batch gets its api's parse directive on Tendermint and none here (each parser's
+	// newBatchChainMessage). One walk would have to pick an answer.
 	for idx, msg := range msgs {
 		parsedInput := parser.NewParsedInput()
 		internalPath := ""
@@ -144,7 +149,7 @@ func (apip *JsonRPCChainParser) ParseMsg(url string, data []byte, connectionType
 		msgs[idx].BaseMessage = jsonrpcBaseMessage(metadata, settingHeaderDirective)
 		msg.BaseMessage = msgs[idx].BaseMessage
 
-		if overwriteReqBlock == "" {
+		if overwriteReqBlock == "" { //nolint:dupl // kept twin of the Tendermint batch walk; see the comment above the walk
 			// Fetch requested block, it is used for data reliability
 			parsedInput = parser.ParseBlockFromParams(msg, apiCont.api.BlockParsing, apiCont.api.Parsers)
 			if hashes, err := parsedInput.GetBlockHashes(); err == nil {
@@ -200,7 +205,7 @@ func (apip *JsonRPCChainParser) ParseMsg(url string, data []byte, connectionType
 		// not decide the batch's block at all; see requestedBlockFold (MAG-4381).
 		blockFold.add(parsedBlock, elementEarliest, parsedInput, overwriteReqBlock == "" && apiNamesNoBlock(apiCont.api))
 
-		if idx == 0 {
+		if idx == 0 { //nolint:dupl // kept twin of the Tendermint batch walk; see the comment above the walk
 			// on the first entry store them.
 			api = apiCont.api
 			apiCollection = apiCollectionForMessage
@@ -467,6 +472,11 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 type JrpcChainProxy struct {
 	BaseChainProxy
 	conn *chainproxy.Connector
+	// flattenXRPLParams is set for an XRP Ledger node over a WebSocket url. rippled and Clio read a
+	// WebSocket request's fields from its top level and ignore a nested "params", so a call sends
+	// its one params object as top-level fields, as WebSocketDirectRPCConnection does (MAG-5452).
+	// Boot and epoch verification reach a node through this proxy, not through that connection.
+	flattenXRPLParams bool
 }
 
 func NewJrpcChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint routersession.RPCProviderEndpoint, chainParser ChainParser) (ChainProxy, error) {
@@ -485,7 +495,8 @@ func NewJrpcChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint rou
 			ErrorHandler:     newNodeErrorHandler(common.TransportJsonRPC, rpcProviderEndpoint.ChainID),
 			ChainID:          rpcProviderEndpoint.ChainID,
 		},
-		conn: nil,
+		conn:              nil,
+		flattenXRPLParams: common.GetChainFamilyOrDefault(rpcProviderEndpoint.ChainID) == common.ChainFamilyXRP && IsWebSocketURL(nodeUrl.Url),
 	}
 
 	validateEndpoints(rpcProviderEndpoint.NodeUrls, spectypes.APIInterfaceJsonRPC)
@@ -514,6 +525,18 @@ func (cp *JrpcChainProxy) start(ctx context.Context, nConns uint, nodeUrl common
 
 	cp.conn = conn
 	return nil
+}
+
+// callContext sends one call over rpc. On an XRP Ledger WebSocket url (flattenXRPLParams) a call
+// with one params object sends that object's fields at the top level of the message; every other
+// call goes out as CallContext builds it.
+func (cp *JrpcChainProxy) callContext(ctx context.Context, rpc *rpcclient.Client, id []byte, method string, params interface{}, isJsonRPC, strict bool) (*rpcclient.JsonrpcMessage, error) {
+	if cp.flattenXRPLParams {
+		if fields, ok := rpcInterfaceMessages.FlattenXRPLWebSocketParams(params); ok {
+			return rpc.CallContextFlat(ctx, id, method, fields)
+		}
+	}
+	return rpc.CallContext(ctx, id, method, params, isJsonRPC, strict)
 }
 
 func (cp *JrpcChainProxy) sendBatchMessage(ctx context.Context, nodeMessage *rpcInterfaceMessages.JsonrpcBatchMessage, chainMessage ChainMessageForSend) (relayReply *RelayReplyWrapper, err error) {

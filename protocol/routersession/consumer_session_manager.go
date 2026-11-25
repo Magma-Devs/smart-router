@@ -539,13 +539,16 @@ func (csm *ConsumerSessionManager) UpdateAllProviders(epoch uint64, pairingList 
 	// TODO: we can block updating until some of the probing is done, this can prevent failed attempts on epoch change when we have no information on the providers,
 	// and all of them are new (less effective on big pairing lists or a process that runs for a few epochs)
 
+	// The pairing generation this update writes, under csm.lock below. The release pass is tied to
+	// it, so it reads and clears only the set this update carried over.
+	var generation uint64
 	defer func() {
 		// run this after done updating pairing
 		time.Sleep(time.Duration(rand.Intn(500)) * time.Millisecond) // sleep up to 500ms in order to scatter different chains probe triggers
 		go func() {
 			ctx := context.Background()
 			// Check re-blocked providers from previous epoch and unblock if healthy
-			csm.checkAndUnblockHealthyReBlockedProviders(ctx, epoch)
+			csm.checkAndUnblockHealthyReBlockedProviders(ctx, epoch, generation)
 		}()
 	}()
 	previousEpoch := csm.atomicReadCurrentEpoch()
@@ -717,6 +720,7 @@ func (csm *ConsumerSessionManager) UpdateAllProviders(epoch uint64, pairingList 
 
 	csm.lastPairingUpdate = time.Now()
 	csm.pairingGeneration++
+	generation = csm.pairingGeneration
 
 	// The pairing inventory is the answer to "why was the primary not even a candidate?". A pool
 	// that never contained a provider and one that dropped it look identical from the selection
@@ -781,7 +785,7 @@ type EndpointWithDirectConnection struct {
 // the primary pairing and the backup provider list. This is used by the smart router for
 // initializing ChainTrackers on startup — excluding backups left their endpoints without a
 // tracker until a relay happened to hit them (rare, because backups are fallback-only),
-// which meant dedicated-URL backups like base.lava.build had no block data on the dashboard.
+// which meant dedicated-URL backups like base.example.com had no block data on the dashboard.
 // Returns empty slice if no direct RPC endpoints are configured.
 //
 // NOT a silent filter on reachability (MAG-2622 chased this as a suspect and it was not the
@@ -1045,7 +1049,7 @@ func (csm *ConsumerSessionManager) probeProvider(ctx context.Context, consumerSe
 				Latency:  relayLatency,
 				Endpoint: endpointAndConnection.endpoint,
 			})
-			// public lava address is a value that is not changing, so it's thread safe
+			// public address is a value that is not changing, so it's thread safe
 			if DebugProbesEnabled() {
 				utils.FormatDebug("Probed provider successfully", utils.Attribute{Key: "latency", Value: relayLatency}, utils.Attribute{Key: "provider", Value: consumerSessionsWithProvider.PublicAddress})
 			}
@@ -1155,8 +1159,9 @@ func (csm *ConsumerSessionManager) probeDirectRPCEndpoints(
 }
 
 // csm needs to be locked here
-// setValidAddressesToDefaultValue refills validAddresses from the pairing and drops the whole
-// regular blocked list at once.
+// setValidAddressesToDefaultValue refills validAddresses from the pairing and drops the regular
+// blocked list at once: the whole list for the default collection, and for an add-on or extension
+// only the providers that serve it.
 //
 // route names who is doing it — the pool-empty last resort, an operator reset, or an epoch rebuild.
 // This is the bulk counterpart to logProviderReleased: one line naming every address released
@@ -1165,15 +1170,26 @@ func (csm *ConsumerSessionManager) probeDirectRPCEndpoints(
 //
 // Backup blocks are NOT touched here, so their reason records deliberately survive.
 //
-// One caveat on the line it logs: with a non-empty addon the branch below APPENDS only the providers
-// that support that addon rather than replacing the list, so a released provider that does not
-// support it is out of the blocked list but not back in validAddresses. The line names it as
-// released, which is true of the blocked list and overstates it as routing. Pre-existing limbo, not
-// introduced here.
+// With a non-empty addon or extensions the branch below APPENDS only the providers that serve them,
+// so only those leave the blocked list. Releasing the rest as well left each of them neither valid
+// nor blocked until the next pairing rebuild: out of routing even once healthy, out of the blocked
+// count and the last-chance walk while still dead, and back in the pool at the next epoch with no
+// block carried over (MAG-5078).
 func (csm *ConsumerSessionManager) setValidAddressesToDefaultValue(addon string, extensions []string, ctx context.Context, route ReleaseRoute) {
 	released := csm.currentlyBlockedProviderAddresses
-	csm.currentlyBlockedProviderAddresses = make([]string, 0) // reset currently blocked provider addresses
-	// Emptied first, then the records: releaseBlockRecordLocked answers "is this provider still
+	stillBlocked := make([]string, 0)
+	if addon != "" || len(extensions) > 0 {
+		released = make([]string, 0, len(csm.currentlyBlockedProviderAddresses))
+		for _, address := range csm.currentlyBlockedProviderAddresses {
+			if provider := csm.pairing[address]; provider != nil && provider.IsSupportingAddon(addon) && provider.IsSupportingExtensions(extensions, ctx) {
+				released = append(released, address)
+			} else {
+				stillBlocked = append(stillBlocked, address)
+			}
+		}
+	}
+	csm.currentlyBlockedProviderAddresses = stillBlocked
+	// The list first, then the records: releaseBlockRecordLocked answers "is this provider still
 	// blocked anywhere", and it has to see the store as it now is. A provider whose BACKUP block
 	// still stands keeps its record — deleting it here would leave a genuinely blocked provider with
 	// no reason, absent from the gauge, and eventually released with no log line.
@@ -1814,7 +1830,7 @@ func (csm *ConsumerSessionManager) getSessionWithProviderOrError(ctx context.Con
 			// A pinned request must never fall through to a provider the caller did not ask for, so
 			// neither the backup tier nor the blocked-provider walk applies here. But an empty pool
 			// still has to give the pinned provider back, as the old top-of-GetSessions reset did:
-			// without this, lava-select-provider stops resolving the moment every provider is
+			// without this, router-select-provider stops resolving the moment every provider is
 			// blocked, even though the pinned provider is sitting in that blocked list. Only that
 			// provider comes back; the rest of the list stands (MAG-4731).
 			if released, ok := csm.releaseBlockedProvidersIfPoolEmpty(ctx, wantedProviderNumber, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, internalPath, stateful, virtualEpoch, stickiness, selectedProvider, minGroups, perGroupTarget); ok {
@@ -1848,7 +1864,7 @@ type GetSessionsOptions struct {
 	// request right now (usablePreferredProvider), and leaves the request to ordinary selection
 	// when it could not. Unlike a header pin it is the router's preference rather than the caller's
 	// demand: it never fails a request, never releases the blocked list, never outranks the caller's
-	// lava-select-provider or lava-stickiness, and is ignored under a group-diversity policy. It may
+	// router-select-provider or router-stickiness, and is ignored under a group-diversity policy. It may
 	// name a backup, which a header pin cannot reach. Read-your-writes pins use it (MAG-4032).
 	PreferredProvider string
 	// MinGroups > 1 makes selection fan out across at least this many distinct provider groups so a
@@ -1940,7 +1956,7 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 		stickiness = ""
 	}
 
-	// The caller's own lava-select-provider name, before a sticky claim below can fill
+	// The caller's own router-select-provider name, before a sticky claim below can fill
 	// selectedProvider. Only that name can be the caller's mistake: a refusal of it that names no
 	// provider of this router at all is marked SelectedProviderNotConfiguredError, which the
 	// listeners answer as a refused request (MAG-3800). A blocked provider, one that lacks the
@@ -2394,7 +2410,7 @@ func (csm *ConsumerSessionManager) SetConfiguredProviderNames(names []string) {
 	csm.configuredProviderNames = append([]string{}, names...)
 }
 
-// selectedProviderConfigured reports whether name, a lava-select-provider value, names a provider
+// selectedProviderConfigured reports whether name, a router-select-provider value, names a provider
 // this router is configured with: a primary or a backup, in rotation or not, in any letter case, the
 // way resolveSelectedProviderAddress matches it. With no configured list recorded, every name
 // counts as configured: an unknown answer must not tell a caller their provider does not exist in
@@ -2441,6 +2457,31 @@ func convertSelectionStatsToMetrics(stats *provideroptimizer.SelectionStats) (al
 		})
 	}
 	return allScores, rngValue
+}
+
+// warnOnSelectionStatsGap warns when the optimizer picked provider without selection stats
+// (noStats) or with stats that carry no provider scores (noScores): the provider-selected metric
+// then publishes no scores for the pick. A sticky pick and a fresh pick pass their own wording.
+func (csm *ConsumerSessionManager) warnOnSelectionStatsGap(ctx context.Context, provider string, stats *provideroptimizer.SelectionStats, addon string, extensions []string, noStats, noScores string) {
+	switch {
+	case stats == nil:
+		utils.FormatWarning(noStats, nil,
+			utils.LogAttr("provider", provider),
+			utils.LogAttr("chainId", csm.rpcEndpoint.ChainID),
+			utils.LogAttr("addon", addon),
+			utils.LogAttr("extensions", extensions),
+			utils.LogAttr("GUID", ctx),
+		)
+	case len(stats.UpstreamScores) == 0:
+		utils.FormatWarning(noScores, nil,
+			utils.LogAttr("provider", provider),
+			utils.LogAttr("selectedProvider", stats.SelectedProvider),
+			utils.LogAttr("chainId", csm.rpcEndpoint.ChainID),
+			utils.LogAttr("addon", addon),
+			utils.LogAttr("extensions", extensions),
+			utils.LogAttr("GUID", ctx),
+		)
+	}
 }
 
 // resolveSelectedProviderAddress maps a header-supplied provider name onto the address
@@ -2670,7 +2711,7 @@ func (csm *ConsumerSessionManager) selectProviderAddresses(ctx context.Context, 
 		// A sticky provider that already failed THIS request is not replaced (MAG-2280). The retry
 		// policy never retries a pinned request, so selection only sees this on a path nobody meant
 		// to take; falling through to ordinary selection here would be the silent substitution the
-		// pin exists to prevent. Refuse the way lava-select-provider does, and keep the session's
+		// pin exists to prevent. Refuse the way router-select-provider does, and keep the session's
 		// choice: the provider answered, it is not unusable.
 		if _, failedThisRequest := triedByThisRequest[stickysession.Provider]; failedThisRequest {
 			return nil, utils.FormatWarning(
@@ -2694,7 +2735,7 @@ func (csm *ConsumerSessionManager) selectProviderAddresses(ctx context.Context, 
 			// a provider that cannot take the relay to ignoredProvidersList and calls back here for
 			// a replacement; handing the same provider back every time would be an unbounded spin
 			// under csm.lock.RLock that pegs a core and starves the next UpdateAllProviders writer,
-			// wedging the whole chain. The lava-select-provider branch above carries the same guard.
+			// wedging the whole chain. The router-select-provider branch above carries the same guard.
 			// When the caller already holds a session (a refill after a success), it keeps that
 			// session and ignores this error.
 			if _, setAside := ignoredProvidersList[stickysession.Provider]; setAside {
@@ -2768,24 +2809,9 @@ func (csm *ConsumerSessionManager) selectProviderAddresses(ctx context.Context, 
 		}
 		// Track provider selection for metrics with all provider scores
 		if len(providers) > 0 {
-			if selectionStats == nil {
-				utils.FormatWarning("Selection stats missing for sticky session provider", nil,
-					utils.LogAttr("provider", providers[0]),
-					utils.LogAttr("chainId", csm.rpcEndpoint.ChainID),
-					utils.LogAttr("addon", addon),
-					utils.LogAttr("extensions", extensions),
-					utils.LogAttr("GUID", ctx),
-				)
-			} else if len(selectionStats.UpstreamScores) == 0 {
-				utils.FormatWarning("Selection stats missing provider scores for sticky session", nil,
-					utils.LogAttr("provider", providers[0]),
-					utils.LogAttr("selectedProvider", selectionStats.SelectedProvider),
-					utils.LogAttr("chainId", csm.rpcEndpoint.ChainID),
-					utils.LogAttr("addon", addon),
-					utils.LogAttr("extensions", extensions),
-					utils.LogAttr("GUID", ctx),
-				)
-			}
+			csm.warnOnSelectionStatsGap(ctx, providers[0], selectionStats, addon, extensions,
+				"Selection stats missing for sticky session provider",
+				"Selection stats missing provider scores for sticky session")
 			allScores, rngValue := convertSelectionStatsToMetrics(selectionStats)
 			csm.consumerMetricsManager.SetProviderSelected(csm.rpcEndpoint.ChainID, csm.rpcEndpoint.ApiInterface, providers[0], allScores, rngValue)
 		}
@@ -2805,24 +2831,9 @@ func (csm *ConsumerSessionManager) selectProviderAddresses(ctx context.Context, 
 				csm.setSelectionStats(selectionStats)
 			}
 			// Track provider selection for metrics with all provider scores
-			if selectionStats == nil {
-				utils.FormatWarning("Selection stats missing for provider selection", nil,
-					utils.LogAttr("provider", provider[0]),
-					utils.LogAttr("chainId", csm.rpcEndpoint.ChainID),
-					utils.LogAttr("addon", addon),
-					utils.LogAttr("extensions", extensions),
-					utils.LogAttr("GUID", ctx),
-				)
-			} else if len(selectionStats.UpstreamScores) == 0 {
-				utils.FormatWarning("Selection stats missing provider scores", nil,
-					utils.LogAttr("provider", provider[0]),
-					utils.LogAttr("selectedProvider", selectionStats.SelectedProvider),
-					utils.LogAttr("chainId", csm.rpcEndpoint.ChainID),
-					utils.LogAttr("addon", addon),
-					utils.LogAttr("extensions", extensions),
-					utils.LogAttr("GUID", ctx),
-				)
-			}
+			csm.warnOnSelectionStatsGap(ctx, provider[0], selectionStats, addon, extensions,
+				"Selection stats missing for provider selection",
+				"Selection stats missing provider scores")
 			allScores, rngValue := convertSelectionStatsToMetrics(selectionStats)
 			for _, providerAddr := range provider {
 				ignoredProvidersListCopy[providerAddr] = struct{}{}
@@ -3258,7 +3269,7 @@ func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProvider(ctx cont
 	var providerAddresses []string
 	if minGroups > 1 {
 		// A group-diversity policy (an operator mandate) needs >= minGroups distinct provider groups,
-		// which is fundamentally incompatible with a single-provider directive: lava-select-provider
+		// which is fundamentally incompatible with a single-provider directive: router-select-provider
 		// and a sticky session each pin selection to exactly ONE provider (getValidProviderAddresses
 		// returns just that address). The operator policy wins (UC-1: stricter validation regardless
 		// of what the caller asked).
@@ -3474,10 +3485,10 @@ func (csm *ConsumerSessionManager) removeAddressFromValidAddresses(address strin
 			csm.sortBlockedProviderListByCuServed()
 			provider, ok := csm.pairing[addr]
 			if ok {
+				// Published here, not from a goroutine: a goroutine could land after a later release's
+				// publication and leave the provider reading blocked while it serves (MAG-4919).
 				info := csm.RPCEndpoint()
-				go func(networkAddress string, chainId string, apiInterface string, providerAddress string) {
-					csm.consumerMetricsManager.SetBlockedProvider(chainId, apiInterface, providerAddress, networkAddress, true)
-				}(provider.Endpoints[0].NetworkAddress, info.ChainID, info.ApiInterface, addr)
+				csm.consumerMetricsManager.SetBlockedProvider(info.ChainID, info.ApiInterface, addr, provider.Endpoints[0].NetworkAddress, true)
 			}
 			return nil
 		}
@@ -3807,7 +3818,7 @@ func (csm *ConsumerSessionManager) releaseWithAvailabilityFailure(consumerSessio
 		//     provider that worked an hour ago and is failing everything now was never caught.
 		//     Concurrent in-flight requests inflate the same total, switching it off on a busy
 		//     router, and the epoch rebuild resets it every 15 minutes anyway.
-		//   - The second chance was not a health mechanism. It came from Lava, where reporting a
+		//   - The second chance was not a health mechanism. It came from the upstream provider-relay protocol, where reporting a
 		//     provider filed an on-chain unresponsiveness complaint against an operator with staked
 		//     collateral; the 3 minutes existed so a brief restart could not cost them money. This
 		//     product submits that list nowhere, so the penalty it deferred does not exist.
@@ -3874,9 +3885,7 @@ func (csm *ConsumerSessionManager) validateAndReturnBlockedProviderToValidAddres
 			if provider, ok := csm.pairing[providerAddress]; ok {
 				info := csm.RPCEndpoint()
 				provider.atomicWriteBlockedStatus(BlockedProviderSessionUnusedStatus)
-				go func(networkAddress string, chainId string, apiInterface string, providerAddress string) {
-					csm.consumerMetricsManager.SetBlockedProvider(chainId, apiInterface, providerAddress, networkAddress, false)
-				}(provider.Endpoints[0].NetworkAddress, info.ChainID, info.ApiInterface, providerAddress)
+				csm.consumerMetricsManager.SetBlockedProvider(info.ChainID, info.ApiInterface, providerAddress, provider.Endpoints[0].NetworkAddress, false)
 			}
 			if released {
 				csm.logProviderReleased(providerAddress, record, route, csm.blockedTotalLocked())
@@ -4238,7 +4247,12 @@ func (csm *ConsumerSessionManager) GenerateReconnectCallback(consumerSessionsWit
 // checkAndUnblockHealthyReBlockedProviders checks providers that were re-blocked from previous epoch
 // and immediately unblocks them if their probe was successful. This only happens at epoch transitions.
 // Other providers and normal blocking behavior during an epoch remain unchanged.
-func (csm *ConsumerSessionManager) checkAndUnblockHealthyReBlockedProviders(ctx context.Context, epoch uint64) {
+//
+// generation is the pairing generation of the UpdateAllProviders that carried the set over. A later
+// update replaces the set with its own and starts its own pass, so this pass leaves that set alone.
+// It used to clear it: a pass that had not finished when the next update came wiped the next
+// update's set, and that update's pass then released no one (MAG-4919).
+func (csm *ConsumerSessionManager) checkAndUnblockHealthyReBlockedProviders(ctx context.Context, epoch uint64, generation uint64) {
 	// Check if epoch is still current - if epoch changed, our previousEpochBlockedProviders data is stale
 	currentEpoch := csm.atomicReadCurrentEpoch()
 	if epoch != currentEpoch {
@@ -4254,10 +4268,12 @@ func (csm *ConsumerSessionManager) checkAndUnblockHealthyReBlockedProviders(ctx 
 		ctx = utils.AppendUniqueIdentifier(ctx, utils.GenerateUniqueIdentifier())
 	}
 
-	// Clean up previousEpochBlockedProviders after processing
+	// Clean up previousEpochBlockedProviders after processing, unless a later update has replaced it
 	defer func() {
 		csm.lock.Lock()
-		csm.previousEpochBlockedProviders = make(map[string]BlockRecord)
+		if csm.pairingGeneration == generation {
+			csm.previousEpochBlockedProviders = make(map[string]BlockRecord)
+		}
 		csm.lock.Unlock()
 	}()
 
@@ -4267,6 +4283,14 @@ func (csm *ConsumerSessionManager) checkAndUnblockHealthyReBlockedProviders(ctx 
 	}
 
 	csm.lock.Lock()
+	if csm.pairingGeneration != generation {
+		csm.lock.Unlock()
+		utils.FormatDebug("Skipping re-blocked provider check: a later pairing update carried its own set over",
+			utils.Attribute{Key: "generation", Value: generation},
+			utils.LogAttr("GUID", ctx),
+		)
+		return
+	}
 
 	// First pass: Identify which re-blocked providers had successful probes
 	providersNeedingComprehensiveProbe := make(map[string]reBlockedProviderInfo)
@@ -4500,7 +4524,7 @@ func (csm *ConsumerSessionManager) ResetEndpointHealth() int {
 // resetting the per-provider redemption flag.
 //
 // Why ResetTransientFailureState alone is not enough:
-// The lava-pairing-network mode relies on UpdateAllProviders firing on every
+// The pairing-network mode relies on UpdateAllProviders firing on every
 // epoch transition to repopulate validAddresses from pairingAddresses — that
 // is the only path that drains currentlyBlockedProviderAddresses without
 // stranding addresses in routing limbo. In direct-rpc mode the pairing list
@@ -4536,17 +4560,15 @@ func (csm *ConsumerSessionManager) ResetBlockedProviders() {
 	// Clear the per-provider redemption flag for every entry returned to
 	// validAddresses. blockProvider sets this to Used in the second-chance
 	// path; without resetting, future failures see a "Used" status and skip
-	// retry logic. Done outside csm.lock — atomicWriteBlockedStatus does not
-	// take csm.lock, and the metric goroutine must not hold it either.
+	// retry logic. Done outside csm.lock: atomicWriteBlockedStatus does not
+	// take csm.lock.
 	for addr, provider := range pairing {
 		if provider == nil {
 			continue
 		}
 		provider.atomicWriteBlockedStatus(BlockedProviderSessionUnusedStatus)
 		if csm.consumerMetricsManager != nil && len(provider.Endpoints) > 0 {
-			go func(networkAddress, chainID, apiInterface, providerAddress string) {
-				csm.consumerMetricsManager.SetBlockedProvider(chainID, apiInterface, providerAddress, networkAddress, false)
-			}(provider.Endpoints[0].NetworkAddress, endpoint.ChainID, endpoint.ApiInterface, addr)
+			csm.consumerMetricsManager.SetBlockedProvider(endpoint.ChainID, endpoint.ApiInterface, addr, provider.Endpoints[0].NetworkAddress, false)
 		}
 	}
 
@@ -4756,12 +4778,29 @@ func (csm *ConsumerSessionManager) stickyClaimTTL() time.Duration {
 // using the ordinary optimizer path. Held under the read lock only for the pick itself: the
 // fleet-store round trip that follows must never happen while csm.lock is held, or a slow
 // backend would stall pairing updates and provider blocking fleet-wide.
+//
+// A primary none of whose urls can take a relay (inRotation) is no candidate, blocked or not. A
+// provider joins the blocked list only once a request picks it and finds nothing to dial, so until
+// then selection still offers it, and a claim on it held the session to a dead node on every
+// replica until the claim expired, two epochs later (MAG-5078). With no candidate left this returns
+// PairingListEmptyError, and the request is served unclaimed, as during an outage of every primary.
+//
+// A session for an add-on or extension is served only by the urls that carry it (relayURLs), so a
+// primary whose plain url is up but whose urls for that scope are all out is no candidate either.
 func (csm *ConsumerSessionManager) stickyCandidate(ctx context.Context, cuNeededForSession uint64, requestedBlock int64, addon string, extensions []string, internalPath *string, stateful uint32) (string, error) {
 	csm.lock.RLock()
 	defer csm.lock.RUnlock()
+	scoped := addon != "" || len(extensions) > 0
+	outOfRotation := map[string]struct{}{}
+	for _, address := range csm.getValidAddresses(addon, extensions, ctx) {
+		provider := csm.pairing[address]
+		if provider == nil || !provider.inRotation() || (scoped && len(provider.relayURLs(addon, extensions, internalPath)) == 0) {
+			outOfRotation[address] = struct{}{}
+		}
+	}
 	// A single pick even for a write: the claim pins the whole session to the first address, so it
 	// is chosen among providers the hold-off is not holding off, as a read's provider is.
-	addresses, err := csm.selectProviderAddresses(ctx, 1, map[string]struct{}{}, nil, cuNeededForSession, requestedBlock, addon, extensions, internalPath, stateful, "", "", true)
+	addresses, err := csm.selectProviderAddresses(ctx, 1, outOfRotation, nil, cuNeededForSession, requestedBlock, addon, extensions, internalPath, stateful, "", "", true)
 	if err != nil {
 		return "", err
 	}

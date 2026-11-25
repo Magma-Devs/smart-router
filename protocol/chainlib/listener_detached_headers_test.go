@@ -100,7 +100,7 @@ func TestListeners_KeepNoHeaderPastTheRequest(t *testing.T) {
 			relay := &headerKeepingRelay{}
 			listener := tc.newListener(ctx, &routersession.RPCEndpoint{
 				NetworkAddress:  "127.0.0.1:0",
-				ChainID:         "LAV1",
+				ChainID:         "COSMOSHUB",
 				ApiInterface:    tc.apiInterface,
 				HealthCheckPath: common.DEFAULT_HEALTH_PATH,
 			}, relay, logger)

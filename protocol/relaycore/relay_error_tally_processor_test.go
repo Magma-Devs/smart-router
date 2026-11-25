@@ -14,10 +14,15 @@ import (
 )
 
 // tallyingGetter is a ChainIdAndApiInterfaceGetter that keeps the router's own node-error count,
-// as the router server does (it implements NodeErrorRecorder through the embedded tally).
+// as the router server does. It counts a request under its api name; the router names it as
+// relay_end does.
 type tallyingGetter struct{ *RelayErrorTally }
 
 func (tallyingGetter) GetChainIdAndApiInterface() (string, string) { return "testId", "testInterface" }
+
+func (g tallyingGetter) RecordNodeError(chainID, apiInterface, providerAddress string, protocolMessage chainlib.ProtocolMessage) {
+	g.RelayErrorTally.RecordNodeError(chainID, apiInterface, providerAddress, protocolMessage.GetApi().Name)
+}
 
 // MAG-4718: each node error the relay processor meters is also counted in the router's own tally,
 // under the same rule as the metric: not on a stateful request, where X-1 of X errors is normal. The
@@ -36,7 +41,7 @@ func TestRelayProcessor_CountsEachNodeErrorInTheRoutersOwnTally(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
 			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
-			chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, "LAVA", spectypes.APIInterfaceRest, handler, nil, "../../", nil)
+			chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, "COSMOSHUB", spectypes.APIInterfaceRest, handler, nil, "../../", nil)
 			if closeServer != nil {
 				defer closeServer()
 			}

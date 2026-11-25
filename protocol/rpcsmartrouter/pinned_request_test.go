@@ -17,7 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// newPinnedHarness is newStopReasonHarness with the request pinned by lava-stickiness: the real
+// newPinnedHarness is newStopReasonHarness with the request pinned by router-stickiness: the real
 // state machine and policy over the REST mock chain, with a hedge window long enough never to fire.
 func newPinnedHarness(t *testing.T) (*relaycore.RelayProcessor, *routersession.UsedProviders) {
 	t.Helper()
@@ -30,7 +30,7 @@ func newPinnedHarnessWith(t *testing.T, directives map[string]string) (*relaycor
 	serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, "LAVA", spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
+	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, "COSMOSHUB", spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 	if closeServer != nil {
 		t.Cleanup(closeServer)
 	}
@@ -44,18 +44,33 @@ func newPinnedHarnessWith(t *testing.T, directives map[string]string) (*relaycor
 	return relaycore.NewRelayProcessor(ctx, &common.DefaultCrossValidationParams, relaycoretest.RelayProcessorMetrics, relaycoretest.RelayProcessorMetrics, stateMachine), usedProviders
 }
 
-// strictPinShapes are the header sets that make a request a strict pin (MAG-4826): sticky (D1),
-// select-provider with the strict header (D3), and sticky next to select-provider (D4).
+// strictPinShapes are the header sets that make a request a strict pin (MAG-5711): sticky,
+// select-provider, select-provider whose allow-retry header is anything but "true", and sticky
+// next to select-provider, which the allow-retry header does not loosen.
 var strictPinShapes = map[string]map[string]string{
-	"sticky": {common.STICKINESS_HEADER_NAME: "ingest-42"},
-	"select-provider strict": {
-		common.SELECT_PROVIDER_HEADER_NAME:        "provider@pinned",
-		common.SELECT_PROVIDER_STRICT_HEADER_NAME: "true",
+	"sticky":          {common.STICKINESS_HEADER_NAME: "ingest-42"},
+	"select-provider": {common.SELECT_PROVIDER_HEADER_NAME: "provider@pinned"},
+	"select-provider, allow-retry false": {
+		common.SELECT_PROVIDER_HEADER_NAME:             "provider@pinned",
+		common.SELECT_PROVIDER_ALLOW_RETRY_HEADER_NAME: "false",
 	},
 	"sticky with select-provider": {
 		common.STICKINESS_HEADER_NAME:      "ingest-42",
 		common.SELECT_PROVIDER_HEADER_NAME: "provider@pinned",
 	},
+	"sticky with select-provider and allow-retry": {
+		common.STICKINESS_HEADER_NAME:                  "ingest-42",
+		common.SELECT_PROVIDER_HEADER_NAME:             "provider@pinned",
+		common.SELECT_PROVIDER_ALLOW_RETRY_HEADER_NAME: "true",
+	},
+}
+
+// allowRetrySelection is a router-select-provider the caller loosened to the first attempt only.
+func allowRetrySelection(provider string) map[string]string {
+	return map[string]string{
+		common.SELECT_PROVIDER_HEADER_NAME:             provider,
+		common.SELECT_PROVIDER_ALLOW_RETRY_HEADER_NAME: "true",
+	}
 }
 
 // A strict-pinned request whose upstream answers with a retryable node error ends there
@@ -123,17 +138,17 @@ func TestPinnedConsistencyRejection_IsTerminalAndNamesTheLag(t *testing.T) {
 }
 
 // The gate in sendRelayToDirectEndpoints returns that terminal error only for a strict pin
-// (MAG-4123, MAG-4826). Every session is far behind the chain tip, so the gate rejects them all: a
-// strict pin fails there, naming the lag, while a plain selection and an unpinned request keep
-// the error that starts a retry on a fresher node.
+// (MAG-4123, MAG-5711). Every session is far behind the chain tip, so the gate rejects them all: a
+// strict pin fails there, naming the lag, while a selection sent with the allow-retry header and
+// an unpinned request keep the error that starts a retry on a fresher node.
 func TestConsistencyGate_RejectsAStrictPinAndRetriesTheRest(t *testing.T) {
 	type gateCase struct {
 		directives map[string]string
 		strict     bool
 	}
 	cases := map[string]gateCase{
-		"plain select-provider": {map[string]string{common.SELECT_PROVIDER_HEADER_NAME: "provider@pinned"}, false},
-		"unpinned":              {nil, false},
+		"select-provider with allow-retry": {allowRetrySelection("provider@pinned"), false},
+		"unpinned":                         {nil, false},
 	}
 	for name, directives := range strictPinShapes {
 		cases[name] = gateCase{directives, true}
@@ -158,13 +173,13 @@ func TestConsistencyGate_RejectsAStrictPinAndRetriesTheRest(t *testing.T) {
 	}
 }
 
-// A plain lava-select-provider keeps its documented failover (MAG-4826 D2): the same node error
-// is retried, so the state machine asks for a second batch instead of stopping on "Pinned". So is
-// a select-provider whose strict header is anything but "true".
-func TestPinnedRequest_PlainSelectProviderRetriesANodeError(t *testing.T) {
+// A router-select-provider sent with router-select-provider-allow-retry: true keeps the failover
+// (MAG-5711): the same node error is retried, so the state machine asks for a second batch
+// instead of stopping on "Pinned". The value is read in any letter case.
+func TestPinnedRequest_SelectProviderWithAllowRetryRetriesANodeError(t *testing.T) {
 	for name, directives := range map[string]map[string]string{
-		"plain select-provider": {common.SELECT_PROVIDER_HEADER_NAME: "provider@1"},
-		"strict false":          {common.SELECT_PROVIDER_HEADER_NAME: "provider@1", common.SELECT_PROVIDER_STRICT_HEADER_NAME: "false"},
+		"allow-retry true": allowRetrySelection("provider@1"),
+		"allow-retry TRUE": {common.SELECT_PROVIDER_HEADER_NAME: "provider@1", common.SELECT_PROVIDER_ALLOW_RETRY_HEADER_NAME: "TRUE"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			relayProcessor, usedProviders := newPinnedHarnessWith(t, directives)

@@ -112,6 +112,7 @@ type relayEndAttempt struct {
 	message          string
 	nodeCode         int           // the code of the node's JSON-RPC error reply; 0 when there is none
 	grpcStatus       int           // the status of a gRPC node error; 0 when there is none
+	writeOutcome     string        // what the copy says of the transaction, on a write its chain's list reads
 	latency          time.Duration // zero when unknown
 	returnedToClient bool
 	sent             bool // went out as a dispatch, so batch and sentAfter are known
@@ -244,6 +245,9 @@ func (a *relayEndAttempt) MarshalZerologObject(event *zerolog.Event) {
 	if a.grpcStatus != 0 {
 		event.Int("grpc_status", a.grpcStatus)
 	}
+	if a.writeOutcome != "" {
+		event.Str("write_outcome", a.writeOutcome)
+	}
 	if a.errorCode != "" {
 		event.Bool("retryable", a.retryable())
 	}
@@ -350,6 +354,7 @@ func (rpcss *RPCSmartRouterServer) buildRelayEnd(ctx context.Context, in relayEn
 		dispatched = len(dispatches)
 		successes, nodeErrors, protocolErrors := in.processor.GetResultsDetail()
 		end.attempts = relayEndAttemptsOf(dispatches, in.start, successes, nodeErrors, protocolErrors, requestRanOutOfRoad(end.stopReason))
+		end.attempts.readWriteOutcomes(in.protocolMessage)
 	}
 
 	served := in.err == nil && in.result != nil && in.result.Reply != nil
@@ -477,6 +482,29 @@ func relayEndAttemptsOf(dispatched []routersession.Dispatch, start time.Time, su
 		}
 	}
 	return attempts
+}
+
+// readWriteOutcomes fills each answered attempt's write_outcome when the request is its chain's
+// write on a chain whose list reads each copy (MAG-5186): a copy that succeeded ran; a node error is
+// read by the chain's write rows. An attempt with no reply has its outcome (timeout, transport_error,
+// cancelled) and no reading.
+func (attempts relayEndAttempts) readWriteOutcomes(protocolMessage chainlib.ProtocolMessage) {
+	if protocolMessage == nil {
+		return
+	}
+	grpcMessage, ok := protocolMessage.GetRPCMessage().(*rpcInterfaceMessages.GrpcMessage)
+	if !ok || !grpcMessage.IsChainListWrite() {
+		return
+	}
+	for i := range attempts {
+		attempt := &attempts[i]
+		if attempt.reply == nil || attempt.transport {
+			continue
+		}
+		if reading, known := grpcMessage.WriteCopyOfReply(attempt.reply.Data, attempt.outcome != attemptOutcomeOK); known {
+			attempt.writeOutcome = reading.Outcome.String()
+		}
+	}
 }
 
 // retryable is the router's verdict on the attempt's error, the registry's Retryable flag the
@@ -694,15 +722,13 @@ const relayEndMethodLimit = 256
 // a value that starts with "/" as /REDACTED, which would erase every REST path. A listed name is the
 // spec's. An unlisted one is what the client sent. When the request named its api by URL, that is
 // the client's path and query, which may carry a credential the "Default-" prefix would carry past
-// the collector, so it is withheld.
+// the collector, so it is withheld, and withheld whole: a request named by URL is one request, so no
+// part of its name is another api's.
 func relayEndMethod(apiName string, namedByURL bool) string {
-	members := strings.Split(apiName, chainlib.SEP)
-	for i, member := range members {
-		if namedByURL && strings.HasPrefix(member, chainlib.DefaultApiName) {
-			members[i] = chainlib.DefaultApiName + "REDACTED"
-		}
+	if namedByURL && strings.Contains(apiName, chainlib.DefaultApiName) {
+		return chainlib.DefaultApiName + "REDACTED"
 	}
-	method := strings.TrimLeft(strings.Join(members, chainlib.SEP), "/")
+	method := strings.TrimLeft(apiName, "/")
 	if method == "" && apiName != "" {
 		// The root path. The collector rewrites a slash only when something follows it, so a lone
 		// "/" survives, and "" stays reserved for a request that did not parse.
@@ -716,19 +742,31 @@ func relayEndMethod(apiName string, namedByURL bool) string {
 // with a body as JSON-RPC, over POST or WebSocket, and one without as a URI. REST, and any interface
 // not listed here, counts as a URL, so an interface added later withholds rather than leaks.
 func relayEndNamedByURL(protocolMessage chainlib.ProtocolMessage, apiInterface string) bool {
+	var requestBody []byte
+	if apiInterface == spectypes.APIInterfaceTendermintRPC && protocolMessage != nil {
+		requestBody = protocolMessage.RelayPrivateData().GetData()
+	}
+	return requestNamedByURL(apiInterface, requestBody)
+}
+
+// requestNamedByURL is relayEndNamedByURL for a caller that holds the request's body rather than
+// its protocol message, as a relay attempt does.
+func requestNamedByURL(apiInterface string, requestBody []byte) bool {
 	switch apiInterface {
 	case spectypes.APIInterfaceJsonRPC, spectypes.APIInterfaceGraphQL, spectypes.APIInterfaceGrpc:
 		return false
 	case spectypes.APIInterfaceTendermintRPC:
-		return len(protocolMessage.RelayPrivateData().GetData()) == 0
+		return len(requestBody) == 0
 	}
 	return true
 }
 
-// relayAnswerMethod names a request on the debug answer ring (GET /debug/relay-answers) the way
-// relay_end names it: without the leading slash, an unlisted api named by URL withheld, and capped
-// at relayEndMethodLimit. The ring keeps the last few thousand answers, so the raw api name would
-// put a caller's own path on the debug route and let one entry be as long as the request.
+// relayAnswerMethod names a request on a debug route the way relay_end names it: without the
+// leading slash, an unlisted api named by URL withheld, and capped at relayEndMethodLimit. The
+// answer ring (GET /debug/relay-answers) and the relay-error tally (GET /debug/relay-errors) read
+// it, and the cross-validation events (GET /debug/cross-validation-events) apply the same rule
+// (MAG-5422). The raw api name would put a caller's own path on the route and let one entry be as
+// long as the request.
 func relayAnswerMethod(protocolMessage chainlib.ProtocolMessage, apiInterface string) string {
 	if protocolMessage == nil || protocolMessage.GetApi() == nil {
 		return ""

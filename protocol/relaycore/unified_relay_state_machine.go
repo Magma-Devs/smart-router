@@ -141,7 +141,7 @@ func NewUnifiedRelayStateMachine(
 	// methods only: a write routes as a write whatever headers arrive with it (MAG-3603).
 	cvOverride *common.CrossValidationParams,
 	// forbidCallerCrossValidation, when true, suppresses the caller-header-driven CrossValidation decision
-	// for this method: the request's lava-cross-validation-* headers are ignored entirely (not even
+	// for this method: the request's router-cross-validation-* headers are ignored entirely (not even
 	// validated) and the method routes by its normal stateful/stateless category. It is what an operator
 	// reaches for on a STATELESS method, since a write now ignores those headers on its own account
 	// (MAG-3603) and needs no policy written for it. The rpcsmartrouter layer
@@ -327,7 +327,22 @@ func (sm *UnifiedRelayStateMachine) buildDecisionInput(isTickerHedge bool) Decis
 		IsDefaultApi:   sm.protocolMessage.IsDefaultApi(),
 		Pinned:         PinnedByDirectives(sm.protocolMessage.GetDirectiveHeaders()),
 		IsGraphQLWrite: sm.selection == Stateful && isGraphQLMessage(sm.protocolMessage),
+		// The chain's own write (MAG-5186): sent to every provider at once, so Stateful too.
+		IsChainListWrite: sm.selection == Stateful && isChainListWrite(sm.protocolMessage),
 	}
+}
+
+// chainListWrite is a request that can say whether it is its chain's write on a chain whose list
+// reads each copy (rpcInterfaceMessages.GrpcMessage, MAG-5186).
+type chainListWrite interface {
+	IsChainListWrite() bool
+}
+
+// isChainListWrite reports whether protocolMessage is its chain's write on a chain whose list reads
+// each copy (MAG-5186).
+func isChainListWrite(protocolMessage chainlib.ProtocolMessage) bool {
+	write, ok := protocolMessage.GetRPCMessage().(chainListWrite)
+	return ok && write.IsChainListWrite()
 }
 
 // isGraphQLMessage reports whether protocolMessage's interface is GraphQL (MAG-5122).
@@ -338,36 +353,40 @@ func isGraphQLMessage(protocolMessage chainlib.ProtocolMessage) bool {
 
 // PinnedByDirectives reports whether the request is a strict pin: answered by one upstream or not
 // at all, never retried, hedged or rerouted by the consistency gate onto another one (MAG-2280,
-// MAG-4123). Two ways in (MAG-4826):
+// MAG-4123). Two ways in:
 //
-//   - lava-stickiness, always. A sticky session that straddles two nodes is the false gap the
+//   - router-stickiness, always. A sticky session that straddles two nodes is the false gap the
 //     header exists to prevent, and the sticky-sessions docs promise "route to the session's node,
-//     or fail". This holds whatever else the request sends, so adding lava-select-provider to a
-//     sticky request can never make it leak.
-//   - lava-select-provider with lava-select-provider-strict: true (SelectProviderStrict). A plain
-//     lava-select-provider keeps its documented behaviour: the named upstream gets the first
-//     attempt, and failover may use the rest of the pool.
+//     or fail". This holds whatever else the request sends, so adding router-select-provider, with
+//     or without router-select-provider-allow-retry, to a sticky request can never make it leak.
+//   - router-select-provider, unless the caller also sent router-select-provider-allow-retry: true
+//     (SelectProviderAllowsRetry). The header names one upstream, so that upstream answers or the
+//     request fails (MAG-5711). With the allow-retry header the selection is not a strict pin: the
+//     named upstream gets the first attempt, and failover may use the rest of the pool.
 //
 // Read from the request's ORIGINAL headers: the pin is a property of the request, not of one
 // attempt, and a message rebuilt for an archive toggle carries every directive header over
 // (metadataFromDirectiveHeaders). It must also be read here, from headers, and not from what
 // routersession selects on: routersession turns a cross-pod sticky claim into a selected provider,
-// which would otherwise look like a plain, non-strict selection. Presence of a pin header is what counts, as in
-// resolvePinDirectives. A request that cross-validation overrides is not pinned in effect, so
-// callers check the selection first.
+// and the allow-retry header must never loosen that claim. For router-stickiness the presence of
+// the header is what counts, as in resolvePinDirectives. A router-select-provider with an empty
+// value names no upstream, and selection treats it as no selection at all, so it is not a pin:
+// now that a selection is strict by default, calling it one would take the failover away from a
+// request that chose nobody. A request that cross-validation overrides is not pinned in effect,
+// so callers check the selection first.
 func PinnedByDirectives(directiveHeaders map[string]string) bool {
 	if _, sticky := directiveHeaders[common.STICKINESS_HEADER_NAME]; sticky {
 		return true
 	}
-	_, selected := directiveHeaders[common.SELECT_PROVIDER_HEADER_NAME]
-	return selected && SelectProviderStrict(directiveHeaders)
+	return directiveHeaders[common.SELECT_PROVIDER_HEADER_NAME] != "" && !SelectProviderAllowsRetry(directiveHeaders)
 }
 
-// SelectProviderStrict reports whether the caller sent lava-select-provider-strict: true. Only the
-// value "true" (any case) turns it on, unlike the presence-only lava-force-cache-refresh: "false"
-// must not silently mean yes. It only matters next to lava-select-provider; alone it pins nothing.
-func SelectProviderStrict(directiveHeaders map[string]string) bool {
-	return strings.EqualFold(strings.TrimSpace(directiveHeaders[common.SELECT_PROVIDER_STRICT_HEADER_NAME]), "true")
+// SelectProviderAllowsRetry reports whether the caller sent router-select-provider-allow-retry:
+// true. Only the value "true" (any case) turns it on, unlike the presence-only
+// router-force-cache-refresh: "false" must not silently mean yes. It only matters next to
+// router-select-provider; alone it changes nothing, and it never loosens router-stickiness.
+func SelectProviderAllowsRetry(directiveHeaders map[string]string) bool {
+	return strings.EqualFold(strings.TrimSpace(directiveHeaders[common.SELECT_PROVIDER_ALLOW_RETRY_HEADER_NAME]), "true")
 }
 
 // PinnedUpstreamUnservable reports a selection error that names the pin: the pinned upstream is
@@ -407,6 +426,22 @@ func (sm *UnifiedRelayStateMachine) endOfRoadReason(err error) string {
 	return sm.stopReasonOr(StopReasonCallerGone)
 }
 
+// processingEndReason is endOfRoadReason for processingCtx once it has ended. processingCtx is bounded
+// by the router's processing timeout and by the caller's own deadline, whichever is earlier. When the
+// caller's grpc-timeout was the earlier one, the request ended from outside, as a hang-up does: it is
+// not the budget running out, and no endpoint still working on it is blamed (rulebook D10).
+//
+// A write keeps the processing timeout's reading. Its deliveries are detached from the caller and run
+// on after the request ends, until the router cuts them off (statefulDeliveryLinger in rpcsmartrouter),
+// so the caller's deadline ends none of them. A delivery still silent at that cut-off is a hang, and
+// the write's outcome is unknown, as before. A write whose caller hung up still stops as CallerGone.
+func (sm *UnifiedRelayStateMachine) processingEndReason(processingCtx context.Context) string {
+	if sm.selection != Stateful && common.CallerDeadlinePassed(processingCtx, time.Now()) {
+		return sm.stopReasonOr(StopReasonCallerGone)
+	}
+	return sm.endOfRoadReason(processingCtx.Err())
+}
+
 // checkAndHandleTimeout checks if processingCtx has expired and handles cleanup if so.
 func (sm *UnifiedRelayStateMachine) checkAndHandleTimeout(
 	processingCtx context.Context,
@@ -431,7 +466,7 @@ func (sm *UnifiedRelayStateMachine) checkAndHandleTimeout(
 		utils.LogAttr("consecutiveBatchErrors", sm.policy.GetConsecutiveBatchErrors()),
 	)
 
-	relayTaskChannel <- RelayStateSendInstructions{Err: processingCtx.Err(), Done: true, StopReason: sm.endOfRoadReason(processingCtx.Err())}
+	relayTaskChannel <- RelayStateSendInstructions{Err: processingCtx.Err(), Done: true, StopReason: sm.processingEndReason(processingCtx)}
 	return true
 }
 
@@ -685,7 +720,7 @@ func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendIn
 						utils.LogAttr("batchNumber", sm.usedProviders.BatchNumber()),
 						utils.LogAttr("consecutiveBatchErrors", sm.policy.GetConsecutiveBatchErrors()),
 					)
-					relayTaskChannel <- RelayStateSendInstructions{Err: processingCtx.Err(), Done: true, StopReason: sm.endOfRoadReason(processingCtx.Err())}
+					relayTaskChannel <- RelayStateSendInstructions{Err: processingCtx.Err(), Done: true, StopReason: sm.processingEndReason(processingCtx)}
 				}
 				return
 			}

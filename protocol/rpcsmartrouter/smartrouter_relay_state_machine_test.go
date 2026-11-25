@@ -120,7 +120,7 @@ func TestConsumerStateMachineHappyFlow(t *testing.T) {
 			// Handle the incoming request and provide the desired response
 			w.WriteHeader(http.StatusOK)
 		})
-		specId := "LAVA"
+		specId := "COSMOSHUB"
 		chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 		if closeServer != nil {
 			defer closeServer()
@@ -192,7 +192,7 @@ func TestConsumerStateMachineExhaustRetries(t *testing.T) {
 			// Handle the incoming request and provide the desired response
 			w.WriteHeader(http.StatusOK)
 		})
-		specId := "LAVA"
+		specId := "COSMOSHUB"
 		chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 		if closeServer != nil {
 			defer closeServer()
@@ -349,7 +349,7 @@ func TestSmartRouterStateMachineCircuitBreakerOnPairingErrors(t *testing.T) {
 		serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 		})
-		specId := "LAVA"
+		specId := "COSMOSHUB"
 		chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 		if closeServer != nil {
 			defer closeServer()
@@ -398,7 +398,7 @@ func TestSmartRouterStateMachineCircuitBreakerResetsOnSuccess(t *testing.T) {
 		serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 		})
-		specId := "LAVA"
+		specId := "COSMOSHUB"
 		chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 		if closeServer != nil {
 			defer closeServer()
@@ -454,7 +454,7 @@ func TestSmartRouterStateMachineCircuitBreakerResetsOnDifferentError(t *testing.
 		serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 		})
-		specId := "LAVA"
+		specId := "COSMOSHUB"
 		chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 		if closeServer != nil {
 			defer closeServer()
@@ -513,7 +513,7 @@ func TestProcessingContextTimeoutEnforcement(t *testing.T) {
 		serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 		})
-		specId := "LAVA"
+		specId := "COSMOSHUB"
 		chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 		if closeServer != nil {
 			defer closeServer()
@@ -609,7 +609,7 @@ func TestProcessingContextStillValidAllowsRetries(t *testing.T) {
 		serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 		})
-		specId := "LAVA"
+		specId := "COSMOSHUB"
 		chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 		if closeServer != nil {
 			defer closeServer()
@@ -687,7 +687,7 @@ func TestProcessingContextRaceCondition(t *testing.T) {
 		serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 		})
-		specId := "LAVA"
+		specId := "COSMOSHUB"
 		chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 		if closeServer != nil {
 			defer closeServer()
@@ -1060,7 +1060,7 @@ func TestSmartRouterStateMachineRetryLimit(t *testing.T) {
 			serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(http.StatusOK)
 			})
-			specId := "LAVA"
+			specId := "COSMOSHUB"
 			chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
 			if closeServer != nil {
 				defer closeServer()

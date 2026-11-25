@@ -12,7 +12,7 @@
 # Smart Router
 
 [![Build and Test](https://github.com/Magma-Devs/smart-router/actions/workflows/smartrouter.yml/badge.svg?branch=main)](https://github.com/Magma-Devs/smart-router/actions/workflows/smartrouter.yml)
-[![Release](https://img.shields.io/badge/release-v1.6.8-brightgreen)](https://github.com/Magma-Devs/smart-router/releases/latest)
+[![Release](https://img.shields.io/badge/release-v1.7.0-brightgreen)](https://github.com/Magma-Devs/smart-router/releases/latest)
 [![Go](https://img.shields.io/badge/go-1.26%2B-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![License](https://img.shields.io/badge/license-source--available-orange.svg)](LICENSE.md)
 
@@ -58,7 +58,7 @@ After running, you get:
 
 - An RPC endpoint per chain interface (ports from the YAML config; conventional default `:3360`).
 - Prometheus metrics on `:7779` — see [docs/METRICS.md](docs/METRICS.md) for the full reference.
-- A health endpoint at `/lava/health`.
+- A health endpoint at `/router/health`.
 - Provider rotation, RPC-aware retry, response caching, and metrics — all driven by the YAML config.
 
 ### Config wizard
@@ -224,9 +224,6 @@ Upstream endpoints are configured in a YAML file. See `config/smartrouter_exampl
 Setup scripts are available in `scripts/pre_setups/`:
 
 ```bash
-# Lava blockchain (REST + gRPC + Tendermint RPC)
-./scripts/pre_setups/init_smartrouter_lava.sh
-
 # Ethereum (JSON-RPC)
 ./scripts/pre_setups/init_smartrouter_eth.sh
 ```
@@ -255,7 +252,7 @@ Setup scripts are available in `scripts/pre_setups/`:
                                 │
                                 ▼
             Statically-configured upstream RPC providers
-              (Lava chain providers, PublicNode, Infura,
+              (PublicNode, Infura, Alchemy,
                self-hosted nodes, ...)
 ```
 
@@ -265,7 +262,7 @@ The hot path for a single request:
 2. **Cache lookup** — for cacheable methods (historical block data, immutable receipts, etc.), the cache layer (`ecosystem/cache`) checks for a recent response. Hits return immediately. Methods the chain spec marks stateful (writes) and the node-bound family (filters, subscriptions, one node's keys, mempool and status; `protocol/rpcsmartrouter/node_bound_methods.go`) are never cached: their answers belong to the node that produced them.
 3. **Upstream selection** — on cache miss, the upstream optimiser (`protocol/provideroptimizer`) picks an upstream from the configured pool using QoS-weighted scoring. Healthy/fast upstreams are preferred; flaky ones get backed off automatically.
 4. **Relay + failover** — the request is sent to the chosen upstream. On failure (timeout, malformed response, certain status codes), the retry state machine picks an alternate upstream and retries within a configurable budget.
-5. **Response** — returned to the client with metadata headers (`Smart-Router-Version`, `Lava-Provider-Address`, retry counts, etc.) annotating which upstream served the response. Prometheus metrics are emitted in parallel. The upstream's own response headers are not passed through: apart from the transport headers (`Content-Type`, `Content-Encoding`, and `Retry-After` with the upstream's `Date`, read for a 429's wait) and the headers the chain spec declares in the reply direction for the API interface (today the Cosmos block-height header and Aptos's eight ledger-state headers, pagination cursor included), every header the client sees is the router's.
+5. **Response** — returned to the client with metadata headers (`Router-Version`, `Router-Provider-Address`, retry counts, etc.) annotating which upstream served the response. Prometheus metrics are emitted in parallel. The upstream's own response headers are not passed through: apart from the transport headers (`Content-Type`, `Content-Encoding`, and `Retry-After` with the upstream's `Date`, read for a 429's wait) and the headers the chain spec declares in the reply direction for the API interface (today the Cosmos block-height header and Aptos's eight ledger-state headers, pagination cursor included), every header the client sees is the router's.
 
 **Cross-validation (optional).** For read methods that warrant extra assurance, the relay step can instead fan out to several upstreams in parallel and only return an answer once a quorum agree on an identical response — optionally requiring the quorum to span multiple distinct upstream groups (or each group to reach its own quorum). It defends against a single upstream returning a wrong-but-well-formed answer, and surfaces dissent via response headers and a bounded mismatch metric. See [`docs/CROSS-VALIDATION.md`](docs/CROSS-VALIDATION.md) for an operator setup guide with runnable example configs, or [`protocol/rpcsmartrouter/README.md`](protocol/rpcsmartrouter/README.md#cross-validation) for the full knob/header reference.
 
@@ -349,8 +346,6 @@ Smart Router ships with specs for **120+ chain networks** — EVM L1s and L2s, C
 | Juno Mainnet | JUN1 | gRPC, REST, Tendermint RPC |
 | Juno Testnet | JUNT1 | gRPC, REST, Tendermint RPC |
 | Kakarot Sepolia Testnet | KAKAROTT | JSON-RPC |
-| Lava Mainnet | LAVA | gRPC, REST, Tendermint RPC |
-| Lava Testnet | LAV1 | gRPC, REST, Tendermint RPC |
 | Litecoin Mainnet | LTC | JSON-RPC |
 | Litecoin Testnet | LTCT | JSON-RPC |
 | Manta Pacific Mainnet | MANTAPACIFIC | JSON-RPC |
@@ -441,7 +436,7 @@ specs/              — Chain specification JSON files
 
 ### Debug endpoints
 
-When started with `--debug-address <addr>` (and `devMode.enabled=true`), the router serves a small reset HTTP API for integration tests. It is **off by default and absent from production builds**.
+When started with `--debug-address <addr>`, the router serves a small reset HTTP API for integration tests. It is **off by default**, and every build carries it, so pass the flag only where the test harness alone reaches the address (for example `--debug-address 127.0.0.1:9999`).
 
 The reset tests rely on is **`POST /debug/reset-all`**, which drains the router's internal state stores (optimizer scores, Ristretto, seen-block caches, session-manager state) and — so a single call returns the router to a serving state after an all-providers-down stress burst — also **re-enables endpoint health and cold-rebuilds pairing**.
 
@@ -521,7 +516,7 @@ docker pull ghcr.io/magma-devs/smart-router:vX.Y.Z
 
 - Trigger pattern: `v[0-9]+.[0-9]+.[0-9]+*`. A tag like `1.2.0` (without the leading `v`) does _not_ fire the workflow.
 - Follow [semver](https://semver.org/) `MAJOR.MINOR.PATCH`. For smart-router specifically:
-  - **MAJOR** — breaking change to the wire surface customers integrate with: HTTP metadata headers (e.g. `Smart-Router-Version`, `Lava-Provider-Address`), JSON-RPC envelope shape, removed/renamed CLI flags, removed/renamed config fields.
+  - **MAJOR** — breaking change to the wire surface customers integrate with: HTTP metadata headers (e.g. `Router-Version`, `Router-Provider-Address`), JSON-RPC envelope shape, removed/renamed CLI flags, removed/renamed config fields.
   - **MINOR** — new capabilities: additional supported chains in `specs/`, new CLI flags, new metrics, new config fields with safe defaults, new HTTP metadata headers.
   - **PATCH** — internal-only changes: bug fixes, performance improvements, refactors, dependency bumps, docs.
 

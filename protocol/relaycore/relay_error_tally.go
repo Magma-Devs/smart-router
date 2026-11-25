@@ -12,9 +12,10 @@ import (
 // RelayErrorTally is the router's own count of the relay attempts it classified as a node error or
 // a protocol error, per chain, interface, provider and method, for GET /debug/relay-errors
 // (MAG-4718). It is kept beside the Prometheus counters, not read from them: it exists on a router
-// run without --metrics-listen-address, its method is the API name the request was relayed as
-// rather than the metric's normalized label (which folds a GraphQL operation's root fields into a
-// batch signature), and a test of the route reads what the router decided, not a metric.
+// run without --metrics-listen-address, its method is the API name the request was relayed as,
+// named as relay_end names it (the router passes it in so; MAG-5422), rather than the metric's
+// normalized label (which folds a GraphQL operation's root fields into a batch signature), and a
+// test of the route reads what the router decided, not a metric.
 //
 // The two counts stay apart: a node error is a reply the router read as the node's fault, a
 // protocol error an attempt that got no proper answer, and failover treats them differently. Both

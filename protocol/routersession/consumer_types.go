@@ -710,7 +710,7 @@ type RPCEndpoint struct {
 	ChainID         string `yaml:"chain-id,omitempty" json:"chain-id,omitempty" mapstructure:"chain-id"`                      // spec chain identifier
 	ApiInterface    string `yaml:"api-interface,omitempty" json:"api-interface,omitempty" mapstructure:"api-interface"`
 	TLSEnabled      bool   `yaml:"tls-enabled,omitempty" json:"tls-enabled,omitempty" mapstructure:"tls-enabled"`
-	HealthCheckPath string `yaml:"health-check-path,omitempty" json:"health-check-path,omitempty" mapstructure:"health-check-path"` // health check status code 200 path, default is common.DEFAULT_HEALTH_PATH ("/lava/health"); a websocket upgrade on it is still served as a websocket
+	HealthCheckPath string `yaml:"health-check-path,omitempty" json:"health-check-path,omitempty" mapstructure:"health-check-path"` // health check status code 200 path, default is common.DEFAULT_HEALTH_PATH ("/router/health"); a websocket upgrade on it is still served as a websocket
 }
 
 func (endpoint *RPCEndpoint) String() (retStr string) {
@@ -730,7 +730,7 @@ type ConsumerSessionsWithProvider struct {
 	MaxComputeUnits  uint64
 	UsedComputeUnits uint64
 	PairingEpoch     uint64
-	stakeSize        int64 // the stake size the provider staked (ulava)
+	stakeSize        int64 // the stake size the provider staked
 
 	// blocked provider recovery status if 0 currently not used, if 1 a session has tried resume communication with this provider
 	// if the provider is not blocked at all this field is irrelevant
@@ -871,14 +871,14 @@ func (cswp *ConsumerSessionsWithProvider) addUsedComputeUnits(cu, virtualEpoch u
 	return nil
 }
 
-// getProviderStakeSize returns the stake size (in ulava) for this provider.
+// getProviderStakeSize returns the stake size for this provider.
 func (cswp *ConsumerSessionsWithProvider) getProviderStakeSize() int64 {
 	cswp.Lock.RLock()
 	defer cswp.Lock.RUnlock()
 	return cswp.stakeSize
 }
 
-// GetProviderStakeSize returns the provider stake (in ulava) used for selection weighting.
+// GetProviderStakeSize returns the provider stake used for selection weighting.
 // Exported for cross-package callers (e.g., rpcsmartrouter) that need to copy sessions.
 func (cswp *ConsumerSessionsWithProvider) GetProviderStakeSize() int64 {
 	return cswp.getProviderStakeSize()
@@ -1366,7 +1366,7 @@ func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSes
 					// session, smart-router health, and refusal counter all agree on
 					// what "the client cancelled" means. Note: context.DeadlineExceeded
 					// is NOT exempt here — a slow/unreachable endpoint should still
-					// increment refusals.
+					// increment refusals — unless the deadline was the caller's own.
 					if common.IsClientCancellation(err, ctx) {
 						utils.FormatDebug("skipping ConnectionRefusals increment: request context canceled (client disconnect)",
 							utils.LogAttr("err", err),

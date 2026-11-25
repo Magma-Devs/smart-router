@@ -126,7 +126,7 @@ func hasDigit(s string) bool {
 }
 
 // isIDCharset reports whether every rune could belong to an address or hash: letters,
-// digits, and the few separators real identifiers use (bech32 "lava@1...", prefixed
+// digits, and the few separators real identifiers use (bech32 "cosmos1...", "name@provider", prefixed
 // ids). A segment containing anything else is not treated as opaque.
 func isIDCharset(s string) bool {
 	for _, r := range s {

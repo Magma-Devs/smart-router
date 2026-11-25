@@ -61,19 +61,25 @@ func TestOnSendRelayResult_PinnedUpstreamUnservableStopsAtOnce(t *testing.T) {
 	})
 }
 
-// A plain lava-select-provider is not a strict pin (MAG-4826 D2): relaycore.PinnedByDirectives
-// reports false, so the policy decides exactly as for an unpinned request: a node error retries,
-// the window hedges, as the released docs promise. With lava-select-provider-strict: true it stops.
-func TestDecide_PlainSelectProviderKeepsFailover(t *testing.T) {
+// A router-select-provider is a strict pin (MAG-5711): relaycore.PinnedByDirectives reports true,
+// so the policy stops on a node error and does not hedge at the window. With
+// router-select-provider-allow-retry: true it reports false, and the policy decides exactly as
+// for an unpinned request: a node error retries, the window hedges.
+func TestDecide_SelectProviderStopsUnlessAllowRetry(t *testing.T) {
 	policy := NewPolicy(PolicyConfig{MaxRetries: 10, RelayRetryLimit: 2, SendRelayAttempts: 3})
 	plain := relaycore.PinnedByDirectives(map[string]string{common.SELECT_PROVIDER_HEADER_NAME: "p1"})
-	require.False(t, plain)
-	require.Equal(t, relaycore.ActionRetry, policy.Decide(relaycore.DecisionInput{Selection: relaycore.Stateless, Pinned: plain, Summary: relaycore.ResultsSummary{NodeErrors: 1}}).Action)
-	require.Equal(t, relaycore.ActionRetry, policy.Decide(relaycore.DecisionInput{Selection: relaycore.Stateless, Pinned: plain, IsTickerHedge: true}).Action)
+	require.True(t, plain)
+	for name, input := range map[string]relaycore.DecisionInput{
+		"node error": {Selection: relaycore.Stateless, Pinned: plain, Summary: relaycore.ResultsSummary{NodeErrors: 1}},
+		"hedge":      {Selection: relaycore.Stateless, Pinned: plain, IsTickerHedge: true},
+	} {
+		out := policy.Decide(input)
+		require.Equal(t, relaycore.ActionStop, out.Action, name)
+		require.Equal(t, "Pinned", out.Reason, name)
+	}
 
-	strict := relaycore.PinnedByDirectives(map[string]string{common.SELECT_PROVIDER_HEADER_NAME: "p1", common.SELECT_PROVIDER_STRICT_HEADER_NAME: "true"})
-	require.True(t, strict)
-	out := policy.Decide(relaycore.DecisionInput{Selection: relaycore.Stateless, Pinned: strict, Summary: relaycore.ResultsSummary{NodeErrors: 1}})
-	require.Equal(t, relaycore.ActionStop, out.Action)
-	require.Equal(t, "Pinned", out.Reason)
+	allowRetry := relaycore.PinnedByDirectives(map[string]string{common.SELECT_PROVIDER_HEADER_NAME: "p1", common.SELECT_PROVIDER_ALLOW_RETRY_HEADER_NAME: "true"})
+	require.False(t, allowRetry)
+	require.Equal(t, relaycore.ActionRetry, policy.Decide(relaycore.DecisionInput{Selection: relaycore.Stateless, Pinned: allowRetry, Summary: relaycore.ResultsSummary{NodeErrors: 1}}).Action)
+	require.Equal(t, relaycore.ActionRetry, policy.Decide(relaycore.DecisionInput{Selection: relaycore.Stateless, Pinned: allowRetry, IsTickerHedge: true}).Action)
 }

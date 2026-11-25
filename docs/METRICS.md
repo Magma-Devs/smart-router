@@ -78,7 +78,7 @@ name and the `disabled` sentinel live in
   `1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000`.
 - **Attempt histograms** (`retry_attempts`, `hedge_attempts`) use integer buckets `1…10`.
 - **Common labels**:
-  - `spec` — chain spec id (e.g. `ETH1`, `LAV1`).
+  - `spec` — chain spec id (e.g. `ETH1`, `COSMOSHUB`).
   - `apiInterface` — `jsonrpc`, `tendermintrpc`, `rest`, `grpc`.
   - `endpoint_id` — the configured upstream RPC endpoint.
   - `provider_address` — provider the relay was routed to.
@@ -251,7 +251,7 @@ They split into **endpoint-scoped** (`rpc_endpoint_*`) and **router-scoped**
 | `smartrouter_overall_health` | Gauge | — | Overall router health (1 / 0). |
 | `smartrouter_overall_health_breakdown` | Gauge | `spec`, `apiInterface` | Per-chain/interface health. |
 | `smartrouter_latest_block` | Gauge | `spec`, `apiInterface` | Latest block known to the router. |
-| `smartrouter_latest_block_regressions_total` | Counter | `spec`, `apiInterface`, `reason` | Times the router's latest block moved backwards; each one also logs `chain latest block went backwards` at ERROR. `reason="consensus"`: the tip led the endpoint majority by more than the outlier threshold and was snapped down to it. `reason="stale_tip"`: nothing re-confirmed the tip for a TTL and a lower observation was adopted. Alert on `increase(...) > 0`. |
+| `smartrouter_latest_block_regressions_total` | Counter | `spec`, `apiInterface`, `reason` | Times the router's latest block moved backwards; each one also logs `chain latest block went backwards` at ERROR. `reason="consensus"`: the tip led the endpoint majority by more than the outlier threshold and was snapped down to it. `reason="stale_tip"`: nothing re-confirmed the tip for a TTL and a lower observation was adopted. `reason="unconfirmed_start"`: the tip was taken with nothing to check it against (the first observation, or one over a stale tip with no majority) and went three block times without advancing, and a url's head far below it moved forward: a load balancer's bad backend answered first. Alert on `increase(...) > 0`. |
 | `smartrouter_chain_idle` | Gauge | `spec`, `apiInterface` | Idle mode state: `1` while the chain has served no client request within `--chain-tracker-idle-after` and its tracker polls are paused, `0` while active. Absent when idle mode is off. Published by the probe loop every cycle (5 s), not on transitions. The infra `sr-tip-frozen` alert skips a router whose every pod reads `1`. |
 | `smartrouter_protocol_version` | Gauge | `version` | Encoded protocol version. |
 
@@ -374,13 +374,13 @@ the other series; `reason="invalid"` counts names that no limit would admit.
 
 #### Extensions no node offers
 
-A caller can ask for an extension (`archive`, …) with the `lava-extension` request header. When no
+A caller can ask for an extension (`archive`, …) with the `router-extension` request header. When no
 node on the router offers it, the request is still served without it and the reply carries the
-`Lava-Extension-Unavailable` response header ([README](../protocol/rpcsmartrouter/README.md#extensions-no-node-offers)).
+`Router-Extension-Unavailable` response header ([README](../protocol/rpcsmartrouter/README.md#extensions-no-node-offers)).
 
 | Metric | Type | Labels | Description |
 | --- | --- | --- | --- |
-| `smartrouter_extension_unavailable_total` | Counter | `spec`, `apiInterface`, `extension` | Requests served without an extension the caller asked for, once per request per such extension — the same replies that carry `Lava-Extension-Unavailable`. Never counts an extension the router adds on its own (`archive` for a deep `eth_call`). `extension` is bounded by the spec: only names the spec defines as extensions (plus `websocket`) can be recorded, so arbitrary caller values do not create series. Non-zero means callers depend on an extension this deployment has no node for. |
+| `smartrouter_extension_unavailable_total` | Counter | `spec`, `apiInterface`, `extension` | Requests served without an extension the caller asked for, once per request per such extension — the same replies that carry `Router-Extension-Unavailable`. Never counts an extension the router adds on its own (`archive` for a deep `eth_call`). `extension` is bounded by the spec: only names the spec defines as extensions (plus `websocket`) can be recorded, so arbitrary caller values do not create series. Non-zero means callers depend on an extension this deployment has no node for. |
 
 #### Errors
 
@@ -403,25 +403,28 @@ Prometheus counter, so it answers on a router run without `--metrics-listen-addr
   from the upstream: a refused or dropped connection, a body cut off or not JSON, a hang past the
   request's budget, or an attempt still silent when its window ran out. The last one counts even
   when a retry then answers and the attempt is cancelled, because the silence came first: a
-  provider in simulator mode `hang` behind a `lava-relay-timeout: 300ms` window gets its row
+  provider in simulator mode `hang` behind a `router-relay-timeout: 300ms` window gets its row
   although another provider answers the retry. These are not counted: an HTTP status (an answer),
   a request the router could not build, an attempt the router cancelled inside its window (a race
   it lost), anything on gRPC, a write, and the router's own health check. A client that hangs up
   does not end an attempt on the HTTP or WebSocket listeners: the attempt runs on, and the same
   rules decide its row.
-* `Method` is the API name the request was relayed as. A GraphQL operation with two root fields
-  is `chainIdentifier&checkpoint`, not the metric's `batch:` label. Two kinds of name are the
-  request's own text: a `Default-...` name for an api the spec does not declare, and a batch's or
-  operation's `&`-joined names. Each kind keeps its own rows only within a budget per chain and
-  interface, with the method label's numbers (32 `Default-` names, 64 joined names), and only up
-  to 512 bytes. Past that the attempt is counted on the `Default-other` or `batch:other` row, so the
-  tally stays bounded whatever a client sends. An admitted name keeps its row. The label's own
-  budget is per chain, and it counts a path's shape and a batch's set of methods rather than the
-  name, so the label and these rows can differ for the same traffic.
+* `Method` is the API name the request was relayed as, named as `relay_end` names it
+  ([RELAY-END-EVENT.md](RELAY-END-EVENT.md)): without its leading slash, capped at 256 characters,
+  and `Default-REDACTED` for an api the spec does not declare that the request named by URL (a REST
+  path, a Tendermint URI), whose name would be the caller's own path. A GraphQL operation with two
+  root fields is `chainIdentifier&checkpoint`, not the metric's `batch:` label. Two kinds of name
+  are still the request's own text: a `Default-...` name for an undeclared method named in the body
+  (JSON-RPC), and a batch's or operation's `&`-joined names. Each kind keeps its own rows only within
+  a budget per chain and interface, with the method label's numbers (32 `Default-` names, 64 joined
+  names). Past that the attempt is counted on the `Default-other` or `batch:other` row, so the tally
+  stays bounded whatever a client sends. An admitted name keeps its row. The label's own budget is
+  per chain, and it counts a path's shape and a batch's set of methods rather than the name, so the
+  label and these rows can differ for the same traffic.
 
 Both counts are per attempt: a retry that answered hides the first attempt from the caller, and
 this is where its classification shows. `chain_id`, `api_interface` and `provider` narrow the
-rows; `provider` matches `ProviderAddress`, the value `Lava-Provider-Address` carries. The counts
+rows; `provider` matches `ProviderAddress`, the value `Router-Provider-Address` carries. The counts
 are per process and cumulative for its lifetime, and no `/debug/reset-*` route clears them: the
 debug Service balances across a router's pods, so compare two readings only when their `PodID`
 matches.
@@ -436,7 +439,7 @@ matches.
 | `smartrouter_retry_attempts` | Histogram | `spec`, `apiInterface`, `method` | Attempts per retried request (buckets 1…10). |
 
 A hedged request is counted here as well. A hedge is an extra attempt, and these series are
-recorded from the same count as the `Lava-Retries` header, which includes every attempt the
+recorded from the same count as the `Router-Retries` header, which includes every attempt the
 router sent (MAG-1818), a hedge's losing attempt among them. The retry and hedging families
 therefore overlap, so do not add them together.
 
@@ -499,11 +502,11 @@ histogram_quantile(0.9,
 | `smartrouter_cross_validation_failed_total` | Counter | `spec`, `apiInterface`, `method` | Requests that did not return a consensus answer — quorum-time failures (no-agreement / diversity / per-group) **and** request-time structural fail-fasts that never tried (`insufficient-capacity` / `insufficient-groups`). `requests_total == success_total + failed_total`. |
 | `smartrouter_cross_validation_provider_agreements_total` | Counter | `spec`, `apiInterface`, `method`, `provider_address` | Times a provider agreed with consensus. |
 | `smartrouter_cross_validation_provider_disagreements_total` | Counter | `spec`, `apiInterface`, `method`, `provider_address` | Times a provider disagreed with consensus. |
-| `smartrouter_cross_validation_mismatch_total` | Counter | `spec`, `apiInterface`, `method`, `group`, `finality` | **Content outliers** by group: one increment **per distinct outlier group per successful deterministic cross-validation request** (a response whose `SHA256(reply.data)` diverged from the reached consensus) — not a per-provider counter. Only emitted when a quorum was reached; quorum failures and node/protocol errors are excluded (failures report a `lava-cross-validation-failure-reason` instead). `finality` is `finalized` / `not_finalized` / `unknown`; post-finality divergence is the high-signal alert. Bounded cardinality (keyed by operator-defined `group`, not provider address). |
-| `smartrouter_cross_validation_failures_total` | Counter | `spec`, `apiInterface`, `method`, `reason` | **Failures by reason** — the by-reason breakdown of `cross_validation_failed_total` (which stays unlabeled, so existing dashboards are unaffected). `reason` is the closed `lava-cross-validation-failure-reason` enum: quorum-time `no-agreement` / `insufficient-responses` / `diversity-unmet` / `group-quorum-unmet`, or request-time structural `insufficient-capacity` / `insufficient-groups`. Use it to separate a structural failure (client should fall back) from a quorum disagreement (a retry may help). Bounded cardinality (the reason set is a closed enum). |
-| `smartrouter_cross_validation_straggler_total` | Counter | `spec`, `apiInterface`, `method`, `outcome` | **Straggler resolutions** (MAG-2187): providers still in flight when the quorum early-exit built the reply (the `lava-cross-validation-pending-providers` header), classified against the reached consensus once their late response lands. `outcome` is the closed enum `agreed` / `disagreed` / `node-error` / `protocol-error` / `not-received` (nothing arrived before the watcher deadline). A late confirmed `disagreed` on a deterministic method also increments `_mismatch_total` for the straggler's group — deduped so the once-per-distinct-group-per-request contract holds across the reply-time and straggler paths combined. Only emitted when a quorum was reached. Bounded cardinality (closed outcome enum). |
+| `smartrouter_cross_validation_mismatch_total` | Counter | `spec`, `apiInterface`, `method`, `group`, `finality` | **Content outliers** by group: one increment **per distinct outlier group per successful deterministic cross-validation request** (a response whose `SHA256(reply.data)` diverged from the reached consensus) — not a per-provider counter. Only emitted when a quorum was reached; quorum failures and node/protocol errors are excluded (failures report a `router-cross-validation-failure-reason` instead). `finality` is `finalized` / `not_finalized` / `unknown`; post-finality divergence is the high-signal alert. Bounded cardinality (keyed by operator-defined `group`, not provider address). |
+| `smartrouter_cross_validation_failures_total` | Counter | `spec`, `apiInterface`, `method`, `reason` | **Failures by reason** — the by-reason breakdown of `cross_validation_failed_total` (which stays unlabeled, so existing dashboards are unaffected). `reason` is the closed `router-cross-validation-failure-reason` enum: quorum-time `no-agreement` / `insufficient-responses` / `diversity-unmet` / `group-quorum-unmet`, or request-time structural `insufficient-capacity` / `insufficient-groups`. Use it to separate a structural failure (client should fall back) from a quorum disagreement (a retry may help). Bounded cardinality (the reason set is a closed enum). |
+| `smartrouter_cross_validation_straggler_total` | Counter | `spec`, `apiInterface`, `method`, `outcome` | **Straggler resolutions** (MAG-2187): providers still in flight when the quorum early-exit built the reply (the `router-cross-validation-pending-providers` header), classified against the reached consensus once their late response lands. `outcome` is the closed enum `agreed` / `disagreed` / `node-error` / `protocol-error` / `not-received` (nothing arrived before the watcher deadline). A late confirmed `disagreed` on a deterministic method also increments `_mismatch_total` for the straggler's group — deduped so the once-per-distinct-group-per-request contract holds across the reply-time and straggler paths combined. Only emitted when a quorum was reached. Bounded cardinality (closed outcome enum). |
 
-> The `_mismatch_total` series is the group-level alerting surface for [outliers](../protocol/rpcsmartrouter/README.md#outlier-behavior). When enough providers still agree, a divergent provider is outvoted and recorded here; per-provider detail lives in the `cross-validation outlier detected` info log and the `lava-cross-validation-disagreeing-providers` header. Dissenters that answered *after* the quorum closed reach it through the [straggler path](../protocol/rpcsmartrouter/README.md#straggler-behavior) (`cross-validation straggler resolved` info log + `_straggler_total`).
+> The `_mismatch_total` series is the group-level alerting surface for [outliers](../protocol/rpcsmartrouter/README.md#outlier-behavior). When enough providers still agree, a divergent provider is outvoted and recorded here; per-provider detail lives in the `cross-validation outlier detected` info log and the `router-cross-validation-disagreeing-providers` header. Dissenters that answered *after* the quorum closed reach it through the [straggler path](../protocol/rpcsmartrouter/README.md#straggler-behavior) (`cross-validation straggler resolved` info log + `_straggler_total`).
 
 #### Cache
 
@@ -535,8 +538,8 @@ across `outcome`, where before `_failed_total` was a single series.
 > on a detached goroutine **after** the reply is written, and nothing orders the
 > two — so reading one straight after its reply is a race, and polling until it
 > settles makes the result depend on how long you waited rather than on what the
-> router did. Send the `lava-debug-relay` directive instead and read
-> `Lava-Cache-Tier` / `Lava-Cache-Outcome` off the reply, which cannot race
+> router did. Send the `router-debug-relay` directive instead and read
+> `Router-Cache-Tier` / `Router-Cache-Outcome` off the reply, which cannot race
 > because it *is* the reply. The `outcome` values are the same four, plus `off`
 > / `skipped` / `unknown` for a tier that was not consulted (those three never
 > label a metric — there was no lookup to count). See
@@ -669,7 +672,7 @@ self-heals in seconds. Alert windows should assume the 3m ceiling.
 
 | Metric | Type | Labels | Description |
 | --- | --- | --- | --- |
-| `smartrouter_provider_verification_failed` | Gauge | `spec`, `apiInterface`, `provider`, `tier`, `scope`, `service`, `check`, `severity` | While a configured provider is failing a verification: the unix time in seconds the failure started. The series exists only while the failure lasts, and a provider that moves to another check in the same `scope` and `service` keeps its start (a `scope=none` warning never borrows another's). While a provider is out of the pairing it has only its `scope=provider` series; a failure it had before it went out comes back with its own start when it is readmitted and still fails, and no "passes again" line is logged for it at the demote. `tier` is `static` or `backup`. |
+| `smartrouter_provider_verification_failed` | Gauge | `spec`, `apiInterface`, `provider`, `tier`, `scope`, `service`, `check`, `severity` | While a configured provider is failing a verification: the unix time in seconds the failure started. At a re-verification that is when the failure takes effect, not its first failed run: a url or a provider that the demote grace keeps serving after its first failed pass (strike 1 of 2) has no series until the second strike takes it out, and that first failure shows only in `/debug/verification`, as its retry's `pendingSince`. A refused add-on or extension is switched off at the first failed pass, so its series starts there (MAG-3950). The series exists only while the failure lasts, and a provider that moves to another check in the same `scope` and `service` keeps its start (a `scope=none` warning never borrows another's). While a provider is out of the pairing it has only its `scope=provider` series; a failure it had before it went out comes back with its own start when it is readmitted and still fails, and no "passes again" line is logged for it at the demote. `tier` is `static` or `backup`. |
 | `smartrouter_provider_verification_check_failures_total` | Counter | same as above | One per failed check run: at boot, each verification retry, and each 15m epoch pass (a grace run before a demotion included). A rate-limited run is inconclusive and not counted, on any path, and a missing websocket url (`missing-url`) ran nothing, so it is not counted either. `increase(...[$__interval]) > 0` draws one mark per failed run. |
 
 The serving tier only drops when a whole tier is gone, so a single provider that fails
@@ -684,7 +687,7 @@ too.
 | --- | --- |
 | `scope` | `provider`: the provider is out of the pairing. `service`: the provider still serves, but lost one add-on or extension: no url of it serves that service any more. `url`: the provider still serves, but one of its node urls was refused (MAG-4231 verifies every url on its own): whole when `service` is empty, else for that one service, which another url of the provider still serves. The websocket counts as a service: a ws(s) url carries only subscriptions, so a refused one is published with `service=websocket`, as `scope=service` when the provider has no ws(s) url left and `scope=url` while another still serves (MAG-3950). `none`: a check the spec gives severity `Warning` is failing; nothing was switched off. |
 | `service` | The refused add-on or extension (`archive`, `debug`, ...), `websocket` for the provider's subscriptions (a refused ws(s) url, or none configured), or for `scope=none` the one the failing check covers; empty for `scope=provider`, for an http(s) url refused whole and for a basic check. |
-| `check` | The spec verification that failed (`chain-id`, `pruning`, ...), or one of: `latest-block` (the head probe before any verification), `unsupported-addon` (a node url's addons name something the spec does not define: `scope=service` with that name as `service`, while the url serves the rest; only a `standalone-addons` url that names no add-on the spec defines is refused whole), `connect` (no connection to the node), `config` (the configured urls cannot work as given: no http(s) url), `missing-url` (`service=websocket`, `scope=service`, `PartialFail`: the provider has no ws(s) url on a chain that subscribes, so it serves everything over http but subscriptions; nothing ran and no retry is scheduled, since only a config change fixes it; gauge only, never counted. It is published with `--skip-websocket-verification` too, which the helm chart sets on every router), `not-run` (the provider's verification deadline passed before this check ran), `rate-limited` (a provider out at boot whose only answer so far is a 429; gauge only, never counted), `unknown`. |
+| `check` | The spec verification that failed (`chain-id`, `pruning`, ...), or one of: `latest-block` (the head probe before any verification), `unsupported-addon` (a node url's addons name something the spec does not define: `scope=service` with that name as `service`, while the url serves the rest; only a `standalone-addons` url that names no add-on the spec defines is refused whole), `connect` (no connection to the node), `config` (the configured urls cannot work as given: no http(s) url), `missing-url` (`service=websocket`, `scope=service`, `PartialFail`: the provider has no ws(s) url on a chain that subscribes, so it serves everything over http but subscriptions; nothing ran and no retry is scheduled, since only a config change fixes it; gauge only, never counted. It is published with `--skip-websocket-verification` too, which the helm chart sets on every router), `not-run` (the provider's verification deadline passed before this check ran; it is no strike, so a provider that serves keeps its place, and a provider out of the pairing keeps the check it last failed), `rate-limited` (a provider out at boot whose only answer so far is a 429; gauge only, never counted), `unknown`. |
 | `severity` | As MAG-3950 names it: `Fail` when the failure takes a url or the provider out, `PartialFail` when it switches off only `service`, `Warning` when it switches off nothing (`scope=none`). A spec value that sets no severity takes the default for where its check sits: `Fail` for a basic check (the base collection's own, no add-on or extension), `PartialFail` for an add-on or extension check. An explicit `Fail` on an add-on check makes the add-on mandatory: its failure takes the url out. A rate-limited `Warning` check, or one the deadline never ran, is not counted: one that failed the last pass keeps its series, and a new one gets none. |
 
 Each check a provider is failing that costs something (MAG-3950) is retried on its own

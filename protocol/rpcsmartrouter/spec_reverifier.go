@@ -71,10 +71,10 @@ type chainReverifyInputs struct {
 	convertProvidersToSessions func([]*routersession.RPCStaticProviderEndpoint) map[uint64]*routersession.ConsumerSessionsWithProvider
 	configuredStatic           []*routersession.RPCStaticProviderEndpoint
 	configuredBackup           []*routersession.RPCStaticProviderEndpoint
-	// validateFn is the per-provider validation callback applyReverification
-	// dispatches to. Production leaves it nil and applyReverification falls back
-	// to validateProvider (real network probe). Tests inject a fake to exercise
-	// updateEpoch's orchestration without standing up upstreams.
+	// validateFn is the per-provider validation callback probeReverification
+	// dispatches to. Production leaves it nil and probeReverification falls back
+	// to revalidateProviderCollections (real network probe). Tests inject a fake to
+	// exercise updateEpoch's orchestration without standing up upstreams.
 	validateFn func(context.Context, *routersession.RPCStaticProviderEndpoint) error
 	// recordAdmission publishes a freshly computed per-collection admission so the
 	// endpoint builder stops using the boot-time one. Nil in tests that do not
@@ -109,9 +109,8 @@ type chainReverifyInputs struct {
 	// demotion, and whenever the provider is not currently active, so a re-promoted provider
 	// always starts with a full grace budget.
 	//
-	// Guarded by RPCSmartRouter.mu: applyReverification is called only from updateEpoch, which
-	// holds that lock across both tier calls. Lazily allocated so test fixtures that build
-	// chainReverifyInputs by hand need not.
+	// Guarded by RPCSmartRouter.mu: every caller of decideReverification holds it. Lazily
+	// allocated so test fixtures that build chainReverifyInputs by hand need not.
 	demoteFailStreak map[string]int
 	// rateLimitHoldoff holds off providers that answered a probe with a rate-limit, so the
 	// pass stops adding load to an upstream that just told us it is over its limit. Nil
@@ -143,6 +142,48 @@ type chainReverifyInputs struct {
 	// another pass, the epoch's, and is dropped: applying it would count that pass's
 	// failure twice. Guarded by RPCSmartRouter.mu; lazily allocated.
 	verdictAt map[string]time.Time
+	// epochPasses counts the epoch passes started on this chain, and epochPassDone is
+	// closed once the passes in flight have committed, nil while none is. A pass probes
+	// without the router lock (MAG-5318), so a retry of the chain waits for it before it
+	// reads the verdicts it keeps, and drops its own verdicts when a pass started while it
+	// probed (lockBetweenEpochPasses, epochPassSince). Start times alone cannot order the
+	// two: a retry re-runs only its due checks and keeps the other verdicts it read, so one
+	// that started during the pass would win over the pass's whole verdict with older
+	// ones. Guarded by RPCSmartRouter.mu.
+	epochPasses        uint64
+	epochPassesRunning int
+	epochPassDone      chan struct{}
+	// pairingResets counts the /debug/reset-pairing rebuilds of this chain. An epoch pass
+	// that one overtook drops its verdicts, which it probed before the reset, and keeps the
+	// pairing the reset left (MAG-5318). Guarded by RPCSmartRouter.mu.
+	pairingResets uint64
+}
+
+// beginEpochPass marks an epoch pass in flight on the chain. Callers hold
+// RPCSmartRouter.mu, and call endEpochPass once the pass has committed.
+func (inputs *chainReverifyInputs) beginEpochPass() {
+	inputs.epochPasses++
+	if inputs.epochPassesRunning == 0 {
+		inputs.epochPassDone = make(chan struct{})
+	}
+	inputs.epochPassesRunning++
+}
+
+// endEpochPass marks an epoch pass committed, and lets the retries waiting for it go
+// once no other is in flight. Callers hold RPCSmartRouter.mu.
+func (inputs *chainReverifyInputs) endEpochPass() {
+	inputs.epochPassesRunning--
+	if inputs.epochPassesRunning == 0 {
+		close(inputs.epochPassDone)
+		inputs.epochPassDone = nil
+	}
+}
+
+// epochPassSince reports whether an epoch pass started on the chain after a retry read
+// passes (lockBetweenEpochPasses). That pass verifies every provider whole and its
+// verdicts are the newer, so the retry's are dropped. Callers hold RPCSmartRouter.mu.
+func (inputs *chainReverifyInputs) epochPassSince(passes uint64) bool {
+	return inputs != nil && inputs.epochPasses != passes
 }
 
 // superseded reports whether a verdict newer than a probe started at started was
@@ -191,6 +232,14 @@ func (inputs *chainReverifyInputs) noteFailure(tier reverifyTier, name string, e
 		return
 	}
 	check := failureCheck(err)
+	if check == chainlib.CheckNotRun {
+		// The deadline cut the check off: like a rate limit it ran nothing, so nothing is
+		// counted and the check the provider last failed stands (MAG-3950).
+		if _, known := inputs.lastFailure[key]; !known {
+			inputs.lastFailure[key] = check
+		}
+		return
+	}
 	inputs.lastFailure[key] = check
 	// A retry that kept the failing check's verdict from an earlier pass ran nothing that
 	// failed under it, so it counts no failed run.
@@ -204,14 +253,15 @@ func (inputs *chainReverifyInputs) noteFailure(tier reverifyTier, name string, e
 
 // countRefusals counts each service and node url this pass refused a provider it
 // admits, and each Warning check it failed, one failed run each. A missing websocket
-// url is not counted: no check ran, and the gauge already holds it while it lasts. A
-// retry counts only the checks it ran, not the verdicts it kept from an earlier pass.
+// url is not counted: no check ran, and the gauge already holds it while it lasts. Nor
+// is a url refused only by checks the deadline cut off: none of them ran. A retry
+// counts only the checks it ran, not the verdicts it kept from an earlier pass.
 func (inputs *chainReverifyInputs) countRefusals(tier reverifyTier, provider *routersession.RPCStaticProviderEndpoint, admission chainlib.ProviderAdmission) {
 	if inputs.countFailedCheck == nil {
 		return
 	}
 	for _, failure := range refusalsOf(inputs.chainParser, provider, admission.Rerun()) {
-		if failure.Check == chainlib.CheckMissingURL {
+		if failure.Check == chainlib.CheckMissingURL || failure.Check == chainlib.CheckNotRun {
 			continue
 		}
 		inputs.countFailedCheck(tier, provider.Name, failure)
@@ -384,9 +434,9 @@ func isRateLimitFailure(err error) bool {
 	return chainlib.IsRateLimitFailure(err)
 }
 
-// applyReverification revalidates configured providers for one tier and
-// reconciles the result against the freshly-built active map. It does two
-// things, in order:
+// applyReverification reconciles one tier's re-verify probes — probeReverification
+// over the tier's configured providers — against the freshly-built active map. It
+// does two things, in order:
 //
 //   - Demote: drop entries from `fresh` whose provider has now failed validation on
 //     reverifyDemoteThreshold CONSECUTIVE cycles (a provider failing for the first time is kept,
@@ -398,18 +448,13 @@ func isRateLimitFailure(err error) bool {
 //     configured providers that pass but were absent from `fresh` (returning
 //     from failed-init / quarantine).
 //
-// The per-provider check is inputs.validateFn; production leaves it nil and we
-// fall back to validateProvider (real network probe). Tests inject a fake via
-// inputs.validateFn to exercise the reconciliation logic — and updateEpoch's
-// orchestration around it — without standing up upstreams.
-//
-// Validations run in parallel, capped by SpecReVerifyConcurrency, so a worst-
-// case cycle is bounded by ⌈N/conc⌉ × SpecReVerifyAttemptTimeout instead of
-// N × timeout. Pure with respect to RPCSmartRouter state — no field mutation,
-// no UpdateAllProviders, no tracker reconcile; updateEpoch owns those. The ONE
-// exception is inputs.demoteFailStreak, the cross-cycle failure counter this
-// function both reads and advances; it is guarded by RPCSmartRouter.mu, which
-// updateEpoch holds across both tier calls.
+// The probes are taken before, without the router lock: one provider that never
+// answers holds its probe for SpecReVerifyAttemptTimeout, and nothing else that
+// needs the lock may wait on it (MAG-5318). This applies their verdicts, and callers
+// hold RPCSmartRouter.mu. Pure with respect to RPCSmartRouter state — no field
+// mutation, no UpdateAllProviders, no tracker reconcile; updateEpoch owns those. The
+// ONE exception is inputs.demoteFailStreak, the cross-cycle failure counter this
+// function both reads and advances.
 //
 // Configured lists are pre-filtered by chain+ApiInterface at startup (see
 // relevantStaticProviderList in rpcsmartrouter.go), so no further filter is
@@ -419,17 +464,16 @@ func isRateLimitFailure(err error) bool {
 // those providers from the failed lists — promoting here while leaving them pending
 // for the retry loop produces two sessions for one provider.
 func applyReverification(
-	ctx context.Context,
 	inputs *chainReverifyInputs,
 	fresh map[uint64]*routersession.ConsumerSessionsWithProvider,
 	tier reverifyTier,
 	epoch uint64,
+	probes []reverifyProbe,
 ) (map[uint64]*routersession.ConsumerSessionsWithProvider, []*routersession.ConsumerSessionsWithProvider, []string) {
-	configured := inputs.configuredFor(tier)
-	if len(configured) == 0 {
+	if len(inputs.configuredFor(tier)) == 0 {
 		return fresh, nil, nil
 	}
-	return decideReverification(inputs, fresh, tier, epoch, probeReverification(ctx, inputs, configured, nil, nil), false)
+	return decideReverification(inputs, fresh, tier, epoch, probes, false)
 }
 
 // configuredFor is one tier's configured providers.
@@ -678,6 +722,7 @@ func decideReverification(
 		if refused, ok := chainlib.FailedPass(err); ok && wasActive && !refused.RefusalRan() {
 			// A retry that kept the failing verdicts instead of running those checks again
 			// found nothing new: the grace advances on the retry of what failed (MAG-3950).
+			// Nor did a pass whose failing checks the deadline cut off: none of them ran.
 			healthyNames[p.Name] = struct{}{}
 			continue
 		}

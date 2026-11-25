@@ -52,7 +52,7 @@ type RelayProcessor struct {
 	// crossValidationFailFastReason carries the structured reason for a request-time cross-validation
 	// fail-fast (capacity/diversity checks that abort before any relay completes, so no RelayResult is
 	// produced). It rides on the shared processor back to the caller, which synthesizes the
-	// lava-cross-validation-failure-reason header from it — the error returns are left byte-for-byte
+	// router-cross-validation-failure-reason header from it — the error returns are left byte-for-byte
 	// unchanged so the state machine's PairingListEmptyError stop logic is unaffected. Guarded by rp.lock.
 	crossValidationFailFastReason string
 	// crossValidationProviderGroups maps each provider the request was sent to onto its group, folded like
@@ -69,7 +69,7 @@ type RelayProcessor struct {
 	// no further attempt. Guarded by rp.lock.
 	stopReason string
 
-	// degradedExtensions are the extensions the caller asked for (lava-extension) that an attempt
+	// degradedExtensions are the extensions the caller asked for (router-extension) that an attempt
 	// of this request was sent without: no node serving them could take it, so the attempt went to
 	// a regular node instead (see GetAllowSessionDegradation). The reply names them as it names an
 	// extension no node offers (MAG-4729). Guarded by rp.lock.
@@ -830,7 +830,7 @@ func (rp *RelayProcessor) handleResponse(response *RelayResponse) {
 		// The router's own health check is not a client request, so its attempts stay out of the
 		// tally a test reads (review 626-5); the metric above keeps counting them, as before.
 		if recorder, ok := rp.chainIdAndApiInterfaceGetter.(NodeErrorRecorder); ok && !rp.GetUsedProviders().IsRouterHealthCheck() {
-			recorder.RecordNodeError(chainId, apiInterface, response.RelayResult.ProviderInfo.ProviderAddress, rp.RelayStateMachine.GetProtocolMessage().GetApi().Name)
+			recorder.RecordNodeError(chainId, apiInterface, response.RelayResult.ProviderInfo.ProviderAddress, rp.RelayStateMachine.GetProtocolMessage())
 		}
 		utils.FormatInfo("Relay received a node error", utils.LogAttr("GUID", rp.guid), utils.LogAttr("Error", nodeError), utils.LogAttr("provider", response.RelayResult.ProviderInfo), utils.LogAttr("Request", rp.RelayStateMachine.GetProtocolMessage().GetApi().Name))
 	}
@@ -1561,8 +1561,8 @@ func onlyRateLimited(nodeErrorResults []common.RelayResult, protocolErrorResults
 // node/protocol error's own RelayResult, whose ProviderInfo.ProviderAddress is a SINGLE provider — the
 // source of the error body being returned. It must never be a comma-joined list: packing the whole
 // attempted set here made appendHeadersToRelayResult treat the joined blob as the resolver name and
-// append it after the per-attempt names, so on the all-transport-errors path Lava-Provider-Address
-// listed ~2x the providers and disagreed with Lava-Retries (MAG-2351).
+// append it after the per-attempt names, so on the all-transport-errors path Router-Provider-Address
+// listed ~2x the providers and disagreed with Router-Retries (MAG-2351).
 func (rp *RelayProcessor) buildFailureResult(
 	nodeErrors []common.RelayResult, protocolErrors []RelayError,
 ) (*common.RelayResult, error) {

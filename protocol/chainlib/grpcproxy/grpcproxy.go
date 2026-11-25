@@ -2,8 +2,12 @@ package grpcproxy
 
 import (
 	"context"
+	"fmt"
 	"net/http"
+	"runtime/debug"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/improbable-eng/grpc-web/go/grpcweb"
@@ -13,7 +17,6 @@ import (
 	"golang.org/x/net/http2/h2c"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
@@ -60,29 +63,52 @@ type HealthReporter interface {
 	IsHealthy() bool
 }
 
+// CallGate is asked about every call the proxy relays, with its method ("service/method") and
+// before any of its messages is read. A non-nil error refuses the call with that status, so a
+// client stream or a two-way stream is answered at once, even when its client sends nothing until
+// it gets a reply (MAG-5133).
+type CallGate = func(ctx context.Context, method string) error
+
+// ProxyOption configures NewGRPCProxyWithReflection.
+type ProxyOption func(*proxyOptions)
+
+type proxyOptions struct {
+	callGate CallGate
+}
+
+// WithCallGate has the proxy ask gate about every call it relays before reading it.
+func WithCallGate(gate CallGate) ProxyOption {
+	return func(o *proxyOptions) { o.callGate = gate }
+}
+
 // NewGRPCProxyWithReflection creates a gRPC proxy. A separate gRPC server answers
 // reflection, v1 and v1alpha, from reflectionSource, which is what lets tools like
 // grpcurl work against the router; without a source it answers for the reflection
-// services alone. Either way, no reflection request reaches cb.
+// services alone. Either way, no reflection request reaches cb. The same server answers
+// grpc.health.v1 from healthReporter, as the HTTP health check at healthCheckPath does.
 //
 // streamCallback is optional; when non-nil the proxy offers every request to it
 // first, so server-streaming methods are served as streams instead of being forced
 // through the single-message unary path.
-func NewGRPCProxyWithReflection(cb ProxyCallBack, healthCheckPath string, cmdFlags common.ConsumerCmdFlags, healthReporter HealthReporter, reflectionSource ReflectionSource, streamCallback StreamProxyCallBack) (*grpc.Server, *http.Server, error) {
+func NewGRPCProxyWithReflection(cb ProxyCallBack, healthCheckPath string, cmdFlags common.ConsumerCmdFlags, healthReporter HealthReporter, reflectionSource ReflectionSource, streamCallback StreamProxyCallBack, opts ...ProxyOption) (*grpc.Server, *http.Server, error) {
+	var options proxyOptions
+	for _, opt := range opts {
+		opt(&options)
+	}
 	serverReceiveMaxMessageSize := grpc.MaxRecvMsgSize(common.GRPCMaxCallRecvMsgSize) // 512 MB instead of grpc-go's 4 MB default
-	s := grpc.NewServer(grpc.UnknownServiceHandler(makeProxyFunc(cb, streamCallback)), grpc.ForceServerCodec(RawBytesCodec{}), serverReceiveMaxMessageSize)
-	grpc_health_v1.RegisterHealthServer(s, health.NewServer())
+	s := grpc.NewServer(grpc.UnknownServiceHandler(makeProxyFunc(cb, streamCallback, options.callGate)), grpc.ForceServerCodec(RawBytesCodec{}), serverReceiveMaxMessageSize)
 
 	wrappedServer := grpcweb.WrapServer(s)
 
-	// Reflection gets a server of its own with the standard protobuf codec: the
-	// main server's RawBytesCodec cannot serialize reflection messages.
+	// The router's own services, reflection and health, get a server of their own with the
+	// standard protobuf codec: the main server's RawBytesCodec cannot read their messages.
 	if reflectionSource == nil {
 		reflectionSource = noUpstreamReflection{}
 	}
-	reflectionGrpcServer := grpc.NewServer(serverReceiveMaxMessageSize)
-	RegisterReflection(reflectionGrpcServer, reflectionSource)
-	wrappedReflectionServer := grpcweb.WrapServer(reflectionGrpcServer)
+	ownServicesGrpcServer := grpc.NewServer(serverReceiveMaxMessageSize)
+	RegisterReflection(ownServicesGrpcServer, reflectionSource)
+	grpc_health_v1.RegisterHealthServer(ownServicesGrpcServer, &listenerHealth{reporter: healthReporter})
+	wrappedOwnServicesServer := grpcweb.WrapServer(ownServicesGrpcServer)
 
 	handler := func(resp http.ResponseWriter, req *http.Request) {
 		// Set CORS headers; a --cors-origin list answers with the caller's own origin when listed.
@@ -123,9 +149,9 @@ func NewGRPCProxyWithReflection(cb ProxyCallBack, healthCheckPath string, cmdFla
 			return
 		}
 
-		// Route reflection requests to the dedicated reflection server
-		if isReflectionRequest(req.URL.Path) {
-			wrappedReflectionServer.ServeHTTP(resp, req)
+		// Reflection and health are answered by the router itself.
+		if isReflectionRequest(req.URL.Path) || isHealthRequest(req.URL.Path) {
+			wrappedOwnServicesServer.ServeHTTP(resp, req)
 			return
 		}
 
@@ -139,22 +165,63 @@ func NewGRPCProxyWithReflection(cb ProxyCallBack, healthCheckPath string, cmdFla
 	return s, httpServer, nil
 }
 
-func makeProxyFunc(callBack ProxyCallBack, streamCallBack StreamProxyCallBack) grpc.StreamHandler {
-	return func(srv interface{}, stream grpc.ServerStream) error {
+// HandlerFailedMessage is all a caller is told when the router fails while handling its request:
+// the details go to the router's log, under the request id the caller gets in router-guid.
+const HandlerFailedMessage = "the router failed to handle the request"
+
+func makeProxyFunc(callBack ProxyCallBack, streamCallBack StreamProxyCallBack, callGate CallGate) grpc.StreamHandler {
+	handle := proxyHandler(callBack, streamCallBack, callGate)
+	return func(srv interface{}, stream grpc.ServerStream) (err error) {
 		// currently the callback function does not account for headers.
 		methodName, ok := grpc.MethodFromServerStream(stream)
 		if !ok {
 			return status.Error(codes.Unavailable, "unable to get method name")
+		}
+		// The request id is set here, before anything runs, so a failure below is logged and
+		// answered under the id the request's own log lines carry: the callbacks keep it.
+		ctx := utils.WithUniqueIdentifier(stream.Context(), utils.GenerateUniqueIdentifier())
+		defer func() {
+			if failure := recover(); failure != nil {
+				err = handlerFailed(ctx, stream, methodName, failure)
+			}
+		}()
+		return handle(ctx, stream, methodName)
+	}
+}
+
+// handlerFailed answers a call whose handling stopped with a panic: INTERNAL with
+// HandlerFailedMessage and the request id in router-guid, while the failure and its stack go to the
+// router's log at ERROR under that id. The server keeps serving every other call.
+func handlerFailed(ctx context.Context, stream grpc.ServerStream, methodName string, failure any) error {
+	guid, _ := utils.GetUniqueIdentifier(ctx)
+	utils.FormatError("gRPC handler failed", fmt.Errorf("%v", failure),
+		utils.LogAttr("GUID", ctx),
+		utils.LogAttr("method", methodName),
+		utils.LogAttr("stack", string(debug.Stack())),
+	)
+	stream.SetTrailer(metadata.Pairs(common.GUID_HEADER_NAME, strconv.FormatUint(guid, 10)))
+	return status.Error(codes.Internal, HandlerFailedMessage)
+}
+
+// proxyHandler serves one call: it refuses a call the router does not serve (callGate), reads the
+// request, offers it to the stream callback, and hands it to the unary callback when that callback
+// does not take it. ctx carries the request id.
+func proxyHandler(callBack ProxyCallBack, streamCallBack StreamProxyCallBack, callGate CallGate) func(ctx context.Context, stream grpc.ServerStream, methodName string) error {
+	return func(ctx context.Context, stream grpc.ServerStream, methodName string) error {
+		method := methodName[1:] // strip first '/' of the method name
+		if callGate != nil {
+			if err := callGate(ctx, method); err != nil {
+				return err
+			}
 		}
 		var reqBytes []byte
 		err := stream.RecvMsg(&reqBytes)
 		if err != nil {
 			return err
 		}
-		method := methodName[1:] // strip first '/' of the method name
 
 		if streamCallBack != nil {
-			streamResponse, streamErr := streamCallBack(stream.Context(), method, reqBytes)
+			streamResponse, streamErr := streamCallBack(ctx, method, reqBytes)
 			if streamErr != nil {
 				return streamErr
 			}
@@ -165,14 +232,34 @@ func makeProxyFunc(callBack ProxyCallBack, streamCallBack StreamProxyCallBack) g
 			// to the unary path, which is the whole of the pre-streaming behaviour.
 		}
 
-		respBytes, md, err := callBack(stream.Context(), method, reqBytes)
+		// The router relays one request message per call. A client that sends a second one is
+		// streaming its requests, which the router does not serve, and an answer to the first
+		// alone would drop the rest without a word (MAG-5133). The read runs beside the relay, so
+		// a single-message call waits for nothing extra: its client closed its side with the
+		// message, and the read ends at once.
+		sentMore := make(chan bool, 1)
+		go func() {
+			var next []byte
+			sentMore <- stream.RecvMsg(&next) == nil
+		}()
+
+		respBytes, md, err := callBack(ctx, method, reqBytes)
 
 		md = lowercaseMetadata(md)
+
+		if clientSentMore(sentMore) {
+			// The first message was relayed, so the reply metadata names the request: its id, as
+			// every other refusal carries it, goes out in the trailers with the refusal.
+			if len(md) > 0 {
+				stream.SetTrailer(md)
+			}
+			return status.Error(codes.Unimplemented, common.UnservedGRPCCallError.Error())
+		}
 
 		if err != nil {
 			// On error the handler returns no message, so gRPC sends a trailers-only response — SetHeader
 			// metadata is unreliable there, but trailers are always flushed with the status. Attach the
-			// reply metadata (e.g. lava-cross-validation-* failure headers) as trailers so error responses
+			// reply metadata (e.g. router-cross-validation-* failure headers) as trailers so error responses
 			// still carry it, matching the success path's SetHeader. Skipped when empty, so non-CV errors
 			// are unchanged.
 			if len(md) > 0 {
@@ -185,6 +272,29 @@ func makeProxyFunc(callBack ProxyCallBack, streamCallBack StreamProxyCallBack) g
 			utils.FormatError("Got error when setting header", err, utils.LogAttr("headers", utils.RedactHeaders(md)))
 		}
 		return stream.SendMsg(respBytes)
+	}
+}
+
+// secondMessageWait bounds how long a reply waits for the read beside it, when that read has not
+// ended by the time the reply is ready: a client that has neither closed its side nor sent more.
+var secondMessageWait = 50 * time.Millisecond
+
+// clientSentMore reports whether the read beside the relay found a second request message. A read
+// still open when the reply is ready gets secondMessageWait to end: a single-message call ends it
+// at once, and a client streaming its requests sends its next one.
+func clientSentMore(sentMore <-chan bool) bool {
+	select {
+	case more := <-sentMore:
+		return more
+	default:
+	}
+	timer := time.NewTimer(secondMessageWait)
+	defer timer.Stop()
+	select {
+	case more := <-sentMore:
+		return more
+	case <-timer.C:
+		return false
 	}
 }
 
@@ -259,11 +369,16 @@ func (RawBytesCodec) Unmarshal(data []byte, v interface{}) error {
 }
 
 func (RawBytesCodec) Name() string {
-	return "lava/grpc-proxy-codec"
+	return "router/grpc-proxy-codec"
 }
 
 func (RawBytesCodec) String() string {
 	return RawBytesCodec{}.Name()
+}
+
+// isHealthRequest reports whether path is a call to the gRPC health service.
+func isHealthRequest(path string) bool {
+	return strings.HasPrefix(path, "/"+grpc_health_v1.Health_ServiceDesc.ServiceName+"/")
 }
 
 // isReflectionRequest checks if the request path is for gRPC reflection service

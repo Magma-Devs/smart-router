@@ -152,9 +152,9 @@ func TestRelayEnd_TransactionFields(t *testing.T) {
 			body: `{"query":"mutation { executeTransaction(transactionDataBcs: \"AAACAAgA\", signatures: [\"AKsS\"]) { __typename } }"}`,
 		},
 		{
-			name: "tendermint_tx_hash", chainID: "LAVA", apiInterface: spectypes.APIInterfaceTendermintRPC,
+			name: "tendermint_tx_hash", chainID: "COSMOSHUB", apiInterface: spectypes.APIInterfaceTendermintRPC,
 			parser: func(t *testing.T) chainlib.ChainParser {
-				return relayEndSpecParser(t, "LAVA", spectypes.APIInterfaceTendermintRPC)
+				return relayEndSpecParser(t, "COSMOSHUB", spectypes.APIInterfaceTendermintRPC)
 			},
 			node: relayEndReply(200, `{"jsonrpc":"2.0","id":1,"result":{"code":0,"data":"","log":"[]","codespace":"","hash":"`+relayEndCosmosHash+`"}}`, 0),
 			body: `{"jsonrpc":"2.0","method":"broadcast_tx_sync","params":{"tx":"CpIBCo8B"},"id":1}`, tendermint: true,
@@ -286,7 +286,7 @@ func TestRelayEnd_CosmosTxHashOnlyOnASubmit(t *testing.T) {
 		return end
 	}
 
-	tendermint := newRelayEndServer(t, "LAVA", spectypes.APIInterfaceTendermintRPC, relayEndSpecParser(t, "LAVA", spectypes.APIInterfaceTendermintRPC))
+	tendermint := newRelayEndServer(t, "COSMOSHUB", spectypes.APIInterfaceTendermintRPC, relayEndSpecParser(t, "COSMOSHUB", spectypes.APIInterfaceTendermintRPC))
 	hashed := `{"jsonrpc":"2.0","id":1,"result":{"hash":"` + relayEndCosmosHash + `"}}`
 	require.Equal(t, relayEndCosmosHash, read(t, tendermint, "", `{"jsonrpc":"2.0","method":"broadcast_tx_sync","params":{"tx":"CpIBCo8B"},"id":1}`, "", hashed).txHash, "the control: a submit")
 	evidence := read(t, tendermint, "", `{"jsonrpc":"2.0","method":"broadcast_evidence","params":{"evidence":"CpIBCo8B"},"id":1}`, "", hashed)
