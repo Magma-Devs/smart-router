@@ -3,6 +3,8 @@ package rpcsmartrouter
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -14,6 +16,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
+	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 )
@@ -188,4 +191,74 @@ func relayGetBalance(t *testing.T, server *RPCSmartRouterServer) {
 	require.NoError(t, err)
 	_, _ = io.Copy(io.Discard, response.Body)
 	require.NoError(t, response.Body.Close())
+}
+
+// PRD §8.2's WebSocket gate on tendermintrpc: the error frame is injected into the subscription's
+// error channel, as a CometBFT node ending the subscription delivers it, and is counted under the
+// manager's own interface with source="subscription"; the subscription still ends.
+func TestTendermintSubscriptionErrorFrameIsCountedAsTheSubscriptions(t *testing.T) {
+	manager := NewDirectWSSubscriptionManager(getTestMetricsManager(), "tendermintrpc", "COSMOSHUB", "tendermintrpc",
+		[]*common.NodeUrl{{Url: "wss://cometbft.example/websocket"}}, nil, nil, nil)
+	t.Cleanup(manager.Close)
+	var reported []reportedFrame
+	manager.SetErrorFrameReporter(func(method, upstream string, nodeErr *rpcclient.JsonError, routerError *common.RouterError) {
+		reported = append(reported, reportedFrame{method: method, upstream: upstream, nodeCode: nodeErr.Code, errorName: routerError.Name})
+	})
+	counted := captureCountedErrors(t)
+
+	subCtx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	const hp = "hp-cometbft-error-frame"
+	activeSub := &directActiveSubscription{
+		upstreamID:       "1#event",
+		hashedParams:     hp,
+		subscribeMethod:  "subscribe",
+		connectedClients: map[string]*common.SafeChannelSender[*pairingtypes.RelayReply]{},
+		clientRouterIDs:  map[string]string{},
+		ctx:              subCtx,
+		cancel:           cancel,
+		closeSubChan:     make(chan struct{}),
+		messagesChan:     make(chan *rpcclient.JsonrpcMessage, 1),
+	}
+	manager.lock.Lock()
+	manager.activeSubscriptions[hp] = activeSub
+	manager.lock.Unlock()
+
+	nodeErr := &rpcclient.JsonError{Code: -32000, Message: "subscription was cancelled (reason: CometBFT exited)"}
+	errCh := make(chan error, 1)
+	errCh <- nodeErr
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		manager.listenForUpstreamMessages(subCtx, hp, activeSub, fakeUpstreamErrSource{ch: errCh}, activeSub.messagesChan)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the error frame must end the subscription")
+	}
+
+	manager.lock.RLock()
+	_, stillOpen := manager.activeSubscriptions[hp]
+	manager.lock.RUnlock()
+	require.False(t, stillOpen, "the node ended it: cleaned up, not restored")
+	want := subscriptionNodeErrorVerdict("COSMOSHUB", spectypes.APIInterfaceTendermintRPC, "subscribe", false, nodeErr)
+	require.Equal(t, []countedError{{name: want.Name, chainID: "COSMOSHUB", apiInterface: spectypes.APIInterfaceTendermintRPC, source: common.ErrorSourceSubscription}}, counted())
+	require.Equal(t, []reportedFrame{{method: "subscribe", nodeCode: -32000, errorName: want.Name}}, reported)
+}
+
+// A subscribe a CometBFT node refuses with a JSON-RPC error is counted under tendermintrpc; one the
+// transport failed is the connection's and is not counted (PRD §5.7).
+func TestTendermintRefusedSubscribeIsCountedAsTheSubscriptions(t *testing.T) {
+	manager := NewDirectWSSubscriptionManager(getTestMetricsManager(), "tendermintrpc", "COSMOSHUB", "tendermintrpc",
+		[]*common.NodeUrl{{Url: "wss://cometbft.example/websocket"}}, nil, nil, nil)
+	t.Cleanup(manager.Close)
+	counted := captureCountedErrors(t)
+
+	refusal := &rpcclient.JsonError{Code: -32603, Message: "max_subscriptions_per_client 5 reached"}
+	manager.countRefusedSubscribe("subscribe", false, fmt.Errorf("upstream rejected subscribe: %w", refusal))
+	manager.countRefusedSubscribe("subscribe", false, fmt.Errorf("upstream subscribe failed: %w", errors.New("websocket: close 1006 (abnormal closure)")))
+
+	want := subscriptionNodeErrorVerdict("COSMOSHUB", spectypes.APIInterfaceTendermintRPC, "subscribe", false, refusal)
+	require.Equal(t, []countedError{{name: want.Name, chainID: "COSMOSHUB", apiInterface: spectypes.APIInterfaceTendermintRPC, source: common.ErrorSourceSubscription}}, counted())
 }
