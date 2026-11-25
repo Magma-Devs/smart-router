@@ -394,6 +394,11 @@ var (
 	// ABORTED answer, with its "retriable with another submission" text, rather than a "transaction
 	// status unclear" error (unclearWriteError).
 	//
+	// CometBFT's broadcast_tx_commit gets this verdict too, for its -32603 "timed out waiting for tx
+	// to be included in a block" (MAG-5325): the transaction passed CheckTx and was not committed
+	// within the node's timeout. That says nothing against the node, and the transaction may still
+	// land.
+	//
 	// A node error, not PROTOCOL_PROVIDER_ABORTED (1013). That code is CategoryInternal, which
 	// would report the endpoint as unreachable and rank the node's own message below internal
 	// errors. It also claims the request never reached the node.
@@ -424,6 +429,16 @@ var (
 	RouterErrorNodeURLRefused = registerError(&RouterError{
 		Code: 2021, Name: "NODE_URL_REFUSED", Category: CategoryExternal,
 		Description: "Endpoint url does not serve this interface (HTTP 404/405 or a redirect on GraphQL's one url)", Retryable: true,
+	})
+	// NODE_UNLISTED_SERVER_ERROR (MAG-5490): a REST 5xx that no status row names (505-511, 528,
+	// 529, 531-599). Every 5xx but 501 is a provider fault (rulebook Part I 1; Part V 3.1 P8):
+	// retried and blamed. It was UNKNOWN_ERROR, retried but recorded as nobody's fault. Like a 502
+	// or 504 it may have reached the node, as UNKNOWN_ERROR did: a write answered with one stays
+	// unclear, and a JSON body under one is not served as the node's reply (ServerErrorIsNodeReply).
+	RouterErrorNodeUnlistedServerError = registerError(&RouterError{
+		Code: 2022, Name: "NODE_UNLISTED_SERVER_ERROR", Category: CategoryExternal,
+		Description: "HTTP 5xx from provider that no status row names (REST)", Retryable: true,
+		MayHaveReachedNode: true,
 	})
 
 	// Bitcoin/UTXO node errors (2100-2149)

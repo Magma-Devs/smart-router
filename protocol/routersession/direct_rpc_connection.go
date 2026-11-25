@@ -399,6 +399,14 @@ type WebSocketDirectRPCConnection struct {
 	// over a WebSocket frame it is currently ignored. Kept for forward-correctness.
 	isJsonRPC bool
 
+	// xrplWebSocketFlattening is set by SetXRPLWebSocketFlattening for an XRP Ledger node url.
+	// rippled's WebSocket API reads a request's fields from the top level and ignores a nested
+	// "params" (MAG-5452), unlike the standard JSON-RPC-over-WS this connection otherwise sends.
+	// The chain identity behind a url is known only to NewDirectRPCConnection's caller
+	// (routersession.RPCProviderEndpoint.ChainID), not to NewDirectRPCConnection itself, so it is
+	// set after construction instead of threading chain identity through every constructor call.
+	xrplWebSocketFlattening bool
+
 	mu     sync.Mutex
 	client *rpcclient.Client // lazily dialed on first SendRequest, then cached
 	closed bool              // set by Close(); prevents re-dialing a closed connection
@@ -578,6 +586,12 @@ func newGRPCConnector(lifetimeCtx, dialCtx context.Context, nConns uint, nodeUrl
 // direct connection that has been closed. Callers should treat it as a normal
 // relay failure and fail over, not as a fatal condition.
 var ErrGRPCConnectionClosed = errors.New("gRPC connection is closed")
+
+// ErrNoMethodDescriptor is a JSON gRPC request the router could not convert to the method's
+// message, because this node's lookup (server reflection) gave no definition of the method: it
+// failed, or it did not describe the method. Nothing was sent to the node, so the relay says nothing
+// about it (MAG-5675).
+var ErrNoMethodDescriptor = errors.New("no definition of the gRPC method from this node")
 
 // DirectRPCPrewarmBudget bounds the readiness step that endpoint setup runs
 // before publishing connections.
@@ -1062,7 +1076,7 @@ func (w *WebSocketDirectRPCConnection) SendRequest(
 	// requests cannot collide, then restore the caller's id on the reply.
 	wireID := json.RawMessage(strconv.FormatUint(w.wireID.Add(1), 10))
 
-	reply, err := client.CallContext(ctx, wireID, reqMsg.Method, reqMsg.Params, w.isJsonRPC, false)
+	reply, err := w.callUpstream(ctx, client, wireID, reqMsg)
 	if err != nil {
 		return nil, err
 	}
@@ -1082,6 +1096,26 @@ func (w *WebSocketDirectRPCConnection) SendRequest(
 		utils.LogAttr("responseBytes", len(respBytes)),
 	)
 	return &DirectRPCResponse{Data: respBytes, StatusCode: http.StatusOK}, nil
+}
+
+// SetXRPLWebSocketFlattening marks this connection as talking to an XRP Ledger node over
+// wss://, so SendRequest flattens a request's single params object to the message's top
+// level instead of sending it nested, as rippled's WebSocket API requires (MAG-5452).
+func (w *WebSocketDirectRPCConnection) SetXRPLWebSocketFlattening() {
+	w.xrplWebSocketFlattening = true
+}
+
+// callUpstream sends reqMsg over client, flattening it first when this connection is talking to
+// an XRP Ledger node over wss:// (see SetXRPLWebSocketFlattening) and the request has rippled's
+// usual single params object. Every other request — including XRP's own no-argument commands —
+// goes out the ordinary nested-params path unchanged.
+func (w *WebSocketDirectRPCConnection) callUpstream(ctx context.Context, client *rpcclient.Client, wireID json.RawMessage, reqMsg rpcInterfaceMessages.JsonrpcMessage) (*rpcclient.JsonrpcMessage, error) {
+	if w.xrplWebSocketFlattening {
+		if fields, ok := rpcInterfaceMessages.FlattenXRPLWebSocketParams(reqMsg.Params); ok {
+			return client.CallContextFlat(ctx, wireID, reqMsg.Method, fields)
+		}
+	}
+	return client.CallContext(ctx, wireID, reqMsg.Method, reqMsg.Params, w.isJsonRPC, false)
 }
 
 // ensureClient lazily dials the WebSocket on first use and caches the resulting
@@ -1226,6 +1260,10 @@ func (g *GRPCDirectRPCConnection) SendRequest(
 	// Get method descriptor (with caching)
 	methodDescriptor, err := g.resolver.MethodDescriptor(ctx, svc, methodName)
 	if err != nil {
+		// A lookup the relay's own context ended is left as the cancellation the resolver reports.
+		if ctx.Err() == nil {
+			err = fmt.Errorf("%w: %w", ErrNoMethodDescriptor, err)
+		}
 		return nil, utils.FormatError("failed to get method descriptor", err,
 			utils.LogAttr("method", methodPath))
 	}

@@ -816,6 +816,8 @@ func TestServerErrorIsNodeReply(t *testing.T) {
 		{"JSON 502 — may have forwarded the request", 502, `{"message":"bad gateway"}`, false},
 		{"JSON 504 — Horizon timeout, the tx may still apply", 504, `{"type":"https://stellar.org/horizon-errors/timeout","status":504}`, false},
 		{"JSON 524 — Cloudflare timeout", 524, `{"message":"timeout"}`, false},
+		{"JSON 507 — a 5xx no row names may have forwarded the request (MAG-5490)", 507, `{"message":"insufficient storage"}`, false},
+		{"JSON 599", 599, `{"message":"network connect timeout"}`, false},
 		{"not a 5xx", 404, `{"message":"not found"}`, false},
 	}
 	for _, tc := range cases {

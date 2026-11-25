@@ -11,6 +11,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/holdoff"
+	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 )
 
@@ -290,6 +291,72 @@ func TestBlockRelease_BulkClearsEveryRecord(t *testing.T) {
 			require.Emptyf(t, blockedRecordCount(csm), "%s released every provider, so it must leave no block records", tc.name)
 		})
 	}
+}
+
+// An add-on request that finds its pool empty releases only the blocked providers that serve the
+// add-on, because only those are put back. A blocked provider that does not serve it stays blocked,
+// with its record (MAG-5078). The release used to drop it from the blocked list without readmitting
+// it, so it sat neither valid nor blocked until the next pairing rebuild.
+func TestPoolEmptyRelease_AddonReleasesOnlyWhatItReadmits(t *testing.T) {
+	csm := CreateConsumerSessionManager()
+	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, createPairingList("", true), nil))
+	ctx := context.Background()
+
+	// provider0-3 serve "addon" (createPairingList) and provider4 does not. Blocking the five empties
+	// the add-on pool, while plain traffic still has provider5-9.
+	addonProviders := []string{"provider0", "provider1", "provider2", "provider3"}
+	const notServingAddon = "provider4"
+	for _, address := range append(slices.Clone(addonProviders), notServingAddon) {
+		require.NoError(t, csm.blockProvider(ctx, address, BlockReasonAllEndpointsDisabled, false, csm.atomicReadCurrentEpoch(), 0, 0, nil))
+	}
+	recordBefore := blockedRecord(t, csm, notServingAddon)
+
+	sessions, err := csm.GetSessions(ctx, 1, cuForFirstRequest, NewUsedProviders(nil), servicedBlockNumber, "addon", nil, common.NO_STATE, 0, "", "")
+	require.NoError(t, err, "the last resort releases the add-on's providers and serves the request")
+	for provider := range sessions {
+		require.Contains(t, addonProviders, provider)
+	}
+
+	csm.lock.RLock()
+	valid := slices.Clone(csm.validAddresses)
+	blocked := slices.Clone(csm.currentlyBlockedProviderAddresses)
+	csm.lock.RUnlock()
+	require.Subset(t, valid, addonProviders, "the add-on's providers are back in rotation")
+	require.Equal(t, []string{notServingAddon}, blocked, "a provider the release did not put back must not leave the blocked list")
+	require.NotContains(t, valid, notServingAddon)
+	require.Equal(t, recordBefore, blockedRecord(t, csm, notServingAddon), "its block stands as it was")
+}
+
+// The same holds for an extension with no add-on, such as archive, which takes the same branch of
+// the release (MAG-5078): only the blocked providers that serve the extension leave the blocked list.
+func TestPoolEmptyRelease_ExtensionReleasesOnlyWhatItReadmits(t *testing.T) {
+	csm := CreateConsumerSessionManager()
+	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, createPairingList("", true), nil))
+	ctx := context.Background()
+
+	// provider2 and provider3 serve "ext1" (createPairingList) and provider4 does not. Blocking the
+	// three empties the extension's pool, while plain traffic still has the other providers.
+	extensionProviders := []string{"provider2", "provider3"}
+	const notServingExtension = "provider4"
+	for _, address := range append(slices.Clone(extensionProviders), notServingExtension) {
+		require.NoError(t, csm.blockProvider(ctx, address, BlockReasonAllEndpointsDisabled, false, csm.atomicReadCurrentEpoch(), 0, 0, nil))
+	}
+	recordBefore := blockedRecord(t, csm, notServingExtension)
+
+	sessions, err := csm.GetSessions(ctx, 1, cuForFirstRequest, NewUsedProviders(nil), servicedBlockNumber, "", []*spectypes.Extension{{Name: "ext1"}}, common.NO_STATE, 0, "", "")
+	require.NoError(t, err, "the last resort releases the extension's providers and serves the request")
+	for provider := range sessions {
+		require.Contains(t, extensionProviders, provider)
+	}
+
+	csm.lock.RLock()
+	valid := slices.Clone(csm.validAddresses)
+	blocked := slices.Clone(csm.currentlyBlockedProviderAddresses)
+	csm.lock.RUnlock()
+	require.Subset(t, valid, extensionProviders, "the extension's providers are back in rotation")
+	require.Equal(t, []string{notServingExtension}, blocked, "a provider the release did not put back must not leave the blocked list")
+	require.NotContains(t, valid, notServingExtension)
+	require.Equal(t, recordBefore, blockedRecord(t, csm, notServingExtension), "its block stands as it was")
 }
 
 // The per-reason gauge is level-triggered: every reason is republished on every tick, zeros
@@ -885,6 +952,35 @@ func TestEpochTransition_AReportedProviderThatPassesItsProbeIsReleased(t *testin
 
 	require.True(t, isValidAddress(csm, address),
 		"the gate is a routability check, not a quarantine: a provider that can serve must come back")
+}
+
+// A release pass belongs to the pairing update that started it. A later update carries its own set
+// over and starts its own pass, so an earlier pass, still running or not yet started, must neither
+// act on that set nor clear it. It used to clear it, which left the later pass nothing to release:
+// a reported provider that passes its probe stayed blocked, and
+// TestEpochTransition_AReportedProviderThatPassesItsProbeIsReleased failed now and then (MAG-4919).
+func TestEpochTransition_AnEarlierPassLeavesALaterUpdatesSetAlone(t *testing.T) {
+	const address = "provider-healthy"
+	csm := CreateConsumerSessionManager()
+	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, epochPairing(t, address, true), nil))
+	require.NoError(t, csm.blockProvider(context.Background(), address, BlockReasonAllEndpointsDisabled,
+		true, csm.atomicReadCurrentEpoch(), MaxConsecutiveConnectionAttempts, 0, nil))
+
+	// A later update in the same epoch, as the failed-provider readmit pushes one, with the set it
+	// carried over. Written by hand so that no pass of its own runs while the test reads the set.
+	csm.lock.Lock()
+	earlier := csm.pairingGeneration
+	csm.pairingGeneration++
+	csm.previousEpochBlockedProviders = map[string]BlockRecord{address: csm.blockedProviderRecords[address]}
+	csm.lock.Unlock()
+
+	csm.checkAndUnblockHealthyReBlockedProviders(context.Background(), firstEpochHeight, earlier)
+
+	csm.lock.RLock()
+	_, carried := csm.previousEpochBlockedProviders[address]
+	csm.lock.RUnlock()
+	require.True(t, carried, "the later update's own pass still has to read its set")
+	require.False(t, isValidAddress(csm, address), "the earlier pass does not act on the later update's set")
 }
 
 // An unknown record must not be read as "never reported". That field decides whether a provider has
