@@ -51,7 +51,7 @@ func TestCollectEndpoints_EachTransportTakesItsOwnUrls(t *testing.T) {
 		NodeUrls: []common.NodeUrl{{Url: "https://evm"}, {Url: "WSS://evm/ws"}, {Url: "ws://evm/plain"}},
 	}
 	grpc := &routersession.RPCStaticProviderEndpoint{
-		Name: "cosmos", ChainID: "LAV1", ApiInterface: "grpc",
+		Name: "cosmos", ChainID: "COSMOSHUB", ApiInterface: "grpc",
 		NodeUrls: []common.NodeUrl{{Url: "cosmos:9090"}, {Url: "grpcs://cosmos:443"}},
 	}
 	providers := []*routersession.RPCStaticProviderEndpoint{jsonrpc, grpc}

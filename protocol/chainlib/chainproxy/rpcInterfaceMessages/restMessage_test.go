@@ -61,8 +61,8 @@ func TestRestMessageGetParamsTrailingSlash(t *testing.T) {
 		{
 			name:     "several placeholders with a trailing slash",
 			specPath: "/cosmos/gov/v1/proposals/{proposal_id}/votes/{voter}",
-			path:     "/cosmos/gov/v1/proposals/7/votes/lava@1abc/",
-			expected: map[string]interface{}{"proposal_id": "7", "voter": "lava@1abc"},
+			path:     "/cosmos/gov/v1/proposals/7/votes/cosmos1abc/",
+			expected: map[string]interface{}{"proposal_id": "7", "voter": "cosmos1abc"},
 		},
 		{
 			name:     "a query string survives the trailing slash",
@@ -175,7 +175,7 @@ func TestRestMessageGetParamsReadsTheBody(t *testing.T) {
 
 // TestCheckResponseError_CosmosTransaction_Success tests successful Cosmos transaction (code=0)
 func TestCheckResponseError_CosmosTransaction_Success(t *testing.T) {
-	restMsg := RestMessage{}
+	restMsg := RestMessage{Broadcast: true}
 
 	// Cosmos SDK transaction success response (HTTP 200 + code=0)
 	successResponse := `{
@@ -204,7 +204,7 @@ func TestCheckResponseError_CosmosTransaction_Success(t *testing.T) {
 
 // TestCheckResponseError_CosmosTransaction_SequenceMismatch tests sequence mismatch error (code=32)
 func TestCheckResponseError_CosmosTransaction_SequenceMismatch(t *testing.T) {
-	restMsg := RestMessage{}
+	restMsg := RestMessage{Broadcast: true}
 
 	// Cosmos SDK transaction error (HTTP 200 + code=32)
 	errorResponse := `{
@@ -285,7 +285,7 @@ func TestCheckResponseError_CosmosTransaction_VariousErrorCodes(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			restMsg := RestMessage{}
+			restMsg := RestMessage{Broadcast: true}
 
 			response := fmt.Sprintf(`{
 				"tx_response": {
@@ -377,7 +377,7 @@ func TestCheckResponseError_HTTPStatusCodeVariations(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			restMsg := RestMessage{}
+			restMsg := RestMessage{Broadcast: true}
 
 			hasError, errorMessage := restMsg.CheckResponseError([]byte(tc.response), tc.httpStatus)
 
@@ -401,7 +401,7 @@ func TestCheckResponseError_NonTransactionCalls(t *testing.T) {
 			name: "Query Balance - Success",
 			response: `{
 				"balances": [
-					{"denom": "ulava", "amount": "1000000"}
+					{"denom": "uatom", "amount": "1000000"}
 				],
 				"pagination": {}
 			}`,
@@ -415,6 +415,23 @@ func TestCheckResponseError_NonTransactionCalls(t *testing.T) {
 				"tx_response": {
 					"code": 0,
 					"txhash": "ABC123"
+				}
+			}`,
+			httpStatus:    200,
+			expectedError: false,
+		},
+		{
+			// MAG-5326: a transaction that was included and failed. The non-zero code is the
+			// transaction's record, the same from every provider, not the node refusing the read.
+			name: "Query TX by Hash - included but failed (out of gas)",
+			response: `{
+				"tx": {},
+				"tx_response": {
+					"height": "17",
+					"txhash": "ABC123",
+					"codespace": "sdk",
+					"code": 11,
+					"raw_log": "out of gas in location: WriteFlat; gasWanted: 200000, gasUsed: 200524: out of gas"
 				}
 			}`,
 			httpStatus:    200,
@@ -528,7 +545,7 @@ func TestCheckResponseError_EdgeCases(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			restMsg := RestMessage{}
+			restMsg := RestMessage{Broadcast: true}
 
 			hasError, _ := restMsg.CheckResponseError([]byte(tc.response), tc.httpStatus)
 
@@ -555,7 +572,7 @@ func TestCheckResponseError_RealWorldScenarios(t *testing.T) {
 					"codespace": "",
 					"code": 0,
 					"data": "0A1E0A1C2F636F736D6F732E62616E6B2E763162657461312E4D736753656E64",
-					"raw_log": "[{\"events\":[{\"type\":\"coin_spent\",\"attributes\":[{\"key\":\"spender\",\"value\":\"lava1...\"},{\"key\":\"amount\",\"value\":\"1000ulava\"}]}]}]",
+					"raw_log": "[{\"events\":[{\"type\":\"coin_spent\",\"attributes\":[{\"key\":\"spender\",\"value\":\"cosmos1...\"},{\"key\":\"amount\",\"value\":\"1000uatom\"}]}]}]",
 					"logs": [{"msg_index": 0, "log": "", "events": [{"type": "coin_spent"}]}],
 					"info": "",
 					"gas_wanted": "200000",
@@ -633,7 +650,7 @@ func TestCheckResponseError_RealWorldScenarios(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			restMsg := RestMessage{}
+			restMsg := RestMessage{Broadcast: true}
 
 			hasError, errorMessage := restMsg.CheckResponseError([]byte(tc.response), tc.httpStatus)
 
@@ -745,9 +762,11 @@ func TestCheckResponseError_ServerErrors(t *testing.T) {
 }
 
 // TestCheckResponseError_AnyNonSuccessIsANodeError pins the rule: every status outside 2xx is a
-// node error whatever the body says, a 2xx is a success unless it carries a Cosmos transaction
-// error, and a status of 0 is "not set" and reads as a success. The bodies are what real nodes
-// and gateways answered with on 2026-09-27 (docs/ERROR-REGISTRY-DESIGN.md, "REST replies").
+// node error whatever the body says, a 2xx is a success unless it answers a broadcast with a Cosmos
+// transaction error, and a status of 0 is "not set" and reads as a success. The bodies are what
+// real nodes and gateways answered with on 2026-09-27 (docs/ERROR-REGISTRY-DESIGN.md, "REST
+// replies"). Every case is read as a broadcast's reply; only the Cosmos one depends on it, and
+// TestCheckResponseError_NonTransactionCalls has the same shape answering a read.
 func TestCheckResponseError_AnyNonSuccessIsANodeError(t *testing.T) {
 	testCases := []struct {
 		name          string
@@ -790,7 +809,7 @@ func TestCheckResponseError_AnyNonSuccessIsANodeError(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			hasError, errorMessage := RestMessage{}.CheckResponseError([]byte(tc.response), tc.httpStatus)
+			hasError, errorMessage := RestMessage{Broadcast: true}.CheckResponseError([]byte(tc.response), tc.httpStatus)
 			require.Equal(t, tc.expectedError, hasError)
 			if tc.msgContains != "" {
 				require.Contains(t, errorMessage, tc.msgContains)
@@ -816,11 +835,86 @@ func TestServerErrorIsNodeReply(t *testing.T) {
 		{"JSON 502 — may have forwarded the request", 502, `{"message":"bad gateway"}`, false},
 		{"JSON 504 — Horizon timeout, the tx may still apply", 504, `{"type":"https://stellar.org/horizon-errors/timeout","status":504}`, false},
 		{"JSON 524 — Cloudflare timeout", 524, `{"message":"timeout"}`, false},
+		{"JSON 507 — a 5xx no row names may have forwarded the request (MAG-5490)", 507, `{"message":"insufficient storage"}`, false},
+		{"JSON 599", 599, `{"message":"network connect timeout"}`, false},
 		{"not a 5xx", 404, `{"message":"not found"}`, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			require.Equal(t, tc.want, ServerErrorIsNodeReply(tc.status, []byte(tc.body)))
 		})
+	}
+}
+
+// TestRestMessage_RefusesTransaction pins MAG-5451's gate: only a refusal on the broadcast path is
+// the node refusing the transaction. A GET of an already-broadcast transaction answers the same
+// tx_response shape, and stays out (MAG-5326).
+func TestRestMessage_RefusesTransaction(t *testing.T) {
+	refused := `{"tx_response":{"height":"0","txhash":"5C504ED4","codespace":"sdk","code":19,"raw_log":""}}`
+	accepted := `{"tx_response":{"height":"0","txhash":"5C504ED4","codespace":"","code":0,"raw_log":"[]"}}`
+
+	cases := []struct {
+		name     string
+		specPath string
+		path     string
+		body     string
+		want     bool
+	}{
+		{"broadcast refused", "/cosmos/tx/v1beta1/txs", "/cosmos/tx/v1beta1/txs", refused, true},
+		{"broadcast accepted", "/cosmos/tx/v1beta1/txs", "/cosmos/tx/v1beta1/txs", accepted, false},
+		{"broadcast refused, no spec path, query on the url", "", "/cosmos/tx/v1beta1/txs?x=1", refused, true},
+		{"GET of a failed transaction (MAG-5326)", "/cosmos/tx/v1beta1/txs/{hash}", "/cosmos/tx/v1beta1/txs/5C504ED4", refused, false},
+		{"broadcast path, not a tx_response", "/cosmos/tx/v1beta1/txs", "/cosmos/tx/v1beta1/txs", `{"message":"ok"}`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			msg := RestMessage{SpecPath: tc.specPath, Path: tc.path}
+			require.Equal(t, tc.want, msg.RefusesTransaction([]byte(tc.body)))
+		})
+	}
+}
+
+// TestCheckResponseError_CosmosRefusal_EmptyLogKeepsCode is the hash case from MAG-5451: an empty
+// raw_log used to give an empty message, so the metric fell back to the whole body, where the tx
+// hash's digits matched the HTTP status rows. On the broadcast the message now always carries the
+// code. A GET of a transaction that was included and failed is no refusal, and no error at all: its
+// tx_response is the answer (MAG-5326).
+func TestCheckResponseError_CosmosRefusal_EmptyLogKeepsCode(t *testing.T) {
+	refused := `{"tx_response":{"height":"0","txhash":"5C504ED4AA429502","codespace":"sdk","code":19,"raw_log":""}}`
+	broadcast := RestMessage{SpecPath: "/cosmos/tx/v1beta1/txs", Path: "/cosmos/tx/v1beta1/txs", Broadcast: true}
+	hasError, message := broadcast.CheckResponseError([]byte(refused), 200)
+	require.True(t, hasError)
+	require.Equal(t, "cosmos tx refused: code 19, codespace sdk", message)
+	require.NotContains(t, message, "5C504ED4", "the tx hash must never reach the message the registry reads")
+
+	failed := `{"tx_response":{"height":"17","txhash":"5C504ED4AA429502","codespace":"sdk","code":11,"raw_log":"out of gas"}}`
+	read := RestMessage{SpecPath: "/cosmos/tx/v1beta1/txs/{hash}", Path: "/cosmos/tx/v1beta1/txs/5C504ED4AA429502"}
+	hasError, message = read.CheckResponseError([]byte(failed), 200)
+	require.False(t, hasError, "a read's tx_response is the answer")
+	require.Empty(t, message)
+}
+
+// TestRestMessage_BlockModeOutcomeIsNoRefusal: BROADCAST_MODE_BLOCK, which Cosmos SDK served before
+// v0.47, answers the broadcast once the transaction is in a block, with the block's height and the
+// execution's code. A non-zero code there is the transaction's outcome, not the node refusing it: it
+// keeps its raw_log message and is not flagged. A refusal at CheckTx has height 0, in every mode, and
+// still is one. The gateway writes the int64 height as a string; a number is read too.
+func TestRestMessage_BlockModeOutcomeIsNoRefusal(t *testing.T) {
+	broadcast := RestMessage{SpecPath: "/cosmos/tx/v1beta1/txs", Path: "/cosmos/tx/v1beta1/txs", Broadcast: true}
+	const ranAndFailed = "out of gas in location: ReadFlat; gasWanted: 200000, gasUsed: 200345: out of gas"
+
+	for _, height := range []string{`"1234"`, `1234`} {
+		ran := `{"tx_response":{"height":` + height + `,"txhash":"5C504ED4","codespace":"sdk","code":11,"raw_log":"` + ranAndFailed + `"}}`
+		require.False(t, broadcast.RefusesTransaction([]byte(ran)), "height %s: the transaction ran", height)
+		hasError, message := broadcast.CheckResponseError([]byte(ran), 200)
+		require.True(t, hasError, "height %s: the outcome keeps its old flag", height)
+		require.Equal(t, ranAndFailed, message, "height %s: the outcome keeps its raw_log", height)
+	}
+
+	for _, height := range []string{`"0"`, `0`, `null`} {
+		refused := `{"tx_response":{"height":` + height + `,"txhash":"5C504ED4","codespace":"sdk","code":32,"raw_log":"account sequence mismatch, expected 7, got 6: incorrect account sequence"}}`
+		require.True(t, broadcast.RefusesTransaction([]byte(refused)), "height %s: refused at CheckTx", height)
+		_, message := broadcast.CheckResponseError([]byte(refused), 200)
+		require.Equal(t, "cosmos tx refused: code 32, codespace sdk: account sequence mismatch, expected 7, got 6: incorrect account sequence", message)
 	}
 }

@@ -3,6 +3,7 @@ package tracing
 import (
 	"context"
 	"errors"
+	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	otelcodes "go.opentelemetry.io/otel/codes"
 	semconv "go.opentelemetry.io/otel/semconv/v1.21.0"
 	"go.opentelemetry.io/otel/trace"
+	grpccodes "google.golang.org/grpc/codes"
 
 	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/magma-Devs/smart-router/utils"
@@ -275,14 +277,36 @@ func RecordGRPCRequest(span trace.Span, methodPath, urlStr string) {
 	span.SetAttributes(attrs...)
 }
 
-// RecordGRPCResponse records the gRPC response status and payload size on
-// a client gRPC span. Skipped when response is nil. We reuse the
-// http.status_code attribute because the SmartRouter's DirectRPCResponse
-// surfaces a unified status field across protocols.
+// RecordGRPCResponse records the gRPC status and payload size on a client gRPC span.
+// Skipped when response is nil. DirectRPCResponse.StatusCode holds http.StatusOK for a
+// reply and the gRPC code for an error, so the code goes under `rpc.grpc.status_code`: 0
+// for a reply, the node's code for an error. A gRPC code never lands in
+// `http.status_code`, where 14 or 5 would read as an HTTP status (MAG-5444). A reply
+// keeps `http.status_code`=200 as before.
 func RecordGRPCResponse(span trace.Span, response *routersession.DirectRPCResponse) {
-	if response != nil {
-		recordResponse(span, response.StatusCode, len(response.Data))
+	if response == nil || !span.IsRecording() {
+		return
 	}
+	if response.StatusCode == http.StatusOK {
+		recordResponse(span, response.StatusCode, len(response.Data))
+		span.SetAttributes(semconv.RPCGRPCStatusCodeOk)
+		return
+	}
+	span.SetAttributes(
+		semconv.RPCGRPCStatusCodeKey.Int(grpcSpanStatusCode(response.StatusCode)),
+		semconv.HTTPResponseContentLength(len(response.Data)),
+	)
+}
+
+// grpcSpanStatusCode is the gRPC code a failed relay's span reports: the node's own code,
+// or UNKNOWN for an error that carried no status (the router marks that with a code
+// outside 0-16, common.GRPCStatusCodeOnFailedMessages), as status.Code reports such an
+// error.
+func grpcSpanStatusCode(code int) int {
+	if code < int(grpccodes.OK) || code > int(grpccodes.Unauthenticated) {
+		return int(grpccodes.Unknown)
+	}
+	return code
 }
 
 // recordResponse records `http.status_code` and `http.response_content_length` on a client span.

@@ -109,7 +109,7 @@ func TestDirectRelay_CountsTheRelayOnTheURLItWentTo(t *testing.T) {
 	const provider = "provider@mag4204Relays"
 	const path = "/cosmos/base/tendermint/v1beta1/blocks/17"
 	parser, _, _, closeServer, endpoint, err := chainlib.CreateChainLibMocks(
-		ctx, "LAVA", spectypes.APIInterfaceRest, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx, "COSMOSHUB", spectypes.APIInterfaceRest, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"block":{"header":{"height":"17"}}}`))
 		}), nil, "../../", nil)
@@ -124,7 +124,7 @@ func TestDirectRelay_CountsTheRelayOnTheURLItWentTo(t *testing.T) {
 		NetworkAddress: nodeURL.Url, Enabled: true, DirectConnections: []routersession.DirectRPCConnection{conn},
 	}}, 100000, 1, 1)
 	session.StaticProvider = true
-	sessionManager, rpcEndpoint := createTestSessionManager("LAVA", spectypes.APIInterfaceRest)
+	sessionManager, rpcEndpoint := createTestSessionManager("COSMOSHUB", spectypes.APIInterfaceRest)
 	rpcEndpoint.NetworkAddress = "127.0.0.1:0"
 	require.NoError(t, sessionManager.UpdateAllProviders(1,
 		map[uint64]*routersession.ConsumerSessionsWithProvider{0: session}, nil))

@@ -237,8 +237,8 @@ func TestJsonRPCBatchBlocklessElementDoesNotDecideTheRequestedBlock(t *testing.T
 // status names no block, abci_info reads latest, block reads its first argument with no default.
 func tendermintBlockFoldSpec() spectypes.Spec {
 	return spectypes.Spec{
-		Index:                         "LAV1",
-		Name:                          "lava mainnet",
+		Index:                         "COSMOSHUB",
+		Name:                          "cosmos hub",
 		Enabled:                       true,
 		AverageBlockTime:              15000,
 		AllowedBlockLagForQosSync:     2,
