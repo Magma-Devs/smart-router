@@ -33,8 +33,8 @@ func DecodeSectionStrict(raw json.RawMessage) (*spectypes.ErrorsSection, error) 
 	return &section, nil
 }
 
-// LoadPath reads every spec under path, a proposal file or a directory of them (its *.json files,
-// recursively), keyed by index; a later file wins for the same index, as the router's loader does.
+// LoadPath reads every spec in path, a proposal file or a directory of them (its top-level *.json
+// files), keyed by index; a later file wins for the same index, as the router's loader does.
 func LoadPath(path string) (map[string]Loaded, error) {
 	files, err := specFiles(path)
 	if err != nil {
@@ -100,6 +100,9 @@ func Validate(loaded map[string]Loaded) []Finding {
 	return findings
 }
 
+// specFiles is path itself, or a directory's top-level *.json files: specs live flat at a spec
+// repository's root (lava-specs' guards read ^[^/]+\.json$), and what sits below is tooling, such
+// as skill fixtures, not specs.
 func specFiles(path string) ([]string, error) {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -108,16 +111,16 @@ func specFiles(path string) ([]string, error) {
 	if !info.IsDir() {
 		return []string{path}, nil
 	}
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return nil, err
+	}
 	var files []string
-	err = filepath.WalkDir(path, func(file string, entry os.DirEntry, err error) error {
-		if err != nil {
-			return err
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".json") {
+			files = append(files, filepath.Join(path, entry.Name()))
 		}
-		if !entry.IsDir() && strings.HasSuffix(file, ".json") {
-			files = append(files, file)
-		}
-		return nil
-	})
+	}
 	sort.Strings(files)
-	return files, err
+	return files, nil
 }

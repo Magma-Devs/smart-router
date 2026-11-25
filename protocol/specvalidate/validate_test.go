@@ -221,3 +221,18 @@ func sorted(names []string) []string {
 	}
 	return names
 }
+
+// A directory is its top-level *.json files, as a spec repository keeps them: a non-spec JSON at
+// the root (compatibility.json) holds no spec, and what sits below (skill fixtures) is not read.
+func TestLoadPathReadsTheTopLevelSpecsOnly(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "solana.json"), []byte(`{"proposal":{"specs":[{"index":"SOLANA"}]}}`), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "compatibility.json"), []byte(`{"schema_versions":{"1":{"min_router":"v1.8.0"}}}`), 0o600))
+	fixtures := filepath.Join(dir, ".claude", "skills", "fixtures")
+	require.NoError(t, os.MkdirAll(fixtures, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(fixtures, "bad.json"), []byte(`{"proposal":{"specs":[{"index":7}]}}`), 0o600))
+	loaded, err := LoadPath(dir)
+	require.NoError(t, err)
+	require.Len(t, loaded, 1)
+	require.Contains(t, loaded, "SOLANA")
+}
