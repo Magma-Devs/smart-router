@@ -71,6 +71,13 @@ type replyStatusClassifier interface {
 // chainRowVerdictReader is a request whose chain's list files some node errors under a verdict of its
 // own (rpcInterfaceMessages.GrpcMessage, a copy of the chain's write: MAG-5186). The sender applied
 // the same verdict to the attempt, so the record and the endpoint's health agree.
+// graphQLOccurrences is a GraphQL request's root fields with the aliases its reply answers under
+// (rpcInterfaceMessages.GraphQLMessage): an error's path starts at an alias, and the record reads it
+// at the field's name (common.ReadGraphQLPathsAsFields).
+type graphQLOccurrences interface {
+	Occurrences() []common.GraphQLOccurrence
+}
+
 type chainRowVerdictReader interface {
 	ChainRowVerdict(data []byte) *common.RouterError
 }
@@ -283,6 +290,9 @@ func (rp *ResultsManagerInst) setValidResponse(response *RelayResponse, protocol
 		// element or GraphQL error, from the same body and status the verdict above was read from.
 		// Built beside that verdict, not in its place; the spec rows (MAG-5606) match these.
 		response.RelayResult.ErrorRecords = chainlib.RecordsFromReply(nil, apiInterfaceOf(protocolMessage), apiNameOf(protocolMessage), response.RelayResult.StatusCode, response.RelayResult.Reply.Data, checkerMessage)
+		if request, ok := protocolMessage.GetRPCMessage().(graphQLOccurrences); ok {
+			common.ReadGraphQLPathsAsFields(response.RelayResult.ErrorRecords, request.Occurrences())
+		}
 		// A write's copy whose reply says the slot is already used may be this very transaction landed
 		// (PRD §5.2, MAG-5593). Read beside the row, not from it: whatever the row says, the copy is
 		// never refused and the write is not sent again (relaypolicy.Decide; the server's
