@@ -563,6 +563,19 @@ func CodeEquals(code int) ErrorMatcher {
 	return codeEqualsMatcher{code: code}
 }
 
+// CodeInRange matches an error code from low to high, both included (e.g., any HTTP 5xx).
+type codeInRangeMatcher struct {
+	low, high int
+}
+
+func (m codeInRangeMatcher) Matches(errorCode int, _ string) bool {
+	return errorCode >= m.low && errorCode <= m.high
+}
+
+func CodeInRange(low, high int) ErrorMatcher {
+	return codeInRangeMatcher{low: low, high: high}
+}
+
 // MessageContains matches a case-insensitive substring in the error message.
 type messageContainsMatcher struct {
 	substring string // pre-lowercased at construction time

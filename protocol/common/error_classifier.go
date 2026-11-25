@@ -780,8 +780,12 @@ func init() {
 	// Append shared HTTP status message matchers to JSON-RPC transport
 	genericErrorMappings[TransportJsonRPC] = append(genericErrorMappings[TransportJsonRPC], httpStatusMessageMappings()...)
 
-	// Append both CodeEquals and HTTPStatusContains matchers to REST transport
+	// Append both CodeEquals and HTTPStatusContains matchers to REST transport, with a 5xx no
+	// status row names between them: every 5xx but 501 is a provider fault (rulebook Part V 3.1 P8),
+	// and a 505 or a 599 was UNKNOWN_ERROR, recorded as nobody's fault (MAG-5490). It follows the
+	// CodeEquals rows, so a listed 5xx keeps its own verdict.
 	genericErrorMappings[TransportREST] = append(genericErrorMappings[TransportREST], httpStatusCodeMappings()...)
+	genericErrorMappings[TransportREST] = append(genericErrorMappings[TransportREST], errorMapping{CodeInRange(500, 599), RouterErrorNodeUnlistedServerError})
 	genericErrorMappings[TransportREST] = append(genericErrorMappings[TransportREST], httpStatusMessageMappings()...)
 
 	// Append HTTPStatusContains matchers to gRPC transport — HTTP status codes can appear
