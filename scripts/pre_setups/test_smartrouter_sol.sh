@@ -316,13 +316,13 @@ else
 $ws_log"
     [ -n "${WS_DEBUG:-}" ] && echo "      [debug] ws_mark=$ws_mark ws_out=[${ws_out:0:60}] ws_log_lines=$(echo "$ws_log" | grep -c .)" >&2
     # Upstream-can't-serve-subscriptions signature (gateway accepts the ws but the
-    # backend refuses/aborts the sub): Lava 'code 889 SubscriptionInitiationError',
-    # ZAN 'close 1011', a plain 'failed to dial WebSocket'. Deliberately NARROW — it
+    # backend refuses/aborts the sub): ZAN
+    # 'close 1011', a plain 'failed to dial WebSocket'. Deliberately NARROW — it
     # must NOT swallow a router defect such as 'unknown parameters type'.
     # Two SKIP reasons (neither is a router defect): (a) no ws:// endpoint configured
     # at all — HTTP-only setup, the NoOp manager returns "no ws:// or wss:// endpoints
     # configured"; (b) the upstream accepts the ws but can't serve the sub.
-    ws_unsupported_re='SubscriptionInitiationError|[Cc]ode 889|close 1011|failed to dial WebSocket|Provider failed initiating subscription|no ws:// or wss:// endpoints configured|WebSocket subscriptions not available'
+    ws_unsupported_re='close 1011|failed to dial WebSocket|Provider failed initiating subscription|no ws:// or wss:// endpoints configured|WebSocket subscriptions not available'
     # Success: a subscription id (rs_…) over the wire or 'DirectWS: subscription started'
     # in the log. Notifications are a bonus. A consumer-path error means the router
     # tried but failed — SKIP if the cause is the upstream signature, else FAIL.

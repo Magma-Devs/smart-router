@@ -12,7 +12,7 @@
 # Smart Router
 
 [![Build and Test](https://github.com/Magma-Devs/smart-router/actions/workflows/smartrouter.yml/badge.svg?branch=main)](https://github.com/Magma-Devs/smart-router/actions/workflows/smartrouter.yml)
-[![Release](https://img.shields.io/badge/release-v1.6.8-brightgreen)](https://github.com/Magma-Devs/smart-router/releases/latest)
+[![Release](https://img.shields.io/badge/release-v1.7.0-brightgreen)](https://github.com/Magma-Devs/smart-router/releases/latest)
 [![Go](https://img.shields.io/badge/go-1.26%2B-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![License](https://img.shields.io/badge/license-source--available-orange.svg)](LICENSE.md)
 
@@ -224,9 +224,6 @@ Upstream endpoints are configured in a YAML file. See `config/smartrouter_exampl
 Setup scripts are available in `scripts/pre_setups/`:
 
 ```bash
-# Lava blockchain (REST + gRPC + Tendermint RPC)
-./scripts/pre_setups/init_smartrouter_lava.sh
-
 # Ethereum (JSON-RPC)
 ./scripts/pre_setups/init_smartrouter_eth.sh
 ```
@@ -255,7 +252,7 @@ Setup scripts are available in `scripts/pre_setups/`:
                                 │
                                 ▼
             Statically-configured upstream RPC providers
-              (Lava chain providers, PublicNode, Infura,
+              (PublicNode, Infura, Alchemy,
                self-hosted nodes, ...)
 ```
 
@@ -349,8 +346,6 @@ Smart Router ships with specs for **120+ chain networks** — EVM L1s and L2s, C
 | Juno Mainnet | JUN1 | gRPC, REST, Tendermint RPC |
 | Juno Testnet | JUNT1 | gRPC, REST, Tendermint RPC |
 | Kakarot Sepolia Testnet | KAKAROTT | JSON-RPC |
-| Lava Mainnet | LAVA | gRPC, REST, Tendermint RPC |
-| Lava Testnet | LAV1 | gRPC, REST, Tendermint RPC |
 | Litecoin Mainnet | LTC | JSON-RPC |
 | Litecoin Testnet | LTCT | JSON-RPC |
 | Manta Pacific Mainnet | MANTAPACIFIC | JSON-RPC |

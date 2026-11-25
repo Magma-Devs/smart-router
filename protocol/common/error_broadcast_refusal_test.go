@@ -121,8 +121,8 @@ func TestTronTxRefusalRows(t *testing.T) {
 func TestBroadcastRefusalRowsReadOnlyTheirMessages(t *testing.T) {
 	require.Equal(t, RouterErrorUnknown.Name, ClassifyError(nil, ChainFamilyTron, TransportREST, 200, "SIGERROR: Validate signature error").Name)
 	require.Equal(t, RouterErrorUnknown.Name, ClassifyError(nil, ChainFamilyUnknown, TransportJsonRPC, 200, "tx refused: code 32, codespace sdk").Name)
-	require.Equal(t, RouterErrorUnknown.Name, ClassifyError(nil, ChainFamilyUnknown, TransportREST, 200, CosmosTxRefusalMessage("sdk", 32, "")).Name,
-		"no REST reader writes a Cosmos refusal message")
+	require.Equal(t, RouterErrorUnknown.Name, ClassifyError(nil, ChainFamilyUnknown, TransportGRPC, 200, TronTxRefusalMessage("SIGERROR", "")).Name,
+		"no gRPC reader writes a Tron refusal message")
 	require.Equal(t, RouterErrorUnknown.Name, ClassifyError(nil, ChainFamilyUnknown, TransportJsonRPC, 200, TronTxRefusalMessage("SIGERROR", "")).Name,
 		"no JSON-RPC reader writes a Tron refusal message")
 }

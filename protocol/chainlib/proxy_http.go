@@ -122,7 +122,7 @@ func (cp *JrpcChainProxy) callNodeRPC(ctx context.Context, chainMessage ChainMes
 	defer cancel()
 
 	cp.NodeUrl.SetIpForwardingIfNecessary(ctx, rpc.SetHeader)
-	rpcMessage, nodeErr := rpc.CallContext(connectCtx, id, method, params, isJsonRPC, disableErrorHandling)
+	rpcMessage, nodeErr := cp.callContext(connectCtx, rpc, id, method, params, isJsonRPC, disableErrorHandling)
 	if nodeErr == nil {
 		return rpcMessage, nil
 	}
