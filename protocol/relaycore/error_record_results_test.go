@@ -12,6 +12,9 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/routersession"
 )
 
+// The replies are delivered in order on the test goroutine: sent from goroutines a millisecond apart,
+// the second could land first, and a stateful relay ends on its answer before reading the other.
+//
 // Every node error the results manager files carries the reply's records (common.ErrorRecord, PRD
 // §3.1; MAG-5595), built from the same body and status its verdict was read from; so does an upstream
 // answer a protocol error carries. The verdict itself is unchanged: the flags are today's.
@@ -24,8 +27,8 @@ func TestNodeErrorsCarryTheirRecords(t *testing.T) {
 	}
 	t.Run("rest: a refused request and an accepted sibling", func(t *testing.T) {
 		rp := newStatefulRestProcessor(t)
-		go sendRestReply(rp, "gateway@test", time.Millisecond, http.StatusBadRequest, `{"code":5,"message":"account not found","details":[]}`)
-		go sendRestReply(rp, "node@test", 2*time.Millisecond, http.StatusOK, `{"tx_response":{"code":0,"txhash":"ABC"}}`)
+		sendRestReply(rp, "gateway@test", 0, http.StatusBadRequest, `{"code":5,"message":"account not found","details":[]}`)
+		sendRestReply(rp, "node@test", 0, http.StatusOK, `{"tx_response":{"code":0,"txhash":"ABC"}}`)
 		waitAll(t, rp)
 
 		successes, nodeErrors, _ := rp.GetResultsData()
@@ -37,8 +40,8 @@ func TestNodeErrorsCarryTheirRecords(t *testing.T) {
 
 	t.Run("rest: a refused broadcast inside a 200 is an error in a success", func(t *testing.T) {
 		rp := newStatefulRestProcessor(t)
-		go sendRestReply(rp, "gateway@test", time.Millisecond, http.StatusOK, `{"tx_response":{"code":32,"raw_log":"account sequence mismatch, expected 5, got 3: incorrect account sequence","txhash":"ABC"}}`)
-		go sendRestReply(rp, "node@test", 2*time.Millisecond, http.StatusOK, `{"tx_response":{"code":32,"raw_log":"account sequence mismatch, expected 5, got 3: incorrect account sequence","txhash":"ABC"}}`)
+		sendRestReply(rp, "gateway@test", 0, http.StatusOK, `{"tx_response":{"code":32,"raw_log":"account sequence mismatch, expected 5, got 3: incorrect account sequence","txhash":"ABC"}}`)
+		sendRestReply(rp, "node@test", 0, http.StatusOK, `{"tx_response":{"code":32,"raw_log":"account sequence mismatch, expected 5, got 3: incorrect account sequence","txhash":"ABC"}}`)
 		waitAll(t, rp)
 
 		_, nodeErrors, _ := rp.GetResultsData()
@@ -55,8 +58,8 @@ func TestNodeErrorsCarryTheirRecords(t *testing.T) {
 	t.Run("graphql: one record per error, the HTTP status kept", func(t *testing.T) {
 		rp := newStatefulGraphQLProcessor(t)
 		body := `{"data":null,"errors":[{"message":"slow down","extensions":{"code":"RESOURCE_EXHAUSTED"}},{"message":"Internal error","path":["executeTransaction"],"extensions":{"code":"INTERNAL_SERVER_ERROR"}}]}`
-		go sendRestReply(rp, "gateway@test", time.Millisecond, http.StatusOK, body)
-		go sendRestReply(rp, "node@test", 2*time.Millisecond, http.StatusOK, body)
+		sendRestReply(rp, "gateway@test", 0, http.StatusOK, body)
+		sendRestReply(rp, "node@test", 0, http.StatusOK, body)
 		waitAll(t, rp)
 
 		_, nodeErrors, _ := rp.GetResultsData()
@@ -74,8 +77,8 @@ func TestNodeErrorsCarryTheirRecords(t *testing.T) {
 	t.Run("an upstream's 5xx body the attempt failed on", func(t *testing.T) {
 		rp := newStatefulRestProcessor(t)
 		gateway := &routersession.HTTPStatusError{StatusCode: http.StatusServiceUnavailable, Body: []byte(`{"code":14,"message":"node is syncing"}`)}
-		go SendProtocolError(rp, "gateway@test", time.Millisecond, gateway)
-		go SendProtocolError(rp, "node@test", 2*time.Millisecond, &routersession.HTTPStatusError{StatusCode: http.StatusBadGateway, Body: []byte("<html>502</html>")})
+		SendProtocolError(rp, "gateway@test", 0, gateway)
+		SendProtocolError(rp, "node@test", 0, &routersession.HTTPStatusError{StatusCode: http.StatusBadGateway, Body: []byte("<html>502</html>")})
 		waitAll(t, rp)
 
 		_, _, protocolErrors := rp.GetResultsData()
@@ -90,8 +93,8 @@ func TestNodeErrorsCarryTheirRecords(t *testing.T) {
 
 	t.Run("a transport failure with no upstream answer has no record", func(t *testing.T) {
 		rp := newStatefulRestProcessor(t)
-		go SendProtocolError(rp, "gateway@test", time.Millisecond, context.DeadlineExceeded)
-		go sendRestReply(rp, "node@test", 2*time.Millisecond, http.StatusOK, `{"tx_response":{"code":0}}`)
+		SendProtocolError(rp, "gateway@test", 0, context.DeadlineExceeded)
+		sendRestReply(rp, "node@test", 0, http.StatusOK, `{"tx_response":{"code":0}}`)
 		waitAll(t, rp)
 		_, _, protocolErrors := rp.GetResultsData()
 		require.Len(t, protocolErrors, 1)
