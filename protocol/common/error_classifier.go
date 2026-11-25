@@ -20,6 +20,17 @@ import (
 // Tier 2: Chain-specific error mappings (checked first, overrides generic)
 // ---------------------------------------------------------------------------
 
+// tronServletErrorClass matches java-tron's servlet error for one of the exception classes given:
+// "class <name> : " at the start of the message, where services/http/Util.java printErrorMsg writes
+// it, with or without the direct-RPC sender's "HTTP <status>: " prefix (MAG-5449).
+func tronServletErrorClass(classes ...string) ErrorMatcher {
+	quoted := make([]string, len(classes))
+	for i, class := range classes {
+		quoted[i] = regexp.QuoteMeta(class)
+	}
+	return MessageRegex(`^(?:HTTP \d+: )?class (?:` + strings.Join(quoted, "|") + `) : `)
+}
+
 // tronRateLimiterMessage is the message java-tron's RateLimiterServlet answers a request it has no
 // capacity for, inside {"Error": ...} with HTTP 200: Util.printErrorMsg of an IllegalAccessException
 // (MAG-5449).
@@ -103,14 +114,36 @@ var chainErrorMappings = map[ChainFamily][]errorMapping{
 		{CodeEquals(63), RouterErrorChainStarknetUnexpectedError},
 	},
 	// Source: java-tron services/http/Util.java and RateLimiterServlet (MAG-5449). A servlet
-	// exception is a 2xx {"Error": "<class> : <message>"}; checkTronServletError flags it, and
-	// this row names the one message that is capacity, not a fault: RateLimiterServlet's own
-	// IllegalAccessException. The row matches that whole message, as the broadcast refusal rows
-	// match theirs, so another exception whose message holds the same words is not read as a rate
-	// limit. Every other message falls through to UNKNOWN_ERROR, which stays never-success now that
-	// checkTronServletError marks it a node error — not a silent "no verdict".
+	// exception is a 2xx {"Error": "<class> : <message>"}; checkTronServletError flags it. The
+	// first row names the one message that is capacity, not a fault: RateLimiterServlet's own
+	// IllegalAccessException. It matches that whole message, as the broadcast refusal rows match
+	// theirs, so another exception whose message holds the same words is not read as a rate limit.
+	//
+	// The rows after it read the exception class, which printErrorMsg writes first, and never the
+	// message after it: java-tron copies the request into many of its messages. A class that says
+	// the request is wrong is answered the same by every node, so it ends at the first one and
+	// blames none. A contract that fails validation is the chain's answer about the transaction.
+	// Any other servlet error is NODE_UNRECOGNIZED_ERROR: another provider is asked and none is
+	// blamed or scored, since the router cannot tell whether the request or the node is wrong.
+	// These rows can move to the chain's REST interface keying when #813 (MAG-5253) lands.
 	ChainFamilyTron: {
 		{MessageRegex(`^(?:HTTP \d+: )?` + regexp.QuoteMeta(tronRateLimiterMessage) + `$`), RouterErrorNodeRateLimited},
+		// The request's body does not parse: JsonFormat.merge (services/http/JsonFormat.java), and
+		// JSON.parseObject, java-tron's own JSON since #6701 (org.tron.json) and fastjson before it.
+		{tronServletErrorClass("org.tron.core.services.http.JsonFormat$ParseException", "org.tron.json.JSONException", "com.alibaba.fastjson.JSONException"), RouterErrorUserParseError},
+		// A parameter is not what it must be: a transaction's bytes that are not a protobuf
+		// message, a number that does not parse (Long.parseLong in the GET servlets), hex that does
+		// not decode (ByteArray.fromHexString), a field Util requires and the request lacks, and an
+		// argument Util refuses (rejectIfEventsPresent).
+		{tronServletErrorClass("com.google.protobuf.InvalidProtocolBufferException", "java.lang.NumberFormatException", "org.bouncycastle.util.encoders.DecoderException", "java.security.InvalidParameterException", "java.lang.IllegalArgumentException"), RouterErrorUserInvalidParams},
+		// The transaction a servlet builds fails its contract's validation (Wallet.createTransactionCapsule,
+		// CreateCommonTransactionServlet).
+		{tronServletErrorClass("org.tron.core.exception.ContractValidateException"), RouterErrorChainTxRejected},
+		// GetBlockServlet writes its IllegalArgumentException's message alone, with no class
+		// (fillResponse): Wallet.getBlock's two fixed sentences for an id_or_num that is a negative
+		// number or not a block hash. Matched whole, they are the request's mistake.
+		{MessageRegex(`^(?:HTTP \d+: )?(?:num must be non-positive number|id must be legal block hash)\.$`), RouterErrorUserInvalidParams},
+		{MessageRegex(`^(?:HTTP \d+: )?class [\w.$]+ : `), RouterErrorNodeUnrecognizedError},
 	},
 	ChainFamilyNEAR: {
 		// Source: NEAR RPC docs — matched by error.cause.name in message

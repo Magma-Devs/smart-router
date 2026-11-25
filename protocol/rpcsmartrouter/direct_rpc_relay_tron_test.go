@@ -77,19 +77,19 @@ func newTestTronRESTRelaySender(t *testing.T, ctx context.Context, path, body st
 // (where the old code read it as an accepted broadcast) exactly as it is on a read.
 func TestSendRESTRelay_TronServletErrorIsANodeError(t *testing.T) {
 	for _, tc := range []struct {
-		name                  string
-		path                  string
-		wantRateLimited       bool
-		wantClassifiedUnknown bool
+		name            string
+		path            string
+		wantRateLimited bool
+		unreadableClass bool
 	}{
 		{name: "write, rate limiter's own exception", path: "/wallet/broadcasttransaction", wantRateLimited: true},
-		{name: "read, a node-local exception", path: "/wallet/getaccount", wantClassifiedUnknown: true},
+		{name: "read, a node-local exception", path: "/wallet/getaccount", unreadableClass: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			body := `{"Error":"class java.lang.IllegalAccessException : lack of computing resources"}`
-			if tc.wantClassifiedUnknown {
+			if tc.unreadableClass {
 				body = `{"Error":"class java.lang.NullPointerException : null"}`
 			}
 			sender, chainMessage := newTestTronRESTRelaySender(t, ctx, tc.path, body, http.StatusOK)

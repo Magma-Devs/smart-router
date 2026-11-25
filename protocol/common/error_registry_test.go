@@ -1532,8 +1532,8 @@ func TestXRPLRowsWinOverARealHTTPStatus(t *testing.T) {
 // --- Tron rows (ChainFamilyTron in error_classifier.go) ---
 
 // TestTronServletErrorRows pins MAG-5449: the rate limiter's own exception is capacity, held off
-// but not scored; every other servlet-error message is UNKNOWN_ERROR — unclassified, but never a
-// success now that checkTronServletError marks it a node error.
+// but not scored. Every other servlet-error message is read by its exception class (see
+// TestTronServletErrorClassRows); a text that is not a servlet error stays UNKNOWN_ERROR.
 func TestTronServletErrorRows(t *testing.T) {
 	rateLimited := ClassifyError(nil, ChainFamilyTron, TransportREST, 200,
 		"class java.lang.IllegalAccessException : lack of computing resources")
@@ -1543,13 +1543,66 @@ func TestTronServletErrorRows(t *testing.T) {
 		"class java.lang.IllegalAccessException : lack of computing resources")
 	require.True(t, retry.IsRateLimited, "held off, not scored")
 
-	for _, msg := range []string{
-		"class java.lang.NullPointerException : null",
-		"class com.google.protobuf.InvalidProtocolBufferException : detail",
-		"... This block does not exist",
+	require.Equal(t, RouterErrorUnknown.Name, ClassifyError(nil, ChainFamilyTron, TransportREST, 200, "... This block does not exist").Name)
+}
+
+// TestTronServletErrorClassRows pins MAG-5449's verdicts by exception class. java-tron writes the
+// class first ("class <name> : <message>", services/http/Util.java printErrorMsg), so the rows read
+// the class token at the start and never the message after it. A class that is the request's own
+// mistake ends at the first node and blames none; a contract that fails validation is the chain's
+// answer; any other servlet error is retried on another provider and blames none.
+func TestTronServletErrorClassRows(t *testing.T) {
+	for _, tc := range []struct {
+		message string
+		want    *RouterError
+	}{
+		{"class org.tron.core.services.http.JsonFormat$ParseException : 1:12: Expected identifier. Found '}'", RouterErrorUserParseError},
+		{"class org.tron.json.JSONException : Unexpected character ('}' (code 125))", RouterErrorUserParseError},
+		{"class com.alibaba.fastjson.JSONException : syntax error, pos 1, line 1, column 2", RouterErrorUserParseError},
+		{"class com.google.protobuf.InvalidProtocolBufferException : While parsing a protocol message, the input ended unexpectedly in the middle of a field.", RouterErrorUserInvalidParams},
+		{`class java.lang.NumberFormatException : For input string: "abc"`, RouterErrorUserInvalidParams},
+		{"class org.bouncycastle.util.encoders.DecoderException : exception decoding Hex string: invalid characters encountered in Hex string", RouterErrorUserInvalidParams},
+		{"class java.security.InvalidParameterException : owner_address isn't set.", RouterErrorUserInvalidParams},
+		{"class java.lang.IllegalArgumentException : events is deprecated", RouterErrorUserInvalidParams},
+		{"class org.tron.core.exception.ContractValidateException : Validate TransferContract error, balance is not sufficient.", RouterErrorChainTxRejected},
+		// GetBlockServlet's own two sentences, written without a class (Wallet.getBlock).
+		{"num must be non-positive number.", RouterErrorUserInvalidParams},
+		{"id must be legal block hash.", RouterErrorUserInvalidParams},
+		{"class java.lang.NullPointerException : null", RouterErrorNodeUnrecognizedError},
+		{"class org.tron.core.exception.StoreException : leveldb closed", RouterErrorNodeUnrecognizedError},
 	} {
-		require.Equal(t, RouterErrorUnknown.Name, ClassifyError(nil, ChainFamilyTron, TransportREST, 200, msg).Name, msg)
+		for _, message := range []string{tc.message, "HTTP 200: " + tc.message} {
+			got := ClassifyError(nil, ChainFamilyTron, TransportREST, 200, message)
+			require.Equal(t, tc.want.Name, got.Name, message)
+			require.False(t, got.EndpointAtFault(), "no servlet error blames the endpoint: %s", message)
+			require.False(t, got.IsRateLimited(), message)
+		}
 	}
+	require.False(t, RouterErrorUserParseError.Retryable, "the request's own mistake ends at the first node")
+	require.False(t, RouterErrorUserInvalidParams.Retryable)
+	require.True(t, RouterErrorNodeUnrecognizedError.Retryable, "another provider is asked")
+}
+
+// The class is read where java-tron writes it, first. The message after it is the request's text
+// as often as not, and decides nothing: not another class named in it, and not the words the
+// generic rows read.
+func TestTronServletErrorClassRowsReadTheClassToken(t *testing.T) {
+	for _, message := range []string{
+		"class java.lang.NullPointerException : class java.lang.NumberFormatException : x",
+		"class java.lang.NullPointerException : rate limit exceeded",
+		"class java.lang.NullPointerException : method not allowed",
+		"class java.lang.NullPointerException : Too many requests",
+	} {
+		got := ClassifyError(nil, ChainFamilyTron, TransportREST, 200, message)
+		require.Equal(t, RouterErrorNodeUnrecognizedError.Name, got.Name, message)
+		require.False(t, got.IsRateLimited(), message)
+	}
+	require.Equal(t, RouterErrorUnknown.Name,
+		ClassifyError(nil, ChainFamilyTron, TransportREST, 200, `{"x":"class java.lang.NumberFormatException : y"}`).Name,
+		"a class quoted inside other text is not a servlet error")
+	require.Equal(t, RouterErrorUnknown.Name,
+		ClassifyError(nil, ChainFamilyTron, TransportREST, 200, "the id must be legal block hash. or not").Name,
+		"GetBlockServlet's sentences are matched whole")
 }
 
 // TestTronRateLimitRowIsTheRateLimitersWholeMessage: the rate limiter writes one message, and only
@@ -1566,7 +1619,7 @@ func TestTronRateLimitRowIsTheRateLimitersWholeMessage(t *testing.T) {
 		"class java.lang.Exception : not a lack of computing resources",
 		"class java.lang.IllegalAccessException : lack of computing resources for this one",
 	} {
-		require.Equal(t, RouterErrorUnknown.Name, ClassifyError(nil, ChainFamilyTron, TransportREST, 200, msg).Name, msg)
+		require.Equal(t, RouterErrorNodeUnrecognizedError.Name, ClassifyError(nil, ChainFamilyTron, TransportREST, 200, msg).Name, msg)
 		require.False(t, ClassifyNodeErrorForRetry(ChainFamilyTron, TransportREST, 200, msg).IsRateLimited, msg)
 	}
 }
