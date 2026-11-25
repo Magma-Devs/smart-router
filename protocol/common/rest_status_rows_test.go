@@ -155,7 +155,8 @@ func TestRESTUnlistedServerErrorMayHaveReachedTheNode(t *testing.T) {
 		require.True(t, got.MayHaveReachedNode, "REST %d", status)
 	}
 	require.Same(t, RouterErrorNodeUnimplemented, ClassifyError(nil, ChainFamilyUnknown, TransportREST, 501, ""))
-	require.Same(t, RouterErrorChainStatePruned, ClassifyError(nil, ChainFamilyUnknown, TransportREST, 500, "height 5 is not available, lowest height is 10"),
+	// The pruned-height row is the Cosmos gateway's, so it reads a Cosmos chain's reply (MAG-5253).
+	require.Same(t, RouterErrorChainStatePruned, ClassifyError(nil, ChainFamilyCosmosSDK, TransportREST, 500, "height 5 is not available, lowest height is 10"),
 		"a row on the body still decides before the status")
 }
 
