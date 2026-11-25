@@ -90,7 +90,9 @@ func enforceWriteMethods(spec *types.Spec, catalog map[string]types.Spec) WriteL
 		}
 		var forced []int
 		for j, api := range collection.Apis {
-			if api == nil || !api.Enabled || api.Category.Stateful >= StatefulAllProviders {
+			// Every reader relays a request stateful at level 1 only (== CONSISTENCY_SELECT_ALL_PROVIDERS), so a
+			// write the spec marks at any other level is a read there, as a cleared one is.
+			if api == nil || !api.Enabled || api.Category.Stateful == StatefulAllProviders {
 				continue
 			}
 			method, listed := table[writeMethodKey(collection.CollectionData.ApiInterface, collection.CollectionData.Type, collection.CollectionData.InternalPath, api.Name)]

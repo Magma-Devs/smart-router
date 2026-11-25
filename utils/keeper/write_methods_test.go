@@ -76,6 +76,20 @@ func TestWriteLock_ForcesAClearedWrite(t *testing.T) {
 	require.Equal(t, 0, report.Count(types.APIInterfaceRest), "an interface with nothing forced reads 0")
 }
 
+// The router relays a request stateful only at level 1: every reader compares Stateful with
+// common.CONSISTENCY_SELECT_ALL_PROVIDERS. A write the spec marks at any other level is relayed as a
+// cacheable read on one provider, as a cleared one is, so the lock loads it at 1 and counts it.
+func TestWriteLock_ForcesAWriteTheSpecMarksAtAnotherLevel(t *testing.T) {
+	catalog := catalogOf(specWith("EVMX", nil, types.APIInterfaceJsonRPC, "POST", "",
+		api("eth_sendRawTransaction", 2), api("eth_blockNumber", 2)))
+
+	spec, report, err := ExpandSpecWithWriteLock(catalog, "EVMX")
+	require.NoError(t, err)
+	require.Equal(t, 1, statefulOf(spec, types.APIInterfaceJsonRPC, "eth_sendRawTransaction"), "the write loads at the level the router relays a write at")
+	require.Equal(t, 2, statefulOf(spec, types.APIInterfaceJsonRPC, "eth_blockNumber"), "an api the table does not name is left as the spec wrote it")
+	require.Equal(t, []string{"eth_sendRawTransaction"}, report.Forced[types.APIInterfaceJsonRPC])
+}
+
 // The lock speaks every interface's identity: a name on JSON-RPC, Tendermint RPC, gRPC and GraphQL
 // (a URI-form Tendermint request resolves to the same api at relay time), the verb and the full route
 // on REST, where the collection's internal path is part of the route.
