@@ -3296,6 +3296,10 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 			// A gRPC call type the router does not serve, found in this attempt (MAG-5133): the
 			// call's, not the endpoint's, so the endpoint is released with no score, as a cancel is.
 			unservedCall := err != nil && errors.Is(err, common.UnservedGRPCCallError)
+			// A JSON gRPC request this node's lookup gave no method definition for was never sent
+			// (MAG-5675): the endpoint is released with no score below, and the metric does not count
+			// it as the endpoint's error either.
+			noMethodDescriptor := err != nil && errors.Is(err, routersession.ErrNoMethodDescriptor)
 
 			if rpcss.smartRouterEndpointMetrics != nil {
 				// analytics is read-only here (classification flags set once pre-launch, Success set
@@ -3307,7 +3311,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 					// Silent when the budget ran out. Cancelled would keep it out of the error and
 					// latency series, which is right for a race loser and wrong for a hang.
 					outcome = metrics.RelayOutcomeError
-				case isClientCancel, unservedCall:
+				case isClientCancel, unservedCall, noMethodDescriptor:
 					outcome = metrics.RelayOutcomeCancelled
 				case err != nil:
 					outcome = metrics.RelayOutcomeError
@@ -3400,6 +3404,18 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 			} else if unservedCall {
 				if errSession := rpcss.sessionManager.OnSessionCancelled(singleConsumerSession, err); errSession != nil {
 					utils.FormatWarning("OnSessionCancelled failed for direct RPC", errSession,
+						utils.LogAttr("GUID", goroutineCtx),
+					)
+				}
+			} else if noMethodDescriptor {
+				// The node's lookup gave no definition of the gRPC method to convert the JSON request
+				// with, so nothing was sent and the endpoint's availability was never tested
+				// (MAG-5675). The failure arm below would score it 0 and count a consecutive error
+				// against an endpoint that was never asked. Released like a session that was
+				// selected and not used. A cancelled relay keeps its own release: the error carries
+				// this only when the lookup ended with the relay's context still live.
+				if errSession := rpcss.sessionManager.OnSessionDiscarded(singleConsumerSession, err); errSession != nil {
+					utils.FormatWarning("OnSessionDiscarded failed for direct RPC", errSession,
 						utils.LogAttr("GUID", goroutineCtx),
 					)
 				}
