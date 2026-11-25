@@ -982,9 +982,10 @@ func TestMultiClientJoinExistingSubscription(t *testing.T) {
 	activeSub.connectedClients[client1Key] = client1Sender
 	activeSub.clientRouterIDs[client1Key] = client1RouterID
 
-	// Store in manager
+	// Store in manager, through its own registration so the subscription is joinable as a
+	// creator's is.
 	manager.lock.Lock()
-	manager.activeSubscriptions[hashedParams] = activeSub
+	manager.registerSubscriptionLocked(hashedParams, activeSub)
 	manager.connectedClients[client1Key] = make(map[string]*common.SafeChannelSender[*pairingtypes.RelayReply])
 	manager.connectedClients[client1Key][hashedParams] = client1Sender
 	manager.lock.Unlock()
