@@ -2968,6 +2968,15 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 					utils.LogAttr("protocol", directConn.GetProtocol()),
 					utils.LogAttr("provider", provider.Name),
 				)
+
+				// rippled's WebSocket API ignores a nested "params"; it reads a request's
+				// fields from the top level (MAG-5452). The chain family is only known here,
+				// not inside NewDirectRPCConnection, so the WS connection opts in after the fact.
+				if wsConn, ok := directConn.(*routersession.WebSocketDirectRPCConnection); ok &&
+					common.GetChainFamilyOrDefault(provider.ChainID) == common.ChainFamilyXRP {
+					wsConn.SetXRPLWebSocketFlattening()
+				}
+
 				createdConnections = append(createdConnections, directConn)
 
 				endpoint := &routersession.Endpoint{

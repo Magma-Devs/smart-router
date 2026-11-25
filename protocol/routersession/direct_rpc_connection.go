@@ -399,6 +399,14 @@ type WebSocketDirectRPCConnection struct {
 	// over a WebSocket frame it is currently ignored. Kept for forward-correctness.
 	isJsonRPC bool
 
+	// xrplWebSocketFlattening is set by SetXRPLWebSocketFlattening for an XRP Ledger node url.
+	// rippled's WebSocket API reads a request's fields from the top level and ignores a nested
+	// "params" (MAG-5452), unlike the standard JSON-RPC-over-WS this connection otherwise sends.
+	// The chain identity behind a url is known only to NewDirectRPCConnection's caller
+	// (routersession.RPCProviderEndpoint.ChainID), not to NewDirectRPCConnection itself, so it is
+	// set after construction instead of threading chain identity through every constructor call.
+	xrplWebSocketFlattening bool
+
 	mu     sync.Mutex
 	client *rpcclient.Client // lazily dialed on first SendRequest, then cached
 	closed bool              // set by Close(); prevents re-dialing a closed connection
@@ -1062,7 +1070,7 @@ func (w *WebSocketDirectRPCConnection) SendRequest(
 	// requests cannot collide, then restore the caller's id on the reply.
 	wireID := json.RawMessage(strconv.FormatUint(w.wireID.Add(1), 10))
 
-	reply, err := client.CallContext(ctx, wireID, reqMsg.Method, reqMsg.Params, w.isJsonRPC, false)
+	reply, err := w.callUpstream(ctx, client, wireID, reqMsg)
 	if err != nil {
 		return nil, err
 	}
@@ -1082,6 +1090,26 @@ func (w *WebSocketDirectRPCConnection) SendRequest(
 		utils.LogAttr("responseBytes", len(respBytes)),
 	)
 	return &DirectRPCResponse{Data: respBytes, StatusCode: http.StatusOK}, nil
+}
+
+// SetXRPLWebSocketFlattening marks this connection as talking to an XRP Ledger node over
+// wss://, so SendRequest flattens a request's single params object to the message's top
+// level instead of sending it nested, as rippled's WebSocket API requires (MAG-5452).
+func (w *WebSocketDirectRPCConnection) SetXRPLWebSocketFlattening() {
+	w.xrplWebSocketFlattening = true
+}
+
+// callUpstream sends reqMsg over client, flattening it first when this connection is talking to
+// an XRP Ledger node over wss:// (see SetXRPLWebSocketFlattening) and the request has rippled's
+// usual single params object. Every other request — including XRP's own no-argument commands —
+// goes out the ordinary nested-params path unchanged.
+func (w *WebSocketDirectRPCConnection) callUpstream(ctx context.Context, client *rpcclient.Client, wireID json.RawMessage, reqMsg rpcInterfaceMessages.JsonrpcMessage) (*rpcclient.JsonrpcMessage, error) {
+	if w.xrplWebSocketFlattening {
+		if fields, ok := rpcInterfaceMessages.FlattenXRPLWebSocketParams(reqMsg.Params); ok {
+			return client.CallContextFlat(ctx, wireID, reqMsg.Method, fields)
+		}
+	}
+	return client.CallContext(ctx, wireID, reqMsg.Method, reqMsg.Params, w.isJsonRPC, false)
 }
 
 // ensureClient lazily dials the WebSocket on first use and caches the resulting
