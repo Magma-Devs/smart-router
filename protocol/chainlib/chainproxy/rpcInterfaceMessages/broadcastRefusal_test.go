@@ -200,7 +200,7 @@ func TestTronBroadcastRefusal(t *testing.T) {
 		})
 	}
 	// The Cosmos REST broadcast is a refusal too (MAG-5451): the code-prefixed message, and flagged.
-	cosmos := RestMessage{SpecPath: "/cosmos/tx/v1beta1/txs"}
+	cosmos := RestMessage{SpecPath: "/cosmos/tx/v1beta1/txs", Broadcast: true}
 	refusal := []byte(`{"tx_response":{"code":32,"raw_log":"account sequence mismatch"}}`)
 	hasError, message := cosmos.CheckResponseError(refusal, http.StatusOK)
 	require.True(t, hasError)
