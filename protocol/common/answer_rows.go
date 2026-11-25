@@ -154,3 +154,28 @@ func renameErrorPaths(errs []any, occurrence GraphQLOccurrence) []any {
 	}
 	return renamed
 }
+
+// ReadGraphQLPathsAsFields gives each GraphQL error record whose path starts at an alias the request
+// gave a root field the field's name there instead (PRD §2.2: a row's path names fields, never
+// aliases), so an error at ["tx"] for `tx: transaction(...)` is read at ["transaction"]. A path
+// starts at a response key, and response keys are unique in an operation, so each alias names one
+// field. occurrences are the request's root fields (GraphQLMessage.Occurrences).
+func ReadGraphQLPathsAsFields(records []ErrorRecord, occurrences []GraphQLOccurrence) {
+	fieldOf := map[string]string{}
+	for _, occurrence := range occurrences {
+		if occurrence.Alias != "" && occurrence.Alias != occurrence.Field {
+			fieldOf[occurrence.Alias] = occurrence.Field
+		}
+	}
+	if len(fieldOf) == 0 {
+		return
+	}
+	for i := range records {
+		if records[i].Interface != spectypes.APIInterfaceGraphQL || len(records[i].Path) == 0 {
+			continue
+		}
+		if field, aliased := fieldOf[records[i].Path[0]]; aliased {
+			records[i].Path = append([]string{field}, records[i].Path[1:]...)
+		}
+	}
+}

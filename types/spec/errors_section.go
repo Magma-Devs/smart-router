@@ -70,6 +70,64 @@ type ErrorsSection struct {
 	PlainText []string `json:"plain_text,omitempty"`
 	// Inherit false inherits no rows; the parents' shapes and plain_text still apply. Nil is true.
 	Inherit *bool `json:"inherit,omitempty"`
+
+	// raw is the section as the spec file wrote it; decodeErr is why a section of this
+	// schema_version did not decode (UnmarshalJSON).
+	raw       json.RawMessage
+	decodeErr error
+}
+
+// UnmarshalJSON decodes a section without ever failing the spec that carries it (PRD §2.1, §5.6): a
+// section the router can't read is dropped whole and its chain falls back, while the spec's api
+// definitions load as they did before the section existed, as on an older router. schema_version is
+// read first. A section with another version keeps only its version: it may be written for types
+// this router doesn't have. A section of this version that doesn't decode keeps its version and the
+// reason (DecodeError). Either way the bytes stay (Raw), for the validator and the bundled-specs check.
+func (s *ErrorsSection) UnmarshalJSON(data []byte) error {
+	type plain ErrorsSection
+	raw := append(json.RawMessage(nil), data...)
+	var version struct {
+		SchemaVersion int `json:"schema_version"`
+	}
+	if err := json.Unmarshal(data, &version); err != nil {
+		*s = ErrorsSection{raw: raw, decodeErr: fmt.Errorf("errors section: %w", err)}
+		return nil
+	}
+	if version.SchemaVersion != ErrorsSchemaVersion {
+		*s = ErrorsSection{SchemaVersion: version.SchemaVersion, raw: raw}
+		return nil
+	}
+	var decoded plain
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		*s = ErrorsSection{SchemaVersion: version.SchemaVersion, raw: raw, decodeErr: fmt.Errorf("errors section: %w", err)}
+		return nil
+	}
+	*s = ErrorsSection(decoded)
+	s.raw = raw
+	return nil
+}
+
+// Raw is the section as the spec file wrote it, nil for a section built in code.
+func (s *ErrorsSection) Raw() json.RawMessage {
+	if s == nil {
+		return nil
+	}
+	return s.raw
+}
+
+// DecodeError is why a section of this schema_version did not decode, nil when it did. A section of
+// another version has none: its version says why it isn't read.
+func (s *ErrorsSection) DecodeError() error {
+	if s == nil {
+		return nil
+	}
+	return s.decodeErr
+}
+
+// Readable reports whether the router can read the section: this schema_version, decoded. A spec
+// without a section has nothing to read.
+func (s *ErrorsSection) Readable() bool {
+	return s != nil && s.SchemaVersion == ErrorsSchemaVersion && s.decodeErr == nil
 }
 
 // Inherits reports whether the section takes its parents' rows: the default, and a nil section's.

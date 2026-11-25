@@ -81,6 +81,13 @@ type replyStatusClassifier interface {
 // chainRowVerdictReader is a request whose chain's list files some node errors under a verdict of its
 // own (rpcInterfaceMessages.GrpcMessage, a copy of the chain's write: MAG-5186). The sender applied
 // the same verdict to the attempt, so the record and the endpoint's health agree.
+// graphQLOccurrences is a GraphQL request's root fields with the aliases its reply answers under
+// (rpcInterfaceMessages.GraphQLMessage): an error's path starts at an alias, and the record reads it
+// at the field's name (common.ReadGraphQLPathsAsFields).
+type graphQLOccurrences interface {
+	Occurrences() []common.GraphQLOccurrence
+}
+
 type chainRowVerdictReader interface {
 	ChainRowVerdict(data []byte) *common.RouterError
 }
@@ -210,6 +217,10 @@ func (rp *ResultsManagerInst) setValidResponse(response *RelayResponse, protocol
 	// check response error
 	foundError, errorMessage := protocolMessage.CheckResponseError(response.RelayResult.Reply.Data, response.RelayResult.StatusCode)
 	if foundError {
+		// The checker's own words, before the fallbacks below stand the body in for a missing message:
+		// the record reads the body itself, so a body is never its text. A gRPC checker names no
+		// message, and the body is then the router's JSON rendering of the node's status, not the node's.
+		checkerMessage := errorMessage
 		// this is a node error, meaning we still didn't get a good response.
 		// we may choose to wait until there will be a response or timeout happens
 		// if we decide to wait and timeout happens we will take the majority of response messages
@@ -280,7 +291,10 @@ func (rp *ResultsManagerInst) setValidResponse(response *RelayResponse, protocol
 		// The reply as the rows see it (common.ErrorRecord, PRD §3.1; MAG-5595): one record per batch
 		// element or GraphQL error, from the same body and status the verdict below is read from. The
 		// spec rows (MAG-5606) match these.
-		response.RelayResult.ErrorRecords = chainlib.RecordsFromReply(nil, apiInterfaceOf(protocolMessage), apiNameOf(protocolMessage), response.RelayResult.StatusCode, response.RelayResult.Reply.Data, errorMessage)
+		response.RelayResult.ErrorRecords = chainlib.RecordsFromReply(nil, apiInterfaceOf(protocolMessage), apiNameOf(protocolMessage), response.RelayResult.StatusCode, response.RelayResult.Reply.Data, checkerMessage)
+		if request, ok := protocolMessage.GetRPCMessage().(graphQLOccurrences); ok {
+			common.ReadGraphQLPathsAsFields(response.RelayResult.ErrorRecords, request.Occurrences())
+		}
 		// The order (PRD §3.2; MAG-5597). The interface's own rows (OwnClassification, MAG-5121) decide
 		// first, as today. Then the prefix, steps 1 to 3, reads the record ahead of every row: a
 		// connection fault in the reply's text is no reply, a 429 is a rate limit whatever the body (no

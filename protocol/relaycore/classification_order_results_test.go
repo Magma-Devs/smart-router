@@ -66,6 +66,22 @@ func TestResultsManagerRunsThePrefixAheadOfTheRows(t *testing.T) {
 		classified := fileNodeError(t, grpcProtocolMessage(), int(codes.Unavailable), body)
 		require.Equal(t, common.RouterErrorNodeRateLimited.Name, classified.Name)
 	})
+	t.Run("the record carries the gateway's 429, read from the node's message in the router's JSON", func(t *testing.T) {
+		// The rows give this reply NODE_RATE_LIMITED by its text as well, so the verdict alone does not
+		// show the prefix read the record's status.
+		rm := NewResultsManager(1, "COSMOSHUB")
+		body := `{"error_message":"unexpected HTTP status code received from server: 429 (Too Many Requests); transport: received unexpected content-type \"text/html\"","error_code":14}`
+		require.Error(t, rm.SetResponse(&RelayResponse{RelayResult: common.RelayResult{
+			Reply: &pairingtypes.RelayReply{Data: []byte(body)}, StatusCode: int(codes.Unavailable), IsNodeError: true, Finalized: true,
+		}}, grpcProtocolMessage()))
+		inst, ok := rm.(*ResultsManagerInst)
+		require.True(t, ok)
+		require.Len(t, inst.nodeResponseErrors.RelayErrors, 1)
+		records := inst.nodeResponseErrors.RelayErrors[0].Response.RelayResult.ErrorRecords
+		require.Len(t, records, 1)
+		require.Equal(t, http.StatusTooManyRequests, records[0].Status)
+		require.Equal(t, int(codes.Unavailable), records[0].GRPCCode)
+	})
 	t.Run("a node's own message that quotes grpc-go's gateway words is not a gateway's 429", func(t *testing.T) {
 		body := `{"error_message":"invalid denom: unexpected HTTP status code received from server: 429","error_code":3}`
 		classified := fileNodeError(t, grpcProtocolMessage(), int(codes.InvalidArgument), body)
