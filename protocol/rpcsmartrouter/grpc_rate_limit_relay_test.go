@@ -33,6 +33,12 @@ import (
 // metadata shows is typed on it.
 func grpcStatusRelayWithMetadata(t *testing.T, code codes.Code, nodeMessage string, md map[string][]string) *common.RelayResult {
 	t.Helper()
+	return grpcStatusRelayForFamily(t, common.ChainFamily(-1), code, nodeMessage, md)
+}
+
+// grpcStatusRelayForFamily is grpcStatusRelayWithMetadata on a chain family's rows.
+func grpcStatusRelayForFamily(t *testing.T, family common.ChainFamily, code codes.Code, nodeMessage string, md map[string][]string) *common.RelayResult {
+	t.Helper()
 	body, err := json.Marshal(routersession.GRPCNodeErrorResponse{ErrorMessage: nodeMessage, ErrorCode: uint32(code)})
 	require.NoError(t, err)
 
@@ -42,7 +48,7 @@ func grpcStatusRelayWithMetadata(t *testing.T, code codes.Code, nodeMessage stri
 			err:  routersession.NewGRPCStatusError(uint32(code), nodeMessage, nil, md),
 		},
 		endpointName: "grpc-endpoint",
-		chainFamily:  common.ChainFamily(-1),
+		chainFamily:  family,
 	}
 	chainMessage := &grpcStatusChainMessage{mockChainMessage: &mockChainMessage{
 		apiInterface: "grpc",
@@ -80,6 +86,56 @@ func TestSendGRPCRelay_RateLimitShapesAreHeldOffNotScored(t *testing.T) {
 			assert.Equal(t, tc.wantRetryAfter, result.RetryAfter, "the wait the node asked for")
 		})
 	}
+}
+
+// RESOURCE_EXHAUSTED that asks for a wait is a rate limit whatever its message says (rulebook Part I
+// 1; Part III): held off for the wait, not scored against the endpoint. The rows used to decide
+// first, so a number in the text was read as an HTTP status, a word as "unimplemented", a chain's
+// text as its own error, and the endpoint was blamed with the wait never applied (MAG-5488).
+func TestSendGRPCRelay_ResourceExhaustedThatAsksForAWaitIsARateLimit(t *testing.T) {
+	waits := []struct {
+		name string
+		md   map[string][]string
+		want time.Duration
+	}{
+		{"grpc-retry-pushback-ms", map[string][]string{"grpc-retry-pushback-ms": {"1500"}}, 1500 * time.Millisecond},
+		{"retry-after", map[string][]string{"retry-after": {"2"}}, 2 * time.Second},
+	}
+	messages := []struct {
+		family  common.ChainFamily
+		message string
+		rowSays *common.RouterError
+	}{
+		// A status row reads a status only where the router or grpc-go wrote it (MAG-5324), so these
+		// carry it in grpc-go's text for a gateway's HTTP reply, not in the vendor's own words.
+		{common.ChainFamilyUnknown, common.GRPCGatewayStatusText + ": 500 (Internal Server Error); quota exceeded: limit 500 requests per minute", common.RouterErrorNodeInternalError},
+		{common.ChainFamilyUnknown, common.GRPCGatewayStatusText + ": 503 (Service Unavailable); compute units exhausted", common.RouterErrorNodeServiceUnavailable},
+		{common.ChainFamilyUnknown, "plan limit: method not implemented on this tier", common.RouterErrorNodeUnimplemented},
+		{common.ChainFamilyCosmosSDK, "insufficient fee budget for this key", common.RouterErrorChainInsufficientFee},
+	}
+	for _, wait := range waits {
+		for _, m := range messages {
+			t.Run(wait.name+"/"+m.message, func(t *testing.T) {
+				require.Same(t, m.rowSays, common.ClassifyError(nil, m.family, common.TransportGRPC, int(codes.ResourceExhausted), m.message),
+					"setup: a row matches the message, or this measures nothing")
+				result := grpcStatusRelayForFamily(t, m.family, codes.ResourceExhausted, m.message, wait.md)
+				assert.True(t, result.IsNodeError)
+				assert.True(t, result.IsRateLimited, "the wait makes it a rate limit, whatever the message says")
+				assert.False(t, result.IsNodeAtFault, "not scored against the endpoint")
+				assert.False(t, result.IsNonRetryable)
+				assert.Equal(t, wait.want, result.RetryAfter, "the wait the node asked for")
+			})
+		}
+	}
+}
+
+// The wait decides only under RESOURCE_EXHAUSTED. Under any other status a rate-limit text keeps
+// the verdict the registry gives, as it did: INVALID_ARGUMENT stays the caller's.
+func TestSendGRPCRelay_AWaitUnderAnotherStatusLeavesTheRowsVerdict(t *testing.T) {
+	result := grpcStatusRelayWithMetadata(t, codes.InvalidArgument, "rate limit exceeded",
+		map[string][]string{"grpc-retry-pushback-ms": {"1500"}})
+	assert.False(t, result.IsRateLimited)
+	assert.True(t, result.IsNonRetryable, "USER_INVALID_PARAMS")
 }
 
 // RESOURCE_EXHAUSTED with neither a rate-limit text nor a retry delay stays unclassified: alone,
@@ -205,6 +261,8 @@ func TestRelay_GRPCRateLimitIsHeldOffForTheWaitItAskedFor(t *testing.T) {
 		{"retry-after in the header", "RESOURCE_EXHAUSTED", metadata.Pairs("retry-after", retryAfter), nil, asked},
 		{"grpc-retry-pushback-ms in the trailer", "RESOURCE_EXHAUSTED", nil, metadata.Pairs("grpc-retry-pushback-ms", pushback), asked},
 		{"retry-after in the trailer", "RESOURCE_EXHAUSTED", nil, metadata.Pairs("retry-after", retryAfter), asked},
+		// A message a row reads (here a number read as an HTTP 500) does not override the wait (MAG-5488).
+		{"a wait beside a message a row reads", "Quota exceeded: limit 500 requests per minute", metadata.Pairs("grpc-retry-pushback-ms", pushback), nil, asked},
 		// The automation test's two controls: a rate limit that asks for nothing gets the default,
 		// and a bare RESOURCE_EXHAUSTED is no rate limit at all (grpc-go mints it for an oversized
 		// message too).

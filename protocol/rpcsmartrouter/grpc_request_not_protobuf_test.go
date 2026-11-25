@@ -104,6 +104,13 @@ func startProtobufCheckRouter(t *testing.T, nodeAddrs ...string) (*grpc.ClientCo
 // also returns the router.
 func startProtobufCheckRouterServing(t *testing.T, readMethod, writeMethod string, nodeAddrs ...string) (*grpc.ClientConn, []*routersession.Endpoint, *RPCSmartRouterServer) {
 	t.Helper()
+	return startProtobufCheckRouterConfigured(t, nil, readMethod, writeMethod, nodeAddrs...)
+}
+
+// startProtobufCheckRouterConfigured is startProtobufCheckRouterServing with configure applied to
+// the router before its listener starts, so a test can set a field its relays read.
+func startProtobufCheckRouterConfigured(t *testing.T, configure func(*RPCSmartRouterServer), readMethod, writeMethod string, nodeAddrs ...string) (*grpc.ClientConn, []*routersession.Endpoint, *RPCSmartRouterServer) {
+	t.Helper()
 	if !rand.Initialized() {
 		rand.InitRandomSeed()
 	}
@@ -155,6 +162,9 @@ func startProtobufCheckRouterServing(t *testing.T, readMethod, writeMethod strin
 		consistencyConfig:  relaycore.DefaultConsistencyValidationConfig(),
 		sessionManager:     csm,
 		rpcSmartRouterLogs: logs,
+	}
+	if configure != nil {
+		configure(server)
 	}
 
 	listenEndpoint := &routersession.RPCEndpoint{NetworkAddress: "127.0.0.1:0", ChainID: "GRPCTEST", ApiInterface: spectypes.APIInterfaceGrpc}

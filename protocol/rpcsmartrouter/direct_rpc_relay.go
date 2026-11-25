@@ -25,6 +25,7 @@ import (
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/tidwall/gjson"
+	"google.golang.org/grpc/codes"
 )
 
 // DirectRPCRelaySender handles sending relay requests directly to RPC endpoints
@@ -876,14 +877,14 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 	// carrying an application error in its body (a Cosmos tx_response.code) is a
 	// request/application error, not a node error at the transport level.
 	//
-	// A 2xx that is the node refusing a broadcast transaction (Tron's, MAG-5323) is a node error, as
-	// on JSON-RPC and gRPC: the reply says the node answered with an error, and it is no proof the
-	// endpoint is healthy.
+	// A 2xx that is the node refusing the broadcast transaction the request sent (Tron's, MAG-5323;
+	// a Cosmos tx_response.code, MAG-5451) is a node error, as on JSON-RPC and gRPC: the reply says
+	// the node answered with an error, and it is no proof the endpoint is healthy.
 	//
 	// A 2xx that is java-tron's servlet-error shape (restMessage.IsTronServletError, MAG-5449) is
-	// a node error at the transport level too: unlike the Cosmos carve-out, it is never the chain's
-	// answer about anything, on a read or a write, so the broadcast waits for a sibling and the
-	// reply never reaches the cache (tryCacheWriteResolved's node-error gate).
+	// a node error at the transport level too: unlike the Cosmos carve-out for a read, it is never
+	// the chain's answer about anything, on a read or a write, so the broadcast waits for a sibling
+	// and the reply never reaches the cache (tryCacheWriteResolved's node-error gate).
 	var isNodeError bool
 	switch {
 	case response.StatusCode == 429:
@@ -1218,12 +1219,22 @@ func (d *DirectRPCRelaySender) sendGRPCRelay(
 			// IsNonRetryable is how both ended up classified but never assigned before.
 			if hasError {
 				result.ApplyNodeErrorClassification(d.chainFamily, common.TransportGRPC, response.StatusCode, errorMessage)
-				// RESOURCE_EXHAUSTED with a retry delay and no rate-limit text is a rate limit only
-				// the metadata shows. The transport typed it (GRPCStatusError.RateLimited); the
-				// registry sees a code and a message and has no row for it, so without this it was
-				// UNKNOWN_ERROR and scored against the endpoint (MAG-4278 item 5). A verdict the
-				// registry did give is left alone.
-				if grpcErr.RateLimited() && common.ClassifyError(nil, d.chainFamily, common.TransportGRPC, response.StatusCode, errorMessage) == common.RouterErrorUnknown {
+				// The wait the node asked for rides on err, which this branch does not return, so the
+				// hold-off read 0 and held the endpoint off for its default whatever was asked: a vendor
+				// that asked for ten minutes was asked again after about 30 s (MAG-4914).
+				result.RetryAfter, _ = common.RetryAfterFrom(err)
+				// A rate limit the transport typed (GRPCStatusError.RateLimited) that the registry
+				// cannot see: the registry reads a code and a message, not the metadata.
+				//   - RESOURCE_EXHAUSTED that asks for a wait (grpc-retry-pushback-ms or retry-after)
+				//     is a rate limit whatever its message says (rulebook Part I 1; Part III). Only a
+				//     chain's over-limit row would beat it, and no chain has one on gRPC. A row used to
+				//     win here, so "limit 500 requests per minute" was read as an HTTP 500: the
+				//     endpoint was blamed and the wait never applied (MAG-5488).
+				//   - Any other typed rate limit applies only where the registry found nothing; without
+				//     it the reply was UNKNOWN_ERROR and scored against the endpoint (MAG-4278 item 5).
+				asksForAWait := grpcErr.Code == uint32(codes.ResourceExhausted) && result.RetryAfter > 0
+				if grpcErr.RateLimited() && (asksForAWait ||
+					common.ClassifyError(nil, d.chainFamily, common.TransportGRPC, response.StatusCode, errorMessage) == common.RouterErrorUnknown) {
 					result.ApplyRouterErrorClassification(common.RouterErrorNodeRateLimited)
 				}
 				// A copy of the chain's write is read by the chain's own list (MAG-5186), which files
@@ -1232,10 +1243,6 @@ func (d *DirectRPCRelaySender) sendGRPCRelay(
 				if copyReading, known := grpcMessage.WriteCopy(grpcErr.Code, grpcErr.Message); known && copyReading.Verdict != nil {
 					result.ApplyRouterErrorClassification(copyReading.Verdict)
 				}
-				// The wait the node asked for rides on err, which this branch does not return, so the
-				// hold-off read 0 and held the endpoint off for its default whatever was asked: a vendor
-				// that asked for ten minutes was asked again after about 30 s (MAG-4914).
-				result.RetryAfter, _ = common.RetryAfterFrom(err)
 			}
 			return result, nil
 		}

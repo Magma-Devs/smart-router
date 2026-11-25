@@ -353,36 +353,40 @@ func isGraphQLMessage(protocolMessage chainlib.ProtocolMessage) bool {
 
 // PinnedByDirectives reports whether the request is a strict pin: answered by one upstream or not
 // at all, never retried, hedged or rerouted by the consistency gate onto another one (MAG-2280,
-// MAG-4123). Two ways in (MAG-4826):
+// MAG-4123). Two ways in:
 //
 //   - router-stickiness, always. A sticky session that straddles two nodes is the false gap the
 //     header exists to prevent, and the sticky-sessions docs promise "route to the session's node,
-//     or fail". This holds whatever else the request sends, so adding router-select-provider to a
-//     sticky request can never make it leak.
-//   - router-select-provider with router-select-provider-strict: true (SelectProviderStrict). A plain
-//     router-select-provider keeps its documented behaviour: the named upstream gets the first
-//     attempt, and failover may use the rest of the pool.
+//     or fail". This holds whatever else the request sends, so adding router-select-provider, with
+//     or without router-select-provider-allow-retry, to a sticky request can never make it leak.
+//   - router-select-provider, unless the caller also sent router-select-provider-allow-retry: true
+//     (SelectProviderAllowsRetry). The header names one upstream, so that upstream answers or the
+//     request fails (MAG-5711). With the allow-retry header the selection is not a strict pin: the
+//     named upstream gets the first attempt, and failover may use the rest of the pool.
 //
 // Read from the request's ORIGINAL headers: the pin is a property of the request, not of one
 // attempt, and a message rebuilt for an archive toggle carries every directive header over
 // (metadataFromDirectiveHeaders). It must also be read here, from headers, and not from what
 // routersession selects on: routersession turns a cross-pod sticky claim into a selected provider,
-// which would otherwise look like a plain, non-strict selection. Presence of a pin header is what counts, as in
-// resolvePinDirectives. A request that cross-validation overrides is not pinned in effect, so
-// callers check the selection first.
+// and the allow-retry header must never loosen that claim. For router-stickiness the presence of
+// the header is what counts, as in resolvePinDirectives. A router-select-provider with an empty
+// value names no upstream, and selection treats it as no selection at all, so it is not a pin:
+// now that a selection is strict by default, calling it one would take the failover away from a
+// request that chose nobody. A request that cross-validation overrides is not pinned in effect,
+// so callers check the selection first.
 func PinnedByDirectives(directiveHeaders map[string]string) bool {
 	if _, sticky := directiveHeaders[common.STICKINESS_HEADER_NAME]; sticky {
 		return true
 	}
-	_, selected := directiveHeaders[common.SELECT_PROVIDER_HEADER_NAME]
-	return selected && SelectProviderStrict(directiveHeaders)
+	return directiveHeaders[common.SELECT_PROVIDER_HEADER_NAME] != "" && !SelectProviderAllowsRetry(directiveHeaders)
 }
 
-// SelectProviderStrict reports whether the caller sent router-select-provider-strict: true. Only the
-// value "true" (any case) turns it on, unlike the presence-only router-force-cache-refresh: "false"
-// must not silently mean yes. It only matters next to router-select-provider; alone it pins nothing.
-func SelectProviderStrict(directiveHeaders map[string]string) bool {
-	return strings.EqualFold(strings.TrimSpace(directiveHeaders[common.SELECT_PROVIDER_STRICT_HEADER_NAME]), "true")
+// SelectProviderAllowsRetry reports whether the caller sent router-select-provider-allow-retry:
+// true. Only the value "true" (any case) turns it on, unlike the presence-only
+// router-force-cache-refresh: "false" must not silently mean yes. It only matters next to
+// router-select-provider; alone it changes nothing, and it never loosens router-stickiness.
+func SelectProviderAllowsRetry(directiveHeaders map[string]string) bool {
+	return strings.EqualFold(strings.TrimSpace(directiveHeaders[common.SELECT_PROVIDER_ALLOW_RETRY_HEADER_NAME]), "true")
 }
 
 // PinnedUpstreamUnservable reports a selection error that names the pin: the pinned upstream is

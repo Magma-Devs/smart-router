@@ -20,6 +20,17 @@ import (
 // It now publishes len(currentlyBlockedProviderAddresses), the standing block. These tests pin
 // both halves so the two can never be confused again.
 
+// createConsumerSessionManagerWithoutStateTicker is createConsumerSessionManagerWithMetrics without
+// the once-a-second state publisher. That publisher reads the state under the lock and publishes it
+// after, so a tick that reads before a block or a release and publishes after it puts the old state
+// back on top of that edge. The publisher starts only for a real metrics manager, so the manager is
+// built with none and given m before anything else reads the field (MAG-4919).
+func createConsumerSessionManagerWithoutStateTicker(m metrics.ConsumerMetricsManagerInf) *ConsumerSessionManager {
+	csm := createConsumerSessionManagerWithMetrics(nil)
+	csm.consumerMetricsManager = m
+	return csm
+}
+
 // blockOneProvider blocks a provider the way the product does, rather than by writing the field.
 func blockOneProvider(t *testing.T, csm *ConsumerSessionManager, address string) {
 	t.Helper()
@@ -81,12 +92,19 @@ func TestBlockedProvidersGauge_ZeroedByResetBlockedProviders(t *testing.T) {
 // the aggregate count and the per-provider gauge disagreed on the dashboard.
 func TestPerProviderGauge_ClearedByThePoolEmptyRelease(t *testing.T) {
 	rec := &stateSizeRecorder{}
-	csm := createConsumerSessionManagerWithMetrics(rec)
+	csm := createConsumerSessionManagerWithoutStateTicker(rec)
 	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, createPairingList("", true), nil))
 
 	// An all-providers-down outage: block every provider in the pairing.
 	for len(csm.validAddresses) > 0 {
 		blockOneProvider(t, csm, csm.validAddresses[0])
+	}
+	// Each block has published its provider by the time blockProvider returns. Published from a
+	// goroutine, a block could land after the release below and read blocked again (MAG-4919).
+	edges := rec.providerBlockedSnapshot()
+	require.Len(t, edges, len(csm.pairing), "every block publishes its own provider")
+	for address, isBlocked := range edges {
+		require.True(t, isBlocked, "%s was published blocked by its own block", address)
 	}
 	csm.publishStateSizes()
 

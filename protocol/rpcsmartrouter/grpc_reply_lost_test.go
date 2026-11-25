@@ -260,13 +260,29 @@ func replyLostAPI(stateful int) string {
 	return fmt.Sprintf(`{"name": %q, "enabled": true, "compute_units": 10, "category": {"deterministic": false, "stateful": %d}}`, replyLostMethod, stateful)
 }
 
-// callRouter makes one call through the router's listener; pin names the provider to ask first.
-func callRouter(t *testing.T, client *grpc.ClientConn, pin string) (*wrapperspb.Int64Value, metadata.MD, error) {
+// callRouter makes one call through the router's listener; askFirst names the provider to ask
+// first. It is sent as router-select-provider with router-select-provider-allow-retry: true, so
+// the selection holds for the first attempt only and a retry may reach another provider. Without
+// the allow-retry header the selection is a strict pin and the request ends on that provider
+// (MAG-5711).
+func callRouter(t *testing.T, client *grpc.ClientConn, askFirst string) (*wrapperspb.Int64Value, metadata.MD, error) {
+	t.Helper()
+	if askFirst == "" {
+		return callRouterWith(t, client)
+	}
+	return callRouterWith(t, client,
+		common.SELECT_PROVIDER_HEADER_NAME, askFirst,
+		common.SELECT_PROVIDER_ALLOW_RETRY_HEADER_NAME, "true")
+}
+
+// callRouterWith makes one call through the router's listener with the given request headers, as
+// name and value pairs.
+func callRouterWith(t *testing.T, client *grpc.ClientConn, headers ...string) (*wrapperspb.Int64Value, metadata.MD, error) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	if pin != "" {
-		ctx = metadata.AppendToOutgoingContext(ctx, common.SELECT_PROVIDER_HEADER_NAME, pin)
+	if len(headers) > 0 {
+		ctx = metadata.AppendToOutgoingContext(ctx, headers...)
 	}
 	reply := &wrapperspb.Int64Value{}
 	var trailer metadata.MD
@@ -337,7 +353,26 @@ func TestGRPCListener_CutProviderIsRetriedOnTheNext(t *testing.T) {
 	reply, _, err := callRouter(t, client, "node-cut")
 	require.NoError(t, err)
 	require.Equal(t, int64(1), reply.GetValue(), "the second provider's answer")
-	require.Equal(t, int32(1), cutNode.calls.Load(), "the pinned provider was asked first")
+	require.Equal(t, int32(1), cutNode.calls.Load(), "the selected provider was asked first")
+}
+
+// MAG-5711: the same cut, with a plain router-select-provider and no allow-retry header. The
+// selection is a strict pin, so the request ends on the selected provider: the client gets the
+// router's reply for "no provider answered", and the second provider is never asked.
+func TestGRPCListener_CutSelectedProviderEndsTheRequestWithoutAllowRetry(t *testing.T) {
+	cutAddr, cutNode := startCuttingGRPCNode(t, replyLostCut{reset: true})
+	var goodCalls atomic.Int32
+	goodAddr := startStalledReflectionNodeAnswering(t, func(string, []byte) ([]byte, error) {
+		goodCalls.Add(1)
+		return []byte{0x08, 0x01}, nil
+	})
+	client := startGRPCRouterOverNodes(t, replyLostAPI(common.NO_STATE), grpcReplyLostNode{"node-cut", cutAddr}, grpcReplyLostNode{"node-good", goodAddr})
+
+	_, trailer, err := callRouterWith(t, client, common.SELECT_PROVIDER_HEADER_NAME, "node-cut")
+	requireRouterNoAnswer(t, err, trailer)
+	time.Sleep(200 * time.Millisecond)
+	require.Equal(t, int32(1), cutNode.calls.Load(), "the selected provider was asked once")
+	require.Zero(t, goodCalls.Load(), "no other provider may serve a strict pin")
 }
 
 // Ticket test 7: a node that really answers UNAVAILABLE is passed on as the node's reply.
