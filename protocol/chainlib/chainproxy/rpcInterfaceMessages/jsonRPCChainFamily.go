@@ -23,6 +23,11 @@ var jsonrpcChainFamilyRules = map[common.ChainFamily]struct {
 		},
 		checkBatch: checkXRPLBatch,
 	},
+	common.ChainFamilyStellar: {
+		responseErrorChecker: func(msg *JsonrpcMessage) func(data []byte, httpStatusCode int) (bool, string) {
+			return msg.CheckStellarResponseError
+		},
+	},
 }
 
 // JsonrpcResponseErrorChecker returns the classifier for a single JSON-RPC reply on a chain of the

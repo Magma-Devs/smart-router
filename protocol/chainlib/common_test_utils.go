@@ -320,6 +320,25 @@ func CreateMockTronSpec(index string) spectypes.Spec {
 	return spec
 }
 
+// CreateMockStellarSpec returns the part of a Stellar RPC spec a transaction submission needs: one
+// JSON-RPC collection holding sendTransaction, stateful and hanging as in the catalog's
+// stellar.json, beside one read (getTransaction). The router's bundled specs carry no Stellar
+// chain, so it registers stellar.json's families itself, as loading the catalog would: XLMT takes
+// the Stellar family from its import of XLM.
+func CreateMockStellarSpec(index string) spectypes.Spec {
+	common.RegisterChainFamilies(map[string]spectypes.Spec{
+		"XLM":  {Index: "XLM"},
+		"XLMT": {Index: "XLMT", Imports: []string{"XLM"}},
+	})
+	submission := spectypes.SpecCategory{Stateful: common.CONSISTENCY_SELECT_ALL_PROVIDERS, HangingApi: true}
+	spec := newMockSpec(index,
+		spectypes.CollectionData{ApiInterface: spectypes.APIInterfaceJsonRPC, Type: http.MethodPost},
+		mockSpecApi("sendTransaction", submission), mockSpecApi("getTransaction", spectypes.SpecCategory{}),
+	)
+	spec.AverageBlockTime = 5000
+	return spec
+}
+
 // generates a chain parser, a chain fetcher messages based on it
 // apiInterface can either be an ApiInterface string as in spectypes.ApiInterfaceXXX or a number for an index in the apiCollections
 // setMockLogLevelOnce guards the one-time global log-level set in CreateChainLibMocks (see there).
