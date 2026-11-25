@@ -2784,7 +2784,12 @@ func shouldFailSessionForResult(err error, relayResult *common.RelayResult) bool
 	// this gate through the IsNodeError branch below, where the carve-outs apply; teaching this
 	// clause that 13/14/15 are "gRPC 5xx" and 8 is "gRPC 429" would re-score them ahead of the
 	// carve-outs and undo the rate-limit exemption that direct_rpc_relay.go just classified.
-	if relayResult.StatusCode >= 500 || relayResult.StatusCode == 429 {
+	//
+	// A chain's own error claimed under a REST 5xx no status row names (IsChainClaimedServerError,
+	// MAG-5760) is scored by its row's verdict, through the node-error carve-outs below, as the same
+	// answer inside a 2xx would be. A verdict that puts the endpoint at fault is retryable and still
+	// scored there.
+	if (relayResult.StatusCode >= 500 && !relayResult.IsChainClaimedServerError) || relayResult.StatusCode == 429 {
 		return true
 	}
 	// Node error delivered inside a 2xx body — scoreable unless a carve-out claims it.
@@ -6386,7 +6391,9 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	// too, under every 5xx: its verdict was read from the body, where the rows decide before the
 	// status, so a 502 carrying the caller's BAD_USER_INPUT is served as is and not blamed, as the
 	// same body under a 500 or a 503 already was. A fault verdict still marks the endpoint
-	// unhealthy, through the IsNodeAtFault arm below. A 429 still takes this branch.
+	// unhealthy, through the IsNodeAtFault arm below. A 429 still takes this branch. So is a REST
+	// reply under a 5xx no status row names whose body its chain's own row reads as the node's
+	// error, such as Aptos's 507 mempool_is_full (common.ChainClaimsServerErrorReply, MAG-5760).
 	statusCode := result.StatusCode
 	carriesNodeReply := result.IsNodeError &&
 		(result.IsOwnVerdict || rpcInterfaceMessages.ServerErrorIsNodeReply(statusCode, result.Reply.GetData()))
@@ -6511,6 +6518,9 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	relayResult.IsDataScope = result.IsDataScope
 	relayResult.IsNodeCapability = result.IsNodeCapability
 	relayResult.IsNodeAtFault = result.IsNodeAtFault
+	// The session release reads it: a chain's error claimed under a REST 5xx is scored by its row's
+	// verdict, not by its status (shouldFailSessionForResult, MAG-5760).
+	relayResult.IsChainClaimedServerError = result.IsChainClaimedServerError
 	relayResult.ProviderInfo = result.ProviderInfo
 	if relayResult.Reply != nil {
 		relayResult.Reply.Metadata = append(relayResult.Reply.Metadata, pairingtypes.Metadata{
