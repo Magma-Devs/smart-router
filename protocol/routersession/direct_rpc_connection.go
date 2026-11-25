@@ -587,6 +587,12 @@ func newGRPCConnector(lifetimeCtx, dialCtx context.Context, nConns uint, nodeUrl
 // relay failure and fail over, not as a fatal condition.
 var ErrGRPCConnectionClosed = errors.New("gRPC connection is closed")
 
+// ErrNoMethodDescriptor is a JSON gRPC request the router could not convert to the method's
+// message, because this node's lookup (server reflection) gave no definition of the method: it
+// failed, or it did not describe the method. Nothing was sent to the node, so the relay says nothing
+// about it (MAG-5675).
+var ErrNoMethodDescriptor = errors.New("no definition of the gRPC method from this node")
+
 // DirectRPCPrewarmBudget bounds the readiness step that endpoint setup runs
 // before publishing connections.
 //
@@ -1254,6 +1260,10 @@ func (g *GRPCDirectRPCConnection) SendRequest(
 	// Get method descriptor (with caching)
 	methodDescriptor, err := g.resolver.MethodDescriptor(ctx, svc, methodName)
 	if err != nil {
+		// A lookup the relay's own context ended is left as the cancellation the resolver reports.
+		if ctx.Err() == nil {
+			err = fmt.Errorf("%w: %w", ErrNoMethodDescriptor, err)
+		}
 		return nil, utils.FormatError("failed to get method descriptor", err,
 			utils.LogAttr("method", methodPath))
 	}
