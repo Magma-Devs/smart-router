@@ -47,13 +47,19 @@ is merged; it skips routers whose every pod is idle (`smartrouter_chain_idle`) a
 - **Scores do not decay over silence.** While a chain is idle, and until its wake burst finishes,
   the prober withholds its QoS feed: with no polls every endpoint would read "not alive" and every
   provider would be scored unavailable for being unpolled.
-- **No head-stall verdicts on silence.** While a chain is idle, and until its wake burst finishes,
-  the probe also skips the head-stall step (MAG-3986). This is its own decision, not tied to the
-  QoS feed: both follow idle mode today because in that window an endpoint's block shows when it
-  was last polled, not whether it is stuck. While the wake burst (or an idle heartbeat) is still re-polling, the first url to
-  answer raises the chain's highest block and the others still hold their pre-idle block; a url
-  that reached the same-block threshold before the chain went idle would otherwise be taken out of
-  rotation for not having answered yet. Head-stall resumes on the first probe cycle after the burst.
+- **No new head-stall marks on silence.** While a chain is idle, and until its wake burst finishes,
+  the probe does not mark any url head-stalled (MAG-3986). This is its own decision, not tied to
+  the QoS feed: both follow idle mode today because in that window an endpoint's block shows when
+  it was last polled, not whether it is stuck. While the wake burst (or an idle heartbeat) is still
+  re-polling, the first url to answer raises the chain's highest block and the others still hold
+  their pre-idle block; a url that reached the same-block threshold before the chain went idle
+  would otherwise be taken out of rotation for not having answered yet. Marking resumes on the
+  first probe cycle after the burst, together with the never-empty pass.
+- **A recovered url comes back while idle.** Releasing does not pause (MAG-5742). A url that was
+  head-stalled before or during the idle period is back in rotation on the first probe cycle after
+  a poll shows it above the block it was stuck on, and its provider is released with it. With
+  `--chain-tracker-idle-poll-interval` set, that poll is the next heartbeat; without it nothing is
+  polled while idle, so the url waits for the wake burst as before.
 
 ## Settings
 
@@ -112,5 +118,5 @@ also fetches block hashes, so it costs more per endpoint.
 | `rpc_endpoint_tracker_gate_skips_total{source="idle"}` | one per skipped cycle |
 | `rpc_endpoint_tracker_requests_total` | flat while idle, one per endpoint at each wake |
 | `/debug/endpoint-state` | `IdleMode` (`off` / `active` / `idle`), `LastClientRelay`, `IdleSince`, `WakeInProgress` |
-| `/debug/probe-loop` | `QoSFeedPausedIdle` (QoS feed withheld) and `HeadStallPausedIdle` (head-stall step skipped), for the last cycle |
+| `/debug/probe-loop` | `QoSFeedPausedIdle` (QoS feed withheld) and `HeadStallPausedIdle` (head-stall marking paused; releases still run), for the last cycle |
 | Log | `chain tracker idle mode enabled`, `chain idle`, `chain awake`, `wake burst finished`, `routing before the first poll landed` (debug) |

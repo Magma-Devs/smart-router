@@ -35,6 +35,11 @@ import (
 //   - never take out the last usable endpoint of this chain and interface, across both tiers (D13);
 //     re-checked every cycle, releasing the stuck endpoint on the highest block when nothing else is
 //     usable (D22, D26).
+//   - while the chain is idle (or its wake burst is still re-polling), only remove (MAG-5742). Idle
+//     heartbeats poll one url at a time, so a url can look behind only because it has not been polled
+//     yet: adding then would mark it for silence. Removing has no such risk: a highest block above the
+//     stuck one proves the url moved, whenever it was polled. Before this, the whole step paused and
+//     a url that recovered during idle stayed out until the next client request woke the chain.
 
 // headStallState is the router-side state of the head-stall step. The stalled url set is read on the
 // hot path (every tip observation) and written by the probe loop; kept is touched only by the probe
@@ -105,12 +110,20 @@ type headStallResult struct {
 // runHeadStallStep is the pure per-cycle body (no rpcss fields), testable with constructed endpoints
 // and a fake observation getter. endpoints is the same slice the probe cycle scored: both tiers,
 // possibly listing one *Endpoint twice when a provider sits in both pools.
+//
+// addPaused runs the remove half only (MAG-5742): step 1 releases every url that moved above its
+// stuck block, and steps 2 (add) and 3 (never-empty) are skipped. Never-empty stays paused only to
+// keep this change to the release the bug needed: while the chain is idle no client relay depends on
+// it. It resumes with add on the first probe cycle after the wake burst. A relay routed before that
+// cycle (the one that woke the chain waits at most wakeWaitCap) and finding no usable url is served
+// by the last-chance path, as it was before this change.
 func runHeadStallStep(
 	endpoints []*routersession.EndpointWithDirectConnection,
 	getObservation func(url string) (endpointstate.EndpointObservation, bool),
 	n int,
 	grace time.Duration,
 	now time.Time,
+	addPaused bool,
 	onRecover func(provider string),
 	state *headStallState,
 	logAttrs []utils.Attribute,
@@ -195,6 +208,21 @@ func runHeadStallStep(
 		return held
 	}
 
+	// publish makes this cycle's stalled set the one the tip-vote filter reads.
+	publish := func() {
+		stalledURLs := make(map[string]struct{})
+		liveURLs := make(map[string]struct{}, len(groups))
+		for _, g := range groups {
+			liveURLs[g.url] = struct{}{}
+			for _, ep := range g.eps {
+				if holdsStall(ep.Endpoint) {
+					stalledURLs[g.url] = struct{}{}
+				}
+			}
+		}
+		state.sync(stalledURLs, liveURLs)
+	}
+
 	// release takes head-stalled off every endpoint of the url and, for each that becomes usable,
 	// returns its provider to the valid list (H1). It reports whether anything was released.
 	release := func(g *urlGroup, why string) bool {
@@ -243,6 +271,11 @@ func runHeadStallStep(
 		if obs, _ := getObservation(g.url); obs.HighestBlockSeen > rec.Block && release(g, "removed") {
 			res.removed++
 		}
+	}
+
+	if addPaused {
+		publish()
+		return res
 	}
 
 	usable := countUsableURLs()
@@ -351,23 +384,13 @@ func runHeadStallStep(
 		}
 	}
 
-	// Publish this cycle's stalled set.
-	stalledURLs := make(map[string]struct{})
-	liveURLs := make(map[string]struct{}, len(groups))
-	for _, g := range groups {
-		liveURLs[g.url] = struct{}{}
-		for _, ep := range g.eps {
-			if holdsStall(ep.Endpoint) {
-				stalledURLs[g.url] = struct{}{}
-			}
-		}
-	}
-	state.sync(stalledURLs, liveURLs)
+	publish()
 	return res
 }
 
 // runHeadStall wires runHeadStallStep to this server's live dependencies.
-func (rpcss *RPCSmartRouterServer) runHeadStall(endpoints []*routersession.EndpointWithDirectConnection, now time.Time) {
+// addPaused runs only the remove half (see runHeadStallStep).
+func (rpcss *RPCSmartRouterServer) runHeadStall(endpoints []*routersession.EndpointWithDirectConnection, now time.Time, addPaused bool) {
 	if rpcss.endpointChainTrackerManager == nil {
 		return
 	}
@@ -384,7 +407,7 @@ func (rpcss *RPCSmartRouterServer) runHeadStall(endpoints []*routersession.Endpo
 		rpcss.endpointChainTrackerManager.GetObservation,
 		rpcss.endpointChainTrackerManager.StallCycleThreshold(),
 		rpcss.endpointChainTrackerManager.StallGrace(),
-		now, onRecover, &rpcss.headStall,
+		now, addPaused, onRecover, &rpcss.headStall,
 		[]utils.Attribute{utils.LogAttr("chainID", chainID), utils.LogAttr("apiInterface", apiInterface)},
 	)
 	rpcss.probeStats.recordHeadStall(res)
