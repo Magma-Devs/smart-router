@@ -914,6 +914,13 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 	}
 	if hasError {
 		result.ApplyNodeErrorClassification(d.chainFamily, common.TransportREST, response.StatusCode, errorMessage)
+		// A 5xx no status row names whose body the chain's own row reads as the node's error is the
+		// node's answer, filed by that row: the relay path serves it rather than taking the status
+		// as a transport failure (common.ChainClaimsServerErrorReply, MAG-5760).
+		if common.ChainClaimsServerErrorReply(d.chainFamily, response.StatusCode, errorMessage) {
+			result.IsOwnVerdict = true
+			result.IsChainClaimedServerError = true
+		}
 	}
 
 	utils.FormatTrace("REST request completed",

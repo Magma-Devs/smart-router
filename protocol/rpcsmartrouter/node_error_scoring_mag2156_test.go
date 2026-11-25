@@ -118,3 +118,19 @@ func TestShouldFailSessionForResult_MAG2156(t *testing.T) {
 		})
 	}
 }
+
+// MAG-5760: a chain's own error claimed under a REST 5xx no status row names is scored by its row's
+// verdict, as the same answer inside a 2xx would be; a bare 5xx is still a failure, and a GraphQL
+// read's own verdict under a 5xx keeps the status scoring it had.
+func TestShouldFailSessionForResult_AChainClaimedServerError(t *testing.T) {
+	require.False(t, shouldFailSessionForResult(nil, &common.RelayResult{StatusCode: 507, IsNodeError: true, IsNonRetryable: true, IsOwnVerdict: true, IsChainClaimedServerError: true}),
+		"a chain's refusal under an unlisted 5xx, not the endpoint's fault, is not a failed session")
+	require.True(t, shouldFailSessionForResult(nil, &common.RelayResult{StatusCode: 507, IsNodeError: true, IsNodeAtFault: true, IsOwnVerdict: true, IsChainClaimedServerError: true}),
+		"a retryable verdict that blames the endpoint is still a failure")
+	require.True(t, shouldFailSessionForResult(nil, &common.RelayResult{StatusCode: 507, IsNodeError: true, IsNonRetryable: true}),
+		"a 5xx no row claims is a failure, whatever its flags")
+	require.True(t, shouldFailSessionForResult(nil, &common.RelayResult{StatusCode: 502, IsNodeError: true, IsNonRetryable: true, IsOwnVerdict: true}),
+		"a GraphQL read's own verdict under a 5xx is scored by its status, as before")
+	require.True(t, shouldFailSessionForResult(nil, &common.RelayResult{StatusCode: 429, IsOwnVerdict: true}),
+		"a 429 is read by its status")
+}

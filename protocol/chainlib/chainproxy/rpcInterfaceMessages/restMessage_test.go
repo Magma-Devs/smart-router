@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/magma-Devs/smart-router/protocol/common"
 )
 
 func TestRestMessage(t *testing.T) {
@@ -916,5 +918,36 @@ func TestRestMessage_BlockModeOutcomeIsNoRefusal(t *testing.T) {
 		require.True(t, broadcast.RefusesTransaction([]byte(refused)), "height %s: refused at CheckTx", height)
 		_, message := broadcast.CheckResponseError([]byte(refused), 200)
 		require.Equal(t, "cosmos tx refused: code 32, codespace sdk: account sequence mismatch, expected 7, got 6: incorrect account sequence", message)
+	}
+}
+
+// MAG-5760: a 5xx on an Aptos transaction submit whose body is an Aptos API error is read with its
+// error_code, so the registry reads it by that code. Any other path or body, and an Aptos error
+// under a status below 500, keep extractErrorMessage's reading.
+func TestRestMessage_CheckResponseError_AptosServerError(t *testing.T) {
+	const body = `{"message":"Mempool is full. Mempool size: 2000000, Capacity: 2000000","error_code":"mempool_is_full","vm_error_code":null}`
+	for _, path := range []string{"/transactions", "/transactions/batch"} {
+		hasError, message := RestMessage{SpecPath: path}.CheckResponseError([]byte(body), 507)
+		require.True(t, hasError)
+		require.Equal(t, common.AptosErrorMessage("mempool_is_full", "Mempool is full. Mempool size: 2000000, Capacity: 2000000"), message, path)
+	}
+	_, message := RestMessage{SpecPath: "/accounts/{address}"}.CheckResponseError([]byte(body), 507)
+	require.Equal(t, "Mempool is full. Mempool size: 2000000, Capacity: 2000000", message, "the shape is read on the submit paths only")
+
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+		want   string
+	}{
+		{"an Aptos error under a 4xx", 404, `{"message":"Account not found","error_code":"account_not_found","vm_error_code":null}`, "Account not found"},
+		{"a body with no error_code", 507, `{"message":"upstream error"}`, "upstream error"},
+		{"an error_code that is not a name", 507, `{"message":"m","error_code":"Mempool Is Full"}`, "m"},
+		{"a proxy's page", 507, `<html>507</html>`, `<html>507</html>`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, message := RestMessage{SpecPath: "/transactions"}.CheckResponseError([]byte(tc.body), tc.status)
+			require.Equal(t, tc.want, message)
+		})
 	}
 }

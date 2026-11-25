@@ -26,6 +26,8 @@ import (
 // need to support dynamic registration, add explicit synchronisation — do NOT
 // silently mutate this map from elsewhere.
 var chainErrorMappings = map[ChainFamily][]errorMapping{
+	// Aptos's own errors under a 5xx no status row names (server_error_reply.go, MAG-5760).
+	ChainFamilyAptos: aptosServerErrorRows,
 	ChainFamilySolana: {
 		// Source: Solana RPC custom error codes (agave rpc-client-api/src/custom_error.rs)
 		{CodeEquals(-32001), RouterErrorChainStatePruned},                                        // "Block cleaned up, does not exist on node"

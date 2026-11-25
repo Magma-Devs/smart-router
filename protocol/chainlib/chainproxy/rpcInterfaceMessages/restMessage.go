@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -94,7 +95,42 @@ func (jm RestMessage) CheckResponseError(data []byte, httpStatusCode int) (hasEr
 		}
 		return checkTronBroadcast(jm.apiPath(), data)
 	}
+	if message, isAptosError := aptosServerErrorMessage(jm.apiPath(), data, httpStatusCode); isAptosError {
+		return true, message
+	}
 	return true, extractErrorMessage(data, httpStatusCode)
+}
+
+// aptosErrorCode is an Aptos API error_code: a snake_case name (AptosErrorCode, aptos-core
+// api/types/src/error.rs).
+var aptosErrorCode = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
+
+// aptosSubmitPaths are the Aptos API's transaction submits (aptos-core api/src/transactions.rs), the
+// spec apis a 507 mempool_is_full answers.
+var aptosSubmitPaths = map[string]struct{}{"/transactions": {}, "/transactions/batch": {}}
+
+// aptosServerErrorMessage writes a 5xx on an Aptos transaction submit whose body is an Aptos API
+// error, {"message", "error_code"}, as common.AptosErrorMessage, so the registry reads it by its
+// error_code and not by its free text (MAG-5760). Aptos refuses a transaction its mempool does not
+// take with such a body under 507, and the Aptos rows claim that reply as the node's answer
+// (common.ChainClaimsServerErrorReply). The reader does not know the chain, so it reads the shape on
+// the submit paths only, as checkTronServletError reads java-tron's on java-tron's paths. Any other
+// path or body keeps extractErrorMessage's reading.
+func aptosServerErrorMessage(path string, data []byte, httpStatusCode int) (string, bool) {
+	if httpStatusCode < 500 || httpStatusCode > 599 {
+		return "", false
+	}
+	if _, submit := aptosSubmitPaths[path]; !submit {
+		return "", false
+	}
+	var body struct {
+		Message   *string `json:"message"`
+		ErrorCode *string `json:"error_code"`
+	}
+	if json.Unmarshal(data, &body) != nil || body.Message == nil || body.ErrorCode == nil || !aptosErrorCode.MatchString(*body.ErrorCode) {
+		return "", false
+	}
+	return common.AptosErrorMessage(*body.ErrorCode, *body.Message), true
 }
 
 // ServerErrorIsNodeReply reports whether a REST 5xx is the node's own answer rather than a failure
