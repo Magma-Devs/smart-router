@@ -3,12 +3,14 @@ package rpcInterfaceMessages
 import (
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/goccy/go-json"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
+	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/parser"
 	"github.com/magma-Devs/smart-router/utils"
 )
@@ -111,17 +113,21 @@ func checkJsonrpcEnvelope(data []byte, kind string) (hasError bool, errorMessage
 	if !hasErr {
 		return false, "", scan.resultBytes
 	}
-	// Code stays raw: only whether it is zero is read, so an off-spec type (a
-	// string, a float) cannot turn a readable message into a decode failure.
+	// Code stays raw: only whether it is zero or -32603 is read, so an off-spec
+	// type (a string, a float) cannot turn a readable message into a decode
+	// failure. Data is any JSON value for the same reason.
 	var je struct {
 		Code    json.RawMessage `json:"code"`
 		Message string          `json:"message"`
+		Data    any             `json:"data"`
 	}
 	if err := json.Unmarshal(scan.errorBytes, &je); err != nil {
 		return true, fmt.Sprintf("malformed %s response: error field is not a valid object", kind), nil
 	}
 	if je.Message != "" {
-		return true, je.Message, nil
+		// CometBFT's reason for an internal error is in data (MAG-5325).
+		code, _ := strconv.Atoi(string(je.Code))
+		return true, common.JSONRPCErrorText(code, je.Message, je.Data), nil
 	}
 	if scan.hasResult && isZeroErrorCode(je.Code) {
 		return false, "", scan.resultBytes

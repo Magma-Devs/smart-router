@@ -96,7 +96,7 @@ func TestTendermintBroadcastRefusal(t *testing.T) {
 			// The envelope rule still comes first.
 			name: "sync, an error object", method: "broadcast_tx_sync",
 			reply:     `{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"Internal error","data":"tx already exists in cache"}}`,
-			wantError: true, wantMessage: "Internal error",
+			wantError: true, wantMessage: "Internal error: tx already exists in cache",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
