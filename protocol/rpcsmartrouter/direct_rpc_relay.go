@@ -687,6 +687,10 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 	}
 	if hasError {
 		classifyJSONRPCNodeError(result, d.chainFamily, statusCode, responseData, errorMessage)
+	} else {
+		// The results manager asks the same question of the same bytes, and a block reply is
+		// megabytes: it takes this answer instead of reading the reply again (MAG-5810).
+		result.MarkReplyCheckedClean()
 	}
 
 	return result, nil
