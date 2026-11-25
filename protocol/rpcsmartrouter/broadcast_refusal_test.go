@@ -375,7 +375,7 @@ func captureErrorVerdicts(t *testing.T, chainID string) func() []string {
 	t.Helper()
 	var mu sync.Mutex
 	var names []string
-	common.SetErrorMetricsCallback(func(_ uint32, errorName string, _ string, _ bool, errorChainID string) {
+	common.SetErrorMetricsCallback(func(_ uint32, errorName string, _ string, _ bool, errorChainID string, _ string, _ common.ErrorSource) {
 		if errorChainID != chainID {
 			return
 		}

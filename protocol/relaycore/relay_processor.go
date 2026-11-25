@@ -154,7 +154,7 @@ func NewRelayProcessor(
 		startedAt:                    time.Now(),
 		crossValidationParams:        crossValidationParams,
 		responses:                    make(chan *RelayResponse, responseBufferSize(selection, crossValidationParams)), // buffered to prevent blocking
-		ResultsManager:               NewResultsManager(guid, chainID),
+		ResultsManager:               newResultsManager(guid, chainID, common.ErrorSourceOf(ctx)),
 		guid:                         guid,
 		debugRelay:                   relayStateMachine.GetDebugState(),
 		metricsInf:                   metricsInf,
@@ -1636,9 +1636,9 @@ func (rp *RelayProcessor) buildFailureResult(
 
 	// Log with classified error code for metrics/observability
 	if bestRouterError != nil {
-		chainID, _ := rp.chainIdAndApiInterfaceGetter.GetChainIdAndApiInterface()
+		chainID, apiInterface := rp.chainIdAndApiInterfaceGetter.GetChainIdAndApiInterface()
 		common.LogCodedError("failed relay, insufficient results", processingError, bestRouterError,
-			chainID, 0, "", utils.LogAttr("GUID", rp.guid))
+			chainID, common.ErrorOriginOf(rp.ctx, apiInterface), 0, "", utils.LogAttr("GUID", rp.guid))
 	}
 
 	return returnedResult, utils.FormatError("failed relay, insufficient results", processingError, utils.LogAttr("GUID", rp.guid))

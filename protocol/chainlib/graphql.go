@@ -471,7 +471,7 @@ func NewGraphQLChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint 
 			averageBlockTime: averageBlockTime,
 			NodeUrl:          nodeUrl,
 			HashedNodeUrl:    chainproxy.HashURL(nodeUrl.Url),
-			ErrorHandler:     newNodeErrorHandler(common.TransportREST, rpcProviderEndpoint.ChainID),
+			ErrorHandler:     newNodeErrorHandler(common.TransportREST, rpcProviderEndpoint.ChainID, rpcProviderEndpoint.ApiInterface),
 			ChainID:          rpcProviderEndpoint.ChainID,
 		},
 	}, nil

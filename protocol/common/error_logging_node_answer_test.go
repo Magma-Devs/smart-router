@@ -19,13 +19,13 @@ func TestLogCodedNodeAnswerStillCountsTheError(t *testing.T) {
 		chainID   string
 	}
 	var got []emitted
-	SetErrorMetricsCallback(func(code uint32, name, category string, retryable bool, chainID string) {
+	SetErrorMetricsCallback(func(code uint32, name, category string, retryable bool, chainID string, _ string, _ ErrorSource) {
 		got = append(got, emitted{code, name, retryable, chainID})
 	})
 	t.Cleanup(func() { SetErrorMetricsCallback(nil) })
 
 	LogCodedNodeAnswer("received node error reply from provider", errors.New("tx not found"),
-		RouterErrorNodeDataNotHeld, "COSMOSHUB", 404, "tx not found: 0000")
+		RouterErrorNodeDataNotHeld, "COSMOSHUB", ErrorOrigin{APIInterface: "rest", Source: ErrorSourceClient}, 404, "tx not found: 0000")
 
 	require.Len(t, got, 1, "the debug path must still fire the metric exactly once")
 	require.Equal(t, RouterErrorNodeDataNotHeld.Code, got[0].code)
@@ -38,11 +38,11 @@ func TestLogCodedNodeAnswerStillCountsTheError(t *testing.T) {
 // counted, under UNKNOWN_ERROR, rather than dropping the metric on a nil.
 func TestLogCodedNodeAnswerTreatsNilAsUnknown(t *testing.T) {
 	var names []string
-	SetErrorMetricsCallback(func(code uint32, name, category string, retryable bool, chainID string) {
+	SetErrorMetricsCallback(func(code uint32, name, category string, retryable bool, chainID string, _ string, _ ErrorSource) {
 		names = append(names, name)
 	})
 	t.Cleanup(func() { SetErrorMetricsCallback(nil) })
 
-	LogCodedNodeAnswer("node answer", nil, nil, "ETH1", 0, "")
+	LogCodedNodeAnswer("node answer", nil, nil, "ETH1", ErrorOrigin{}, 0, "")
 	require.Equal(t, []string{"UNKNOWN_ERROR"}, names)
 }

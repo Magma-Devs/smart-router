@@ -192,6 +192,11 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 	rpcss.chainParser = chainParser
 	rpcss.sharedState = sharedState
 	rpcss.wsSubscriptionManager = wsSubscriptionManager
+	if direct, ok := wsSubscriptionManager.(*DirectWSSubscriptionManager); ok {
+		// An error frame on an open subscription answers no request in flight: the manager
+		// hands it here for its relay_end (MAG-5598).
+		direct.SetErrorFrameReporter(rpcss.reportSubscriptionErrorFrame)
+	}
 	rpcss.debugRelays = cmdFlags.DebugRelays
 	rpcss.enableSelectionStats = cmdFlags.EnableSelectionStats
 
@@ -1287,7 +1292,13 @@ func (rpcss *RPCSmartRouterServer) sendCraftedRelays(retries int, initialRelays 
 	// Cancellable, so the RelayProcessor built from it has a Done to give up on. Without one, an
 	// attempt that finishes after this function returns can park forever in SetResponse — the
 	// internal path has no client to disconnect and no deadline of its own to close the context.
-	ctx, cancel := context.WithCancel(utils.WithUniqueIdentifier(context.Background(), utils.GenerateUniqueIdentifier()))
+	// The router's own relays: the first ones, before the endpoint serves, are boot's; the relays
+	// monitor's later ones are probes (MAG-5598).
+	source := common.ErrorSourceProbe
+	if initialRelays {
+		source = common.ErrorSourceBoot
+	}
+	ctx, cancel := context.WithCancel(common.WithErrorSource(utils.WithUniqueIdentifier(context.Background(), utils.GenerateUniqueIdentifier()), source))
 	defer cancel()
 	ok, relay, chainMessage, _ := rpcss.craftRelay(ctx)
 	if !ok {
@@ -4151,6 +4162,8 @@ func (rpcss *RPCSmartRouterServer) runProbeLoop(ctx context.Context, cadence tim
 	if rpcss.sessionManager == nil || rpcss.endpointChainTrackerManager == nil {
 		return
 	}
+	// What the loop meets is the router's own probe, never a client's (MAG-5598).
+	ctx = common.WithErrorSource(ctx, common.ErrorSourceProbe)
 	if cadence <= 0 {
 		cadence = defaultProbeCadence
 	}
@@ -6367,7 +6380,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 			)
 		} else {
 			common.LogCodedError("direct RPC relay error", err, classified,
-				rpcss.listenEndpoint.ChainID, 0, err.Error(),
+				rpcss.listenEndpoint.ChainID, common.ErrorOriginOf(ctx, rpcss.listenEndpoint.ApiInterface), 0, err.Error(),
 				utils.LogAttr("endpoint", singleConsumerSession.Parent.PublicAddress),
 			)
 		}

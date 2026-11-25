@@ -11,19 +11,19 @@ import (
 
 func TestLogCodedError_NilRouterError(t *testing.T) {
 	// Should not panic and should use RouterErrorUnknown
-	err := LogCodedError("test", errors.New("boom"), nil, "", 0, "")
+	err := LogCodedError("test", errors.New("boom"), nil, "", ErrorOrigin{}, 0, "")
 	require.NotNil(t, err)
 }
 
 func TestLogCodedError_WithRouterError(t *testing.T) {
 	err := LogCodedError("test timeout", errors.New("connection timed out"),
-		RouterErrorConnectionTimeout, "ETH1", 0, "connection timed out")
+		RouterErrorConnectionTimeout, "ETH1", ErrorOrigin{}, 0, "connection timed out")
 	require.NotNil(t, err)
 }
 
 func TestLogCodedError_WithChainError(t *testing.T) {
 	err := LogCodedError("node error", errors.New("nonce too low"),
-		RouterErrorChainNonceTooLow, "ETH1", -32000, "nonce too low")
+		RouterErrorChainNonceTooLow, "ETH1", ErrorOrigin{}, -32000, "nonce too low")
 	require.NotNil(t, err)
 }
 
@@ -35,10 +35,12 @@ func TestLogCodedError_MetricsCallbackInvoked(t *testing.T) {
 		category string
 		retry    bool
 		chain    string
+		iface    string
+		source   ErrorSource
 	}
 
 	// Register test callback
-	SetErrorMetricsCallback(func(code uint32, name string, category string, retryable bool, chainID string) {
+	SetErrorMetricsCallback(func(code uint32, name string, category string, retryable bool, chainID string, apiInterface string, source ErrorSource) {
 		mu.Lock()
 		defer mu.Unlock()
 		captured.code = code
@@ -46,11 +48,13 @@ func TestLogCodedError_MetricsCallbackInvoked(t *testing.T) {
 		captured.category = category
 		captured.retry = retryable
 		captured.chain = chainID
+		captured.iface = apiInterface
+		captured.source = source
 	})
 	defer SetErrorMetricsCallback(nil) // cleanup
 
 	LogCodedError("test", errors.New("nonce too low"),
-		RouterErrorChainNonceTooLow, "ETH1", -32000, "nonce too low")
+		RouterErrorChainNonceTooLow, "ETH1", ErrorOrigin{APIInterface: "jsonrpc", Source: ErrorSourceProbe}, -32000, "nonce too low")
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -59,11 +63,13 @@ func TestLogCodedError_MetricsCallbackInvoked(t *testing.T) {
 	assert.Equal(t, "external", captured.category)
 	assert.False(t, captured.retry)
 	assert.Equal(t, "ETH1", captured.chain)
+	assert.Equal(t, "jsonrpc", captured.iface)
+	assert.Equal(t, ErrorSourceProbe, captured.source)
 }
 
 func TestLogCodedError_NoCallbackNoPanic(t *testing.T) {
 	SetErrorMetricsCallback(nil)
 	// Should not panic
-	err := LogCodedError("test", errors.New("boom"), RouterErrorUnknown, "", 0, "")
+	err := LogCodedError("test", errors.New("boom"), RouterErrorUnknown, "", ErrorOrigin{}, 0, "")
 	require.NotNil(t, err)
 }

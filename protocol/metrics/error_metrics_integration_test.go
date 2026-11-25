@@ -22,7 +22,7 @@ func TestErrorMetrics_EndToEnd(t *testing.T) {
 	reg.MustRegister(counter)
 
 	// Register callback manually (simulating what InitErrorMetrics does)
-	common.SetErrorMetricsCallback(func(errorCode uint32, errorName string, errorCategory string, retryable bool, chainID string) {
+	common.SetErrorMetricsCallback(func(errorCode uint32, errorName string, errorCategory string, retryable bool, chainID string, _ string, _ common.ErrorSource) {
 		retryStr := "false"
 		if retryable {
 			retryStr = "true"
@@ -38,10 +38,11 @@ func TestErrorMetrics_EndToEnd(t *testing.T) {
 	defer common.SetErrorMetricsCallback(nil) // cleanup
 
 	// Simulate errors from the relay pipeline
-	common.LogCodedError("node error", nil, common.RouterErrorChainNonceTooLow, "ETH1", -32000, "nonce too low")
-	common.LogCodedError("node error", nil, common.RouterErrorChainNonceTooLow, "ETH1", -32000, "nonce too low")
-	common.LogCodedError("timeout", nil, common.RouterErrorConnectionTimeout, "SOLANA", 0, "")
-	common.LogCodedError("rate limit", nil, common.RouterErrorNodeRateLimited, "ETH1", 429, "")
+	client := common.ErrorOrigin{APIInterface: "jsonrpc", Source: common.ErrorSourceClient}
+	common.LogCodedError("node error", nil, common.RouterErrorChainNonceTooLow, "ETH1", client, -32000, "nonce too low")
+	common.LogCodedError("node error", nil, common.RouterErrorChainNonceTooLow, "ETH1", client, -32000, "nonce too low")
+	common.LogCodedError("timeout", nil, common.RouterErrorConnectionTimeout, "SOLANA", client, 0, "")
+	common.LogCodedError("rate limit", nil, common.RouterErrorNodeRateLimited, "ETH1", client, 429, "")
 
 	// Gather and verify
 	families, err := reg.Gather()
