@@ -404,6 +404,24 @@ func TestRESTRelay_400_BeyondHead_IsRetriedElsewhere(t *testing.T) {
 	assert.False(t, shouldFailSessionForResult(nil, result))
 }
 
+// TestRESTRelay_RefusedBroadcastIsReadByItsCodeOnEveryFamily: CANTO is an EVM chain and serves the
+// Cosmos REST broadcast. A refused broadcast is decided by its code whatever its log says, here a
+// log holding the Cosmos gateway's beyond-head words, which the EVM REST chain rows read (MAG-5253).
+// It stays a non-retryable rejection that blames nobody, as on a Cosmos chain.
+func TestRESTRelay_RefusedBroadcastIsReadByItsCodeOnEveryFamily(t *testing.T) {
+	body := `{"tx_response":{"height":"0","txhash":"0A1B","codespace":"sdk","code":2,"raw_log":"requested block height is bigger then the chain length"}}`
+	for _, family := range []common.ChainFamily{common.ChainFamilyCosmosSDK, common.ChainFamilyEVM, common.ChainFamilyUnknown} {
+		t.Run(family.String(), func(t *testing.T) {
+			result := sendRESTThroughMockUpstreamAs(t, family, http.StatusOK, body)
+
+			assert.True(t, result.IsNodeError, "a refused broadcast is the node's error")
+			assert.True(t, result.IsNonRetryable, "the refusal is the transaction's, the same on every node")
+			assert.False(t, result.IsDataScope, "not an answer about data the node does not hold")
+			assert.False(t, result.IsNodeAtFault)
+		})
+	}
+}
+
 // TestRESTRelay_410_Pruned_IsRetriedElsewhere: Aptos and Horizon answer 410 for data the node no
 // longer holds. The registry's new 410 row makes it data-scope: retryable on an archive node, and
 // not the endpoint's fault.

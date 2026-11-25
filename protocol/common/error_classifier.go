@@ -197,8 +197,9 @@ func xrplMessageStartsWith(alternatives ...string) ErrorMatcher {
 // only: what the node software behind a REST interface writes in its error body. Keyed by family,
 // then transport, so a Sidecar phrase never classifies a Cosmos reply and a REST body's phrase never
 // classifies the same family's JSON-RPC error. ClassifyError checks them after the family's own rows
-// and before the generic table. Until MAG-5253 they sat in the generic REST table, where every
-// chain's REST reply was matched against every node software's wording.
+// and before the generic table, so each REST list opens with the broadcast-refusal rows
+// (restChainRows). Until MAG-5253 they sat in the generic REST table, where every chain's REST reply
+// was matched against every node software's wording.
 //
 // Evidence for every row is recorded in MAG-3972, MAG-3974 and MAG-3976 (twelve families probed
 // live 2026-09-27). Two kinds of body are here:
@@ -215,23 +216,33 @@ func xrplMessageStartsWith(alternatives ...string) ErrorMatcher {
 // chainErrorMappings, so ClassifyError reads it lock-free.
 var chainInterfaceErrorMappings = map[ChainFamily]map[TransportType][]errorMapping{
 	// The Substrate API Sidecar.
-	ChainFamilySubstrate: {TransportREST: {
+	ChainFamilySubstrate: {TransportREST: restChainRows([]errorMapping{
 		{MessageContains("larger than the current largest block"), RouterErrorChainBlockNotFound},    // 400
 		{CodeAndMessage(500, "unable to retrieve header and parent"), RouterErrorChainBlockNotFound}, // unknown block hash
-	}},
-	ChainFamilyCosmosSDK: {TransportREST: cosmosGatewayRESTRows},
+	})},
+	ChainFamilyCosmosSDK: {TransportREST: restChainRows(cosmosGatewayRESTRows)},
 	// EOS imports ETH1 for its EVM and serves nodeos on REST. CANTO imports ETH1 first, so it is EVM
 	// too, and its REST interface is the Cosmos gRPC-gateway it takes from COSMOSSDK.
-	ChainFamilyEVM: {TransportREST: append([]errorMapping{
+	ChainFamilyEVM: {TransportREST: restChainRows(append([]errorMapping{
 		// "unknown block" is two common English words, and on REST the matcher is fed the raw response
 		// body (extractErrorMessage's fallback), so it is gated on the 400 nodeos sends with it.
 		// Ungated it fired on any status: a 500 saying "unknown blockchain id" classified as
 		// block-not-found and the endpoint was never scored for it.
 		{CodeAndMessage(400, "unknown block"), RouterErrorChainBlockNotFound}, // nodeos unknown_block_exception
-	}, cosmosGatewayRESTRows...)},
-	ChainFamilyMultiversX: {TransportREST: {
+	}, cosmosGatewayRESTRows...))},
+	ChainFamilyMultiversX: {TransportREST: restChainRows([]errorMapping{
 		{CodeAndMessage(500, "transaction not found"), RouterErrorChainTxNotFound},
-	}},
+	})},
+}
+
+// restChainRows is a family's REST chain rows, opened by the broadcast-refusal rows. A refused
+// transaction's message carries the node's log, which is free text, so the refusal rows read it
+// before any row that reads words: at the head of the generic REST table (init) and of the
+// CosmosSDK chain rows. These rows run before the generic table, so they open with them too.
+// Without them, CANTO (EVM) filed a refused broadcast whose log held the gateway's beyond-head words
+// as block-not-found.
+func restChainRows(rows []errorMapping) []errorMapping {
+	return slices.Concat(cosmosTxRefusalRows, tronTxRefusalRows, rows)
 }
 
 // cosmosGatewayRESTRows is what the Cosmos SDK's gRPC-gateway, a Cosmos chain's REST interface,
@@ -841,6 +852,7 @@ func init() {
 	// A broadcast's refusal opens the table of each transport its reader runs on: Tendermint RPC
 	// (JSON-RPC) and gRPC for Cosmos, REST for Cosmos and Tron. Their messages start with a prefix no
 	// node writes, so they shadow no row below, and first, no row below reads the node's free text.
+	// The REST chain rows run before this table and open with them too (restChainRows).
 	genericErrorMappings[TransportJsonRPC] = slices.Concat(cosmosTxRefusalRows, genericErrorMappings[TransportJsonRPC])
 	genericErrorMappings[TransportGRPC] = slices.Concat(cosmosTxRefusalRows, genericErrorMappings[TransportGRPC])
 	genericErrorMappings[TransportREST] = slices.Concat(cosmosTxRefusalRows, tronTxRefusalRows, genericErrorMappings[TransportREST])

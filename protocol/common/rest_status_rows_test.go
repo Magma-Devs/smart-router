@@ -329,6 +329,42 @@ func TestRESTChainRowsByChain(t *testing.T) {
 		"and not Hedera's REST reply")
 }
 
+// TestRESTChainRowsLeaveARefusedBroadcastToItsCode: a refused broadcast's message carries the
+// node's log, which is free text. The broadcast-refusal rows read it before any row that reads
+// words, at the head of the generic REST table. The REST chain rows run before that table, so they
+// must not read it either: on every family that has them, the refusal is decided as on a chain with
+// none (MAG-5253). CANTO is EVM and serves the Cosmos REST broadcast, so the gateway's beyond-head
+// row read its refused broadcast's log as block-not-found.
+func TestRESTChainRowsLeaveARefusedBroadcastToItsCode(t *testing.T) {
+	// What the REST chain rows read.
+	words := []string{
+		"Specified block number is larger than the current largest block.",
+		"Unable to retrieve header and parent from supplied hash",
+		"requested block height is bigger then the chain length",
+		"height 1 is not available, lowest height is 25280088",
+		"decoding bech32 failed: invalid character not part of charset: 111",
+		"Unknown Block",
+		"transaction not found",
+	}
+	for family, transports := range chainInterfaceErrorMappings {
+		if len(transports[TransportREST]) == 0 {
+			continue
+		}
+		for _, text := range words {
+			for _, message := range []string{CosmosTxRefusalMessage("sdk", 2, text), TronTxRefusalMessage("SIGERROR", text)} {
+				// 0 and 200 are how a refusal reaches the REST rows; 400 and 500 cover the gated rows.
+				for _, status := range []int{0, 200, 400, 500} {
+					want := ClassifyError(nil, ChainFamilyUnknown, TransportREST, status, message)
+					require.Contains(t, []*RouterError{RouterErrorChainTxRejected, RouterErrorChainInvalidSignature}, want,
+						"the refusal rows decide %q", message)
+					require.Same(t, want, ClassifyError(nil, family, TransportREST, status, message),
+						"%s, status %d: %q", family, status, message)
+				}
+			}
+		}
+	}
+}
+
 // TestRESTAccessDeniedIsRetriedButNotBlamed is the registry half of the endpoint-disable fix: a 401
 // or 403 is retried on another provider, and the refusing endpoint keeps its health. See
 // RouterErrorNodeAccessDenied for what blaming it cost.

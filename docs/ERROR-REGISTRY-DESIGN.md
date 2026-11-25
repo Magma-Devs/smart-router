@@ -723,8 +723,10 @@ caller's bad request instead of going to another provider.
 **What one node software writes is a chain row.** The Substrate sidecar, the Cosmos gRPC-gateway,
 nodeos and MultiversX each word their errors their own way, so their rows are keyed by chain family
 and transport (`chainInterfaceErrorMappings`) and run after the family's own rows and before the
-generic table (MAG-5253). They classify the chains that run that software, on REST only; the same
-body from any other chain is read by the generic rows below, which means by its status. CANTO
+generic table (MAG-5253). Each family's list opens with the broadcast-refusal rows (§10), as the
+generic table does, so a refused transaction's log is never read by a chain row. They classify the
+chains that run that software, on REST only; the same body from any other chain is read by the
+generic rows below, which means by its status. CANTO
 imports ETH1 before the Cosmos SDK specs and EOS imports ETH1, so both are `EVM` and the `EVM` REST
 rows are the gateway's and nodeos's.
 
