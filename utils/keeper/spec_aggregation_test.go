@@ -1129,3 +1129,29 @@ func TestGetAllSpecsFromLocalDir_ReportsACorruptSibling(t *testing.T) {
 	require.NoError(t, err, "one good spec is still a successful load")
 	require.Contains(t, loaded, "GOOD1")
 }
+
+// A spec whose errors section the router can't read still loads, and so does every other spec in its
+// file (PRD §2.1, §5.6): only the section is dropped. Decoded with the rest of the spec, the section's
+// type error failed the file, and the loader skipped it with every chain in it.
+func TestGetSpecFromLocalDirs_AnUnreadableErrorsSectionDropsOnlyTheSection(t *testing.T) {
+	tmpDir := t.TempDir()
+	file := `{"proposal":{"specs":[
+		{"index":"FUTURE","name":"a chain with a later section","enabled":true,"errors":{"schema_version":2,"shapes":[{"id":"s","interface":["rest","grpc"],"code":"/code"}]}},
+		{"index":"TYPO","name":"a chain whose section has a type error","enabled":true,"errors":{"schema_version":1,"rows":[{"id":"x","methods":"eth_call"}]}},
+		{"index":"PLAIN","name":"a chain beside them","enabled":true}]}}`
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "chains.json"), []byte(file), 0o644))
+
+	for _, index := range []string{"FUTURE", "TYPO", "PLAIN"} {
+		spec, err := GetSpecFromLocalDirs([]string{tmpDir}, index)
+		require.NoError(t, err, index)
+		require.Equal(t, index, spec.Index)
+	}
+	future, err := GetSpecFromLocalDirs([]string{tmpDir}, "FUTURE")
+	require.NoError(t, err)
+	require.False(t, future.Errors.Readable())
+	require.Equal(t, 2, future.Errors.SchemaVersion)
+	typo, err := GetSpecFromLocalDirs([]string{tmpDir}, "TYPO")
+	require.NoError(t, err)
+	require.False(t, typo.Errors.Readable())
+	require.Error(t, typo.Errors.DecodeError())
+}

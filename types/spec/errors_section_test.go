@@ -120,3 +120,61 @@ func TestErrorsSectionIsOptionalAndRoundTrips(t *testing.T) {
 	require.JSONEq(t, `["rest","grpc"]`, string(many))
 	require.Error(t, json.Unmarshal([]byte(`5`), &list), "neither a name nor a list")
 }
+
+// A section the router can't read never fails the spec that carries it (PRD §2.1, §5.6): the spec's
+// api definitions load as on a router that predates the section, and the section is dropped whole,
+// its bytes and the reason kept for the validator. Decoded with the rest of the spec, a section's
+// type error failed the whole proposal file, so every chain in it lost its apis.
+func TestErrorsSectionThatCannotBeReadNeverFailsTheSpec(t *testing.T) {
+	proposal := func(errors string) string {
+		return `{"proposal": {"specs": [
+			{"index": "A", "name": "a", "enabled": true, "api_collections": [{"enabled": true, "collection_data": {"api_interface": "jsonrpc"}, "apis": [{"name": "eth_call", "enabled": true}]}], "errors": ` + errors + `},
+			{"index": "B", "name": "b", "enabled": true}]}}`
+	}
+	decode := func(t *testing.T, errors string) (Spec, Spec) {
+		t.Helper()
+		var file SpecAddProposalJSON
+		require.NoError(t, json.Unmarshal([]byte(proposal(errors)), &file), "the file loads whatever the section holds")
+		require.Len(t, file.Proposal.Specs, 2)
+		a := file.Proposal.Specs[0]
+		require.Len(t, a.ApiCollections, 1, "the spec keeps its apis")
+		require.Equal(t, "eth_call", a.ApiCollections[0].Apis[0].Name)
+		require.NotNil(t, a.Errors)
+		require.JSONEq(t, errors, string(a.Errors.Raw()), "the section's bytes are kept")
+		return a, file.Proposal.Specs[1]
+	}
+
+	t.Run("a type error in a section of this version", func(t *testing.T) {
+		a, b := decode(t, `{"schema_version": 1, "rows": [{"id": "x", "interface": 5, "contains": "x", "error": "UNKNOWN_ERROR"}]}`)
+		require.False(t, a.Errors.Readable())
+		require.Error(t, a.Errors.DecodeError())
+		require.Equal(t, 1, a.Errors.SchemaVersion)
+		require.Empty(t, a.Errors.Rows, "nothing half-decoded acts")
+		require.Equal(t, "B", b.Index)
+	})
+	t.Run("a section of a later version, written for types this router doesn't have", func(t *testing.T) {
+		a, _ := decode(t, `{"schema_version": 2, "shapes": [{"id": "s", "interface": ["rest", "grpc"], "code": "/code"}]}`)
+		require.False(t, a.Errors.Readable())
+		require.NoError(t, a.Errors.DecodeError(), "its version says why it isn't read")
+		require.Equal(t, 2, a.Errors.SchemaVersion)
+		require.Empty(t, a.Errors.Shapes)
+	})
+	t.Run("a section that is not an object", func(t *testing.T) {
+		a, _ := decode(t, `"rows"`)
+		require.False(t, a.Errors.Readable())
+		require.Error(t, a.Errors.DecodeError())
+	})
+	t.Run("a section this router reads", func(t *testing.T) {
+		a, _ := decode(t, `{"schema_version": 1, "rows": [{"id": "x", "interface": "jsonrpc", "code": -32005, "error": "NODE_SOLANA_UNHEALTHY", "class": "C5"}]}`)
+		require.True(t, a.Errors.Readable())
+		require.NoError(t, a.Errors.DecodeError())
+		require.Len(t, a.Errors.Rows, 1)
+		require.JSONEq(t, `-32005`, string(a.Errors.Rows[0].Code))
+	})
+	t.Run("no section, nothing to read", func(t *testing.T) {
+		var none *ErrorsSection
+		require.False(t, none.Readable())
+		require.Nil(t, none.Raw())
+		require.NoError(t, none.DecodeError())
+	})
+}
