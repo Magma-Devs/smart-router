@@ -57,7 +57,7 @@ Errors returned by the blockchain node itself (not execution/state errors).
 | **Generic Node Errors (2000-2099)** |||||
 | 2001 | `NODE_METHOD_NOT_FOUND` | Node reports the method is not on its surface; another provider may serve it (SubCategoryNodeCapability, MAG-2771) | Yes | JSON-RPC -32601 |
 | 2002 | `NODE_METHOD_NOT_SUPPORTED` | Method exists but is DISABLED on this specific node (provider tier / policy / admin config), or a part of it is, such as the pending block tag (MAG-5021). Retryable on a different provider (SubCategoryNodeCapability) | Yes | JSON-RPC -32004 / MessageContains("method not supported" / "pending state is not supported") |
-| 2003 | `NODE_INTERNAL_ERROR` | Internal node error | Yes | JSON-RPC -32603 |
+| 2003 | `NODE_INTERNAL_ERROR` | Internal node error. CometBFT's -32603 is read with its `data` first, and the reasons rule 3 below names get their own codes (MAG-5325) | Yes | JSON-RPC -32603 |
 | 2004 | `NODE_SERVER_ERROR` | Generic server error | Yes | JSON-RPC -32000 |
 | 2005 | `NODE_RATE_LIMITED` | Rate limited by node (SubCategoryRateLimit) | Yes | HTTP 429 / JSON-RPC code 429 / MessageContains("rate limit", "too many requests") |
 | 2006 | `NODE_SERVICE_UNAVAILABLE` | Node temporarily unavailable | Yes | HTTP 503 |
@@ -73,7 +73,7 @@ Errors returned by the blockchain node itself (not execution/state errors).
 | 2016 | `NODE_UNAUTHORIZED` | Upstream rejected router credentials (HTTP 401); another provider may serve it (SubCategoryNodeCapability, MAG-2771) | Yes | JSON-RPC and gRPC `HTTPStatusContains(401)`. A REST HTTP 401 is 2018 — see §9 |
 | 2018 | `NODE_ACCESS_DENIED` | Endpoint refused the router itself — credentials, plan or quota, WAF or IP rule, proxy auth, protocol, region | Yes | REST HTTP 401, 402, 403, 407, 426, 451 |
 | 2017 | `NODE_DATA_NOT_HELD` | Endpoint does not hold the requested data — pruned or never existed (SubCategoryDataScope) | Yes | gRPC 5, gRPC 11 |
-| 2019 | `NODE_ABORTED` | Node aborted the operation. On Sui (the only sender), the validators' answer to a submitted transaction: consensus rejection, expired status, an input object that does not exist yet, already finalized under other signatures, or another transient processing failure. Sui's own message calls it retriable with another submission, which is the client's call; not evidence against the endpoint, so not scored | No | gRPC 10 |
+| 2019 | `NODE_ABORTED` | Node aborted the operation. On Sui, the validators' answer to a submitted transaction: consensus rejection, expired status, an input object that does not exist yet, already finalized under other signatures, or another transient processing failure. Sui's own message calls it retriable with another submission, which is the client's call; not evidence against the endpoint, so not scored. CometBFT's `broadcast_tx_commit` answers the same kind with -32603 "timed out waiting for tx to be included in a block": the transaction passed CheckTx and may still land (MAG-5325) | No | gRPC 10; CometBFT -32603 commit timeout |
 | 2020 | `NODE_UNRECOGNIZED_ERROR` | GraphQL only (MAG-5121): an error the router has no row for, an error with no code or an unknown code inside a 200, or a 4xx status GraphQL's status table does not name (400, 409, 410, 413, 415, 422, ...). The router cannot tell whose mistake it is, so it asks another provider and does not blame this one; when every provider says the same, a provider's reply is served as is | Yes | GraphQL |
 | 2021 | `NODE_URL_REFUSED` | GraphQL only (MAG-5121): HTTP 404, 405 or a redirect on GraphQL's one url. Says the configured url is wrong, so every request to it fails the same way: retried and blamed on the endpoint | Yes | HTTP 404, 405, 3xx (GraphQL) |
 | 2022 | `NODE_UNLISTED_SERVER_ERROR` | REST (MAG-5490): a 5xx no status row names. A provider fault: retried and blamed. May have reached the node, like a 502 or 504 | Yes | HTTP 505–511, 528, 529, 531–599 (REST) |
@@ -349,6 +349,21 @@ An open stream is not enough on its own: grpc-go also writes `UNAVAILABLE` when 
 2. **Safety nets (required in Phase 1):**
    - **Shadow detection test:** A unit test that iterates every pair of matchers and fails if a broader matcher appears before a narrower one it would shadow.
    - **Real-world fixture tests:** A `testdata/` directory containing actual error responses captured from each node client (Geth, Erigon, Nethermind, Solana validator, Bitcoin Core, etc.). Table-driven tests run every fixture through `ClassifyError` and assert the expected router error code. When a new client variant surfaces in production as `UNKNOWN_ERROR`, its message is added to the fixtures.
+3. **A JSON-RPC internal error (-32603) is read with its `data` (MAG-5325).** CometBFT answers most failures as -32603 "Internal error" with the reason in `data`, so the text classified is `common.JSONRPCErrorText`'s "Internal error: <data>", in a 2xx (the JSON-RPC and Tendermint readers, batch elements included) and under a 5xx (`ExtractNodeErrorDetails`). Every other code keeps its message alone, so a revert's hex `data` never reaches the message rows. CometBFT's rows run before the -32603 row on the JSON-RPC table, by CometBFT's own sentences, on every chain family: 28 of the 48 chains that serve Tendermint RPC have no Cosmos SDK family. They read a sentence only where the readers write it (at the start of the text, behind "HTTP <status>: ", or at the start of a batch element), and only under -32603 or under the HTTP status a batch or the sender's status pass is classified with. A text the revert row reads as a revert is left to it: a reply under any other code keeps its verdict.
+
+   | `data` (cometbft v0.38) | Code |
+   | --- | --- |
+   | `tx already exists in cache` | 3007 `CHAIN_TX_ALREADY_KNOWN` |
+   | `mempool is full: …`, `mempool is still rechecking …` | 3009 `CHAIN_MEMPOOL_FULL` |
+   | `Tx too large. Max size is …` | 3010 `CHAIN_TX_TOO_LARGE` |
+   | `tx pre check: tx size is too big: …` | 3010 `CHAIN_TX_TOO_LARGE` |
+   | `height N is not available, lowest height is M` | 3204 `CHAIN_STATE_PRUNED` |
+   | `height N must be less than or equal to the current blockchain height M` | 3201 `CHAIN_BLOCK_NOT_FOUND` |
+   | `tx (HASH) not found` | 3202 `CHAIN_TX_NOT_FOUND` |
+   | `timed out waiting for tx to be included in a block` | 2019 `NODE_ABORTED` |
+   | anything else | 2003 `NODE_INTERNAL_ERROR`, as before |
+
+   `broadcast_tx_commit` prefixes a mempool refusal with `error on broadcastTxCommit: `; the rows allow it. A batch is classified with its HTTP status for a code. A row anchored on an element's "Internal error: " gives an element's internal error with a sentence above the verdict it gets alone; with any other data it keeps main's batch verdict, `UNKNOWN_ERROR`, and the data reaches no row after it. A batch's text joins its elements' messages, which may echo the caller, so that row blames no endpoint.
 
 ### Mapping Registration
 

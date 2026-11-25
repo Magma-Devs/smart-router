@@ -394,6 +394,11 @@ var (
 	// ABORTED answer, with its "retriable with another submission" text, rather than a "transaction
 	// status unclear" error (unclearWriteError).
 	//
+	// CometBFT's broadcast_tx_commit gets this verdict too, for its -32603 "timed out waiting for tx
+	// to be included in a block" (MAG-5325): the transaction passed CheckTx and was not committed
+	// within the node's timeout. That says nothing against the node, and the transaction may still
+	// land.
+	//
 	// A node error, not PROTOCOL_PROVIDER_ABORTED (1013). That code is CategoryInternal, which
 	// would report the endpoint as unreachable and rank the node's own message below internal
 	// errors. It also claims the request never reached the node.
