@@ -64,6 +64,8 @@ func TestSendGRPCRelay_RefusedConnectionIsUnreachable(t *testing.T) {
 	attempt := relayEndProtocolErrorAttempt(relaycore.RelayError{Err: err, RouterError: common.AsRouterError(err)}, false)
 	require.Equal(t, attemptOutcomeTransportError, attempt.outcome, "relay_end reads it as a transport error")
 	require.Equal(t, common.RouterErrorConnectionRefused.Name, attempt.errorCode)
+	require.NotRegexp(t, replyAddress, attempt.message, "no address in relay_end")
+	require.NotRegexp(t, replyAddress, err.Error(), "no address in the error a log line is built from")
 }
 
 // The guard on the other side: a node that answers UNAVAILABLE itself, on an open connection,

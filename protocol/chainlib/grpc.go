@@ -722,11 +722,17 @@ func (apil *GrpcChainListener) makeStreamRelayCallback(subscriptionManager GRPCS
 		apil.logger.AddMetricForGrpc(metricsData, err, &metadataValues)
 		if err != nil {
 			apil.logger.LogRequestAndResponse("grpc stream in/out", true, method, relayBodyForLog(string(reqBody), debugRelays), "", err.Error(), connectionUniqueId, time.Since(startTime), err)
-			return nil, utils.FormatError("failed to start gRPC subscription", err,
+			utils.FormatError("failed to start gRPC subscription", err,
 				utils.LogAttr("GUID", ctx),
 				utils.LogAttr("_method", method),
 				utils.LogAttr("dappID", dappID),
 			)
+			// The client gets the router's own status, and the request id the reason is logged
+			// under, as for a subscription the router gives up (GRPCSubscriptionEndReporter).
+			if trailerErr := grpc.SetTrailer(ctx, metadata.Pairs(common.GUID_HEADER_NAME, connectionUniqueId)); trailerErr != nil {
+				utils.FormatDebug("could not set the request id on a gRPC subscription that did not start", utils.LogAttr("error", trailerErr.Error()))
+			}
+			return nil, grpcSubscriptionStartStatus(err)
 		}
 
 		// The manager closes the reply channel both when the upstream ends and when it
@@ -753,6 +759,23 @@ func (apil *GrpcChainListener) makeStreamRelayCallback(subscriptionManager GRPCS
 			},
 		}, nil
 	}
+}
+
+// The statuses a client's stream ends with when its subscription cannot be started. The manager's
+// reason goes to the router's log and to relay_end.
+var (
+	errGRPCSubscriptionLimitReached = status.Error(codes.ResourceExhausted, ErrSubscriptionLimitReached.Error())
+	errGRPCSubscriptionNotStarted   = status.Error(codes.Unavailable, "subscription could not be started")
+)
+
+// grpcSubscriptionStartStatus is the status a client's stream ends with when the manager could not
+// start its subscription: RESOURCE_EXHAUSTED at a subscription limit, UNAVAILABLE otherwise, so the
+// client resubscribes.
+func grpcSubscriptionStartStatus(err error) error {
+	if errors.Is(err, ErrSubscriptionLimitReached) {
+		return errGRPCSubscriptionLimitReached
+	}
+	return errGRPCSubscriptionNotStarted
 }
 
 // forwardSubscriptionReplies adapts the manager's reply channel to the raw payload

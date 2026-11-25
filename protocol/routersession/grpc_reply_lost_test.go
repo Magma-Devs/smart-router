@@ -301,9 +301,9 @@ func TestSendRequest_NodeSentUnavailableIsAnswered(t *testing.T) {
 // is asked, the client gets the router's no-answer status, and a write it carried was not sent.
 // It used to be an error no row names, and the client got its text.
 func TestSendRequest_ConnectionThatCannotBeSetUpIsUndelivered(t *testing.T) {
-	newConn := func(t *testing.T, setUpErr error) *GRPCDirectRPCConnection {
+	newConnTo := func(t *testing.T, nodeURL string, setUpErr error) *GRPCDirectRPCConnection {
 		t.Helper()
-		conn, err := NewDirectRPCConnection(context.Background(), common.NodeUrl{Url: "grpc://10.0.0.7:9090", GrpcConfig: common.GrpcConfig{AllowInsecure: true}}, 5, "")
+		conn, err := NewDirectRPCConnection(context.Background(), common.NodeUrl{Url: nodeURL, GrpcConfig: common.GrpcConfig{AllowInsecure: true}}, 5, "")
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = conn.Close() })
 		grpcConn, ok := conn.(*GRPCDirectRPCConnection)
@@ -312,6 +312,10 @@ func TestSendRequest_ConnectionThatCannotBeSetUpIsUndelivered(t *testing.T) {
 			return nil, setUpErr
 		}
 		return grpcConn
+	}
+	newConn := func(t *testing.T, setUpErr error) *GRPCDirectRPCConnection {
+		t.Helper()
+		return newConnTo(t, "grpc://10.0.0.7:9090", setUpErr)
 	}
 	send := func(g *GRPCDirectRPCConnection) (*DirectRPCResponse, error) {
 		return g.SendRequest(context.Background(), []byte{0x08, 0x01}, map[string]string{GRPCMethodHeader: "test.v1.Node/Call"})
@@ -326,6 +330,18 @@ func TestSendRequest_ConnectionThatCannotBeSetUpIsUndelivered(t *testing.T) {
 		require.Equal(t, common.RouterErrorProviderUnavailable, routerErr)
 		require.True(t, routerErr.Retryable, "another provider is asked")
 		require.False(t, routerErr.MayHaveReachedNode, "no stream was opened, so a write it carried was not sent")
+		require.NotRegexp(t, addressInText, err.Error(), "relay_end and the logs get the node's address as [address]")
+	})
+
+	t.Run("a node configured by name", func(t *testing.T) {
+		g := newConnTo(t, "grpc://node.example.com:9090/node-key", errors.New("grpc failed to create the first connection ErrMsg: dial tcp: lookup node.example.com: no such host"))
+		_, err := send(g)
+		var undelivered *common.GRPCCallUndeliveredError
+		require.ErrorAs(t, err, &undelivered)
+		require.Equal(t, common.RouterErrorDNSFailure, common.DetectConnectionError(err), "the text still names the fault: %v", err)
+		for _, name := range []string{"node.example.com", ":9090", "node-key"} {
+			require.NotContains(t, err.Error(), name)
+		}
 	})
 
 	t.Run("the request's own deadline still reads as a timeout", func(t *testing.T) {
