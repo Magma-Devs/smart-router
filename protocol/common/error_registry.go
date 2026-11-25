@@ -563,6 +563,19 @@ func CodeEquals(code int) ErrorMatcher {
 	return codeEqualsMatcher{code: code}
 }
 
+// CodeInRange matches an error code from low to high, both included (e.g., any HTTP 5xx).
+type codeInRangeMatcher struct {
+	low, high int
+}
+
+func (m codeInRangeMatcher) Matches(errorCode int, _ string) bool {
+	return errorCode >= m.low && errorCode <= m.high
+}
+
+func CodeInRange(low, high int) ErrorMatcher {
+	return codeInRangeMatcher{low: low, high: high}
+}
+
 // MessageContains matches a case-insensitive substring in the error message.
 type messageContainsMatcher struct {
 	substring string // pre-lowercased at construction time
@@ -620,34 +633,66 @@ func CodeAndMessage(code int, substring string) ErrorMatcher {
 	return codeAndMessageMatcher{code: code, substring: strings.ToLower(substring)}
 }
 
-// HTTPStatusContains matches an HTTP status code in the error message with non-digit
-// boundary checks. This prevents false positives like "500" matching inside "25001500".
-// Prefer structured status codes (CodeEquals) when the HTTP status is available as an int.
+// HTTPStatusContains matches an HTTP status in an error message where the router wrote it, and
+// nowhere else. A number inside the node's own text is not a status: a Cosmos log's "500uatom" or
+// "channel-429", a sequence number or a height read as one blamed the endpoint or held every
+// provider off (MAG-5324). Prefer structured status codes (CodeEquals) when the HTTP status is
+// available as an int.
+//
+// The status must follow one of httpStatusLeads at the start of the message, and end at a character
+// that is neither a letter nor a digit. A status anywhere else is not read, not even one in
+// parentheses: a node's text can say "(HTTP 503)" as well, and read there it blamed the endpoint as
+// "500uatom" did. The router writes one only in a refused WebSocket upgrade's text ("websocket: bad
+// handshake (HTTP status 503)") and in the reasons it releases a session with ("upstream returned a
+// node error (HTTP 503)"). The reasons reach only UsedProviders.RemoveUsed, which decides the same
+// either way, and the upgrade's text only relay_end's record of a subscription attempt, which keeps
+// a 429 by its "Too Many Requests" and records a refused 5xx as UNKNOWN_ERROR.
 type httpStatusMatcher struct {
 	status string
 }
 
-func (m httpStatusMatcher) Matches(_ int, errorMessage string) bool {
-	target := m.status
-	msg := errorMessage
-	for {
-		idx := strings.Index(msg, target)
-		if idx < 0 {
-			return false
+// httpStatusLeads are what the router writes right before a status at the start of a message,
+// lowercase:
+//   - "http " and "http status ": the prefix the JSON-RPC sender and ExtractNodeErrorDetails put on
+//     the message of a non-2xx reply ("HTTP 503: …"), and routersession.HTTPStatusError's own text
+//     ("HTTP 503 Service Unavailable");
+//   - GRPCGatewayStatusText: grpc-go's status for a gateway's plain HTTP reply;
+//   - StatusCodeError429's and StatusCodeError504's text, which RateLimited puts in front of the
+//     error it types;
+//   - nothing: the status line Go's HTTP client reads, as rpcclient.HTTPError prints it ("503
+//     Service Unavailable: <body>").
+var httpStatusLeads = []string{"http status ", "http ", GRPCGatewayStatusText + ": ", "disallowed status code error (", ""}
+
+// grpcNodeErrorRecordLead opens the JSON the direct gRPC sender keeps as the reply to a node's status
+// (routersession.GRPCNodeErrorResponse), lowercase. The results manager classifies that JSON as the
+// reply's text, since a gRPC node error carries no message of its own. The status message follows
+// it, so the leads above apply after it as they do at the start of the message the sender
+// classifies: a gateway's HTTP 500 is read as a 500 in the record too, not only by the sender.
+const grpcNodeErrorRecordLead = `{"error_message":"`
+
+func (m httpStatusMatcher) Matches(errorCode int, errorMessage string) bool {
+	return m.matchesLowered(errorCode, strings.ToLower(errorMessage))
+}
+
+func (m httpStatusMatcher) matchesLowered(_ int, loweredMessage string) bool {
+	start := strings.TrimPrefix(loweredMessage, grpcNodeErrorRecordLead)
+	for _, lead := range httpStatusLeads {
+		if rest, ok := strings.CutPrefix(start, lead); ok && m.startsWithStatus(rest) {
+			return true
 		}
-		// Check that the character before the match (if any) is not a digit
-		if idx > 0 && msg[idx-1] >= '0' && msg[idx-1] <= '9' {
-			msg = msg[idx+len(target):]
-			continue
-		}
-		// Check that the character after the match (if any) is not a digit
-		end := idx + len(target)
-		if end < len(msg) && msg[end] >= '0' && msg[end] <= '9' {
-			msg = msg[end:]
-			continue
-		}
-		return true
 	}
+	return false
+}
+
+// startsWithStatus reports whether text opens with the status as a whole word: "503", "503:" or
+// "503 Service Unavailable", never "5030" or "500uatom".
+func (m httpStatusMatcher) startsWithStatus(text string) bool {
+	rest, ok := strings.CutPrefix(text, m.status)
+	if !ok || rest == "" {
+		return ok
+	}
+	c := rest[0]
+	return !(c >= '0' && c <= '9' || c >= 'a' && c <= 'z')
 }
 
 func HTTPStatusContains(status int) ErrorMatcher {

@@ -733,8 +733,8 @@ func grpcProviderFaultMappings() []errorMapping {
 // httpStatusRows is the one list of HTTP error statuses the registry knows, with the verdict each
 // row form gives it. byCode is the CodeEquals verdict, appended to the REST table only (see init),
 // where the error code is the HTTP status itself. byMessage is the HTTPStatusContains verdict,
-// for a status that reaches the classifier as digits in the message (e.g. "HTTP status 429"); every
-// transport gets it. The two agree except on 401 and 404, which split on purpose.
+// for a status the router wrote into the message (e.g. "HTTP 429: …"), never one in the node's own
+// text (MAG-5324); every transport gets it. The two agree except on 401 and 404, which split on purpose.
 var httpStatusRows = []struct {
 	status    int
 	byCode    *RouterError
@@ -784,7 +784,7 @@ func httpStatusCodeMappings() []errorMapping {
 }
 
 // httpStatusMessageMappings returns HTTPStatusContains matchers for common HTTP error status codes.
-// These match status codes appearing as substrings in error messages (e.g., "HTTP status 429").
+// These match a status the router wrote into an error message (e.g., "HTTP 429: …").
 func httpStatusMessageMappings() []errorMapping {
 	mappings := make([]errorMapping, 0, len(httpStatusRows))
 	for _, row := range httpStatusRows {
@@ -807,8 +807,12 @@ func init() {
 	// Append shared HTTP status message matchers to JSON-RPC transport
 	genericErrorMappings[TransportJsonRPC] = append(genericErrorMappings[TransportJsonRPC], httpStatusMessageMappings()...)
 
-	// Append both CodeEquals and HTTPStatusContains matchers to REST transport
+	// Append both CodeEquals and HTTPStatusContains matchers to REST transport, with a 5xx no
+	// status row names between them: every 5xx but 501 is a provider fault (rulebook Part V 3.1 P8),
+	// and a 505 or a 599 was UNKNOWN_ERROR, recorded as nobody's fault (MAG-5490). It follows the
+	// CodeEquals rows, so a listed 5xx keeps its own verdict.
 	genericErrorMappings[TransportREST] = append(genericErrorMappings[TransportREST], httpStatusCodeMappings()...)
+	genericErrorMappings[TransportREST] = append(genericErrorMappings[TransportREST], errorMapping{CodeInRange(500, 599), RouterErrorNodeUnlistedServerError})
 	genericErrorMappings[TransportREST] = append(genericErrorMappings[TransportREST], httpStatusMessageMappings()...)
 
 	// Append HTTPStatusContains matchers to gRPC transport — HTTP status codes can appear
