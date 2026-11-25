@@ -146,6 +146,27 @@ func resultRuleReadsBlockHash(parseDirective *spectypes.ParseDirective) bool {
 	return parseDirective.FunctionTag == spectypes.FUNCTION_TAG_GET_BLOCK_BY_NUM
 }
 
+// suiCheckpointHeightHeader is the header in which a Sui node stamps its latest checkpoint on
+// every gRPC reply (sui-rpc-api, append_info_headers).
+const suiCheckpointHeightHeader = "x-sui-checkpoint-height"
+
+// suiCheckpointHeightFromMetadata returns the latest checkpoint a Sui node stamped on its reply's
+// header block, and whether it stamped a usable one: a positive decimal integer. gRPC metadata
+// names are lowercase, so the map is read by the name as it is. Like Solana's context slot, it
+// is the node's tip at reply time whatever the method, and reading it needs no method definition.
+// The caller gates it to the Sui family.
+func suiCheckpointHeightFromMetadata(md map[string][]string) (int64, bool) {
+	values := md[suiCheckpointHeightHeader]
+	if len(values) == 0 {
+		return 0, false
+	}
+	height, err := strconv.ParseInt(values[0], 10, 64)
+	if err != nil || height <= 0 {
+		return 0, false
+	}
+	return height, true
+}
+
 // extractSolanaContextSlot returns result.context.slot from a SINGLE successful Solana
 // JSON-RPC response, and whether it was found. Solana stamps most successful responses
 // (getBalance, getAccountInfo, getLatestBlockhash, ...) with the slot the query was
@@ -1198,7 +1219,8 @@ func (d *DirectRPCRelaySender) sendGRPCRelay(
 					ProviderAddress: endpointIdentifier,
 					ProviderGroup:   d.groupLabel,
 				},
-				IsNodeError: hasError,
+				IsNodeError:     hasError,
+				NodeLatestBlock: d.grpcNodeStampedLatestBlock(response.Metadata),
 			}
 			// This branch returns err == nil, so downstream sees a completed relay
 			// carrying a node error — same shape as the four body-error paths. It
@@ -1300,13 +1322,26 @@ func (d *DirectRPCRelaySender) sendGRPCRelay(
 			ProviderAddress: providerAddress,
 			ProviderGroup:   d.groupLabel,
 		},
-		IsNodeError: hasError,
+		IsNodeError:     hasError,
+		NodeLatestBlock: d.grpcNodeStampedLatestBlock(response.Metadata),
 	}
 	if hasError {
 		result.ApplyNodeErrorClassification(d.chainFamily, common.TransportGRPC, response.StatusCode, errorMessage)
 	}
 
 	return result, nil
+}
+
+// grpcNodeStampedLatestBlock returns the latest block a gRPC node stamped on its reply's header
+// block, 0 when it stamped none or the chain stamps none. Only Sui does today: every reply of a
+// Sui node carries its latest checkpoint (MAG-5141). It is read from the node's own headers,
+// before the reply-header filter, so it does not depend on the spec passing the header on.
+func (d *DirectRPCRelaySender) grpcNodeStampedLatestBlock(md map[string][]string) int64 {
+	if d.chainFamily != common.ChainFamilySui {
+		return 0
+	}
+	height, _ := suiCheckpointHeightFromMetadata(md)
+	return height
 }
 
 // grpcMethodIsServerStreaming reports whether methodPath is server-streaming upstream,

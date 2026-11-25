@@ -198,7 +198,7 @@ func TestGraphQLAliasedTipQueryForgesNoTipOrStallEvidence(t *testing.T) {
 	}
 
 	chainMessage, result := sendGraphQLUserRelay(t, chainParser, suiGraphQLAliasedHeadPoll, suiForgedTipReply)
-	rpcss.harvestAndUpdateTipFromRelay(endpoint, chainMessage, result.Reply, gen, "graphql-upstream")
+	rpcss.harvestAndUpdateTipFromRelay(endpoint, chainMessage, result.Reply, 0, gen, "graphql-upstream")
 
 	if assertNoTipOrStallEvidence(t, monitor, url) {
 		requireRelayObservationShows(t, monitor, url, gen)
