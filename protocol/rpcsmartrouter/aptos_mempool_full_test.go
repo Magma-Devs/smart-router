@@ -52,7 +52,7 @@ func aptosNode(t *testing.T, status int, body string, hits *atomic.Int64) string
 // submitToAptosNodes sends an Aptos transaction submit (POST /transactions, a write the spec marks
 // stateful) through a router on APT1 with one provider per node URL, through the real REST parser,
 // sender and session manager.
-func submitToAptosNodes(t *testing.T, optimizer routersession.ProviderOptimizer, nodeURLs ...string) (*common.RelayResult, error, []*routersession.Endpoint) {
+func submitToAptosNodes(t *testing.T, optimizer routersession.ProviderOptimizer, nodeURLs ...string) (*common.RelayResult, []*routersession.Endpoint, error) {
 	t.Helper()
 	ctx := context.Background()
 
@@ -98,7 +98,7 @@ func submitToAptosNodes(t *testing.T, optimizer routersession.ProviderOptimizer,
 	callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	result, sendErr := server.SendParsedRelay(callCtx, nil, protocolMessage)
-	return result, sendErr, endpoints
+	return result, endpoints, sendErr
 }
 
 func TestAptosMempoolRefusalBlamesNoEndpoint(t *testing.T) {
@@ -113,7 +113,7 @@ func TestAptosMempoolRefusalBlamesNoEndpoint(t *testing.T) {
 				ProviderOptimizer: provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "APT1"),
 			}
 			var hits atomic.Int64
-			result, sendErr, endpoints := submitToAptosNodes(t, spy,
+			result, endpoints, sendErr := submitToAptosNodes(t, spy,
 				aptosNode(t, http.StatusInsufficientStorage, tc.body, &hits),
 				aptosNode(t, http.StatusInsufficientStorage, tc.body, &hits))
 
@@ -138,7 +138,7 @@ func TestAptosMempoolRefusalBesideAnAcceptance(t *testing.T) {
 	rand.InitRandomSeed()
 	benchAfter(t, 1)
 	var refusals, acceptances atomic.Int64
-	result, sendErr, endpoints := submitToAptosNodes(t,
+	result, endpoints, sendErr := submitToAptosNodes(t,
 		provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "APT1"),
 		aptosNode(t, http.StatusInsufficientStorage, aptosMempoolFull, &refusals),
 		aptosNode(t, http.StatusAccepted, aptosAccepted, &acceptances))
@@ -163,7 +163,7 @@ func TestAptosUnclaimedServerErrorIsStillAProviderFault(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			benchAfter(t, 1)
 			var hits atomic.Int64
-			_, _, endpoints := submitToAptosNodes(t,
+			_, endpoints, _ := submitToAptosNodes(t,
 				provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "APT1"),
 				aptosNode(t, http.StatusInsufficientStorage, tc.body, &hits),
 				aptosNode(t, http.StatusInsufficientStorage, tc.body, &hits))
