@@ -16,29 +16,29 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// cometBFTNode is a CometBFT-shaped WebSocket node. It answers subscribe with an empty result
+// cometBFTWSNode is a CometBFT-shaped WebSocket node. It answers subscribe with an empty result
 // under the request's id, pushes events whose result names the query, and cancels a
 // subscription the way CometBFT 0.37 and 0.38 do: a JSON-RPC error under the subscribe
 // request's id, on a socket it keeps open.
-type cometBFTNode struct {
+type cometBFTWSNode struct {
 	t      *testing.T
 	server *httptest.Server
 
 	mu         sync.Mutex
 	conns      int
 	subscribes map[string]int // per query
-	subs       map[string]cometBFTSubscription
+	subs       map[string]cometBFTWSSubscription
 	writeMu    sync.Mutex
 }
 
-type cometBFTSubscription struct {
+type cometBFTWSSubscription struct {
 	conn      *websocket.Conn
 	requestID json.RawMessage
 }
 
-func newCometBFTNode(t *testing.T) *cometBFTNode {
+func newCometBFTWSNode(t *testing.T) *cometBFTWSNode {
 	t.Helper()
-	node := &cometBFTNode{t: t, subscribes: map[string]int{}, subs: map[string]cometBFTSubscription{}}
+	node := &cometBFTWSNode{t: t, subscribes: map[string]int{}, subs: map[string]cometBFTWSSubscription{}}
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	node.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
@@ -68,7 +68,7 @@ func newCometBFTNode(t *testing.T) *cometBFTNode {
 			case "subscribe":
 				node.mu.Lock()
 				node.subscribes[req.Params.Query]++
-				node.subs[req.Params.Query] = cometBFTSubscription{conn: conn, requestID: req.ID}
+				node.subs[req.Params.Query] = cometBFTWSSubscription{conn: conn, requestID: req.ID}
 				node.mu.Unlock()
 				node.write(conn, map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": map[string]any{}})
 			case "unsubscribe", "unsubscribe_all":
@@ -83,9 +83,9 @@ func newCometBFTNode(t *testing.T) *cometBFTNode {
 	return node
 }
 
-func (n *cometBFTNode) url() string { return "ws" + strings.TrimPrefix(n.server.URL, "http") }
+func (n *cometBFTWSNode) url() string { return "ws" + strings.TrimPrefix(n.server.URL, "http") }
 
-func (n *cometBFTNode) write(conn *websocket.Conn, frame map[string]any) {
+func (n *cometBFTWSNode) write(conn *websocket.Conn, frame map[string]any) {
 	data, err := json.Marshal(frame)
 	require.NoError(n.t, err)
 	n.writeMu.Lock()
@@ -93,7 +93,7 @@ func (n *cometBFTNode) write(conn *websocket.Conn, frame map[string]any) {
 	_ = conn.WriteMessage(websocket.TextMessage, data)
 }
 
-func (n *cometBFTNode) subscription(query string) cometBFTSubscription {
+func (n *cometBFTWSNode) subscription(query string) cometBFTWSSubscription {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	sub, ok := n.subs[query]
@@ -101,20 +101,20 @@ func (n *cometBFTNode) subscription(query string) cometBFTSubscription {
 	return sub
 }
 
-func (n *cometBFTNode) subscribeCount(query string) int {
+func (n *cometBFTWSNode) subscribeCount(query string) int {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	return n.subscribes[query]
 }
 
-func (n *cometBFTNode) connectionCount() int {
+func (n *cometBFTWSNode) connectionCount() int {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	return n.conns
 }
 
 // push sends an event on the latest subscription to query.
-func (n *cometBFTNode) push(query string, height int) {
+func (n *cometBFTWSNode) push(query string, height int) {
 	sub := n.subscription(query)
 	n.write(sub.conn, map[string]any{"jsonrpc": "2.0", "id": sub.requestID, "result": map[string]any{
 		"query": query,
@@ -124,7 +124,7 @@ func (n *cometBFTNode) push(query string, height int) {
 
 // cancel ends the latest subscription to query as CometBFT does when its event buffer is out of
 // capacity. withEventSuffix uses older Tendermint's "<id>#event" id instead.
-func (n *cometBFTNode) cancel(query string, withEventSuffix bool) {
+func (n *cometBFTWSNode) cancel(query string, withEventSuffix bool) {
 	sub := n.subscription(query)
 	id := sub.requestID
 	if withEventSuffix {
@@ -167,7 +167,7 @@ func TestCometBFTCancel_EndsTheRouterSubscription(t *testing.T) {
 		{"under the id plus #event", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			node := newCometBFTNode(t)
+			node := newCometBFTWSNode(t)
 			manager := NewDirectWSSubscriptionManager(getTestMetricsManager(), "tendermintrpc", "COSMOSHUB", "tendermintrpc",
 				[]*common.NodeUrl{{Url: node.url()}}, nil, nil, nil)
 			t.Cleanup(manager.Close)
