@@ -176,6 +176,22 @@ func TestClassificationOrderXRPRows(t *testing.T) {
 			require.Equal(t, want.Name, ClassifyError(nil, ChainFamilyXRP, TransportJsonRPC, 503, "HTTP 503: "+text).Name, "with the direct sender's prefix too")
 		})
 	}
+	t.Run("the first rows read XRP replies only", func(t *testing.T) {
+		// They left the family table, which kept them on XRP by its key; the family checks in
+		// ClassifyError and classifyXRPFirst keep them there now.
+		for text, want := range first {
+			for _, family := range []ChainFamily{ChainFamilyEVM, ChainFamilySolana, ChainFamilyCosmosSDK, ChainFamilyUnknown} {
+				for _, transport := range []TransportType{TransportJsonRPC, TransportREST, TransportGRPC} {
+					require.NotEqual(t, want.Name, ClassifyError(nil, family, transport, 200, text).Name, "%s on %s, transport %d", text, family, transport)
+				}
+				for _, apiInterface := range []string{spectypes.APIInterfaceJsonRPC, spectypes.APIInterfaceRest, spectypes.APIInterfaceGrpc} {
+					record := ErrorRecord{Interface: apiInterface, Status: 200, Text: text, InSuccess: true}
+					verdict := ClassifyInOrder(nil, family, record, ReplyContext{})
+					require.NotEqual(t, StageXRPFirst.String(), verdict.Stage.String(), "%s on %s, %s", text, family, apiInterface)
+				}
+			}
+		}
+	})
 	t.Run("the first rows read the text on any interface XRP serves", func(t *testing.T) {
 		record := ErrorRecord{Interface: spectypes.APIInterfaceRest, Status: 200, Text: "tooBusy: The server is too busy to help you now.", InSuccess: true}
 		verdict := ClassifyInOrder(nil, ChainFamilyXRP, record, ReplyContext{})
