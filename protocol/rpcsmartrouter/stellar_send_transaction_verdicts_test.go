@@ -43,8 +43,8 @@ func stellarReplying(body string) http.HandlerFunc {
 var stellarNodeNames = [2]string{"stellar-a", "stellar-b"}
 
 // sendStellarTransaction broadcasts a sendTransaction through a router on XLMT whose two primaries
-// answer with the given handlers. It returns the router's result and error, and each primary's url.
-func sendStellarTransaction(t *testing.T, first, second http.HandlerFunc) (*common.RelayResult, error, [2]string) {
+// answer with the given handlers. It returns the router's result, each primary's url, and the error.
+func sendStellarTransaction(t *testing.T, first, second http.HandlerFunc) (*common.RelayResult, [2]string, error) {
 	t.Helper()
 	ctx := context.Background()
 	chainParser, err := chainlib.NewChainParser(spectypes.APIInterfaceJsonRPC)
@@ -79,7 +79,7 @@ func sendStellarTransaction(t *testing.T, first, second http.HandlerFunc) (*comm
 		rpcSmartRouterLogs: logs,
 	}
 	result, err := sendRefusalTestRequestBody(t, ctx, chainParser, server, []byte(stellarSendRequest))
-	return result, err, urls
+	return result, urls, err
 }
 
 // TRY_AGAIN_LATER is stellar-core's queue declining this one transaction now. It is not the
@@ -100,7 +100,7 @@ func TestStellarSendTransaction_TryAgainLaterHoldsNoProviderOff(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			holdoffs := withFreshRelayHoldoff(t)
 			benchAfter(t, 1)
-			result, err, urls := sendStellarTransaction(t, stellarReplying(stellarSendTryLater), stellarReplying(tc.second))
+			result, urls, err := sendStellarTransaction(t, stellarReplying(stellarSendTryLater), stellarReplying(tc.second))
 
 			require.NoError(t, err)
 			require.NotNil(t, result)
@@ -126,7 +126,7 @@ func TestStellarSendTransaction_TryAgainLaterHoldsNoProviderOff(t *testing.T) {
 func TestStellarSendTransaction_DuplicateBesideACutConnectionIsTheAnswer(t *testing.T) {
 	rand.InitRandomSeed()
 	withFreshRelayHoldoff(t)
-	result, err, _ := sendStellarTransaction(t, stellarReplying(stellarSendDup), dropConnection)
+	result, _, err := sendStellarTransaction(t, stellarReplying(stellarSendDup), dropConnection)
 
 	require.NoError(t, err, "a DUPLICATE is an answer, not a status left unclear")
 	require.NotNil(t, result)
