@@ -82,7 +82,7 @@ func TestTendermintBroadcastRefusal(t *testing.T) {
 			// abci_query keeps its rule: result.response.code with a log.
 			name: "abci_query refused", method: "abci_query",
 			reply:     `{"jsonrpc":"2.0","id":1,"result":{"response":{"code":18,"log":"invalid request","height":"0","codespace":"sdk"}}}`,
-			wantError: true, wantMessage: "invalid request",
+			wantError: true, wantMessage: "abci query failed: code 18, codespace sdk: invalid request",
 		},
 		{
 			name: "abci_query, a code outside response", method: "abci_query",

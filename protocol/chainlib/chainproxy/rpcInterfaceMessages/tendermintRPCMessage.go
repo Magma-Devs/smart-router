@@ -8,6 +8,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
+	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/utils"
 )
 
@@ -22,8 +23,9 @@ func (tm *TendermintrpcMessage) GetRawRequestHash() ([]byte, error) {
 }
 
 type TendermintMessageResponseBody struct {
-	Code int    `json:"code,omitempty"`
-	Log  string `json:"log,omitempty"`
+	Code      int    `json:"code,omitempty"`
+	Log       string `json:"log,omitempty"`
+	Codespace string `json:"codespace,omitempty"`
 }
 
 type TendermintMessageResponse struct {
@@ -41,6 +43,9 @@ type TendermintMessageResponse struct {
 // transaction, in result.code and result.check_tx.code; a refusal there is a node error too
 // (checkTendermintBroadcast, MAG-5323). A batch is read by CheckResponseErrorForTendermintBatch,
 // which knows no element's method, so a refusal inside one keeps the batch rule.
+//
+// A failed abci_query is written as common.ABCIQueryFailureMessage, so its log, the application's
+// own text, is read as such and never as the node's words (MAG-5760).
 func (jm TendermintrpcMessage) CheckResponseError(data []byte, httpStatusCode int) (hasError bool, errorMessage string) {
 	hasErr, msg, resultBytes := checkJsonrpcEnvelope(data, "Tendermint RPC")
 	if hasErr || resultBytes == nil {
@@ -52,7 +57,7 @@ func (jm TendermintrpcMessage) CheckResponseError(data []byte, httpStatusCode in
 	var inner TendermintMessageResponse
 	if err := json.Unmarshal(resultBytes, &inner); err == nil {
 		if inner.Response.Code != 0 && inner.Response.Log != "" {
-			return true, inner.Response.Log
+			return true, common.ABCIQueryFailureMessage(inner.Response.Codespace, inner.Response.Code, inner.Response.Log)
 		}
 	}
 	return false, ""

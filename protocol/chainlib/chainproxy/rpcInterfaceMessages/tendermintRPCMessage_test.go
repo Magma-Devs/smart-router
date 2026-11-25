@@ -323,7 +323,7 @@ func TestTendermintrpcMessage_CheckResponseError(t *testing.T) {
 		data := []byte(`{"jsonrpc":"2.0","id":1,"result":{"response":{"code":5,"log":"insufficient fees"}}}`)
 		hasError, msg := tm.CheckResponseError(data, 200)
 		require.True(t, hasError, "non-zero inner code must surface")
-		require.Equal(t, "insufficient fees", msg)
+		require.Equal(t, "abci query failed: code 5: insufficient fees", msg)
 	})
 
 	t.Run("inner_tendermint_code_zero_is_success", func(t *testing.T) {
@@ -362,7 +362,7 @@ func TestTendermintrpcMessage_CheckResponseError(t *testing.T) {
 		data := []byte(`{"jsonrpc":"2.0","id":1,"result":{"response":{"code":5,"log":"insufficient fees"}},"error":{"code":0,"message":""}}`)
 		hasError, msg := tm.CheckResponseError(data, 200)
 		require.True(t, hasError)
-		require.Equal(t, "insufficient fees", msg)
+		require.Equal(t, "abci query failed: code 5: insufficient fees", msg)
 	})
 }
 
@@ -373,11 +373,11 @@ func TestCheckResponseErrorForTendermintBatch_SeesTheAppErrorASingleReplySees(t 
 	appError := `{"jsonrpc":"2.0","id":1,"result":{"response":{"code":5,"log":"account not found"}}}`
 	hasErr, msg := TendermintrpcMessage{}.CheckResponseError([]byte(appError), 200)
 	require.True(t, hasErr)
-	require.Equal(t, "account not found", msg)
+	require.Equal(t, "abci query failed: code 5: account not found", msg)
 
 	hasErr, msg = CheckResponseErrorForTendermintBatch([]byte("["+appError+"]"), 200)
 	require.True(t, hasErr, "the batch walker must apply the Tendermint rule per element")
-	require.Equal(t, "account not found", msg)
+	require.Equal(t, "abci query failed: code 5: account not found", msg)
 
 	clean := `{"jsonrpc":"2.0","id":2,"result":{"response":{"code":0,"value":"AQ=="}}}`
 	hasErr, _ = CheckResponseErrorForTendermintBatch([]byte("["+clean+"]"), 200)

@@ -193,6 +193,14 @@ func xrplMessageStartsWith(alternatives ...string) ErrorMatcher {
 	return MessageRegex(`^(?:HTTP \d+: )?(?:` + strings.Join(alternatives, "|") + `)\b`)
 }
 
+// restNodeSentence matches a REST node's own sentence at the start of the message, where the node
+// writes it, with or without the direct-RPC sender's "HTTP <status>: " prefix. A node that quotes
+// the request in an error, as the gRPC gateway's 400 for a path parameter does, writes the quote
+// after its own words, so the sentence inside a quote is not read as the node's (MAG-5760).
+func restNodeSentence(sentence string) ErrorMatcher {
+	return MessageRegex(`(?i)^(?:HTTP \d+: )?` + regexp.QuoteMeta(sentence))
+}
+
 // ---------------------------------------------------------------------------
 // A node's refusal of a broadcast transaction, inside an ordinary reply (MAG-5323, MAG-5451)
 // ---------------------------------------------------------------------------
@@ -353,6 +361,24 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 		{cometBFTInternalError(`height \d+ must be less than or equal to the current blockchain height`), RouterErrorChainBlockNotFound},
 		{cometBFTInternalError(`tx \([0-9A-Fa-f]*\) not found`), RouterErrorChainTxNotFound},
 		{cometBFTInternalError(`timed out waiting for tx to be included in a block`), RouterErrorNodeAborted},
+		// A request CometBFT cannot serve as asked (MAG-5760; rpc/core, the same sentences in v0.37,
+		// v0.38 and v1.0). A height below 1, negative bounds, a page below 1, an order_by, a search
+		// query that is too long or does not parse, and evidence that does not validate are wrong on
+		// every node: the caller's mistake, answered by the first node and blamed on none. A
+		// blockchain range is clamped to this node's base and height before its bounds are compared,
+		// and a page is counted from this node's own index, so another node may serve either: data
+		// scope, asked elsewhere and blamed on none. Evidence the node could not store stays
+		// NODE_INTERNAL_ERROR below.
+		{cometBFTInternalError(`height must be greater than 0, but got -?\d+`), RouterErrorUserInvalidParams},
+		{cometBFTInternalError(`heights must be non-negative`), RouterErrorUserInvalidParams},
+		{cometBFTInternalError(`page should be within \[1, \d+\] range, given (?:0|-\d+)\b`), RouterErrorUserInvalidParams},
+		{cometBFTInternalError("(?:expected order_by to be either `asc` or `desc` or empty|invalid order_by: expected )"), RouterErrorUserInvalidParams},
+		{cometBFTInternalError(`maximum query length exceeded`), RouterErrorUserInvalidParams},
+		{cometBFTInternalError(`(?:failed to parse query: )?(?:offset \d+: |invalid input (?s:.) at offset \d+)`), RouterErrorUserInvalidParams},
+		{cometBFTInternalError(`compile .*: (?:missing argument for|unknown argument type|invalid op/arg combination)`), RouterErrorUserInvalidParams},
+		{cometBFTInternalError(`(?:no evidence was provided|evidence\.ValidateBasic failed: |failed to add evidence: Invalid evidence: )`), RouterErrorUserInvalidParams},
+		{cometBFTInternalError(`min height \d+ can't be greater than max height \d+`), RouterErrorChainDataNotAvailable},
+		{cometBFTInternalError(`page should be within \[1, \d+\] range, given \d+`), RouterErrorChainDataNotAvailable},
 		// A batch is classified with its HTTP status for a code, so the -32603 row below never
 		// reaches an element, and on main a batch's internal error was UNKNOWN_ERROR: retried, and
 		// not the endpoint's fault. An element's internal error whose data no row above reads keeps
@@ -552,14 +578,15 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 
 		// --- 2. What the node said: "the block you asked for is beyond my head". ---
 		// A lagging node says this while a synced node has the block: retryable elsewhere, and
-		// not the node's fault. The first two phrases are long enough to stand alone; "unknown
+		// not the node's fault. The sidecar's and the gateway's sentences are read where the node
+		// writes them, at the start of the message (restNodeSentence); "unknown
 		// block" is two common English words, and on REST the matcher is fed the raw response
 		// body (extractErrorMessage's fallback), so it is gated on the 400 nodeos sends with it.
 		// Ungated it fired on any status — a 500 saying "unknown blockchain id" classified as
 		// block-not-found and the endpoint was never scored for it.
-		{MessageContains("larger than the current largest block"), RouterErrorChainBlockNotFound},                  // Substrate sidecar, 400
-		{MessageContains("requested block height is bigger then the chain length"), RouterErrorChainBlockNotFound}, // Cosmos gRPC-gateway, 400
-		{CodeAndMessage(400, "unknown block"), RouterErrorChainBlockNotFound},                                      // nodeos unknown_block_exception, 400
+		{restNodeSentence("Specified block number is larger than the current largest block"), RouterErrorChainBlockNotFound}, // Substrate sidecar, 400
+		{restNodeSentence("requested block height is bigger then the chain length"), RouterErrorChainBlockNotFound},          // Cosmos gRPC-gateway, 400
+		{CodeAndMessage(400, "unknown block"), RouterErrorChainBlockNotFound},                                                // nodeos unknown_block_exception, 400
 
 		// --- 3. What the node said, under a 500 that is really the CALLER's answer. ---
 		// Cosmos, nodeos, MultiversX and the Substrate sidecar all answer a caller's mistake, or
@@ -993,9 +1020,16 @@ func ClassifyError(connectionError *RouterError, chainFamily ChainFamily, transp
 	// consume the pre-lowered form directly.
 	loweredMessage := strings.ToLower(errorMessage)
 
+	// An application's own text, such as a failed abci_query's log, never takes a verdict about the
+	// node: it can say anything (applicationText, MAG-5760).
+	fromApplication := applicationText(errorMessage)
+
 	// Step 1: Check chain-specific mappings (Tier 2)
 	if chainMappings, ok := chainErrorMappings[chainFamily]; ok {
 		for _, mapping := range chainMappings {
+			if fromApplication && speaksForTheNode(mapping.RouterError) {
+				continue
+			}
 			if matchMapping(mapping.Matcher, errorCode, errorMessage, loweredMessage) {
 				return mapping.RouterError
 			}
@@ -1005,6 +1039,9 @@ func ClassifyError(connectionError *RouterError, chainFamily ChainFamily, transp
 	// Step 2: Fall back to generic semantic mappings (Tier 1), scoped by transport
 	if transportMappings, ok := genericErrorMappings[transport]; ok {
 		for _, mapping := range transportMappings {
+			if fromApplication && speaksForTheNode(mapping.RouterError) {
+				continue
+			}
 			if matchMapping(mapping.Matcher, errorCode, errorMessage, loweredMessage) {
 				return mapping.RouterError
 			}
