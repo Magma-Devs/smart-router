@@ -233,6 +233,51 @@ func TestClassificationOrderReadsAGatewayStatusWhereGRPCWritesIt(t *testing.T) {
 	}
 }
 
+// A write copy's reply that reaches the order is an error, never an answer (PRD §3.1; MAG-5597). A
+// success row without `at` reads a 2xx answer only (§2.2, §3.2 step 2), so it reads neither a
+// well-formed error under a 200 nor an error a shape found inside a success (§8.2, Shapes: such an
+// error never ends a write's fan-out as its success). A success row with `at` still reads the body,
+// and decides by what its pointer finds there.
+func TestClassificationOrderSuccessRowsReadAnswersOnly(t *testing.T) {
+	ethAny := `{"id":"eth1.sent-any","interface":"jsonrpc","methods":["eth_sendRawTransaction"],"scope":"write","answer":true,"write":"took_it"}`
+	cosmosAny := `{"id":"cosmos.sent-any","interface":"rest","methods":["POST /cosmos/tx/v1beta1/txs"],"scope":"write","answer":true,"write":"took_it"}`
+	cosmosDuplicate := `{"id":"cosmos.in-mempool","interface":"rest","methods":["POST /cosmos/tx/v1beta1/txs"],"scope":"write","answer":true,"at":"/tx_response/code","code":19,"write":"took_it"}`
+	policyOf := func(writeRows string, rows ...string) *spectypes.ErrorsSection {
+		policy := &spectypes.ErrorsSection{SchemaVersion: 1, WriteRows: []string{writeRows}}
+		for _, literal := range rows {
+			policy.Rows = append(policy.Rows, rowOf(t, literal))
+		}
+		return policy
+	}
+
+	t.Run("a well-formed JSON-RPC error under a 200", func(t *testing.T) {
+		record := ErrorRecord{Interface: spectypes.APIInterfaceJsonRPC, Status: 200, Code: json.Number("-32000"), Text: "insufficient funds for gas * price + value"}
+		ctx := ReplyContext{Method: "eth_sendRawTransaction", IsWrite: true, Body: []byte(`{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"insufficient funds for gas * price + value"}}`)}
+		verdict := ClassifyInOrder(policyOf("jsonrpc", ethAny), ChainFamilyEVM, record, ctx)
+		require.False(t, verdict.TookIt, "a refused write is not took it")
+		require.Equal(t, StageRouterRows.String(), verdict.Stage.String())
+		require.Equal(t, ClassifyRecord(ChainFamilyEVM, record).Name, verdict.Classified().Name)
+	})
+	refused := ErrorRecord{Interface: spectypes.APIInterfaceRest, Status: 200, Text: "insufficient fee", InSuccess: true}
+	refusedBody := []byte(`{"tx_response":{"code":13,"codespace":"sdk","txhash":"AB","raw_log":"insufficient fee"}}`)
+	broadcast := ReplyContext{Method: "POST /cosmos/tx/v1beta1/txs", IsWrite: true, Body: refusedBody}
+	t.Run("an error a shape found inside a 200", func(t *testing.T) {
+		verdict := ClassifyInOrder(policyOf("rest", cosmosAny), ChainFamilyCosmosSDK, refused, broadcast)
+		require.False(t, verdict.TookIt, "a refused broadcast is not took it")
+		require.NotEqual(t, StageWriteRow.String(), verdict.Stage.String())
+	})
+	t.Run("a success row with at reads the body and decides by its pointer", func(t *testing.T) {
+		verdict := ClassifyInOrder(policyOf("rest", cosmosDuplicate), ChainFamilyCosmosSDK, refused, broadcast)
+		require.False(t, verdict.TookIt, "code 13 is not the row's 19")
+		inMempool := ErrorRecord{Interface: spectypes.APIInterfaceRest, Status: 200, Text: "tx already in mempool", InSuccess: true}
+		ctx := ReplyContext{Method: "POST /cosmos/tx/v1beta1/txs", IsWrite: true, Body: []byte(`{"tx_response":{"code":19,"codespace":"sdk","txhash":"AB","raw_log":"tx already in mempool"}}`)}
+		verdict = ClassifyInOrder(policyOf("rest", cosmosDuplicate), ChainFamilyCosmosSDK, inMempool, ctx)
+		require.True(t, verdict.TookIt)
+		require.Equal(t, StageWriteRow.String(), verdict.Stage.String())
+		require.Equal(t, "cosmos.in-mempool", verdict.Row.ID)
+	})
+}
+
 // ClassifyPrefix is steps 1 to 3 alone, for the results manager, which still gives the router's
 // rows today's inputs after it.
 func TestClassifyPrefix(t *testing.T) {

@@ -170,6 +170,11 @@ func writeRowsShipped(policy *spectypes.ErrorsSection, apiInterface string) bool
 // tookItRow is the first success or duplicate row (`write: took_it`) that reads a write copy's reply:
 // an answer row through the reply's body (a success row with `at` reads it under any status, R-L),
 // an error row through the record. A plain success beats a duplicate: the answer rows run first.
+//
+// The reply is an error (it has a record), never an answer: a well-formed error under a 2xx is not
+// an answer (§3.1), and an error a shape found inside a success never ends a write's fan-out as its
+// success (§8.2, Shapes). So a success row without `at`, which reads a 2xx answer only (§2.2), never
+// reads it; only a success row's pointer can show the write landed in an error's body.
 func tookItRow(rows []*spectypes.ErrorRow, record ErrorRecord, ctx ReplyContext) (*spectypes.ErrorRow, bool) {
 	var answerRows, errorRows []*spectypes.ErrorRow
 	for _, row := range rows {
@@ -184,8 +189,8 @@ func tookItRow(rows []*spectypes.ErrorRow, record ErrorRecord, ctx ReplyContext)
 	}
 	if len(answerRows) > 0 && len(ctx.Body) > 0 {
 		if doc, ok := DecodeJSONDocument(ctx.Body); ok {
-			success := record.InSuccess || IsSuccessStatus(record.Status)
-			if row, ok := MatchAnswerRow(answerRows, record.Interface, ctx.Method, true, success, doc); ok {
+			// success false: an error's body is read as a non-2xx's is, by a success row with `at` only.
+			if row, ok := MatchAnswerRow(answerRows, record.Interface, ctx.Method, true, false, doc); ok {
 				return row, true
 			}
 		}
