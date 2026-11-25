@@ -1174,10 +1174,10 @@ func (o nodeUrlOutcome) report(index int, admission ProviderAdmission) NodeURLVa
 		Verifications: make([]VerificationResult, 0, len(o.checks)),
 	}
 	if o.err != nil {
-		result.Error = o.err.Error()
+		result.Error = reportText(o.err)
 	}
 	if o.headErr != nil {
-		result.LatestBlockError = o.headErr.Error()
+		result.LatestBlockError = reportText(o.headErr)
 	}
 	for _, check := range o.checks {
 		verification := VerificationResult{
@@ -1188,7 +1188,7 @@ func (o nodeUrlOutcome) report(index int, admission ProviderAdmission) NodeURLVa
 			Ok:        check.err == nil,
 		}
 		if check.err != nil {
-			verification.Error = check.err.Error()
+			verification.Error = reportText(check.err)
 		}
 		result.Verifications = append(result.Verifications, verification)
 	}
@@ -1196,7 +1196,7 @@ func (o nodeUrlOutcome) report(index int, admission ProviderAdmission) NodeURLVa
 	// still carries the typo, and health should say both at once.
 	result.UnknownServices = o.unknown
 	if cause, refused := admission.refusedURLs[index]; refused {
-		result.Refused, result.Refusal = true, cause.Error()
+		result.Refused, result.Refusal = true, reportText(cause)
 		return result
 	}
 	if _, keep := admission.AdmittedServices(o.served); !keep {
@@ -1204,11 +1204,19 @@ func (o nodeUrlOutcome) report(index int, admission ProviderAdmission) NodeURLVa
 		return result
 	}
 	if cause, throttled := admission.throttledURLs[index]; throttled {
-		result.Throttled = cause.Error()
+		result.Throttled = reportText(cause)
 	}
 	result.RefusedServices = servicesIn(admission.refused, o.url)
 	result.ThrottledServices = servicesIn(admission.throttledServices, o.url)
 	return result
+}
+
+// reportText is an error's text as a health row carries it: redacted, as a log line is
+// (utils.RedactSecrets). `smartrouter health` prints the report, and an error a debug-level log
+// line returned when debug was off is the error as it was built, with whatever the node or the
+// transport said in it (MAG-5698).
+func reportText(err error) string {
+	return utils.RedactSecrets(err.Error())
 }
 
 // admissionFrom charges every failed check that costs anything to what its severity
@@ -2321,7 +2329,8 @@ func rateLimitedClassifiedReply(chainID string, chainMessage ChainMessageForSend
 // relay can never disagree about whether an answer is one.
 //
 // Both head fetchers call it after RateLimitedReplyError, which keeps a rate limit typed as the
-// hold-off's 429 (MAG-4378).
+// hold-off's 429 (MAG-4378). The node's message is redacted, as grpcNodeErrorReply's is: the
+// error takes the same way out.
 func NotAnAnswerReplyError(chainMessage ChainMessageForSend, data []byte, httpStatusCode int) error {
 	if chainMessage == nil {
 		return nil
@@ -2333,7 +2342,7 @@ func NotAnAnswerReplyError(chainMessage ChainMessageForSend, data []byte, httpSt
 	if !hasError {
 		return nil
 	}
-	return fmt.Errorf("reply is not an answer: %s", message)
+	return fmt.Errorf("reply is not an answer: %s", utils.RedactSecrets(message))
 }
 
 // RateLimitedErrorBody is RateLimitedReplyError for a caller holding the JSON-RPC error's code
@@ -2354,6 +2363,10 @@ func RateLimitedErrorBody(chainID string, code int, message string) error {
 // Decoding that JSON as the method's reply can only fail, and it failed as "proto: bad wiretype",
 // which hid what the node said: a node that refuses a verification's method read as a router
 // that cannot parse the chain's replies (MAG-5002).
+//
+// The node's message is redacted here, as a logged one is (MAG-5698): the head and block-hash
+// reads return this error through FormatDebugErr, which hands an error back as it is when debug
+// is off, and `smartrouter health` prints what they return.
 func grpcNodeErrorReply(reply *RelayReplyWrapper, chainMessage ChainMessageForSend) error {
 	if _, isGrpc := chainMessage.GetRPCMessage().(*rpcInterfaceMessages.GrpcMessage); !isGrpc || reply.StatusCode == http.StatusOK {
 		return nil
@@ -2363,7 +2376,7 @@ func grpcNodeErrorReply(reply *RelayReplyWrapper, chainMessage ChainMessageForSe
 		// A body that does not decode still leaves the status code, which is the node's.
 		_ = json.Unmarshal(reply.RelayReply.Data, &nodeError)
 	}
-	return fmt.Errorf("gRPC status %s: %s", codes.Code(nodeError.ErrorCode), nodeError.ErrorMessage)
+	return fmt.Errorf("gRPC status %s: %s", codes.Code(nodeError.ErrorCode), utils.RedactSecrets(nodeError.ErrorMessage))
 }
 
 func FormatResponseForParsing(reply *pairingtypes.RelayReply, chainMessage ChainMessageForSend) (parsable parser.RPCInput, err error) {

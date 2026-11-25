@@ -172,6 +172,11 @@ func (rpccl *RPCConsumerLogs) LogRequestAndResponse(module string, hasError bool
 		utils.FormatError(module, err, []utils.Attribute{{Key: "GUID", Value: msgSeed}, {Key: "timeTaken", Value: timeTaken}, {Key: "request", Value: req}, {Key: "response", Value: parser.CapStringLen(resp)}, {Key: "method", Value: method}, {Key: "path", Value: path}, {Key: "HasError", Value: hasError}}...)
 		return
 	}
+	// A success is written at debug only, and the cap redacts a long resp before it cuts it
+	// (parser.CapStringLen): neither is worth doing for a line the level drops.
+	if !utils.IsDebugEnabled() {
+		return
+	}
 	utils.FormatDebug(module, []utils.Attribute{{Key: "GUID", Value: msgSeed}, {Key: "timeTaken", Value: timeTaken}, {Key: "request", Value: req}, {Key: "response", Value: parser.CapStringLen(resp)}, {Key: "method", Value: method}, {Key: "path", Value: path}, {Key: "HasError", Value: hasError}}...)
 }
 

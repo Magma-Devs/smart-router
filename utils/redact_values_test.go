@@ -140,3 +140,59 @@ func TestRedactSecretsBytes_LeavesACleanBodyAlone(t *testing.T) {
 	require.Equal(t, body, out)
 	require.Same(t, &body[0], &out[0], "the same slice, not a copy")
 }
+
+// MAG-5698: Tendermint RPC takes a string parameter JSON-quoted, and clients send the quotes raw.
+// The url pass ended at the opening quote, and the query past the closing one stood. The key is not
+// registered: the url pass alone must take it, as it must for a value the router never knew.
+func TestRedactSecrets_AQuotedQueryValueDoesNotEndTheURL(t *testing.T) {
+	withConfiguredSecrets(t)
+	cases := []struct{ name, in, want string }{
+		{
+			"an abci_query in a transport error",
+			`Get "https://rpc.example.com/abci_query?path="/store/acc/key"&apikey=KEY123SECRET": EOF`,
+			`Get "https://rpc.example.com/[redacted]": EOF`,
+		},
+		{
+			"scheme-less",
+			`dial rpc.example.com/abci_query?path="/store/acc/key"&apikey=KEY123SECRET failed`,
+			`dial rpc.example.com/[redacted] failed`,
+		},
+		{
+			"in a log attribute list",
+			`{url:https://rpc.example.com/abci_query?path="/store/acc/key"&apikey=KEY123SECRET,method:abci_query}`,
+			`{url:https://rpc.example.com/[redacted],method:abci_query}`,
+		},
+		{
+			"a value with = and ' inside, as tx_search sends",
+			`https://rpc.example.com/tx_search?query="tx.height=5&tx.hash='AB'"&apikey=KEY123SECRET`,
+			`https://rpc.example.com/[redacted]`,
+		},
+		{
+			"two quoted values around the key",
+			`https://rpc.example.com/abci_query?path="/store/acc/key"&apikey=KEY123SECRET&data="0x00"`,
+			`https://rpc.example.com/[redacted]`,
+		},
+		{
+			"the quoted value last",
+			`https://rpc.example.com/abci_query?apikey=KEY123SECRET&path="/store/acc/key"`,
+			`https://rpc.example.com/[redacted]`,
+		},
+		{
+			// The quote that closes a quoted url is not an opening one: nothing follows "=".
+			"a quoted url with a quoted value inside still ends at its own quote",
+			`url="https://rpc.example.com/abci_query?path="/store/acc/key"&apikey=KEY123SECRET" next`,
+			`url="https://rpc.example.com/[redacted]" next`,
+		},
+		{
+			"a quote that never closes still ends the url",
+			`https://rpc.example.com/abci_query?path="/store`,
+			`https://rpc.example.com/[redacted]"/store`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, RedactSecrets(tc.in))
+			require.NotContains(t, RedactSecrets(tc.in), "KEY123SECRET")
+		})
+	}
+}

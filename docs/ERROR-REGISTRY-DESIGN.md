@@ -874,7 +874,8 @@ is not that: java-tron sends it after it took the transaction into its pending p
 had already announced the transaction, so the node holds it and is not blamed. Every refusal sets
 `router-identified-node-error: true` when it reaches the client, and is counted in
 `smartrouter_errors_total` under its code. A gRPC refusal is the node's protobuf message, so it is
-not redacted: a rewritten string would break it.
+not redacted: a rewritten string would break it. It is the one node error reply that is not, read by
+its method and status; the router's JSON for a failed gRPC status is redacted like any other.
 
 A Cosmos REST `POST /cosmos/tx/v1beta1/txs` refusal was already a node error to the relay processor
 (§9). The sender now flags it too, and it is classified by its code, because the `raw_log` alone is

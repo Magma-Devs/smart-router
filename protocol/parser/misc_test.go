@@ -6,6 +6,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/magma-Devs/smart-router/utils"
 )
 
 // CapStringLen keeps a string of up to 250 bytes whole and cuts a longer one to its first 150 and
@@ -40,5 +42,33 @@ func TestCapStringLen(t *testing.T) {
 		}
 		got := CapStringLen(in)
 		require.True(t, utf8.ValidString(got), "length %d: %q", n, got)
+	}
+}
+
+// A string the cap cuts is redacted before the cut (MAG-5698). The log layer replaces a
+// registered value whole, so a value the cut had split no longer matched it, and the part the
+// cut kept was written. A registered value that straddles either cut, or sits whole in the part
+// the cut drops, leaves no fragment behind.
+func TestCapStringLen_RedactsBeforeItCuts(t *testing.T) {
+	const registered = "MAG5698CapValue0123456789abcdefghij" // 35 bytes
+	utils.RegisterSecrets(registered)
+	for _, tc := range []struct {
+		name, in string
+		// marked: the mark lands in a part the cut keeps. A value the cut drops whole leaves none.
+		marked bool
+	}{
+		{"across the head cut", strings.Repeat("a", 140) + registered + strings.Repeat("b", 120), true},
+		{"across the tail cut", strings.Repeat("a", 160) + registered + strings.Repeat("b", 90), true},
+		{"in the part the cut drops", strings.Repeat("a", 155) + registered + strings.Repeat("b", 150), false},
+		{"first, before a long tail", registered + strings.Repeat("b", 250), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Greater(t, len(tc.in), 250, "a string the cap cuts")
+			got := CapStringLen(tc.in)
+			require.Equal(t, tc.marked, strings.Contains(got, utils.RedactedMark), got)
+			for i := 0; i+8 <= len(registered); i++ {
+				require.NotContains(t, got, registered[i:i+8], "a fragment of the value survived the cut: %q", got)
+			}
+		})
 	}
 }
