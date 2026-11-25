@@ -13,7 +13,7 @@ import (
 // The upstream's response headers reach the reply only through the allow-list (MAG-3104).
 // These pin the filter on its own; rpcsmartrouter's direct_rpc_reply_headers_test.go drives
 // it through the relay senders against a real upstream, rest_integration_test.go through the
-// real LAVA and APT1 specs, and cached_reply_headers_test.go through both cache tiers.
+// real COSMOSHUB and APT1 specs, and cached_reply_headers_test.go through both cache tiers.
 
 func metadataNames(md []pairingtypes.Metadata) []string {
 	names := make([]string, 0, len(md))

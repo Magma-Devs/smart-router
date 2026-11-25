@@ -197,7 +197,7 @@ func TestRecordRelayAttributes(t *testing.T) {
 		apiInterface string
 	}{
 		{name: "typical relay", guid: 12345, chainID: "ETH1", apiInterface: "jsonrpc"},
-		{name: "zero guid", guid: 0, chainID: "LAV1", apiInterface: "tendermintrpc"},
+		{name: "zero guid", guid: 0, chainID: "COSMOSHUB", apiInterface: "tendermintrpc"},
 		{name: "max uint64 guid", guid: ^uint64(0), chainID: "COS5", apiInterface: "rest"},
 	}
 

@@ -19,7 +19,7 @@ import (
 // deferred to a background goroutine), so dummy endpoint addresses are sufficient.
 func newCapacityTestServer(t *testing.T, groupByAddr map[string]string) *RPCSmartRouterServer {
 	t.Helper()
-	return newCapacityTestServerFor(t, "LAVA", "rest", groupByAddr)
+	return newCapacityTestServerFor(t, "COSMOSHUB", "rest", groupByAddr)
 }
 
 // newCapacityTestServerFor is newCapacityTestServer for a given endpoint, so a test can drive the guard on

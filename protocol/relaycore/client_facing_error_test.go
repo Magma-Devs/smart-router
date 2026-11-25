@@ -73,6 +73,8 @@ func TestClientFacingFromProtocolError_TransportFailures(t *testing.T) {
 		{common.RouterErrorConnectionClosed, http.StatusBadGateway},
 		{common.RouterErrorContextDeadline, http.StatusGatewayTimeout},
 		{common.RouterErrorNetworkUnreachable, http.StatusBadGateway},
+		// A gRPC call the router's own client could not deliver (MAG-5130).
+		{common.RouterErrorProviderUnavailable, http.StatusBadGateway},
 	} {
 		t.Run(tc.routerErr.Name, func(t *testing.T) {
 			cf := clientFacingFromProtocolError(common.NewRouterErrorWrapping(tc.routerErr, leaf), tc.routerErr)
