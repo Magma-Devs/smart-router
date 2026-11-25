@@ -66,6 +66,11 @@ func TestResultsManagerRunsThePrefixAheadOfTheRows(t *testing.T) {
 		classified := fileNodeError(t, grpcProtocolMessage(), int(codes.Unavailable), body)
 		require.Equal(t, common.RouterErrorNodeRateLimited.Name, classified.Name)
 	})
+	t.Run("a node's own message that quotes grpc-go's gateway words is not a gateway's 429", func(t *testing.T) {
+		body := `{"error_message":"invalid denom: unexpected HTTP status code received from server: 429","error_code":3}`
+		classified := fileNodeError(t, grpcProtocolMessage(), int(codes.InvalidArgument), body)
+		require.Equal(t, common.RouterErrorUserInvalidParams.Name, classified.Name, "the INVALID_ARGUMENT's code row, as on main")
+	})
 	t.Run("any other status is left to the rows, with today's inputs", func(t *testing.T) {
 		classified := fileNodeError(t, restProtocolMessage(t), http.StatusBadRequest, `{"message":"route not found"}`)
 		require.Equal(t, common.RouterErrorNodeEndpointNotFound.Name, classified.Name, "the text row, ahead of the 400 code row, as on main")

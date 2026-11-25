@@ -215,7 +215,15 @@ func restStandardText(doc any, body []byte) string {
 
 // grpcGatewayStatus is grpc-go's message when a gateway in front of the node answered with an HTTP
 // status instead of gRPC: the status is the gateway's, and the record carries it (Part III D12).
-var grpcGatewayStatus = regexp.MustCompile(`unexpected HTTP status code received from server: (\d{3})`)
+//
+// It is read only where grpc-go writes it: at the start of the status message, or right after the
+// opening of the router's JSON for a node's gRPC error ({"error_message":"…), which the results
+// manager reads as the reply's text. The status rows read a gateway's status in the same places only
+// (httpStatusMatcher). A node's own message that quotes those words further on is the node's text,
+// not a status: read there, a 429 in it made the prefix file an INVALID_ARGUMENT as a rate limit
+// (ClassifyPrefix).
+var grpcGatewayStatus = regexp.MustCompile(`(?i)^(?:` + regexp.QuoteMeta(`{"error_message":"`) + `)?` +
+	regexp.QuoteMeta(GRPCGatewayStatusText) + `: (\d{3})\b`)
 
 // ReadGRPCReply reads a gRPC reply: a status other than OK is a well-formed error with the status as
 // the record's status, its message as the text and its details, rendered by the caller from linked or

@@ -200,6 +200,39 @@ func TestClassificationOrderXRPRows(t *testing.T) {
 	})
 }
 
+// A gateway's HTTP status is the record's only where grpc-go writes it (Part III D12; MAG-5597): at
+// the start of the status message, or of the router's JSON of it, which the results manager reads.
+// A node's own message that quotes grpc-go's words further on keeps its gRPC status, so the prefix
+// leaves it to the rows: the keep-today rule for a rate-limit phrase inside gRPC 3/5/10/11/12 holds
+// for a quoted 429 too.
+func TestClassificationOrderReadsAGatewayStatusWhereGRPCWritesIt(t *testing.T) {
+	gateway := `unexpected HTTP status code received from server: 429 (Too Many Requests); transport: received unexpected content-type "text/html"`
+	rendered, err := json.Marshal(struct {
+		ErrorMessage string `json:"error_message"`
+		ErrorCode    uint32 `json:"error_code"`
+	}{gateway, 14})
+	require.NoError(t, err)
+	for name, text := range map[string]string{"the status message": gateway, "the router's JSON of it": string(rendered)} {
+		_, records := ReadGRPCReply(14, text, nil, false)
+		require.Equal(t, 429, records[0].Status, name)
+		require.Equal(t, 14, records[0].GRPCCode, name)
+		verdict, ok := ClassifyPrefix(nil, ChainFamilyUnknown, records[0], ReplyContext{})
+		require.True(t, ok, name)
+		require.Equal(t, StageStatus.String(), verdict.Stage.String(), name)
+		require.Equal(t, RouterErrorNodeRateLimited.Name, verdict.RouterError.Name, name)
+	}
+
+	quoted := "unexpected HTTP status code received from server: 429"
+	for _, code := range []int{2, 3, 5, 9, 10, 11, 12, 13} {
+		for _, text := range []string{"invalid request: " + quoted, `{"error_message":"invalid request: ` + quoted + `","error_code":3}`} {
+			_, records := ReadGRPCReply(code, text, nil, false)
+			require.Equal(t, code, records[0].Status, "code %d, %q: words a node quotes are not a gateway's status", code, text)
+			_, decided := ClassifyPrefix(nil, ChainFamilyUnknown, records[0], ReplyContext{})
+			require.False(t, decided, "code %d, %q: left to the rows", code, text)
+		}
+	}
+}
+
 // ClassifyPrefix is steps 1 to 3 alone, for the results manager, which still gives the router's
 // rows today's inputs after it.
 func TestClassifyPrefix(t *testing.T) {
