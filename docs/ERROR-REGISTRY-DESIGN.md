@@ -818,7 +818,7 @@ reading was the wrong one.
 
 ## 10. A broadcast refused inside a success (MAG-5323)
 
-Three write paths answer a refused transaction with HTTP 200 or gRPC OK. Read as a success, the
+Four write paths answer a refused transaction with HTTP 200 or gRPC OK. Read as a success, the
 refusal ended a stateful broadcast whenever it arrived first, while another node took the
 transaction. Each is now a node error, read on its request only (the method or path, never the
 chain), as XRPL's submit is (MAG-4033):
@@ -829,6 +829,7 @@ chain), as XRPL's submit is (MAG-4033):
 | Tendermint RPC `broadcast_tx_commit` | `result.check_tx.code` ≠ 0 | `result.tx_result.code` ≠ 0: the transaction ran |
 | gRPC `cosmos.tx.v1beta1.Service/BroadcastTx` | `tx_response.code` ≠ 0 at height 0 | a height: `BROADCAST_MODE_BLOCK` (before SDK v0.47), the transaction ran |
 | Tron `/wallet/broadcasttransaction`, `/wallet/broadcasthex` | `result` false or absent, with a `code` other than `SUCCESS` | |
+| REST `POST /cosmos/tx/v1beta1/txs` | `tx_response.code` ≠ 0 at height 0 | a height: `BROADCAST_MODE_BLOCK` (before SDK v0.47), the transaction ran; a GET of a transaction |
 
 `broadcast_tx_async` answers before CheckTx and is not read. A Tendermint batch keeps the batch rule.
 
@@ -873,5 +874,7 @@ had already announced the transaction, so the node holds it and is not blamed. E
 not redacted: a rewritten string would break it.
 
 A Cosmos REST `POST /cosmos/tx/v1beta1/txs` refusal was already a node error to the relay processor
-(§9); its sender flag and its classification by the log are unchanged.
+(§9). The sender now flags it too, and it is classified by its code, because the `raw_log` alone is
+empty on some refusals (MAG-5451). A GET of a transaction that was included and failed answers the
+same shape; it keeps its old flag and its `raw_log` message (MAG-5326).
 

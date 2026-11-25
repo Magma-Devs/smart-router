@@ -194,16 +194,16 @@ func xrplMessageStartsWith(alternatives ...string) ErrorMatcher {
 }
 
 // ---------------------------------------------------------------------------
-// A node's refusal of a broadcast transaction, inside an ordinary reply (MAG-5323)
+// A node's refusal of a broadcast transaction, inside an ordinary reply (MAG-5323, MAG-5451)
 // ---------------------------------------------------------------------------
 //
-// Tendermint RPC's broadcast_tx_sync and broadcast_tx_commit, Cosmos gRPC's BroadcastTx and Tron's
-// /wallet/broadcasttransaction and /wallet/broadcasthex answer a refused transaction with HTTP 200
-// or gRPC OK. rpcInterfaceMessages flags those replies and writes a message that starts with what
-// the node said, through CosmosTxRefusalMessage and TronTxRefusalMessage, and the rows below
-// classify that message. Each set ends in a catch-all, so a flagged refusal is never UNKNOWN_ERROR:
-// that is retryable and scored by the availability gate, which would blame a node for a client's
-// re-sent transaction.
+// Tendermint RPC's broadcast_tx_sync and broadcast_tx_commit, Cosmos gRPC's BroadcastTx, Cosmos
+// REST's POST /cosmos/tx/v1beta1/txs, and Tron's /wallet/broadcasttransaction and
+// /wallet/broadcasthex answer a refused transaction with HTTP 200 or gRPC OK. rpcInterfaceMessages
+// flags those replies and writes a message that starts with what the node said, through
+// CosmosTxRefusalMessage and TronTxRefusalMessage, and the rows below classify that message. Each
+// set ends in a catch-all, so a flagged refusal is never UNKNOWN_ERROR: that is retryable and
+// scored by the availability gate, which would blame a node for a client's re-sent transaction.
 //
 // The readers are chosen by the request (the method, the path), not by the chain, so the rows are
 // Tier-1 on the transports those readers run on: CANTO serves Cosmos interfaces and is an EVM
@@ -798,11 +798,11 @@ func httpStatusMessageMappings() []errorMapping {
 // package init") holds. Do not add mutations outside this function.
 func init() {
 	// A broadcast's refusal opens the table of each transport its reader runs on: Tendermint RPC
-	// (JSON-RPC) and gRPC for Cosmos, REST for Tron. Their messages start with a prefix no node
-	// writes, so they shadow no row below, and first, no row below reads the node's free text.
+	// (JSON-RPC) and gRPC for Cosmos, REST for Cosmos and Tron. Their messages start with a prefix no
+	// node writes, so they shadow no row below, and first, no row below reads the node's free text.
 	genericErrorMappings[TransportJsonRPC] = slices.Concat(cosmosTxRefusalRows, genericErrorMappings[TransportJsonRPC])
 	genericErrorMappings[TransportGRPC] = slices.Concat(cosmosTxRefusalRows, genericErrorMappings[TransportGRPC])
-	genericErrorMappings[TransportREST] = slices.Concat(tronTxRefusalRows, genericErrorMappings[TransportREST])
+	genericErrorMappings[TransportREST] = slices.Concat(cosmosTxRefusalRows, tronTxRefusalRows, genericErrorMappings[TransportREST])
 
 	// Append shared HTTP status message matchers to JSON-RPC transport
 	genericErrorMappings[TransportJsonRPC] = append(genericErrorMappings[TransportJsonRPC], httpStatusMessageMappings()...)

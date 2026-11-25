@@ -877,9 +877,9 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 	// carrying an application error in its body (a Cosmos tx_response.code) is a
 	// request/application error, not a node error at the transport level.
 	//
-	// A 2xx that is the node refusing a broadcast transaction (Tron's, MAG-5323) is a node error, as
-	// on JSON-RPC and gRPC: the reply says the node answered with an error, and it is no proof the
-	// endpoint is healthy.
+	// A 2xx that is the node refusing the broadcast transaction the request sent (Tron's, MAG-5323;
+	// a Cosmos tx_response.code, MAG-5451) is a node error, as on JSON-RPC and gRPC: the reply says
+	// the node answered with an error, and it is no proof the endpoint is healthy.
 	var isNodeError bool
 	switch {
 	case response.StatusCode == 429:

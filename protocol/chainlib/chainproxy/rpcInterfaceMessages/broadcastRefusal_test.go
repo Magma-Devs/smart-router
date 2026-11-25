@@ -199,13 +199,13 @@ func TestTronBroadcastRefusal(t *testing.T) {
 			require.Equal(t, tc.wantError, msg.RefusesTransaction([]byte(tc.reply)))
 		})
 	}
-	// A Cosmos tx_response error is still the Cosmos rule's, and the sender keeps its old flag.
+	// The Cosmos REST broadcast is a refusal too (MAG-5451): the code-prefixed message, and flagged.
 	cosmos := RestMessage{SpecPath: "/cosmos/tx/v1beta1/txs"}
 	refusal := []byte(`{"tx_response":{"code":32,"raw_log":"account sequence mismatch"}}`)
 	hasError, message := cosmos.CheckResponseError(refusal, http.StatusOK)
 	require.True(t, hasError)
-	require.Equal(t, "account sequence mismatch", message)
-	require.False(t, cosmos.RefusesTransaction(refusal))
+	require.Equal(t, "cosmos tx refused: code 32: account sequence mismatch", message)
+	require.True(t, cosmos.RefusesTransaction(refusal))
 }
 
 // Every refusal a reader flags reaches a named verdict on the transport it runs on, whatever the
