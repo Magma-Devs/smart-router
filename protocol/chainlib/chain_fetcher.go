@@ -1665,11 +1665,25 @@ func (cf *ChainFetcher) verifyWithRetries(ctx context.Context, router ChainRoute
 
 // deadlineContext says so when a failure came with the pass's deadline: the
 // connector closes as the deadline passes, and its own words would hide why.
+//
+// The clock decides, not ctx.Err() alone. A dial or read that runs into the deadline
+// fails at the deadline's own time, and ctx.Err() stays nil until the runtime has run
+// the context's timer. Read in that gap, a dial the deadline cut off came back as a
+// bare "dial tcp ...: i/o timeout" (MAG-4919).
 func deadlineContext(ctx context.Context, err error) error {
-	if err == nil || ctx.Err() == nil {
+	if err == nil || !deadlinePassed(ctx) {
 		return err
 	}
 	return fmt.Errorf("verification deadline exceeded: %w", err)
+}
+
+// deadlinePassed reports whether ctx has ended or its deadline is behind the clock.
+func deadlinePassed(ctx context.Context) bool {
+	if ctx.Err() != nil {
+		return true
+	}
+	deadline, ok := ctx.Deadline()
+	return ok && !time.Now().Before(deadline)
 }
 
 func (cf *ChainFetcher) populateCache(relayData *pairingtypes.RelayPrivateData, reply *pairingtypes.RelayReply, requestedBlockHash []byte, finalized bool) {

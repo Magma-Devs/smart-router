@@ -539,13 +539,16 @@ func (csm *ConsumerSessionManager) UpdateAllProviders(epoch uint64, pairingList 
 	// TODO: we can block updating until some of the probing is done, this can prevent failed attempts on epoch change when we have no information on the providers,
 	// and all of them are new (less effective on big pairing lists or a process that runs for a few epochs)
 
+	// The pairing generation this update writes, under csm.lock below. The release pass is tied to
+	// it, so it reads and clears only the set this update carried over.
+	var generation uint64
 	defer func() {
 		// run this after done updating pairing
 		time.Sleep(time.Duration(rand.Intn(500)) * time.Millisecond) // sleep up to 500ms in order to scatter different chains probe triggers
 		go func() {
 			ctx := context.Background()
 			// Check re-blocked providers from previous epoch and unblock if healthy
-			csm.checkAndUnblockHealthyReBlockedProviders(ctx, epoch)
+			csm.checkAndUnblockHealthyReBlockedProviders(ctx, epoch, generation)
 		}()
 	}()
 	previousEpoch := csm.atomicReadCurrentEpoch()
@@ -717,6 +720,7 @@ func (csm *ConsumerSessionManager) UpdateAllProviders(epoch uint64, pairingList 
 
 	csm.lastPairingUpdate = time.Now()
 	csm.pairingGeneration++
+	generation = csm.pairingGeneration
 
 	// The pairing inventory is the answer to "why was the primary not even a candidate?". A pool
 	// that never contained a provider and one that dropped it look identical from the selection
@@ -3469,10 +3473,10 @@ func (csm *ConsumerSessionManager) removeAddressFromValidAddresses(address strin
 			csm.sortBlockedProviderListByCuServed()
 			provider, ok := csm.pairing[addr]
 			if ok {
+				// Published here, not from a goroutine: a goroutine could land after a later release's
+				// publication and leave the provider reading blocked while it serves (MAG-4919).
 				info := csm.RPCEndpoint()
-				go func(networkAddress string, chainId string, apiInterface string, providerAddress string) {
-					csm.consumerMetricsManager.SetBlockedProvider(chainId, apiInterface, providerAddress, networkAddress, true)
-				}(provider.Endpoints[0].NetworkAddress, info.ChainID, info.ApiInterface, addr)
+				csm.consumerMetricsManager.SetBlockedProvider(info.ChainID, info.ApiInterface, addr, provider.Endpoints[0].NetworkAddress, true)
 			}
 			return nil
 		}
@@ -3869,9 +3873,7 @@ func (csm *ConsumerSessionManager) validateAndReturnBlockedProviderToValidAddres
 			if provider, ok := csm.pairing[providerAddress]; ok {
 				info := csm.RPCEndpoint()
 				provider.atomicWriteBlockedStatus(BlockedProviderSessionUnusedStatus)
-				go func(networkAddress string, chainId string, apiInterface string, providerAddress string) {
-					csm.consumerMetricsManager.SetBlockedProvider(chainId, apiInterface, providerAddress, networkAddress, false)
-				}(provider.Endpoints[0].NetworkAddress, info.ChainID, info.ApiInterface, providerAddress)
+				csm.consumerMetricsManager.SetBlockedProvider(info.ChainID, info.ApiInterface, providerAddress, provider.Endpoints[0].NetworkAddress, false)
 			}
 			if released {
 				csm.logProviderReleased(providerAddress, record, route, csm.blockedTotalLocked())
@@ -4233,7 +4235,12 @@ func (csm *ConsumerSessionManager) GenerateReconnectCallback(consumerSessionsWit
 // checkAndUnblockHealthyReBlockedProviders checks providers that were re-blocked from previous epoch
 // and immediately unblocks them if their probe was successful. This only happens at epoch transitions.
 // Other providers and normal blocking behavior during an epoch remain unchanged.
-func (csm *ConsumerSessionManager) checkAndUnblockHealthyReBlockedProviders(ctx context.Context, epoch uint64) {
+//
+// generation is the pairing generation of the UpdateAllProviders that carried the set over. A later
+// update replaces the set with its own and starts its own pass, so this pass leaves that set alone.
+// It used to clear it: a pass that had not finished when the next update came wiped the next
+// update's set, and that update's pass then released no one (MAG-4919).
+func (csm *ConsumerSessionManager) checkAndUnblockHealthyReBlockedProviders(ctx context.Context, epoch uint64, generation uint64) {
 	// Check if epoch is still current - if epoch changed, our previousEpochBlockedProviders data is stale
 	currentEpoch := csm.atomicReadCurrentEpoch()
 	if epoch != currentEpoch {
@@ -4249,10 +4256,12 @@ func (csm *ConsumerSessionManager) checkAndUnblockHealthyReBlockedProviders(ctx 
 		ctx = utils.AppendUniqueIdentifier(ctx, utils.GenerateUniqueIdentifier())
 	}
 
-	// Clean up previousEpochBlockedProviders after processing
+	// Clean up previousEpochBlockedProviders after processing, unless a later update has replaced it
 	defer func() {
 		csm.lock.Lock()
-		csm.previousEpochBlockedProviders = make(map[string]BlockRecord)
+		if csm.pairingGeneration == generation {
+			csm.previousEpochBlockedProviders = make(map[string]BlockRecord)
+		}
 		csm.lock.Unlock()
 	}()
 
@@ -4262,6 +4271,14 @@ func (csm *ConsumerSessionManager) checkAndUnblockHealthyReBlockedProviders(ctx 
 	}
 
 	csm.lock.Lock()
+	if csm.pairingGeneration != generation {
+		csm.lock.Unlock()
+		utils.FormatDebug("Skipping re-blocked provider check: a later pairing update carried its own set over",
+			utils.Attribute{Key: "generation", Value: generation},
+			utils.LogAttr("GUID", ctx),
+		)
+		return
+	}
 
 	// First pass: Identify which re-blocked providers had successful probes
 	providersNeedingComprehensiveProbe := make(map[string]reBlockedProviderInfo)
@@ -4531,17 +4548,15 @@ func (csm *ConsumerSessionManager) ResetBlockedProviders() {
 	// Clear the per-provider redemption flag for every entry returned to
 	// validAddresses. blockProvider sets this to Used in the second-chance
 	// path; without resetting, future failures see a "Used" status and skip
-	// retry logic. Done outside csm.lock — atomicWriteBlockedStatus does not
-	// take csm.lock, and the metric goroutine must not hold it either.
+	// retry logic. Done outside csm.lock: atomicWriteBlockedStatus does not
+	// take csm.lock.
 	for addr, provider := range pairing {
 		if provider == nil {
 			continue
 		}
 		provider.atomicWriteBlockedStatus(BlockedProviderSessionUnusedStatus)
 		if csm.consumerMetricsManager != nil && len(provider.Endpoints) > 0 {
-			go func(networkAddress, chainID, apiInterface, providerAddress string) {
-				csm.consumerMetricsManager.SetBlockedProvider(chainID, apiInterface, providerAddress, networkAddress, false)
-			}(provider.Endpoints[0].NetworkAddress, endpoint.ChainID, endpoint.ApiInterface, addr)
+			csm.consumerMetricsManager.SetBlockedProvider(endpoint.ChainID, endpoint.ApiInterface, addr, provider.Endpoints[0].NetworkAddress, false)
 		}
 	}
 
