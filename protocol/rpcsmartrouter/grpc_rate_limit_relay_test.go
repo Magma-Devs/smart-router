@@ -106,8 +106,10 @@ func TestSendGRPCRelay_ResourceExhaustedThatAsksForAWaitIsARateLimit(t *testing.
 		message string
 		rowSays *common.RouterError
 	}{
-		{common.ChainFamilyUnknown, "Quota exceeded: limit 500 requests per minute", common.RouterErrorNodeInternalError},
-		{common.ChainFamilyUnknown, "upstream 503: compute units exhausted", common.RouterErrorNodeServiceUnavailable},
+		// A status row reads a status only where the router or grpc-go wrote it (MAG-5324), so these
+		// carry it in grpc-go's text for a gateway's HTTP reply, not in the vendor's own words.
+		{common.ChainFamilyUnknown, common.GRPCGatewayStatusText + ": 500 (Internal Server Error); quota exceeded: limit 500 requests per minute", common.RouterErrorNodeInternalError},
+		{common.ChainFamilyUnknown, common.GRPCGatewayStatusText + ": 503 (Service Unavailable); compute units exhausted", common.RouterErrorNodeServiceUnavailable},
 		{common.ChainFamilyUnknown, "plan limit: method not implemented on this tier", common.RouterErrorNodeUnimplemented},
 		{common.ChainFamilyCosmosSDK, "insufficient fee budget for this key", common.RouterErrorChainInsufficientFee},
 	}
