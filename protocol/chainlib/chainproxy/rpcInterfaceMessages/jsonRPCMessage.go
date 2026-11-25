@@ -341,8 +341,8 @@ func NewBatchMessage(msgs []JsonrpcMessage) (JsonrpcBatchMessage, error) {
 // is treated as a faulty element. A malformed top-level array (truncated, not
 // an array) is itself classified as a wrong-data verdict so the relay pipeline
 // can retry against another provider. Sub-element classification reuses
-// checkJsonrpcEnvelope so the rules stay in lockstep with the single path,
-// including the error:null edge case.
+// classifyJsonrpcEnvelope, the verdict of checkJsonrpcEnvelope, so the rules
+// stay in lockstep with the single path, including the error:null edge case.
 func CheckResponseErrorForJsonRpcBatch(data []byte, httpStatusCode int) (hasError bool, errorMessage string) {
 	return checkResponseErrorForBatch(data, func(scan jsonrpcScanResult, scanErr error, element []byte) (bool, string) {
 		elemHasErr, elemMsg, _ := classifyJsonrpcEnvelope(scan, scanErr, element, "JSON-RPC batch element")

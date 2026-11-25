@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/goccy/go-json"
 	"github.com/stretchr/testify/require"
 )
 
@@ -114,7 +115,8 @@ func twoWalkIsJsonrpcReply(data []byte) bool {
 
 // batchSeeds are batch replies of every shape the checks tell apart, plus the shapes that break
 // a scanner: brackets and quotes inside strings, escapes at the end of a string, an element that
-// is balanced by its bracket count and wrong by its bracket kinds, and elements that are no object.
+// is balanced by its bracket count and wrong by its bracket kinds (before and after its result),
+// and elements that are no object.
 var batchSeeds = []string{
 	`[]`,
 	`[{"jsonrpc":"2.0","id":1,"result":"0x1"}]`,
@@ -130,6 +132,7 @@ var batchSeeds = []string{
 	`[{"id":1,"result":"a\\"},{"id":2,"result":"\\\"]"},{"id":3,"result":"]""}]`,
 	`[{"id":1,"result":{"a":[1,2}}},{"id":2,"result":1}]`,
 	`[{"id":1,"result":1},42,"text",null,true,[1,2],{"id":7,"result":2}]`,
+	`[{"id":1,"result":1,"extra":[1,2}},{"id":2,"result":2}]`,
 	`[{"id":1,"result":{"response":{"code":5,"log":"app refused"}}},{"id":2,"result":{"response":{"code":0,"log":""}}}]`,
 	`[{"id":1,"result":{"response":{"code":5,"log":"only fault"}}}]`,
 	`[{"id":1,"result":{"code":3,"log":"broadcast refused","hash":"AB"}}]`,
@@ -211,6 +214,7 @@ func TestScanJsonrpcBatchEnvelopes_ScanIsTheElementsOwn(t *testing.T) {
 			ownScan, ownErr := scanJsonrpcEnvelope(element)
 			if ownErr != nil {
 				require.EqualError(t, scanErr, ownErr.Error(), "element %d of %q", index, seed)
+				require.Equal(t, jsonrpcScanResult{}, scan, "a refused element comes with an empty scan: element %d of %q", index, seed)
 			} else {
 				require.NoError(t, scanErr, "element %d of %q", index, seed)
 				require.Equal(t, ownScan.hasError, scan.hasError)
@@ -293,6 +297,22 @@ func BenchmarkBatchCheck_BlockLikeReply(b *testing.B) {
 		b.SetBytes(int64(len(data)))
 		b.ReportAllocs()
 		for i := 0; i < b.N; i++ {
+			twoWalkJsonRpcBatch(data)
+		}
+	})
+	// Every read one relay makes of a clean reply: json.Valid in the sender, then the checks.
+	b.Run("relay_valid_and_one_check_of_one_walk", func(b *testing.B) {
+		b.SetBytes(int64(len(data)))
+		for i := 0; i < b.N; i++ {
+			json.Valid(data)
+			CheckResponseErrorForJsonRpcBatch(data, 200)
+		}
+	})
+	b.Run("relay_valid_and_two_checks_of_two_walks", func(b *testing.B) {
+		b.SetBytes(int64(len(data)))
+		for i := 0; i < b.N; i++ {
+			json.Valid(data)
+			twoWalkJsonRpcBatch(data)
 			twoWalkJsonRpcBatch(data)
 		}
 	})

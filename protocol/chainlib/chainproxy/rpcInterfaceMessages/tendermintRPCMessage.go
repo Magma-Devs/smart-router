@@ -32,7 +32,7 @@ type TendermintMessageResponse struct {
 
 // CheckResponseError classifies a Tendermint JSON-RPC response. The envelope
 // shape check (malformed bytes, missing-both-fields, error:null normalisation,
-// top-level error extraction) is delegated to checkJsonrpcEnvelope; this
+// top-level error extraction) is delegated to classifyJsonrpcEnvelope; this
 // method adds the Tendermint-specific success-path inspection of the embedded
 // `{"response": {"code": N, "log": M}}` payload that Tendermint nodes use to
 // signal application-level errors over an otherwise-200 envelope.
