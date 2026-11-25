@@ -361,9 +361,13 @@ An open stream is not enough on its own: grpc-go also writes `UNAVAILABLE` when 
    | `height N must be less than or equal to the current blockchain height M` | 3201 `CHAIN_BLOCK_NOT_FOUND` |
    | `tx (HASH) not found` | 3202 `CHAIN_TX_NOT_FOUND` |
    | `timed out waiting for tx to be included in a block` | 2019 `NODE_ABORTED` |
+   | `height must be greater than 0, but got N`, `heights must be non-negative`, `page should be within [1, N] range, given M` with M below 1, an `order_by` error, `maximum query length exceeded`, a search query that does not parse or compile, `no evidence was provided`, `evidence.ValidateBasic failed: …`, `failed to add evidence: Invalid evidence: …` | 4003 `USER_INVALID_PARAMS`: the first node's answer, no retry (MAG-5760) |
+   | `min height N can't be greater than max height M`, `page should be within [1, N] range, given M` with M of 1 or more | 3205 `CHAIN_DATA_NOT_AVAILABLE`: retried, not at fault. CometBFT clamps a range to the node's own base and height, and counts pages from its own index (MAG-5760) |
    | anything else | 2003 `NODE_INTERNAL_ERROR`, as before |
 
    `broadcast_tx_commit` prefixes a mempool refusal with `error on broadcastTxCommit: `; the rows allow it. A batch is classified with its HTTP status for a code. A row anchored on an element's "Internal error: " gives an element's internal error with a sentence above the verdict it gets alone; with any other data it keeps main's batch verdict, `UNKNOWN_ERROR`, and the data reaches no row after it. A batch's text joins its elements' messages, which may echo the caller, so that row blames no endpoint.
+
+4. **An application's own text takes no verdict about the node (MAG-5760).** A failed `abci_query` answers inside an ordinary reply with the application's code, codespace and log. The Tendermint reader writes it as `common.ABCIQueryFailureMessage`, "abci query failed: code <code>, codespace <codespace>: <log>". The log is the application's text, not the node's: an application error, or a CosmWasm contract's own error. `ClassifyError` skips every row whose verdict speaks for the node, at fault (`EndpointAtFault`) or rate-limited (`IsRateLimited`), for a text the reader wrote that way. Rows about the request or the chain still apply ("insufficient funds", "account not found"), and a log no such row reads is `UNKNOWN_ERROR`, as before. It is the move the JSON-RPC table makes for a revert's reason, which is read before the message rows (MAG-5385).
 
 ### Mapping Registration
 
@@ -716,7 +720,7 @@ caller's bad request instead of going to another provider.
 | --- | --- | --- | --- |
 | body: "endpoint/route/path not found" | `NODE_ENDPOINT_NOT_FOUND` | yes | no (node-capability) |
 | body: "method not allowed" | `NODE_METHOD_NOT_ALLOWED` | yes | no (node-capability) |
-| body: sidecar/gateway "block beyond head"; `400` + "unknown block" | `CHAIN_BLOCK_NOT_FOUND` | yes | no (data-scope) |
+| body: the sidecar's or the gateway's "block beyond head" sentence, at the start of the message (MAG-5760); `400` + "unknown block" | `CHAIN_BLOCK_NOT_FOUND` | yes | no (data-scope) |
 | `500` + "is not available, lowest height" (Cosmos) | `CHAIN_STATE_PRUNED` | yes | no (data-scope) |
 | `500` + "decoding bech32 failed" (Cosmos) | `USER_INVALID_PARAMS` | no | no |
 | `500` + "unable to retrieve header and parent" (sidecar) | `CHAIN_BLOCK_NOT_FOUND` | yes | no (data-scope) |

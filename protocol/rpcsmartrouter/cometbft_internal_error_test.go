@@ -2,6 +2,7 @@ package rpcsmartrouter
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -46,6 +47,14 @@ func cometBFTNode(t *testing.T, status int, body string, hits *atomic.Int64) str
 // provider's endpoint.
 func sendToCometBFTNode(t *testing.T, chainID, nodeURL, request string, optimizer routersession.ProviderOptimizer) (*common.RelayResult, *routersession.Endpoint) {
 	t.Helper()
+	result, endpoints, _ := sendToCometBFTNodes(t, chainID, request, optimizer, nodeURL)
+	return result, endpoints[0]
+}
+
+// sendToCometBFTNodes is sendToCometBFTNode over one provider per node URL. It also returns the
+// router, whose session manager says which providers are held off.
+func sendToCometBFTNodes(t *testing.T, chainID, request string, optimizer routersession.ProviderOptimizer, nodeURLs ...string) (*common.RelayResult, []*routersession.Endpoint, *RPCSmartRouterServer) {
+	t.Helper()
 	ctx := context.Background()
 
 	spec, err := specutils.GetSpecFromLocalDirs([]string{"../../specs/"}, "COSMOSHUB")
@@ -56,12 +65,18 @@ func sendToCometBFTNode(t *testing.T, chainID, nodeURL, request string, optimize
 
 	rpcEndpoint := &routersession.RPCEndpoint{ChainID: chainID, ApiInterface: spectypes.APIInterfaceTendermintRPC}
 	csm := routersession.NewConsumerSessionManager(rpcEndpoint, optimizer, nil, "test-router", routersession.NewActiveSubscriptionProvidersStorage())
-	connection, err := routersession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: nodeURL}, 5, "")
-	require.NoError(t, err)
-	endpoint := &routersession.Endpoint{NetworkAddress: nodeURL, Enabled: true, DirectConnections: []routersession.DirectRPCConnection{connection}}
-	provider := routersession.NewConsumerSessionWithProvider("cometbft-"+t.Name(), []*routersession.Endpoint{endpoint}, 100000, 1, 1)
-	provider.StaticProvider = true
-	require.NoError(t, csm.UpdateAllProviders(1, map[uint64]*routersession.ConsumerSessionsWithProvider{0: provider}, nil))
+	endpoints := make([]*routersession.Endpoint, 0, len(nodeURLs))
+	providers := map[uint64]*routersession.ConsumerSessionsWithProvider{}
+	for i, nodeURL := range nodeURLs {
+		connection, err := routersession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: nodeURL}, 5, "")
+		require.NoError(t, err)
+		endpoint := &routersession.Endpoint{NetworkAddress: nodeURL, Enabled: true, DirectConnections: []routersession.DirectRPCConnection{connection}}
+		provider := routersession.NewConsumerSessionWithProvider(fmt.Sprintf("cometbft-%d-%s", i, t.Name()), []*routersession.Endpoint{endpoint}, 100000, 1, 1)
+		provider.StaticProvider = true
+		providers[uint64(i)] = provider
+		endpoints = append(endpoints, endpoint)
+	}
+	require.NoError(t, csm.UpdateAllProviders(1, providers, nil))
 
 	logs, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
 	require.NoError(t, err)
@@ -82,7 +97,7 @@ func sendToCometBFTNode(t *testing.T, chainID, nodeURL, request string, optimize
 	callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	result, _ := server.SendParsedRelay(callCtx, nil, protocolMessage)
-	return result, endpoint
+	return result, endpoints, server
 }
 
 func cometBFTInternalError(data string) string {
