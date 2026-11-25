@@ -122,7 +122,8 @@ type relayEndAttempt struct {
 
 	// Not written: what the relay-level fields are derived from.
 	reply       *pairingtypes.RelayReply
-	statusCode  int // the reply's HTTP status, which a GraphQL write's rows read beside its body
+	statusCode  int    // the reply's HTTP status, which a GraphQL write's rows read beside its body
+	statusBody  []byte // the body of an upstream's error status on a transport attempt (a gateway's 503), read the same way
 	routerError *common.RouterError
 	transport   bool // a protocol error: no node reply came back
 }
@@ -489,8 +490,8 @@ func relayEndAttemptsOf(dispatched []routersession.Dispatch, start time.Time, su
 // readWriteOutcomes fills each answered attempt's write_outcome when the request is its chain's
 // write on a chain whose list reads each copy: over gRPC (MAG-5186) a copy that succeeded ran and a
 // node error is read by the chain's write rows; over GraphQL (MAG-4909) every reply is read by them,
-// its body and its status. An attempt with no reply has its outcome (timeout, transport_error,
-// cancelled) and no reading.
+// its body and its status, an upstream's error status with a body included. An attempt with no
+// reply has its outcome (timeout, transport_error, cancelled) and no reading.
 func (attempts relayEndAttempts) readWriteOutcomes(protocolMessage chainlib.ProtocolMessage) {
 	if protocolMessage == nil {
 		return
@@ -502,6 +503,9 @@ func (attempts relayEndAttempts) readWriteOutcomes(protocolMessage chainlib.Prot
 			return
 		}
 		read = func(attempt *relayEndAttempt) (string, bool) {
+			if attempt.transport || attempt.reply == nil {
+				return "", false
+			}
 			reading, known := message.WriteCopyOfReply(attempt.reply.Data, attempt.outcome != attemptOutcomeOK)
 			return reading.Outcome.String(), known
 		}
@@ -510,7 +514,11 @@ func (attempts relayEndAttempts) readWriteOutcomes(protocolMessage chainlib.Prot
 			return
 		}
 		read = func(attempt *relayEndAttempt) (string, bool) {
-			outcome, known := message.WriteOutcome(attempt.reply.Data, attempt.statusCode)
+			body := attempt.statusBody
+			if attempt.reply != nil {
+				body = attempt.reply.Data
+			}
+			outcome, known := message.WriteOutcome(body, attempt.statusCode)
 			return outcome.String(), known
 		}
 	default:
@@ -518,7 +526,7 @@ func (attempts relayEndAttempts) readWriteOutcomes(protocolMessage chainlib.Prot
 	}
 	for i := range attempts {
 		attempt := &attempts[i]
-		if attempt.reply == nil || attempt.transport {
+		if attempt.reply == nil && attempt.statusBody == nil {
 			continue
 		}
 		if outcome, known := read(attempt); known {
@@ -568,6 +576,14 @@ func relayEndProtocolErrorAttempt(protocolError relaycore.RelayError, ranOutOfRo
 	}
 	attempt.outcome = protocolErrorOutcome(protocolError, ranOutOfRoad)
 	attempt.errorCode = relayEndCode(protocolError.RouterError)
+	// An upstream that answered with an error status came back without a node reply, but what it
+	// sent is what a GraphQL write's rows read (a gateway's 503 is "may have run", MAG-4909), so the
+	// attempt keeps the body beside the status.
+	var httpErr *routersession.HTTPStatusError
+	if errors.As(protocolError.Err, &httpErr) {
+		attempt.statusCode = httpErr.StatusCode
+		attempt.statusBody = httpErr.Body
+	}
 	if err := protocolError.GetError(); err != nil {
 		attempt.message = relayEndText(err.Error())
 	}
@@ -648,9 +664,10 @@ func relayEndWriteUnknownCode(cause error, attempts relayEndAttempts, ranOutOfRo
 		}
 	}
 	// A node's reply settles its upstream, unless its chain's write rows read it as "may have run"
-	// (MAG-4909, unclearWriteOutcomeFor): then the reply is why the outcome is open.
+	// (MAG-4909, unclearWriteOutcomeFor): then the reply is why the outcome is open. The same for an
+	// upstream's error status whose body the rows read so, a gateway's 503.
 	for i := range attempts {
-		if !attempts[i].transport && attempts[i].writeOutcome == rpcInterfaceMessages.GraphQLWriteMayHaveRun.String() {
+		if attempts[i].writeOutcome == rpcInterfaceMessages.GraphQLWriteMayHaveRun.String() {
 			return attempts[i].errorCode
 		}
 	}

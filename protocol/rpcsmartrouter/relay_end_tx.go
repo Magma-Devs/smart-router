@@ -211,9 +211,8 @@ func suiGRPCExecution(reply []byte) (hash, status, errorText string) {
 
 // suiGRPCRequestDigest is the digest of the transaction an ExecuteTransaction request carries, by
 // Sui's formula (rpcInterfaceMessages.SuiTransactionDataDigest), or "" when the request holds no
-// transaction bytes. The
-// transaction is the request's field 1, a Transaction whose BCS is field 1, a Bcs whose value is
-// field 2. A JSON request names the same fields, with the bytes in base64.
+// transaction bytes. The transaction is the request's field 1, a Transaction whose BCS is field 1,
+// a Bcs whose value is field 2. A JSON request names the same fields, with the bytes in base64.
 func suiGRPCRequestDigest(protocolMessage chainlib.ProtocolMessage) string {
 	grpcMessage, ok := protocolMessage.GetRPCMessage().(*rpcInterfaceMessages.GrpcMessage)
 	if !ok || grpcMessage == nil {

@@ -1,6 +1,7 @@
 package rpcsmartrouter
 
 import (
+	"cmp"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -29,13 +30,14 @@ func TestRelayEnd_SuiGraphQLWrites(t *testing.T) {
 		refusedBcs = `{"data":null,"errors":[{"message":"Invalid BCS-encoded TransactionData: unexpected end of input","path":["executeTransaction"],"extensions":{"code":"BAD_USER_INPUT"}}]}`
 	)
 	for i, c := range []struct {
-		name           string
-		a, b           string
-		delayA, delayB time.Duration // a copy that ran ends the relay, so a later one is cancelled
-		outcome        string
-		errorCode      string
-		txHash         string
-		writeOutcomes  [2]any // a's and b's; nil for a copy with no reply
+		name             string
+		a, b             string
+		statusA, statusB int           // 200 when 0
+		delayA, delayB   time.Duration // a copy that ran ends the relay, so a later one is cancelled
+		outcome          string
+		errorCode        string
+		txHash           string
+		writeOutcomes    [2]any // a's and b's; nil for a copy with no reply
 	}{
 		{
 			name: "a copy that ran is the answer", a: ran, b: networkNo, delayA: 150 * time.Millisecond,
@@ -56,6 +58,13 @@ func TestRelayEnd_SuiGraphQLWrites(t *testing.T) {
 			writeOutcomes: [2]any{"rejected", "may_have_run"},
 		},
 		{
+			// A gateway's 503 comes back as a transport error, with no node reply; its body is still
+			// read by the write rows, as unclearWriteOutcomeFor reads it (W11, MAG-5122 T13).
+			name: "every copy a gateway's 503: may have run, the status's code", a: "upstream down", statusA: http.StatusServiceUnavailable, b: "upstream down", statusB: http.StatusServiceUnavailable,
+			outcome: relayOutcomeWriteUnknown, errorCode: common.RouterErrorNodeServiceUnavailable.Name, txHash: suiSnapshotDigest,
+			writeOutcomes: [2]any{"may_have_run", "may_have_run"},
+		},
+		{
 			name: "every copy refused: the node's error", a: refusedBcs, b: refusedBcs,
 			outcome: relayOutcomeNodeError, errorCode: common.RouterErrorUserInvalidRequest.Name, txHash: suiSnapshotDigest,
 			writeOutcomes: [2]any{"rejected", "rejected"},
@@ -64,8 +73,8 @@ func TestRelayEnd_SuiGraphQLWrites(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			tc := suiWriteOf(t, suiEffectsQuery)
 			chainParser := tc.parser(t)
-			a := writeUpstream{name: "a-" + t.Name(), status: http.StatusOK, body: c.a, delay: c.delayA}
-			b := writeUpstream{name: "b-" + t.Name(), status: http.StatusOK, body: c.b, delay: c.delayB}
+			a := writeUpstream{name: "a-" + t.Name(), status: cmp.Or(c.statusA, http.StatusOK), body: c.a, delay: c.delayA}
+			b := writeUpstream{name: "b-" + t.Name(), status: cmp.Or(c.statusB, http.StatusOK), body: c.b, delay: c.delayB}
 			_, server := newTwoPrimaryWriteServer(t, tc, chainParser, [2]writeUpstream{a, b})
 
 			guid := uint64(4909_000 + i)

@@ -313,9 +313,9 @@ func graphQLClassifiedOfKind(kind graphQLVerdictKind, status int) *common.Router
 	}
 }
 
-// graphQLKindOfStatus reads the verdict kind the registry's REST rows give a bare status. Only a
-// write's error status uses it: writes still stand on the shared rows (MAG-5122), reads on
-// statusTableVerdict.
+// graphQLKindOfStatus reads the verdict kind the registry's REST rows give a bare status. Only the
+// error status of a write on a chain without write rows uses it (writeVerdict, the shared rows); a
+// chain's write rows and every read use statusTableVerdict.
 func graphQLKindOfStatus(status int) graphQLVerdictKind {
 	classified := common.ClassifyError(nil, common.ChainFamilyUnknown, common.TransportREST, status, "")
 	switch {
