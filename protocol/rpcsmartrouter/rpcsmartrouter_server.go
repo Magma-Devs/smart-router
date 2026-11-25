@@ -2435,6 +2435,13 @@ func primaryLookupVerdict(cacheError error, cacheReply *pairingtypes.CacheRelayR
 	if hit && !usableCachedReply(apiInterface, cacheReply.GetReply().Data) {
 		hit, unusable = false, true
 	}
+	// An entry that answers with nothing, written by a router from before MAG-5249 or by another
+	// writer, is no hit either: it is passed over as a miss, so the request goes to a node, whose
+	// answer then takes the entry's place. A miss, not an error, because the entry is a well-formed
+	// reply that this router simply does not serve.
+	if hit && emptyResultReason(apiInterface, cacheReply.GetReply().Data) != "" {
+		hit = false
+	}
 	outcome = metrics.ClassifyCacheLookupOutcome(cacheError, hit)
 	if unusable {
 		outcome = metrics.CacheOutcomeError
@@ -5179,10 +5186,12 @@ func skipCacheWriteAfterDegrade(ctx context.Context, relayProcessor *relaycore.R
 // - Cache is not active
 // - Quorum is enabled (quorum requires fresh endpoint validation)
 // - Request is stateful, node-bound or selects a GraphQL never-cache field (cacheExclusionReason)
+// - Request is pinned to a node by router-select-provider or router-stickiness (nodePinDirective)
 // - Response is a node error
 // - Response body is larger than cacheMaxEntryBytes (--cache-max-entry-bytes)
 // - Requested block is NOT_APPLICABLE
-// - Reply answers nothing (a null, {}, an error document) for a concrete block at or below the router's tip (noAnswerForBlockAtOrBelowTip)
+// - Reply is a JSON-RPC or Tendermint result of null or [], or a batch with such an element (emptyResultReason)
+// - REST reply answers nothing ({}, an error document) for a concrete block at or below the router's tip (noAnswerForBlockAtOrBelowTip)
 // - Reply is a GraphQL reply with an error, or with a root field that is null or [] (graphQLReplyCacheExclusion)
 // - Requested block is a tag the resolution above leaves negative (EARLIEST/PENDING/SAFE/FINALIZED)
 func (rpcss *RPCSmartRouterServer) tryCacheWrite(
@@ -5219,6 +5228,18 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 		utils.FormatDebug("cache write skipped: "+reason+" request",
 			utils.LogAttr("api", protocolMessage.GetApi().Name),
 			utils.LogAttr("why", cacheExclusionWhy(protocolMessage)),
+			utils.LogAttr("GUID", ctx),
+		)
+		return
+	}
+
+	// A pinned request is answered by the node it is pinned to, never from the cache, and its
+	// answer stays with it: it is one node's view, which the caller asked for, not the chain's
+	// (MAG-5249; nodePinDirective). An exclusion list is not a pin and its answer is written.
+	if pin := nodePinDirective(protocolMessage); pin != "" {
+		utils.FormatDebug("cache write skipped: the request is pinned to a node",
+			utils.LogAttr("api", protocolMessage.GetApi().Name),
+			utils.LogAttr("directive", pin),
 			utils.LogAttr("GUID", ctx),
 		)
 		return
@@ -5294,10 +5315,23 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 		return
 	}
 
-	// No answer for a block the router knows exists (a JSON-RPC null, a REST {} or error document)
-	// is one node's answer, not the chain's. Written, it would be replayed to every caller of that
-	// block as a gap (MAG-4124, MAG-5307). The caller that drew it still gets it; only the replay is
-	// refused.
+	// A JSON-RPC or Tendermint result of null or [], in a single reply or in any element of a batch,
+	// can be a lagging node's miss as easily as the chain's answer, and the cache cannot tell the two
+	// apart. Written, it would be replayed to every caller as "not there" for the entry's lifetime
+	// (MAG-5249, MAG-4124, MAG-5201). The caller that drew it still gets it; only the replay is refused.
+	if why := emptyResultReason(apiInterface, relayResult.Reply.Data); why != "" {
+		utils.FormatDebug("cache write skipped: the reply answers with nothing",
+			utils.LogAttr("chainId", chainId),
+			utils.LogAttr("api", apiName),
+			utils.LogAttr("why", why),
+			utils.LogAttr("GUID", ctx),
+		)
+		return
+	}
+
+	// No answer for a block the router knows exists (a REST {} or error document) is one node's
+	// answer, not the chain's. Written, it would be replayed to every caller of that block as a gap
+	// (MAG-5307). The caller that drew it still gets it; only the replay is refused.
 	if tip := int64(rpcss.getLatestBlock()); noAnswerForBlockAtOrBelowTip(requestedBlock, tip, relayResult.Reply.Data) {
 		utils.FormatDebug("cache write skipped: no answer for a block at or below the tip",
 			utils.LogAttr("chainId", chainId),
@@ -5832,7 +5866,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 						// Returns the outcome alongside the latency so the span, the counter and
 						// the response header all describe the same classification of the same
 						// lookup, rather than each re-deriving it from cacheError.
-						cacheLatencyMs, primaryOutcome, unusable := func() (float64, string, bool) {
+						cacheLatencyMs, primaryOutcome, unusable, cacheHit := func() (float64, string, bool, bool) {
 							_, cacheSpan := tracing.StartInternalSpan(ctx, tracing.SpanCacheLookup)
 							defer cacheSpan.End()
 							cacheStart := time.Now()
@@ -5855,7 +5889,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 							// error, and the request proceeds as on a miss.
 							cacheHit, unusable, outcome := primaryLookupVerdict(cacheError, cacheReply, apiInterface)
 							tracing.RecordCacheResult(ctx, cacheSpan, metrics.CacheTierPrimary, outcome, cacheHit, latencyMs)
-							return latencyMs, outcome, unusable
+							return latencyMs, outcome, unusable, cacheHit
 						}()
 						cacheReport.PrimaryOutcome = primaryOutcome
 
@@ -5893,8 +5927,16 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 							)
 						}
 						rpcss.smartRouterEndpointMetrics.RecordCacheResult(chainId, apiInterface, protocolMessage.GetApi().GetName(), metrics.CacheTierPrimary, primaryOutcome, cacheLatencyMs)
+						if cacheError == nil && reply != nil && !unusable && !cacheHit {
+							// The entry answers with nothing (primaryLookupVerdict): recorded as a miss,
+							// and the request proceeds to a node (MAG-5249).
+							utils.FormatDebug("cache hit passed over: the entry answers with nothing",
+								utils.LogAttr("GUID", ctx),
+								utils.LogAttr("why", emptyResultReason(apiInterface, reply.Data)),
+							)
+						}
 						// handle cache reply: primaryOutcome is a hit exactly on this branch
-						if cacheError == nil && reply != nil && !unusable {
+						if cacheHit {
 							// Cache hit - return cached response
 							utils.FormatDebug("cache hit",
 								utils.LogAttr("chainId", chainId),
