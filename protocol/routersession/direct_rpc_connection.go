@@ -1590,6 +1590,9 @@ func (g *GRPCDirectRPCConnection) warmDescriptorCache() {
 			utils.LogAttr("url", g.nodeUrl.Url))
 		return
 	}
+	// The node's own list answers, for one reflection-timeout, every service it does not list
+	// (MAG-5760).
+	g.resolver.noteServiceList(services)
 
 	descriptorSource, err := rpcInterfaceMessages.DescriptorSourceForGrpcConfig(&g.nodeUrl.GrpcConfig, rpcInterfaceMessages.DescriptorSourceFromServer(cl))
 	if err != nil {
@@ -1691,7 +1694,7 @@ func resolveServiceFrom(descriptorSource grpcurl.DescriptorSource, service strin
 
 	serviceDescriptor, ok := descriptor.(*desc.ServiceDescriptor)
 	if !ok {
-		return nil, utils.FormatError("descriptor is not a ServiceDescriptor", nil,
+		return nil, utils.FormatError("descriptor is not a ServiceDescriptor", errNotDescribed,
 			utils.LogAttr("service", service))
 	}
 

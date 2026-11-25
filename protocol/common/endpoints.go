@@ -426,6 +426,11 @@ type GrpcConfig struct {
 	// ReflectionTimeout is the timeout for gRPC reflection queries.
 	// Only used when DescriptorSource is "reflection" or "hybrid".
 	// Default: 5s
+	//
+	// It is also how long the router remembers that the node does not describe a service or a
+	// method, and, in "reflection" mode, how long it uses the node's service list to answer for
+	// the services the node does not list. A service the node starts serving is found within one
+	// reflection-timeout (MAG-5760).
 	ReflectionTimeout time.Duration `yaml:"reflection-timeout,omitempty" json:"reflection-timeout,omitempty" mapstructure:"reflection-timeout"`
 
 	// AllowInsecure permits grpc:// (non-TLS) connections.
