@@ -90,6 +90,46 @@ func TestWriteLock_ForcesAWriteTheSpecMarksAtAnotherLevel(t *testing.T) {
 	require.Equal(t, []string{"eth_sendRawTransaction"}, report.Forced[types.APIInterfaceJsonRPC])
 }
 
+// An inherited api sits in every collection that inherits it, and the gauge counts apis: Starknet keeps
+// its writes in one collection the spec disables and that its served collections inherit. One cleared
+// write there is forced in every served collection, counted and named once, and the disabled
+// collection, which the parser never reads, is left as the spec wrote it, as a disabled api is.
+func TestWriteLock_CountsAnInheritedWriteOnce(t *testing.T) {
+	template := types.CollectionData{ApiInterface: types.APIInterfaceJsonRPC, Type: "POST", InternalPath: "HTTP-ONLY"}
+	inheriting := func(internalPath string) *types.ApiCollection {
+		return &types.ApiCollection{
+			Enabled:         true,
+			CollectionData:  types.CollectionData{ApiInterface: types.APIInterfaceJsonRPC, Type: "POST", InternalPath: internalPath},
+			InheritanceApis: []*types.CollectionData{&template},
+		}
+	}
+	spec := types.Spec{Index: "STRKX", Name: "STRKX", Enabled: true, ApiCollections: []*types.ApiCollection{
+		{CollectionData: template, Apis: []*types.Api{api("starknet_addInvokeTransaction", 0), api("starknet_blockNumber", 0)}},
+		inheriting(""),
+		inheriting("/rpc/v0_8"),
+	}}
+
+	expanded, report, err := ExpandSpecWithWriteLock(catalogOf(spec), "STRKX")
+	require.NoError(t, err)
+	served := 0
+	for _, collection := range expanded.ApiCollections {
+		for _, entry := range collection.Apis {
+			if entry.Name != "starknet_addInvokeTransaction" {
+				continue
+			}
+			if !collection.Enabled {
+				require.Equal(t, uint32(0), entry.Category.Stateful, "the disabled collection is left alone")
+				continue
+			}
+			served++
+			require.Equal(t, uint32(1), entry.Category.Stateful, "served under %q", collection.CollectionData.InternalPath)
+		}
+	}
+	require.Equal(t, 2, served, "setup: both served collections inherit the write")
+	require.Equal(t, []string{"starknet_addInvokeTransaction"}, report.Forced[types.APIInterfaceJsonRPC], "one api, named once")
+	require.Equal(t, 1, report.Count(types.APIInterfaceJsonRPC), "the gauge counts apis, not the collections that hold one")
+}
+
 // The lock speaks every interface's identity: a name on JSON-RPC, Tendermint RPC, gRPC and GraphQL
 // (a URI-form Tendermint request resolves to the same api at relay time), the verb and the full route
 // on REST, where the collection's internal path is part of the route.

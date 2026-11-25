@@ -84,8 +84,13 @@ func enforceWriteMethods(spec *types.Spec, catalog map[string]types.Spec) WriteL
 	report := WriteLockReport{ChainID: spec.Index}
 	table := writeMethods()
 	var collections []*types.ApiCollection
+	// An inherited api sits in every collection that inherits it, so the report names each api once.
+	reported := map[string]bool{}
 	for i, collection := range spec.ApiCollections {
-		if collection == nil {
+		// A disabled collection is never served (the parser reads enabled collections only), so the lock
+		// leaves it alone, as it does a disabled api. Its apis that other collections inherit are forced
+		// there.
+		if collection == nil || !collection.Enabled {
 			continue
 		}
 		var forced []int
@@ -113,6 +118,11 @@ func enforceWriteMethods(spec *types.Spec, catalog map[string]types.Spec) WriteL
 			api := *collection.Apis[j]
 			api.Category.Stateful = StatefulAllProviders
 			copied.Apis[j] = &api
+			key := writeMethodKey(collection.CollectionData.ApiInterface, collection.CollectionData.Type, collection.CollectionData.InternalPath, api.Name)
+			if reported[key] {
+				continue
+			}
+			reported[key] = true
 			if report.Forced == nil {
 				report.Forced = map[string][]string{}
 			}
