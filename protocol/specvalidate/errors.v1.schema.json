@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Magma-Devs/smart-router/protocol/specvalidate/errors.v1.schema.json",
+  "title": "A chain spec's errors section, schema version 1",
+  "description": "The structure of PRD section 2 (per-chain error classification). The rules that need the router's registry (section 4) are cmd/specvalidate's.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "shapes": { "type": "array", "items": { "$ref": "#/$defs/shape" } },
+    "rows": { "type": "array", "items": { "$ref": "#/$defs/row" } },
+    "write_rows": { "type": "array", "items": { "$ref": "#/$defs/interface" }, "uniqueItems": true },
+    "plain_text": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+    "inherit": { "type": "boolean" }
+  },
+  "$defs": {
+    "interface": { "enum": ["jsonrpc", "tendermintrpc", "rest", "grpc", "graphql"] },
+    "pointer": { "type": "string", "pattern": "^(/([^~/]|~[01])*)*$" },
+    "matchValue": { "type": ["number", "string", "boolean", "null"] },
+    "row": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z][a-z0-9]*\\.[a-z0-9]+(_[a-z0-9]+)*$" },
+        "interface": {
+          "oneOf": [
+            { "$ref": "#/$defs/interface" },
+            { "type": "array", "items": { "$ref": "#/$defs/interface" }, "minItems": 1, "uniqueItems": true }
+          ]
+        },
+        "methods": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+        "scope": { "enum": ["read", "write", "both"] },
+        "answer": { "type": "boolean" },
+        "status": { "type": ["integer", "string"] },
+        "code": { "$ref": "#/$defs/matchValue" },
+        "contains": { "type": "string", "minLength": 1 },
+        "regex": { "type": "string", "minLength": 1 },
+        "field": { "enum": ["text", "detail"] },
+        "path": { "type": ["boolean", "string"] },
+        "at": { "$ref": "#/$defs/pointer" },
+        "present": { "type": "boolean" },
+        "error": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$" },
+        "class": { "enum": ["C2", "C3", "C4", "C5"] },
+        "reason": { "enum": ["invalid", "over_limit", "not_found", "pruned", "behind", "limit", "version", "method_off"] },
+        "write": { "enum": ["took_it", "refused_it", "may_have_run"] },
+        "source": { "type": "string", "minLength": 1 },
+        "disabled": { "type": "boolean" },
+        "note": { "type": "string" }
+      }
+    },
+    "shape": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "interface": { "$ref": "#/$defs/interface" },
+        "methods": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+        "code": { "$ref": "#/$defs/pointer" },
+        "space": { "$ref": "#/$defs/pointer" },
+        "message": { "$ref": "#/$defs/pointer" },
+        "when": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["at"],
+          "properties": {
+            "at": { "$ref": "#/$defs/pointer" },
+            "equals": { "$ref": "#/$defs/matchValue" },
+            "not": { "$ref": "#/$defs/matchValue" }
+          }
+        },
+        "source": { "type": "string", "minLength": 1 },
+        "disabled": { "type": "boolean" },
+        "note": { "type": "string" }
+      }
+    }
+  }
+}
