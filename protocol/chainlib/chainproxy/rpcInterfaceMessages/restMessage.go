@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/goccy/go-json"
@@ -20,15 +21,41 @@ const (
 // cosmosTxResponse represents Cosmos SDK transaction broadcast response structure
 type cosmosTxResponse struct {
 	TxResponse struct {
-		Code   int    `json:"code"`
-		RawLog string `json:"raw_log"`
+		Height    json.RawMessage `json:"height"`
+		Code      int             `json:"code"`
+		Codespace string          `json:"codespace"`
+		RawLog    string          `json:"raw_log"`
 	} `json:"tx_response"`
 }
+
+// refused reports whether a broadcast's reply is the node refusing the transaction: a non-zero code
+// at height 0. BROADCAST_MODE_BLOCK, served before Cosmos SDK v0.47, answers once the transaction is
+// in a block, with the block's height and the execution's code: the transaction ran, and a failure
+// there is its outcome, the same from every node, not a refusal. A refusal at CheckTx has height 0
+// in every mode, and a SYNC or ASYNC reply never has one. The gateway writes the int64 height as a
+// string; a number is read too.
+func (tx cosmosTxResponse) refused() bool {
+	if tx.TxResponse.Code == cosmosSDKSuccessCode {
+		return false
+	}
+	height, err := strconv.ParseInt(strings.Trim(string(tx.TxResponse.Height), `"`), 10, 64)
+	inBlock := err == nil && height > 0
+	return !inBlock
+}
+
+// cosmosBroadcastPath is Cosmos SDK's REST transaction broadcast.
+const cosmosBroadcastPath = "/cosmos/tx/v1beta1/txs"
 
 type RestMessage struct {
 	Msg      []byte
 	Path     string
 	SpecPath string
+	// Broadcast is set when the request matched an api the spec marks stateful
+	// (CONSISTENCY_SELECT_ALL_PROVIDERS), a write sent to every provider, or is a POST to Cosmos SDK's
+	// broadcast path, which a spec may not list (chainlib.isRESTBroadcast). Only its reply's
+	// tx_response.code is the node's verdict on the request. A read of a transaction that was
+	// included and failed carries the same non-zero code in its correct answer (MAG-5326).
+	Broadcast bool
 	chainproxy.BaseMessage
 }
 
@@ -48,17 +75,24 @@ func (rm *RestMessage) GetRawRequestHash() ([]byte, error) {
 // it adds on JSON-RPC: a write broadcast keeps waiting for a sibling's success instead of taking
 // the first refusal as the result, and the error registry classifies the reply — its REST rows
 // decide whether a read is retried elsewhere and whether the endpoint is scored. A 2xx is a
-// success unless its body carries a Cosmos transaction error.
+// success unless the request is a Broadcast and its body carries a Cosmos transaction error, or
+// it is Tron refusing a broadcast transaction (checkTronBroadcast, MAG-5323). On any other
+// request a tx_response is the answer: a GET of a transaction that ran out of gas is that
+// transaction's final record, and every provider answers it the same way. Whether such an error
+// is the node refusing the transaction, which the sender also counts differently, is the narrower
+// question RefusesTransaction answers.
 //
 // A status of 0 is "not set" — a cache entry written before statuses were stored, a test
 // fixture, gRPC's codes.OK on the shared RelayResult — and reads as a success, the way the
 // health gate reads it. A REST upstream always answers with a real status.
 func (jm RestMessage) CheckResponseError(data []byte, httpStatusCode int) (hasError bool, errorMessage string) {
 	if httpStatusCode == 0 || (httpStatusCode >= 200 && httpStatusCode < 300) {
-		if cosmosTxErr, errMsg := checkCosmosTxError(data); cosmosTxErr {
-			return cosmosTxErr, errMsg
+		if jm.Broadcast {
+			if cosmosTxErr, errMsg := checkCosmosTxError(data, jm.apiPath() == cosmosBroadcastPath); cosmosTxErr {
+				return cosmosTxErr, errMsg
+			}
 		}
-		return false, ""
+		return checkTronBroadcast(jm.apiPath(), data)
 	}
 	return true, extractErrorMessage(data, httpStatusCode)
 }
@@ -81,7 +115,13 @@ func ServerErrorIsNodeReply(httpStatusCode int, data []byte) bool {
 
 // checkCosmosTxError detects errors in Cosmos SDK transaction responses
 // Cosmos returns HTTP 200 for both success and failed txs - must check tx_response.code
-func checkCosmosTxError(data []byte) (bool, string) {
+//
+// On the broadcast, a failure at height 0 is the node refusing the transaction, and the message is
+// CosmosTxRefusalMessage: the code and codespace the registry's refusal rows classify by, which
+// the raw_log alone drops (MAG-5451). A BROADCAST_MODE_BLOCK failure with a height (the transaction
+// ran), and a failure on another stateful api, keep the raw_log, as before. A read never gets here:
+// its tx_response is the answer (CheckResponseError, MAG-5326).
+func checkCosmosTxError(data []byte, broadcast bool) (bool, string) {
 	var txResp cosmosTxResponse
 	if err := json.Unmarshal(data, &txResp); err != nil {
 		return false, "" // Not a Cosmos tx response, treat as success
@@ -89,10 +129,43 @@ func checkCosmosTxError(data []byte) (bool, string) {
 
 	// Non-zero code indicates error in Cosmos SDK
 	if txResp.TxResponse.Code != cosmosSDKSuccessCode {
+		if broadcast && txResp.refused() {
+			return true, common.CosmosTxRefusalMessage(txResp.TxResponse.Codespace, uint32(txResp.TxResponse.Code), txResp.TxResponse.RawLog)
+		}
 		return true, txResp.TxResponse.RawLog
 	}
 
 	return false, ""
+}
+
+// RefusesTransaction reports whether a 2xx reply is the node refusing the transaction the request
+// broadcast. Two readers: on the Cosmos broadcast path, a tx_response.code != 0 at height 0
+// (MAG-5451); on Tron's broadcast paths, checkTronBroadcast (MAG-5323). The sender marks such a
+// reply a node error, as it does any reply outside 2xx, and never resets or adds to the refuser's
+// failure count for it. A Cosmos BROADCAST_MODE_BLOCK reply with a height is the transaction's
+// outcome, not a refusal (cosmosTxResponse.refused).
+//
+// The sender asks it only of a reply CheckResponseError called an error, and a tx_response is one
+// only on a Broadcast (MAG-5326). The Cosmos reader is gated to the broadcast path as well, the way
+// Tron's is gated to Tron's own broadcast paths.
+func (jm RestMessage) RefusesTransaction(data []byte) bool {
+	path := jm.apiPath()
+	if path == cosmosBroadcastPath {
+		var txResp cosmosTxResponse
+		return json.Unmarshal(data, &txResp) == nil && txResp.refused()
+	}
+	refused, _ := checkTronBroadcast(path, data)
+	return refused
+}
+
+// apiPath is the spec api the request was parsed as, or, on a message built without one, its path
+// without the query.
+func (jm RestMessage) apiPath() string {
+	if jm.SpecPath != "" {
+		return jm.SpecPath
+	}
+	path, _, _ := strings.Cut(jm.Path, "?")
+	return path
 }
 
 // extractErrorMessage attempts to extract error message from response body

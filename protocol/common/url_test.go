@@ -18,9 +18,9 @@ func TestJoinURLPath(t *testing.T) {
 	}{
 		{
 			name:        "absolute path preserves base path (gateway)",
-			base:        "https://g.w.lavanet.xyz:443/gateway/lava/rest/YOUR_LAVA_GATEWAY_KEY",
-			path:        "/cosmos/bank/v1beta1/balances/lava@1ax3pa3eg0k5wnmuj8v3k2yd87a4ka5g9ymwdu3",
-			wantURL:     "https://g.w.lavanet.xyz:443/gateway/lava/rest/YOUR_LAVA_GATEWAY_KEY/cosmos/bank/v1beta1/balances/lava@1ax3pa3eg0k5wnmuj8v3k2yd87a4ka5g9ymwdu3",
+			base:        "https://gateway.example.com:443/gateway/cosmoshub/rest/YOUR_GATEWAY_KEY",
+			path:        "/cosmos/bank/v1beta1/balances/cosmos1ax3pa3eg0k5wnmuj8v3k2yd87a4ka5g9ymwdu3",
+			wantURL:     "https://gateway.example.com:443/gateway/cosmoshub/rest/YOUR_GATEWAY_KEY/cosmos/bank/v1beta1/balances/cosmos1ax3pa3eg0k5wnmuj8v3k2yd87a4ka5g9ymwdu3",
 			wantErr:     false,
 			description: "base path must not be replaced by ResolveReference",
 		},

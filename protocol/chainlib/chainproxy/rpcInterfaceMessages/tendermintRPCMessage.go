@@ -36,10 +36,18 @@ type TendermintMessageResponse struct {
 // method adds the Tendermint-specific success-path inspection of the embedded
 // `{"response": {"code": N, "log": M}}` payload that Tendermint nodes use to
 // signal application-level errors over an otherwise-200 envelope.
+//
+// A broadcast_tx_sync or broadcast_tx_commit result also says whether the node took the
+// transaction, in result.code and result.check_tx.code; a refusal there is a node error too
+// (checkTendermintBroadcast, MAG-5323). A batch is read by CheckResponseErrorForTendermintBatch,
+// which knows no element's method, so a refusal inside one keeps the batch rule.
 func (jm TendermintrpcMessage) CheckResponseError(data []byte, httpStatusCode int) (hasError bool, errorMessage string) {
 	hasErr, msg, resultBytes := checkJsonrpcEnvelope(data, "Tendermint RPC")
 	if hasErr || resultBytes == nil {
 		return hasErr, msg
+	}
+	if refused, refusal := checkTendermintBroadcast(jm.Method, resultBytes); refused {
+		return true, refusal
 	}
 	var inner TendermintMessageResponse
 	if err := json.Unmarshal(resultBytes, &inner); err == nil {

@@ -25,6 +25,14 @@ func classifyDirectRPCError(err error, chainFamily common.ChainFamily, transport
 		return common.RouterErrorUnknown, nil
 	}
 
+	// A JSON gRPC request this node's lookup gave no definition for was never sent (MAG-5675).
+	// NODE_UNIMPLEMENTED is the method not being available here: retried on a provider that may
+	// describe it, and node-capability, which keeps the endpoint off MarkUnhealthy. As an
+	// unrecognised error it marked the endpoint unhealthy.
+	if errors.Is(err, routersession.ErrNoMethodDescriptor) {
+		return common.RouterErrorNodeUnimplemented, common.NewRouterErrorWrapping(common.RouterErrorNodeUnimplemented, err)
+	}
+
 	// The one classification pipeline every node-error path uses: connection shape first, then
 	// the JSON-RPC / gRPC / HTTP code and message, then the registry.
 	classified, _, _ := chainlib.ClassifyNodeErrorWithDetails(err, chainFamily, transport)

@@ -158,6 +158,10 @@ func (m *EndpointMonitor) recordPollObservation(endpointURL string, gen uint64, 
 		if tipBlock > 0 && m.onTipObservation != nil {
 			m.onTipObservation(endpointURL, tipBlock, tipRepeat)
 		}
+		// Every answer, after the tip feed above has judged it (MAG-5080).
+		if answeredBlock > 0 && m.onAnswer != nil {
+			m.onAnswer(endpointURL, answeredBlock)
+		}
 		if publishBlock > 0 {
 			m.publishLocalObservation(endpointURL, publishBlock)
 		}
@@ -267,12 +271,17 @@ func (m *EndpointMonitor) RecordRelayObservation(endpointURL string, gen uint64,
 	}
 
 	// Feed the per-chain tip after releasing obsMu (see recordPollObservation). Both tipBlock and
-	// publishBlock stay 0 unless the write is accepted (generation + monotonic guards pass).
-	var tipBlock, publishBlock int64
+	// publishBlock stay 0 unless the write is accepted (generation + monotonic guards pass);
+	// answeredBlock is set once the generation gate passes, whatever the tip store then does.
+	var tipBlock, publishBlock, answeredBlock int64
 	var tipRepeat bool
 	defer func() {
 		if tipBlock > 0 && m.onTipObservation != nil {
 			m.onTipObservation(endpointURL, tipBlock, tipRepeat)
+		}
+		// Every answer, after the tip feed above has judged it (MAG-5080).
+		if answeredBlock > 0 && m.onAnswer != nil {
+			m.onAnswer(endpointURL, answeredBlock)
 		}
 		if publishBlock > 0 {
 			m.publishLocalObservation(endpointURL, publishBlock)
@@ -285,6 +294,7 @@ func (m *EndpointMonitor) RecordRelayObservation(endpointURL string, gen uint64,
 	if !m.acceptsLocked(endpointURL, gen) {
 		return false
 	}
+	answeredBlock = block
 
 	// Register the endpoint in the observation map (if a relay is the first thing we ever
 	// see for it) so SnapshotObservations — which iterates the map — includes a relay-only

@@ -38,7 +38,7 @@ const (
 	// It can be overridden at process start via CLI flag (see rpcconsumer/rpcsmartrouter).
 	DefaultProbeUpdateWeight float64 = 0.25
 
-	// TODO: find actual numbers from info of latencies of high/mid/low CU from "stats.lavanet.xyz".
+	// TODO: find actual numbers from measured latencies of high/mid/low CU.
 	// Do a distribution and find average factor to multiply the failure cost by.
 	DefaultCuLatencyFactor = LowCuLatencyFactor
 	HighCuLatencyFactor    = 0.01       // for cu > HighCuThreshold

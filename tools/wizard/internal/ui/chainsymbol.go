@@ -80,7 +80,6 @@ var chainMarks = []chainMark{
 	{"agoric", "◬", lipgloss.Color("#E04D63")},
 	{"secret", "▦", lipgloss.Color("#9AA0A6")},
 	{"namada", "◴", lipgloss.Color("#FFFF66")},
-	{"lava", "▰", Brand},
 	{"solana", "◎", lipgloss.Color("#14F195")},
 	{"aptos", "◌", lipgloss.Color("#E8E8E8")},
 	{"sui", "◐", lipgloss.Color("#4DA2FF")},
