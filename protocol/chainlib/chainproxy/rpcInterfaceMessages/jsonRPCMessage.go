@@ -102,6 +102,13 @@ func truncateForLog(data []byte) string {
 // error object like any other.
 func checkJsonrpcEnvelope(data []byte, kind string) (hasError bool, errorMessage string, resultBytes []byte) {
 	scan, err := scanJsonrpcEnvelope(data)
+	return classifyJsonrpcEnvelope(scan, err, data, kind)
+}
+
+// classifyJsonrpcEnvelope is checkJsonrpcEnvelope's verdict for an envelope that is already
+// scanned: scan and err are what scanJsonrpcEnvelope returned for data. The batch walk scans
+// each element as it finds its end, and hands the scan here.
+func classifyJsonrpcEnvelope(scan jsonrpcScanResult, err error, data []byte, kind string) (hasError bool, errorMessage string, resultBytes []byte) {
 	if err != nil {
 		utils.FormatWarning("malformed "+kind+" response", err, utils.LogAttr("data", truncateForLog(data)))
 		return true, fmt.Sprintf("malformed %s response: %v", kind, err), nil
@@ -337,8 +344,8 @@ func NewBatchMessage(msgs []JsonrpcMessage) (JsonrpcBatchMessage, error) {
 // checkJsonrpcEnvelope so the rules stay in lockstep with the single path,
 // including the error:null edge case.
 func CheckResponseErrorForJsonRpcBatch(data []byte, httpStatusCode int) (hasError bool, errorMessage string) {
-	return checkResponseErrorForBatch(data, httpStatusCode, func(element []byte, _ int) (bool, string) {
-		elemHasErr, elemMsg, _ := checkJsonrpcEnvelope(element, "JSON-RPC batch element")
+	return checkResponseErrorForBatch(data, func(scan jsonrpcScanResult, scanErr error, element []byte) (bool, string) {
+		elemHasErr, elemMsg, _ := classifyJsonrpcEnvelope(scan, scanErr, element, "JSON-RPC batch element")
 		return elemHasErr, elemMsg
 	})
 }
@@ -349,12 +356,13 @@ func CheckResponseErrorForJsonRpcBatch(data []byte, httpStatusCode int) (hasErro
 // JSON-RPC walker above only reads the envelope, which is right for EVM-shaped replies and wrong
 // for Tendermint's 200-with-app-error shape.
 func CheckResponseErrorForTendermintBatch(data []byte, httpStatusCode int) (hasError bool, errorMessage string) {
-	return checkResponseErrorForBatch(data, httpStatusCode, TendermintrpcMessage{}.CheckResponseError)
+	return checkResponseErrorForBatch(data, TendermintrpcMessage{}.checkScannedResponse)
 }
 
-// checkResponseErrorForBatch walks a batch reply and classifies every element with elementCheck.
+// checkResponseErrorForBatch walks a batch reply and classifies every element with elementCheck,
+// which gets the element's envelope scan from the walk and does not scan it again.
 // Default mode: a single success masks any sibling faults; BatchNodeErrorOnAny flips that.
-func checkResponseErrorForBatch(data []byte, httpStatusCode int, elementCheck func(element []byte, httpStatusCode int) (bool, string)) (hasError bool, errorMessage string) {
+func checkResponseErrorForBatch(data []byte, elementCheck func(scan jsonrpcScanResult, scanErr error, element []byte) (bool, string)) (hasError bool, errorMessage string) {
 	var (
 		hasAnySuccess bool
 		aggregated    strings.Builder
@@ -366,8 +374,8 @@ func checkResponseErrorForBatch(data []byte, httpStatusCode int, elementCheck fu
 		aggregated.WriteString(msg)
 	}
 
-	walkErr := scanJsonrpcBatchElements(data, func(element []byte) bool {
-		elemHasErr, elemMsg := elementCheck(element, httpStatusCode)
+	walkErr := scanJsonrpcBatchEnvelopes(data, func(scan jsonrpcScanResult, scanErr error, element []byte) bool {
+		elemHasErr, elemMsg := elementCheck(scan, scanErr, element)
 		if elemHasErr {
 			appendFault(elemMsg)
 			return true

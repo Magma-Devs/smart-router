@@ -42,7 +42,14 @@ type TendermintMessageResponse struct {
 // (checkTendermintBroadcast, MAG-5323). A batch is read by CheckResponseErrorForTendermintBatch,
 // which knows no element's method, so a refusal inside one keeps the batch rule.
 func (jm TendermintrpcMessage) CheckResponseError(data []byte, httpStatusCode int) (hasError bool, errorMessage string) {
-	hasErr, msg, resultBytes := checkJsonrpcEnvelope(data, "Tendermint RPC")
+	scan, err := scanJsonrpcEnvelope(data)
+	return jm.checkScannedResponse(scan, err, data)
+}
+
+// checkScannedResponse is CheckResponseError for a reply whose envelope is already scanned: scan
+// and scanErr are what scanJsonrpcEnvelope returned for data. The batch walk calls it per element.
+func (jm TendermintrpcMessage) checkScannedResponse(scan jsonrpcScanResult, scanErr error, data []byte) (hasError bool, errorMessage string) {
+	hasErr, msg, resultBytes := classifyJsonrpcEnvelope(scan, scanErr, data, "Tendermint RPC")
 	if hasErr || resultBytes == nil {
 		return hasErr, msg
 	}

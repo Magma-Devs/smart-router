@@ -29,42 +29,50 @@ type jsonrpcScanResult struct {
 // spec-legal but will not be recognized. No production upstream is known
 // to emit them.
 func scanJsonrpcEnvelope(data []byte) (jsonrpcScanResult, error) {
-	var res jsonrpcScanResult
+	res, _, err := scanJsonrpcEnvelopePrefix(data)
+	return res, err
+}
+
+// scanJsonrpcEnvelopePrefix is scanJsonrpcEnvelope for an object that data starts with and may
+// run past: it also returns the index just past the object's closing brace. A batch walk scans
+// each element with it in place, so the element's end comes from the same pass that reads its
+// "error" and "result" (MAG-5810). Positions in its errors count from the start of data.
+func scanJsonrpcEnvelopePrefix(data []byte) (res jsonrpcScanResult, end int, err error) {
 	pos := SkipJSONWhitespace(data, 0)
 	if pos >= len(data) {
-		return res, errors.New("empty input")
+		return res, 0, errors.New("empty input")
 	}
 	if data[pos] != '{' {
-		return res, fmt.Errorf("expected '{' at position %d, got %q", pos, data[pos])
+		return res, 0, fmt.Errorf("expected '{' at position %d, got %q", pos, data[pos])
 	}
 	pos++
 	pos = SkipJSONWhitespace(data, pos)
 	if pos < len(data) && data[pos] == '}' {
-		return res, nil
+		return res, pos + 1, nil
 	}
 	for {
 		if pos >= len(data) {
-			return res, errors.New("truncated: expected key")
+			return res, 0, errors.New("truncated: expected key")
 		}
 		if data[pos] != '"' {
-			return res, fmt.Errorf("expected string key at position %d, got %q", pos, data[pos])
+			return res, 0, fmt.Errorf("expected string key at position %d, got %q", pos, data[pos])
 		}
 		keyStart := pos + 1
 		keyEnd, next, err := scanString(data, pos)
 		if err != nil {
-			return res, fmt.Errorf("key: %w", err)
+			return res, 0, fmt.Errorf("key: %w", err)
 		}
 		pos = next
 		pos = SkipJSONWhitespace(data, pos)
 		if pos >= len(data) || data[pos] != ':' {
-			return res, fmt.Errorf("expected ':' at position %d", pos)
+			return res, 0, fmt.Errorf("expected ':' at position %d", pos)
 		}
 		pos++
 		pos = SkipJSONWhitespace(data, pos)
 		valueStart := pos
 		valueEnd, err := skipValue(data, pos)
 		if err != nil {
-			return res, fmt.Errorf("value: %w", err)
+			return res, 0, fmt.Errorf("value: %w", err)
 		}
 		key := data[keyStart:keyEnd]
 		// The string(key) == "literal" pattern is optimized to a direct
@@ -78,26 +86,29 @@ func scanJsonrpcEnvelope(data []byte) (jsonrpcScanResult, error) {
 		}
 		pos = SkipJSONWhitespace(data, valueEnd)
 		if pos >= len(data) {
-			return res, errors.New("truncated: expected ',' or '}'")
+			return res, 0, errors.New("truncated: expected ',' or '}'")
 		}
 		if data[pos] == '}' {
-			return res, nil
+			return res, pos + 1, nil
 		}
 		if data[pos] != ',' {
-			return res, fmt.Errorf("expected ',' or '}' at position %d, got %q", pos, data[pos])
+			return res, 0, fmt.Errorf("expected ',' or '}' at position %d, got %q", pos, data[pos])
 		}
 		pos++
 		pos = SkipJSONWhitespace(data, pos)
 	}
 }
 
-// scanJsonrpcBatchElements walks data as a JSON array and invokes fn once
-// for each element with the element's byte range (a sub-slice of data).
-// If fn returns false, iteration stops without error.
+// scanJsonrpcBatchEnvelopes walks data as a JSON array and invokes fn once for each element with
+// the element's envelope scan, the error of that scan, and the element's bytes (a sub-slice of
+// data). If fn returns false, iteration stops without error.
 //
-// Returns a non-nil error when data is not a syntactically well-formed
-// JSON array.
-func scanJsonrpcBatchElements(data []byte, fn func(elementBytes []byte) bool) error {
+// An element is read once: its envelope scan also finds where it ends. Only an element the scan
+// refuses (not an object, or broken inside) is walked a second time, to find its end by its
+// brackets, and fn then gets the scan's error for it.
+//
+// Returns a non-nil error when data is not a syntactically well-formed JSON array.
+func scanJsonrpcBatchEnvelopes(data []byte, fn func(scan jsonrpcScanResult, scanErr error, element []byte) bool) error {
 	pos := SkipJSONWhitespace(data, 0)
 	if pos >= len(data) {
 		return errors.New("empty input")
@@ -115,11 +126,17 @@ func scanJsonrpcBatchElements(data []byte, fn func(elementBytes []byte) bool) er
 			return errors.New("truncated: expected element")
 		}
 		elementStart := pos
-		elementEnd, err := skipValue(data, pos)
-		if err != nil {
-			return fmt.Errorf("element: %w", err)
+		scan, length, scanErr := scanJsonrpcEnvelopePrefix(data[pos:])
+		elementEnd := pos + length
+		if scanErr != nil {
+			var err error
+			elementEnd, err = skipValue(data, pos)
+			if err != nil {
+				return fmt.Errorf("element: %w", err)
+			}
+			scan = jsonrpcScanResult{}
 		}
-		if !fn(data[elementStart:elementEnd]) {
+		if !fn(scan, scanErr, data[elementStart:elementEnd]) {
 			return nil
 		}
 		pos = SkipJSONWhitespace(data, elementEnd)
@@ -147,8 +164,7 @@ func IsJsonrpcReply(data []byte) bool {
 		return carriesJsonrpcAnswer(scan)
 	}
 	replies := 0
-	err := scanJsonrpcBatchElements(data, func(element []byte) bool {
-		scan, err := scanJsonrpcEnvelope(element)
+	err := scanJsonrpcBatchEnvelopes(data, func(scan jsonrpcScanResult, err error, _ []byte) bool {
 		if err != nil || !carriesJsonrpcAnswer(scan) {
 			replies = -1
 			return false
