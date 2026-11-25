@@ -666,7 +666,7 @@ _Blocked on protocol upgrade: sdkerrors carry ABCI codes used in the gRPC wire f
 | **XRP/Ripple** | Yes — tec/tef/tel/tem/ter system | Yes (3 codes) | Most complex; prefix determines retryability |
 | **TON** | Partial — TVM exit codes + custom HTTP | Yes (3 codes) | Lite-server timeout retryable, message expired retryable |
 | **Aptos** | Partial — custom REST error format | No (generic codes sufficient) | Error format differs but semantics map to generic codes |
-| **Stellar** | Yes — typed error URIs + result_codes | No (generic codes sufficient) | REST-based, HTTP codes sufficient for retry decisions |
+| **Stellar** | Yes — typed error URIs + result_codes | No (generic codes sufficient) | Horizon is REST-based, HTTP codes sufficient for retry decisions. Stellar RPC's `sendTransaction` answers inside a 200: PENDING and DUPLICATE are successes (the transaction is in the network); TRY_AGAIN_LATER is a node error, `CHAIN_MEMPOOL_FULL`, not at fault and not held off (stellar-core's queue declined it now: an account's pending transaction, a full queue's fee floor, or a hash applied within the last ten ledgers); ERROR is `CHAIN_INVALID_SEQUENCE` for txBAD_SEQ, else `CHAIN_TX_REJECTED` (MAG-5448) |
 | **Cosmos SDK** | Standard — tx_response.code | No (generic codes sufficient) | Standard patterns, well-covered by generic tier. A broadcast refusal is classified by its code (§10) |
 | **Tron** | Partial — a broadcast's response code inside a 200 | No (generic codes sufficient) | §10 |
 

@@ -54,22 +54,20 @@ func TestCheckStellarResponseError(t *testing.T) {
 		require.Empty(t, msg)
 	})
 
-	t.Run("DUPLICATE is a node error, read as CHAIN_TX_ALREADY_KNOWN", func(t *testing.T) {
+	t.Run("DUPLICATE is a success: the transaction is in the network", func(t *testing.T) {
 		hasError, msg := send.CheckStellarResponseError([]byte(stellarSendTransactionReply("DUPLICATE", "")), http.StatusOK)
-		require.True(t, hasError, "a sibling's PENDING must be able to win over this reply")
-		require.Equal(t, common.StellarSendTransactionVerdict("DUPLICATE"), msg)
-		classification := requireStellarClassifiedAs(t, msg, "CHAIN_TX_ALREADY_KNOWN")
-		require.True(t, classification.IsNonRetryable)
-		require.False(t, classification.IsNodeAtFault, "the node took the transaction; this says nothing about its health")
+		require.False(t, hasError)
+		require.Empty(t, msg)
 	})
 
-	t.Run("TRY_AGAIN_LATER is a node error, held off but not scored", func(t *testing.T) {
+	t.Run("TRY_AGAIN_LATER is a node error that blames nothing and holds nothing off", func(t *testing.T) {
 		hasError, msg := send.CheckStellarResponseError([]byte(stellarSendTransactionReply("TRY_AGAIN_LATER", "")), http.StatusOK)
-		require.True(t, hasError)
+		require.True(t, hasError, "a sibling's PENDING must be able to win over this reply")
 		require.Equal(t, common.StellarSendTransactionVerdict("TRY_AGAIN_LATER"), msg)
-		classification := requireStellarClassifiedAs(t, msg, "NODE_RATE_LIMITED")
-		require.True(t, classification.IsRateLimited, "healthy but busy — a resend is safe")
+		classification := requireStellarClassifiedAs(t, msg, "CHAIN_MEMPOOL_FULL")
+		require.False(t, classification.IsRateLimited, "the queue declined this transaction; the router is not being limited")
 		require.False(t, classification.IsNodeAtFault)
+		require.True(t, classification.IsNonRetryable, "every node shares the queue's state, and a broadcast already asks each")
 	})
 
 	t.Run("ERROR with txBAD_SEQ is read as CHAIN_INVALID_SEQUENCE", func(t *testing.T) {
@@ -123,8 +121,8 @@ func TestCheckStellarResponseError(t *testing.T) {
 // the verdict text is not classified by the Stellar rows.
 func TestStellarRowsAreStellarOnly(t *testing.T) {
 	for _, family := range []common.ChainFamily{common.ChainFamilyEVM, common.ChainFamilyXRP, common.ChainFamilyUnknown} {
-		require.NotEqual(t, "CHAIN_TX_ALREADY_KNOWN",
-			common.ClassifyError(nil, family, common.TransportJsonRPC, http.StatusOK, common.StellarSendTransactionVerdict("DUPLICATE")).Name, family.String())
+		require.NotEqual(t, "CHAIN_MEMPOOL_FULL",
+			common.ClassifyError(nil, family, common.TransportJsonRPC, http.StatusOK, common.StellarSendTransactionVerdict("TRY_AGAIN_LATER")).Name, family.String())
 	}
 }
 

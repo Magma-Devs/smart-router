@@ -91,14 +91,13 @@ func TestStatefulStellarBroadcastWaitsThroughError(t *testing.T) {
 	require.Equal(t, stellarQueuer, returnedResult.ProviderInfo.ProviderAddress)
 }
 
-// TestStatefulStellarBroadcastAllRefuseReturnsTheFirstRefusal: every node answers DUPLICATE (a
-// client re-sending a transaction already in every queue) or ERROR. The caller gets the first of
-// them as-is, HTTP 200, unchanged.
+// TestStatefulStellarBroadcastAllRefuseReturnsTheFirstRefusal: every node answers TRY_AGAIN_LATER or
+// ERROR. The caller gets the first of them as-is, HTTP 200, unchanged.
 //
 // Both replies are delivered before the one wait, as the state machine's single wait would read
 // them: a wait counts only the replies it reads itself toward "every provider answered".
 func TestStatefulStellarBroadcastAllRefuseReturnsTheFirstRefusal(t *testing.T) {
-	for name, refusal := range map[string]string{"DUPLICATE": stellarDup, "ERROR": stellarError} {
+	for name, refusal := range map[string]string{"TRY_AGAIN_LATER": stellarTryLater, "ERROR": stellarError} {
 		t.Run(name, func(t *testing.T) {
 			relayProcessor := newStatefulStellarProcessor(t)
 
@@ -121,4 +120,24 @@ func TestStatefulStellarBroadcastAllRefuseReturnsTheFirstRefusal(t *testing.T) {
 			require.Equal(t, stellarLoaded, returnedResult.ProviderInfo.ProviderAddress)
 		})
 	}
+}
+
+// TestStatefulStellarBroadcastEndsOnADuplicate: DUPLICATE says the node already holds the
+// transaction, so it is in the network. It is a success, as on every other path, and ends the
+// broadcast without waiting for the other node.
+func TestStatefulStellarBroadcastEndsOnADuplicate(t *testing.T) {
+	relayProcessor := newStatefulStellarProcessor(t)
+
+	deliverJsonrpcReply(relayProcessor, stellarLoaded, stellarDup)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, relayProcessor.WaitForResults(ctx))
+	hasResults, _ := relayProcessor.HasRequiredNodeResults(1)
+	require.True(t, hasResults, "a DUPLICATE is the answer; the broadcast does not wait for the other node")
+
+	returnedResult, err := relayProcessor.ProcessingResult()
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, returnedResult.StatusCode)
+	require.Equal(t, stellarDup, string(returnedResult.Reply.Data))
+	require.False(t, returnedResult.IsNodeError)
 }

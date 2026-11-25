@@ -109,12 +109,14 @@ var chainErrorMappings = map[ChainFamily][]errorMapping{
 	// (MAG-5448), which writes StellarSendTransactionVerdict. Each row matches that whole message,
 	// so a Stellar node's own error text ("internal error", "duplicate key") never reaches them.
 	ChainFamilyStellar: {
-		// DUPLICATE: this node's queue already holds the transaction. Not at fault, not retried — the
-		// same verdict Horizon's own 409 DUPLICATE gets (the generic REST row below).
-		{stellarVerdictIs("DUPLICATE"), RouterErrorChainTxAlreadyKnown},
-		// TRY_AGAIN_LATER: not queued, but a resend is safe — healthy but busy, held off and not
-		// scored, the same as a rate limit.
-		{stellarVerdictIs("TRY_AGAIN_LATER"), RouterErrorNodeRateLimited},
+		// DUPLICATE is a success and never reaches these rows: the transaction is in the network.
+		//
+		// TRY_AGAIN_LATER: stellar-core's queue declined this transaction now (its account already
+		// has one pending, a full queue's fee floor, or a hash applied within the last ten ledgers).
+		// That is the network's state, shared by every node, not this node's health or a limit on
+		// the router's requests: not at fault, not held off, and not retried, since a broadcast
+		// already asks every node.
+		{stellarVerdictIs("TRY_AGAIN_LATER"), RouterErrorChainMempoolFull},
 		// ERROR, errorResultXdr decoding as txBAD_SEQ: the one result code MAG-5448 names explicitly.
 		{stellarVerdictIs("ERROR txBAD_SEQ"), RouterErrorChainInvalidSequence},
 		// ERROR, any other or undecodable result code: a generic chain-rules rejection.
@@ -192,8 +194,8 @@ var chainErrorMappings = map[ChainFamily][]errorMapping{
 const stellarSendTransactionVerdictPrefix = "stellar sendTransaction: "
 
 // StellarSendTransactionVerdict is the message rpcInterfaceMessages.CheckStellarResponseError
-// writes for a sendTransaction reply that did not queue the transaction: DUPLICATE,
-// TRY_AGAIN_LATER, "ERROR txBAD_SEQ" or ERROR. The Stellar rows above match exactly these.
+// writes for a sendTransaction reply that did not queue the transaction: TRY_AGAIN_LATER,
+// "ERROR txBAD_SEQ" or ERROR. The Stellar rows above match exactly these.
 func StellarSendTransactionVerdict(verdict string) string {
 	return stellarSendTransactionVerdictPrefix + verdict
 }

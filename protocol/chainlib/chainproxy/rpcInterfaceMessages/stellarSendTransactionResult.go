@@ -33,7 +33,7 @@ const stellarTxResultCodeFeeBumpInnerFailed = -13
 //
 //	{"status":"PENDING","hash":"..."}                                    // queued
 //	{"status":"DUPLICATE","hash":"..."}                                  // already in this node's queue
-//	{"status":"TRY_AGAIN_LATER","hash":"..."}                            // not queued; a resend is safe
+//	{"status":"TRY_AGAIN_LATER","hash":"..."}                            // not queued now
 //	{"status":"ERROR","errorResultXdr":"...","hash":"..."}               // refused by the transaction engine
 //
 // Read as a success on every status, a refusal ended a stateful broadcast whenever it arrived
@@ -42,17 +42,22 @@ const stellarTxResultCodeFeeBumpInnerFailed = -13
 // took it: the same fault MAG-4033 fixed for XRPL's submit and MAG-5323 for Tendermint, Cosmos
 // gRPC and Tron broadcasts.
 //
-//   - PENDING: queued. Still a success.
-//   - DUPLICATE: this node's queue already holds this exact transaction (one already applied
-//     answers ERROR txBAD_SEQ instead). A node error, so a sibling's PENDING wins; the registry
-//     reads it as CHAIN_TX_ALREADY_KNOWN, as Horizon's own 409 DUPLICATE is
-//     (common/error_classifier.go's generic REST row).
-//   - TRY_AGAIN_LATER: not queued — a same-account transaction is already pending, the fee is too
-//     low under load, or the hash is banned. A resend is safe: healthy but busy, like a rate limit.
+//   - PENDING: queued. A success.
+//   - DUPLICATE: this node's queue already holds this exact transaction, so it is in the network.
+//     A success, as before MAG-5448: the client polls the hash either way, and a DUPLICATE that
+//     arrives first ends the broadcast. Reading "already known" as a write outcome of its own, on
+//     every chain, belongs to the chain write rows of MAG-5232 (#788), not to this reader.
+//   - TRY_AGAIN_LATER: not queued now. stellar-core's queue declines the transaction when its
+//     source account already has one pending, when the fee is too low for a full queue, or when
+//     its hash was applied within the last TRANSACTION_QUEUE_BAN_LEDGERS (10) ledgers
+//     (TransactionQueue::canAdd and ::removeApplied; HerderImpl.cpp). That state is the network's,
+//     not this node's, so it is a node error that blames nothing and holds nothing off, and a
+//     sibling's PENDING or DUPLICATE wins.
 //   - ERROR: refused by the transaction engine. The verdict is read from the TransactionResult's
 //     code, in errorResultXdr, or in errorResultJson when the caller asked for xdrFormat "json"; a
 //     fee bump's failed inner transaction gives its own code. txBAD_SEQ is the one case named
-//     explicitly, everything else is a generic rejection.
+//     explicitly, everything else is a generic rejection. A transaction applied more than ten
+//     ledgers ago, sent again, answers ERROR txBAD_SEQ.
 //
 // The message is common.StellarSendTransactionVerdict, which the registry's Stellar rows match
 // whole.
@@ -83,7 +88,7 @@ func checkStellarSendTransactionResult(resultBytes []byte) (hasError bool, error
 		return false, ""
 	}
 	switch result.Status {
-	case "DUPLICATE", "TRY_AGAIN_LATER":
+	case "TRY_AGAIN_LATER":
 		return true, common.StellarSendTransactionVerdict(result.Status)
 	case "ERROR":
 		if stellarErrorIsBadSeq(result.ErrorResultXdr, result.ErrorResultJSON) {
@@ -91,8 +96,8 @@ func checkStellarSendTransactionResult(resultBytes []byte) (hasError bool, error
 		}
 		return true, common.StellarSendTransactionVerdict("ERROR")
 	default:
-		// PENDING, and any status this node names that the fleet has not seen: a success, the same
-		// trade IsXRPLRejection's catch-all makes for an unlisted XRPL engine result.
+		// PENDING, DUPLICATE, and any status this node names that the fleet has not seen: a success,
+		// the same trade IsXRPLRejection's catch-all makes for an unlisted XRPL engine result.
 		return false, ""
 	}
 }
