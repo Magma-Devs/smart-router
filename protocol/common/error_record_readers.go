@@ -214,8 +214,11 @@ func restStandardText(doc any, body []byte) string {
 }
 
 // grpcGatewayStatus is grpc-go's message when a gateway in front of the node answered with an HTTP
-// status instead of gRPC: the status is the gateway's, and the record carries it (Part III D12).
-var grpcGatewayStatus = regexp.MustCompile(`unexpected HTTP status code received from server: (\d{3})`)
+// status instead of gRPC: the status is the gateway's, and the record carries it (Part III D12). It is
+// read only where grpc-go writes it, at the start of the status message, as grpcNonGRPCReplyPrefixes
+// and the Sui edge check read it: the same words later in the message are the node's own text, and a
+// status is never read from a node's text (#795).
+var grpcGatewayStatus = regexp.MustCompile(`^unexpected HTTP status code received from server: (\d{3})`)
 
 // ReadGRPCReply reads a gRPC reply: a status other than OK is a well-formed error with the status as
 // the record's status, its message as the text and its details, rendered by the caller from linked or

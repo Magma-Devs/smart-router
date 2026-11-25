@@ -200,6 +200,10 @@ func (rp *ResultsManagerInst) setValidResponse(response *RelayResponse, protocol
 	// check response error
 	foundError, errorMessage := protocolMessage.CheckResponseError(response.RelayResult.Reply.Data, response.RelayResult.StatusCode)
 	if foundError {
+		// The checker's own words, before the fallbacks below stand the body in for a missing message:
+		// the record reads the body itself, so a body is never its text. A gRPC checker names no
+		// message, and the body is then the router's JSON rendering of the node's status, not the node's.
+		checkerMessage := errorMessage
 		// this is a node error, meaning we still didn't get a good response.
 		// we may choose to wait until there will be a response or timeout happens
 		// if we decide to wait and timeout happens we will take the majority of response messages
@@ -278,7 +282,7 @@ func (rp *ResultsManagerInst) setValidResponse(response *RelayResponse, protocol
 		// The reply as the rows see it (common.ErrorRecord, PRD §3.1; MAG-5595): one record per batch
 		// element or GraphQL error, from the same body and status the verdict above was read from.
 		// Built beside that verdict, not in its place; the spec rows (MAG-5606) match these.
-		response.RelayResult.ErrorRecords = chainlib.RecordsFromReply(nil, apiInterfaceOf(protocolMessage), apiNameOf(protocolMessage), response.RelayResult.StatusCode, response.RelayResult.Reply.Data, errorMessage)
+		response.RelayResult.ErrorRecords = chainlib.RecordsFromReply(nil, apiInterfaceOf(protocolMessage), apiNameOf(protocolMessage), response.RelayResult.StatusCode, response.RelayResult.Reply.Data, checkerMessage)
 		// A write's copy whose reply says the slot is already used may be this very transaction landed
 		// (PRD §5.2, MAG-5593). Read beside the row, not from it: whatever the row says, the copy is
 		// never refused and the write is not sent again (relaypolicy.Decide; the server's

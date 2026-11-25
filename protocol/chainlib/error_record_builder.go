@@ -2,6 +2,7 @@ package chainlib
 
 import (
 	"encoding/json"
+	"net/http"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
@@ -64,8 +65,11 @@ func RecordsFromReply(policy *spectypes.ErrorsSection, apiInterface, method stri
 		if text == "" {
 			text = grpcErrorMessage(body)
 		}
-		if status == 0 {
-			return []common.ErrorRecord{{Interface: spectypes.APIInterfaceGrpc, Text: text}}
+		// An OK reply the checker judged an error (a refused BroadcastTx): the error sits inside the
+		// success, and there is no status to carry. The transport writes OK as 200 (invokeRaw), which
+		// is no gRPC code.
+		if status == 0 || status == http.StatusOK {
+			return []common.ErrorRecord{{Interface: spectypes.APIInterfaceGrpc, Text: text, InSuccess: true}}
 		}
 		_, records := common.ReadGRPCReply(status, text, nil, false)
 		return records
