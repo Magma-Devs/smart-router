@@ -30,11 +30,14 @@ func suiTransactionDigest(field *graphQLMutationField) string {
 	if err != nil {
 		return ""
 	}
-	return suiDigestOfTransactionData(transactionData)
+	return SuiTransactionDataDigest(transactionData)
 }
 
-// suiDigestOfTransactionData is Sui's TransactionData::digest over a transaction's BCS bytes.
-func suiDigestOfTransactionData(transactionData []byte) string {
+// SuiTransactionDataDigest is Sui's TransactionData::digest over a transaction's BCS bytes:
+// Base58(Blake2b-256("TransactionData::" || bytes)). One formula for every Sui write the router
+// reads: the GraphQL executeTransaction here, and the gRPC ExecuteTransaction in relay_end
+// (rpcsmartrouter's suiGRPCRequestDigest, MAG-5186).
+func SuiTransactionDataDigest(transactionData []byte) string {
 	hashed := make([]byte, 0, len(suiTransactionDigestPrefix)+len(transactionData))
 	hashed = append(hashed, suiTransactionDigestPrefix...)
 	hashed = append(hashed, transactionData...)

@@ -252,12 +252,12 @@ func TestSuiTransactionDigest(t *testing.T) {
 	}
 }
 
-// TestSuiDigestOfTransactionData checks the formula against the snapshot's second transaction, and
+// TestSuiTransactionDataDigest checks the formula against the snapshot's second transaction, and
 // base58's leading zeros.
-func TestSuiDigestOfTransactionData(t *testing.T) {
+func TestSuiTransactionDataDigest(t *testing.T) {
 	transactionData, err := base64.StdEncoding.DecodeString("AAADAQHAKe9amowUuqNGNxmA3a6v21/6lzVJRzbOCkolF+i+nAIAAAAAAAAAAQAIKgAAAAAAAAAAIPzMmkIbuxPBpmoaqY8K11Ap7elIV3ecaRW0T5QGi5IeBgD4oJgBXLPMUHIjtw7ydYH0c5YLeY9OR7TpiaplfiOBzQdjb3VudGVyA2luYwABAQAAAPigmAFcs8xQciO3DvJ1gfRzlgt5j05HtOmJqmV+I4HNB2NvdW50ZXIGaW5jX2J5AAIBAAABAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIEY29pbgV2YWx1ZQEHAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIDc3VpA1NVSQABAAD4oJgBXLPMUHIjtw7ydYH0c5YLeY9OR7TpiaplfiOBzQdjb3VudGVyBmluY19ieQACAQAAAgIAAPigmAFcs8xQciO3DvJ1gfRzlgt5j05HtOmJqmV+I4HNB2NvdW50ZXIEdGFrZQACAQAAAQEAAQECBAABAgD8zJpCG7sTwaZqGqmPCtdQKe3pSFd3nGkVtE+UBouSHgHhFa5/+bVpRPr+9v0BXVEKL9ljttQuyKYmZAnA6kD7NgEAAAAAAAAAIKNmcsfp1eRv0o7j0BEOV/7jebfQsZBpJGE2dHWWITHp/MyaQhu7E8GmahqpjwrXUCnt6UhXd5xpFbRPlAaLkh7oAwAAAAAAAADyBSoBAAAAAA==")
 	require.NoError(t, err)
-	require.Equal(t, "AFXpqnsV9vKK6p3XDx3e2pMYt95VdcyCrA774Wf1Fi5u", suiDigestOfTransactionData(transactionData))
+	require.Equal(t, "AFXpqnsV9vKK6p3XDx3e2pMYt95VdcyCrA774Wf1Fi5u", SuiTransactionDataDigest(transactionData))
 	require.Equal(t, "112", base58Encode([]byte{0, 0, 1}))
 	require.Equal(t, "1", base58Encode([]byte{0}))
 }
