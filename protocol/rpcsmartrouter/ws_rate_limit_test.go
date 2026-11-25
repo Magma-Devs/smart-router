@@ -30,6 +30,14 @@ func (r *recordingOptimizer) AppendRelayFailure(providerAddress string) {
 	r.failures = append(r.failures, providerAddress)
 }
 
+// snapshotFailures returns a copy of the recorded failures, safe to call while the
+// manager's goroutines may still be appending.
+func (r *recordingOptimizer) snapshotFailures() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.failures...)
+}
+
 // A rate-limited subscribe is held off, not scored: no availability sample, a registry
 // hold-off with the upstream's Retry-After as the floor.
 func TestWSNoteSubscribeFailure_RateLimitHoldsOffInsteadOfScoring(t *testing.T) {
