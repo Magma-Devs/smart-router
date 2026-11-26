@@ -687,6 +687,44 @@ type RelayResult struct {
 	// AttemptLatency is how long the upstream attempt behind this result took; zero when no
 	// upstream was asked (a cache hit, a result the router built itself).
 	AttemptLatency time.Duration
+	// ReplyCheck is the sender's record that it read Reply.Data for a node error and found none,
+	// so the results manager does not read a multi-megabyte reply a second time (MAG-5810). Set it
+	// with MarkReplyCheckedClean and read it with ReplyCheckedClean; a code path that copies a
+	// result field by field copies this one with the reply.
+	ReplyCheck CleanReplyCheck
+}
+
+// CleanReplyCheck names the reply a sender checked: the bytes by their address and length, and the
+// status code they were checked under. It holds for those exact bytes only, so a reply that is
+// replaced afterwards (a node error's reply is redacted, a cached reply gets its ids restored) is
+// checked again. The record compares where the bytes are, not what they hold, so it cannot see an
+// edit made in place: code that changes a reply's bytes assigns Reply.Data a new slice, as
+// utils.RedactSecretsBytes returns one, and never writes into the slice it was handed. The zero
+// value names no reply.
+type CleanReplyCheck struct {
+	first      *byte
+	length     int
+	statusCode int
+}
+
+// MarkReplyCheckedClean records that the request's CheckResponseError read this result's reply
+// under this result's status code and found no error. An empty reply is not recorded.
+func (rr *RelayResult) MarkReplyCheckedClean() {
+	if rr == nil || rr.Reply == nil || len(rr.Reply.Data) == 0 {
+		return
+	}
+	rr.ReplyCheck = CleanReplyCheck{first: &rr.Reply.Data[0], length: len(rr.Reply.Data), statusCode: rr.StatusCode}
+}
+
+// ReplyCheckedClean reports whether the reply and status code this result holds now are the ones
+// MarkReplyCheckedClean recorded.
+func (rr *RelayResult) ReplyCheckedClean() bool {
+	if rr == nil || rr.ReplyCheck.first == nil || rr.Reply == nil || len(rr.Reply.Data) == 0 {
+		return false
+	}
+	return &rr.Reply.Data[0] == rr.ReplyCheck.first &&
+		len(rr.Reply.Data) == rr.ReplyCheck.length &&
+		rr.StatusCode == rr.ReplyCheck.statusCode
 }
 
 // ApplyNodeErrorClassification stamps every registry-derived policy flag onto a node-error

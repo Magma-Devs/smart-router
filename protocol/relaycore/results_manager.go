@@ -242,8 +242,13 @@ func (rp *ResultsManagerInst) setValidResponse(response *RelayResponse, protocol
 		return nil
 	}
 
-	// check response error
-	foundError, errorMessage := protocolMessage.CheckResponseError(response.RelayResult.Reply.Data, response.RelayResult.StatusCode)
+	// check response error. A reply its sender already read under this status code and found clean
+	// is not read again: the check walks the whole reply, and both ask the request's own rule about
+	// the same bytes (common.CleanReplyCheck).
+	foundError, errorMessage := false, ""
+	if !response.RelayResult.ReplyCheckedClean() {
+		foundError, errorMessage = protocolMessage.CheckResponseError(response.RelayResult.Reply.Data, response.RelayResult.StatusCode)
+	}
 	if foundError {
 		// The checker's own words, before the fallbacks below stand the body in for a missing message:
 		// the record reads the body itself, so a body is never its text. A gRPC checker names no

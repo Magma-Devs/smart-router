@@ -32,7 +32,7 @@ type TendermintMessageResponse struct {
 
 // CheckResponseError classifies a Tendermint JSON-RPC response. The envelope
 // shape check (malformed bytes, missing-both-fields, error:null normalisation,
-// top-level error extraction) is delegated to checkJsonrpcEnvelope; this
+// top-level error extraction) is delegated to classifyJsonrpcEnvelope; this
 // method adds the Tendermint-specific success-path inspection of the embedded
 // `{"response": {"code": N, "log": M}}` payload that Tendermint nodes use to
 // signal application-level errors over an otherwise-200 envelope.
@@ -42,7 +42,14 @@ type TendermintMessageResponse struct {
 // (checkTendermintBroadcast, MAG-5323). A batch is read by CheckResponseErrorForTendermintBatch,
 // which knows no element's method, so a refusal inside one keeps the batch rule.
 func (jm TendermintrpcMessage) CheckResponseError(data []byte, httpStatusCode int) (hasError bool, errorMessage string) {
-	hasErr, msg, resultBytes := checkJsonrpcEnvelope(data, "Tendermint RPC")
+	scan, err := scanJsonrpcEnvelope(data)
+	return jm.checkScannedResponse(scan, err, data)
+}
+
+// checkScannedResponse is CheckResponseError for a reply whose envelope is already scanned: scan
+// and scanErr are what scanJsonrpcEnvelope returned for data. The batch walk calls it per element.
+func (jm TendermintrpcMessage) checkScannedResponse(scan jsonrpcScanResult, scanErr error, data []byte) (hasError bool, errorMessage string) {
+	hasErr, msg, resultBytes := classifyJsonrpcEnvelope(scan, scanErr, data, "Tendermint RPC")
 	if hasErr || resultBytes == nil {
 		return hasErr, msg
 	}

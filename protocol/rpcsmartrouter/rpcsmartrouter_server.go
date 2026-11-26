@@ -6502,6 +6502,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	relayResult.Reply = result.Reply
 	relayResult.Finalized = result.Finalized
 	relayResult.StatusCode = result.StatusCode
+	relayResult.ReplyCheck = result.ReplyCheck
 	relayResult.IsNodeError = result.IsNodeError
 	relayResult.IsNonRetryable = result.IsNonRetryable
 	// IsUnsupportedMethod, IsRateLimited and IsDataScope are the fault-axis flags

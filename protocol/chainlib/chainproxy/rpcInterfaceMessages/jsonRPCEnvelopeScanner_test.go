@@ -222,10 +222,10 @@ func TestScanJsonrpcEnvelope_KeysWithSimilarNames(t *testing.T) {
 	require.False(t, res.hasError)
 }
 
-func TestScanJsonrpcBatchElements_Multi(t *testing.T) {
+func TestScanJsonrpcBatchEnvelopes_Multi(t *testing.T) {
 	data := []byte(`[{"id":1,"result":1},{"id":2,"result":2},{"id":3,"result":3}]`)
 	var collected []string
-	err := scanJsonrpcBatchElements(data, func(b []byte) bool {
+	err := scanJsonrpcBatchEnvelopes(data, func(_ jsonrpcScanResult, _ error, b []byte) bool {
 		collected = append(collected, string(b))
 		return true
 	})
@@ -237,10 +237,10 @@ func TestScanJsonrpcBatchElements_Multi(t *testing.T) {
 	}, collected)
 }
 
-func TestScanJsonrpcBatchElements_Empty(t *testing.T) {
+func TestScanJsonrpcBatchEnvelopes_Empty(t *testing.T) {
 	data := []byte(`[]`)
 	count := 0
-	err := scanJsonrpcBatchElements(data, func(b []byte) bool {
+	err := scanJsonrpcBatchEnvelopes(data, func(_ jsonrpcScanResult, _ error, b []byte) bool {
 		count++
 		return true
 	})
@@ -248,10 +248,10 @@ func TestScanJsonrpcBatchElements_Empty(t *testing.T) {
 	require.Zero(t, count)
 }
 
-func TestScanJsonrpcBatchElements_Single(t *testing.T) {
+func TestScanJsonrpcBatchEnvelopes_Single(t *testing.T) {
 	data := []byte(`[{"id":1,"result":1}]`)
 	var collected []string
-	err := scanJsonrpcBatchElements(data, func(b []byte) bool {
+	err := scanJsonrpcBatchEnvelopes(data, func(_ jsonrpcScanResult, _ error, b []byte) bool {
 		collected = append(collected, string(b))
 		return true
 	})
@@ -259,22 +259,22 @@ func TestScanJsonrpcBatchElements_Single(t *testing.T) {
 	require.Equal(t, []string{`{"id":1,"result":1}`}, collected)
 }
 
-func TestScanJsonrpcBatchElements_Truncated(t *testing.T) {
+func TestScanJsonrpcBatchEnvelopes_Truncated(t *testing.T) {
 	data := []byte(`[{"id":1,"result":1},{"id":2,"result"`)
-	err := scanJsonrpcBatchElements(data, func(b []byte) bool { return true })
+	err := scanJsonrpcBatchEnvelopes(data, func(_ jsonrpcScanResult, _ error, b []byte) bool { return true })
 	require.Error(t, err)
 }
 
-func TestScanJsonrpcBatchElements_TopLevelObject(t *testing.T) {
+func TestScanJsonrpcBatchEnvelopes_TopLevelObject(t *testing.T) {
 	data := []byte(`{"id":1,"result":1}`)
-	err := scanJsonrpcBatchElements(data, func(b []byte) bool { return true })
+	err := scanJsonrpcBatchEnvelopes(data, func(_ jsonrpcScanResult, _ error, b []byte) bool { return true })
 	require.Error(t, err)
 }
 
-func TestScanJsonrpcBatchElements_EarlyExit(t *testing.T) {
+func TestScanJsonrpcBatchEnvelopes_EarlyExit(t *testing.T) {
 	data := []byte(`[{"id":1,"result":1},{"id":2,"result":2},{"id":3,"result":3}]`)
 	count := 0
-	err := scanJsonrpcBatchElements(data, func(b []byte) bool {
+	err := scanJsonrpcBatchEnvelopes(data, func(_ jsonrpcScanResult, _ error, b []byte) bool {
 		count++
 		return count < 2
 	})
@@ -282,10 +282,10 @@ func TestScanJsonrpcBatchElements_EarlyExit(t *testing.T) {
 	require.Equal(t, 2, count)
 }
 
-func TestScanJsonrpcBatchElements_LeadingWhitespace(t *testing.T) {
+func TestScanJsonrpcBatchEnvelopes_LeadingWhitespace(t *testing.T) {
 	data := []byte("\n\t [{\"id\":1,\"result\":1}]")
 	count := 0
-	err := scanJsonrpcBatchElements(data, func(b []byte) bool {
+	err := scanJsonrpcBatchEnvelopes(data, func(_ jsonrpcScanResult, _ error, b []byte) bool {
 		count++
 		return true
 	})
@@ -293,12 +293,12 @@ func TestScanJsonrpcBatchElements_LeadingWhitespace(t *testing.T) {
 	require.Equal(t, 1, count)
 }
 
-func TestScanJsonrpcBatchElements_HeterogeneousElements(t *testing.T) {
+func TestScanJsonrpcBatchEnvelopes_HeterogeneousElements(t *testing.T) {
 	// Scanner doesn't validate elements — they may be any JSON value.
 	// Schema validation is the caller's responsibility.
 	data := []byte(`[{"id":1,"result":1},42,"string","array",null,true]`)
 	count := 0
-	err := scanJsonrpcBatchElements(data, func(b []byte) bool {
+	err := scanJsonrpcBatchEnvelopes(data, func(_ jsonrpcScanResult, _ error, b []byte) bool {
 		count++
 		return true
 	})
