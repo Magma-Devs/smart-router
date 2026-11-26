@@ -1,0 +1,214 @@
+{
+  "_comment": "Replies as nodes send them, per interface (PRD §3.1, §8.2 'Fixtures per interface'; MAG-5595). Each runs through its interface's reader (RecordsFromReply, with the fixture's shapes), and the record it yields is classified through ClassifyRecord, not ClassifyError alone. body is the reply as JSON, body_text a reply that is not JSON. checker_text is what the interface's own reply check (CheckResponseError) finds where the error sits inside a result, which Step 1 turns into shapes. node_software and version are the evidence (PRD §4.4). expected_kind is answer, error or bare; expected_records are the records in order; expected_name is the first record's verdict through the router's rows.",
+  "fixtures": [
+    {
+      "name": "geth_nonce_too_low_reply",
+      "interface": "jsonrpc", "chain_family": "EVM", "method": "eth_sendRawTransaction", "status": 200,
+      "body": {"jsonrpc": "2.0", "id": 1, "error": {"code": -32000, "message": "nonce too low: next nonce 5, tx nonce 3"}},
+      "node_software": "geth", "version": "v1.14.11",
+      "expected_kind": "error",
+      "expected_records": [{"code": -32000, "text": "nonce too low: next nonce 5, tx nonce 3"}],
+      "expected_name": "CHAIN_NONCE_TOO_LOW"
+    },
+    {
+      "name": "geth_revert_with_data_detail",
+      "_comment": "field: detail reads error.data: a string as its value.",
+      "interface": "jsonrpc", "chain_family": "EVM", "method": "eth_call", "status": 200,
+      "body": {"jsonrpc": "2.0", "id": 1, "error": {"code": 3, "message": "execution reverted: Ownable: caller is not the owner", "data": "0x08c379a0000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000204f776e61626c653a2063616c6c6572206973206e6f7420746865206f776e657200"}},
+      "node_software": "geth", "version": "v1.14.11",
+      "expected_kind": "error",
+      "expected_records": [{"code": 3, "text": "execution reverted: Ownable: caller is not the owner", "detail_text": "0x08c379a0000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000204f776e61626c653a2063616c6c6572206973206e6f7420746865206f776e657200"}],
+      "expected_name": "CHAIN_EXECUTION_REVERTED"
+    },
+    {
+      "name": "erigon_revert_with_object_data_detail",
+      "_comment": "field: detail reads an object as its compact JSON.",
+      "interface": "jsonrpc", "chain_family": "EVM", "method": "eth_estimateGas", "status": 200,
+      "body": {"jsonrpc": "2.0", "id": 1, "error": {"code": 3, "message": "execution reverted", "data": {"reason": "insufficient allowance", "revert": "0x"}}},
+      "node_software": "erigon", "version": "v2.60.0",
+      "expected_kind": "error",
+      "expected_records": [{"code": 3, "text": "execution reverted", "detail_text": "{\"reason\":\"insufficient allowance\",\"revert\":\"0x\"}"}],
+      "expected_name": "CHAIN_EXECUTION_REVERTED"
+    },
+    {
+      "name": "jsonrpc_batch_one_element_failed",
+      "interface": "jsonrpc", "chain_family": "EVM", "method": "eth_blockNumber&eth_getBalance", "status": 200,
+      "body": [{"jsonrpc": "2.0", "id": 1, "result": "0x10"}, {"jsonrpc": "2.0", "id": 2, "error": {"code": -32602, "message": "invalid argument 0: hex string has length 39, want 40 for common.Address"}}],
+      "node_software": "geth", "version": "v1.14.11",
+      "expected_kind": "error",
+      "expected_records": [{"code": -32602, "text": "invalid argument 0: hex string has length 39, want 40 for common.Address"}],
+      "expected_name": "USER_INVALID_PARAMS"
+    },
+    {
+      "name": "gateway_503_html_around_jsonrpc",
+      "interface": "jsonrpc", "chain_family": "EVM", "method": "eth_blockNumber", "status": 503,
+      "body_text": "<html><head><title>503 Service Temporarily Unavailable</title></head><body><center><h1>503 Service Temporarily Unavailable</h1></center></body></html>",
+      "node_software": "nginx", "version": "1.25",
+      "expected_kind": "bare",
+      "expected_records": [{"text": "<html><head><title>503 Service Temporarily Unavailable</title></head><body><center><h1>503 Service Temporarily Unavailable</h1></center></body></html>"}],
+      "expected_name": "NODE_SERVICE_UNAVAILABLE"
+    },
+    {
+      "name": "xrpl_tef_past_seq_inside_result",
+      "_comment": "XRPL's engine result stays router code (PRD §5.5): the checker's text is the record's, inside a success.",
+      "interface": "jsonrpc", "chain_family": "XRP", "method": "submit", "status": 200,
+      "body": {"result": {"engine_result": "tefPAST_SEQ", "engine_result_code": -190, "engine_result_message": "This sequence number has already passed.", "status": "success"}},
+      "checker_text": "tefPAST_SEQ: This sequence number has already passed.",
+      "node_software": "rippled", "version": "2.3.0",
+      "expected_kind": "error",
+      "expected_records": [{"text": "tefPAST_SEQ: This sequence number has already passed.", "in_success": true}],
+      "expected_name": "CHAIN_NONCE_TOO_LOW"
+    },
+    {
+      "name": "tendermint_abci_query_code_inside_result",
+      "interface": "tendermintrpc", "chain_family": "CosmosSDK", "method": "abci_query", "status": 200,
+      "body": {"jsonrpc": "2.0", "id": -1, "result": {"response": {"code": 6, "log": "rpc error: code = Unknown desc = unknown request", "codespace": "sdk"}}},
+      "checker_text": "rpc error: code = Unknown desc = unknown request",
+      "node_software": "cometbft", "version": "v0.38.12",
+      "expected_kind": "error",
+      "expected_records": [{"text": "rpc error: code = Unknown desc = unknown request", "in_success": true}],
+      "expected_name": "UNKNOWN_ERROR"
+    },
+    {
+      "name": "cosmos_rest_account_not_found",
+      "interface": "rest", "chain_family": "CosmosSDK", "method": "GET /cosmos/auth/v1beta1/accounts/cosmos1x", "status": 404,
+      "body": {"code": 5, "message": "rpc error: code = NotFound desc = account cosmos1x not found: key not found", "details": []},
+      "checker_text": "rpc error: code = NotFound desc = account cosmos1x not found: key not found",
+      "node_software": "cosmos-sdk", "version": "v0.50.10",
+      "expected_kind": "bare",
+      "expected_records": [{"text": "rpc error: code = NotFound desc = account cosmos1x not found: key not found"}],
+      "expected_name": "NODE_DATA_NOT_HELD"
+    },
+    {
+      "name": "cosmos_rest_account_not_found_with_shape",
+      "_comment": "The same body through the Cosmos REST shape of PRD §2.4: a well-formed error with the body's code.",
+      "interface": "rest", "chain_family": "CosmosSDK", "method": "GET /cosmos/auth/v1beta1/accounts/cosmos1x", "status": 404,
+      "shapes": [{"id": "cosmos.rest_error", "interface": "rest", "code": "/code", "message": "/message"}],
+      "body": {"code": 5, "message": "rpc error: code = NotFound desc = account cosmos1x not found: key not found", "details": []},
+      "node_software": "cosmos-sdk", "version": "v0.50.10",
+      "expected_kind": "error",
+      "expected_records": [{"code": 5, "text": "rpc error: code = NotFound desc = account cosmos1x not found: key not found"}],
+      "expected_name": "NODE_DATA_NOT_HELD"
+    },
+    {
+      "name": "cosmos_rest_broadcast_refused_inside_200_with_shape",
+      "_comment": "PRD §8.2 Shapes: a broadcast refused inside a 200, the code with its codespace.",
+      "interface": "rest", "chain_family": "CosmosSDK", "method": "POST /cosmos/tx/v1beta1/txs", "status": 200,
+      "shapes": [{"id": "cosmos.broadcast", "interface": "rest", "methods": ["POST /cosmos/tx/v1beta1/txs"], "when": {"at": "/tx_response/code", "not": 0}, "code": "/tx_response/code", "space": "/tx_response/codespace", "message": "/tx_response/raw_log"}],
+      "body": {"tx_response": {"code": 32, "codespace": "sdk", "raw_log": "account sequence mismatch, expected 5, got 3: incorrect account sequence", "txhash": "ABC"}},
+      "checker_text": "account sequence mismatch, expected 5, got 3: incorrect account sequence",
+      "node_software": "cosmos-sdk", "version": "v0.50.10",
+      "expected_kind": "error",
+      "expected_records": [{"code": "sdk/32", "text": "account sequence mismatch, expected 5, got 3: incorrect account sequence", "in_success": true}],
+      "expected_name": "CHAIN_INVALID_SEQUENCE"
+    },
+    {
+      "name": "cosmos_rest_broadcast_accepted_shape_leaves_the_answer",
+      "interface": "rest", "chain_family": "CosmosSDK", "method": "POST /cosmos/tx/v1beta1/txs", "status": 200,
+      "shapes": [{"id": "cosmos.broadcast", "interface": "rest", "methods": ["POST /cosmos/tx/v1beta1/txs"], "when": {"at": "/tx_response/code", "not": 0}, "code": "/tx_response/code", "space": "/tx_response/codespace", "message": "/tx_response/raw_log"}],
+      "body": {"tx_response": {"code": 0, "codespace": "", "raw_log": "[]", "txhash": "ABC"}},
+      "node_software": "cosmos-sdk", "version": "v0.50.10",
+      "expected_kind": "answer"
+    },
+    {
+      "name": "ton_rest_shape_message_pointer_missing",
+      "_comment": "A shape whose code resolves and whose message pointer is missing applies, with the interface's standard text (MAG-5595 Done when).",
+      "interface": "rest", "chain_family": "TON", "method": "GET /getBlock", "status": 500,
+      "shapes": [{"id": "ton.error", "interface": "rest", "code": "/code", "message": "/error"}],
+      "body": {"ok": false, "code": 500, "message": "block not found"},
+      "node_software": "ton-http-api", "version": "v2.0",
+      "expected_kind": "error",
+      "expected_records": [{"code": 500, "text": "block not found"}],
+      "expected_name": "NODE_INTERNAL_ERROR"
+    },
+    {
+      "name": "rest_plain_text_answer",
+      "interface": "rest", "chain_family": "Aptos", "method": "GET /-/healthy", "status": 200, "plain_text": true,
+      "body_text": "aptos-node:ok",
+      "node_software": "aptos-core", "version": "v1.20",
+      "expected_kind": "answer"
+    },
+    {
+      "name": "rest_2xx_html_is_not_an_answer",
+      "interface": "rest", "chain_family": "Aptos", "method": "GET /v1", "status": 200,
+      "body_text": "<html>maintenance</html>",
+      "node_software": "nginx", "version": "1.25",
+      "expected_kind": "bare",
+      "expected_records": [{"text": "<html>maintenance</html>"}]
+    },
+    {
+      "name": "graphql_data_object_with_empty_errors_is_an_answer",
+      "_comment": "MAG-5595 Done when: a reply with a data object and errors: [] is an answer.",
+      "interface": "graphql", "chain_family": "Sui", "method": "chainIdentifier", "status": 200,
+      "body": {"data": {"chainIdentifier": "35834a8a"}, "errors": []},
+      "node_software": "sui-graphql-rpc", "version": "2024.11",
+      "expected_kind": "answer"
+    },
+    {
+      "name": "graphql_data_null_without_errors_is_bare",
+      "interface": "graphql", "chain_family": "Sui", "method": "chainIdentifier", "status": 200,
+      "body": {"data": null},
+      "node_software": "sui-graphql-rpc", "version": "2024.11",
+      "expected_kind": "bare",
+      "expected_records": [{"text": "{\"data\": null}"}]
+    },
+    {
+      "name": "graphql_empty_errors_without_data_is_bare",
+      "interface": "graphql", "chain_family": "Sui", "method": "chainIdentifier", "status": 200,
+      "body": {"errors": []},
+      "node_software": "sui-graphql-rpc", "version": "2024.11",
+      "expected_kind": "bare",
+      "expected_records": [{"text": "{\"errors\": []}"}]
+    },
+    {
+      "name": "graphql_two_errors_one_record_each",
+      "interface": "graphql", "chain_family": "Sui", "method": "transaction", "status": 200,
+      "body": {"data": null, "errors": [{"message": "Request is throttled: slow down", "extensions": {"code": "RESOURCE_EXHAUSTED"}}, {"message": "Could not find the referenced transaction", "path": ["tx"], "extensions": {"code": "NOT_FOUND"}}]},
+      "node_software": "sui-graphql-rpc", "version": "2024.11",
+      "expected_kind": "error",
+      "expected_records": [
+        {"code": "RESOURCE_EXHAUSTED", "text": "Request is throttled: slow down", "detail_text": "{\"code\":\"RESOURCE_EXHAUSTED\"}"},
+        {"code": "NOT_FOUND", "text": "Could not find the referenced transaction", "path": ["tx"], "detail_text": "{\"code\":\"NOT_FOUND\"}"}
+      ]
+    },
+    {
+      "name": "graphql_alias_null_answer_matches_the_not_found_row",
+      "_comment": "PRD §8.2 GraphQL aliases: the request asked `tx: transaction(digest)`; the row names the field, the reader reads the alias as it.",
+      "interface": "graphql", "chain_family": "Sui", "method": "transaction", "status": 200,
+      "body": {"data": {"tx": null}},
+      "graphql_occurrences": [{"field": "transaction", "alias": "tx"}],
+      "answer_rows": [{"id": "sui.tx_not_found", "interface": "graphql", "methods": ["transaction"], "answer": true, "at": "/data/transaction", "code": null, "error": "CHAIN_SUI_TX_NOT_FOUND", "class": "C3", "reason": "not_found"}],
+      "node_software": "sui-graphql-rpc", "version": "2024.11",
+      "expected_kind": "answer",
+      "expected_answer_rows": ["sui.tx_not_found"]
+    },
+    {
+      "name": "graphql_same_field_under_two_aliases_read_twice",
+      "interface": "graphql", "chain_family": "Sui", "method": "transaction", "status": 200,
+      "body": {"data": {"a": null, "b": null}},
+      "graphql_occurrences": [{"field": "transaction", "alias": "a"}, {"field": "transaction", "alias": "b"}],
+      "answer_rows": [{"id": "sui.tx_not_found", "interface": "graphql", "methods": ["transaction"], "answer": true, "at": "/data/transaction", "code": null, "error": "CHAIN_SUI_TX_NOT_FOUND", "class": "C3", "reason": "not_found"}],
+      "node_software": "sui-graphql-rpc", "version": "2024.11",
+      "expected_kind": "answer",
+      "expected_answer_rows": ["sui.tx_not_found", "sui.tx_not_found"]
+    },
+    {
+      "name": "grpc_not_found_status",
+      "interface": "grpc", "chain_family": "CosmosSDK", "method": "cosmos.bank.v1beta1.Query/Balance", "status": 5,
+      "body": {"error_message": "rpc error: code = NotFound desc = account not found", "error_code": 5},
+      "node_software": "cosmos-sdk", "version": "v0.50.10",
+      "expected_kind": "error",
+      "expected_records": [{"text": "rpc error: code = NotFound desc = account not found"}],
+      "expected_name": "CHAIN_ACCOUNT_NOT_FOUND"
+    },
+    {
+      "name": "grpc_unavailable_status",
+      "interface": "grpc", "chain_family": "CosmosSDK", "method": "cosmos.bank.v1beta1.Query/Balance", "status": 14,
+      "body": {"error_message": "connection refused", "error_code": 14},
+      "node_software": "cosmos-sdk", "version": "v0.50.10",
+      "expected_kind": "error",
+      "expected_records": [{"text": "connection refused"}],
+      "expected_name": "NODE_SERVICE_UNAVAILABLE"
+    }
+  ]
+}

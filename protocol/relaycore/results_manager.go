@@ -29,6 +29,14 @@ func apiInterfaceOf(pm chainlib.ProtocolMessage) string {
 	return ""
 }
 
+// apiNameOf is the api identity the rows filter by (methods), "" when the message has no api.
+func apiNameOf(pm chainlib.ProtocolMessage) string {
+	if pm == nil || pm.GetApi() == nil {
+		return ""
+	}
+	return pm.GetApi().Name
+}
+
 // isWrite reports whether protocolMessage is a stateful request: a write, relayed to every provider
 // at once and never again.
 func isWrite(protocolMessage chainlib.ProtocolMessage) bool {
@@ -63,6 +71,13 @@ type replyStatusClassifier interface {
 // chainRowVerdictReader is a request whose chain's list files some node errors under a verdict of its
 // own (rpcInterfaceMessages.GrpcMessage, a copy of the chain's write: MAG-5186). The sender applied
 // the same verdict to the attempt, so the record and the endpoint's health agree.
+// graphQLOccurrences is a GraphQL request's root fields with the aliases its reply answers under
+// (rpcInterfaceMessages.GraphQLMessage): an error's path starts at an alias, and the record reads it
+// at the field's name (common.ReadGraphQLPathsAsFields).
+type graphQLOccurrences interface {
+	Occurrences() []common.GraphQLOccurrence
+}
+
 type chainRowVerdictReader interface {
 	ChainRowVerdict(data []byte) *common.RouterError
 }
@@ -126,6 +141,13 @@ func (rp *ResultsManagerInst) setErrorResponse(response *RelayResponse, protocol
 	// 503 or a 429 can wrap the node's own "nonce too low", which says this very transaction may have
 	// landed. The code is the body's JSON-RPC error code when it has one; the text rows read the body
 	// wherever the words sit.
+	// An upstream's answer the attempt failed on (a 429 or 5xx the sender kept on the error) as the
+	// rows see it (PRD §3.1, MAG-5595): the status it failed on and the error the body carries, a
+	// JSON-RPC 5xx body read as the node's error. A transport failure has no answer and no record.
+	var httpErr *routersession.HTTPStatusError
+	if errors.As(response.Err, &httpErr) && len(httpErr.Body) > 0 && protocolMessage != nil {
+		response.RelayResult.ErrorRecords = chainlib.RecordsFromUpstreamBody(nil, apiInterfaceOf(protocolMessage), apiNameOf(protocolMessage), httpErr.StatusCode, httpErr.Body)
+	}
 	if isWrite(protocolMessage) {
 		if body := upstreamAnswerBody(response); len(body) > 0 {
 			response.RelayResult.IsSlotAlreadyUsed = common.IsSlotAlreadyUsed(common.GetChainFamilyOrDefault(rp.chainID), apiInterfaceOf(protocolMessage), common.ExtractJSONRPCErrorCode(body), string(body))
@@ -213,6 +235,10 @@ func (rp *ResultsManagerInst) setValidResponse(response *RelayResponse, protocol
 	// check response error
 	foundError, errorMessage := protocolMessage.CheckResponseError(response.RelayResult.Reply.Data, response.RelayResult.StatusCode)
 	if foundError {
+		// The checker's own words, before the fallbacks below stand the body in for a missing message:
+		// the record reads the body itself, so a body is never its text. A gRPC checker names no
+		// message, and the body is then the router's JSON rendering of the node's status, not the node's.
+		checkerMessage := errorMessage
 		// this is a node error, meaning we still didn't get a good response.
 		// we may choose to wait until there will be a response or timeout happens
 		// if we decide to wait and timeout happens we will take the majority of response messages
@@ -287,6 +313,13 @@ func (rp *ResultsManagerInst) setValidResponse(response *RelayResponse, protocol
 		}
 		if nodeClassified == nil {
 			nodeClassified = common.ClassifyError(common.DetectConnectionErrorInReplyText(errorMessage), chainFamily, transport, errorCode, err.Error())
+		}
+		// The reply as the rows see it (common.ErrorRecord, PRD §3.1; MAG-5595): one record per batch
+		// element or GraphQL error, from the same body and status the verdict above was read from.
+		// Built beside that verdict, not in its place; the spec rows (MAG-5606) match these.
+		response.RelayResult.ErrorRecords = chainlib.RecordsFromReply(nil, apiInterfaceOf(protocolMessage), apiNameOf(protocolMessage), response.RelayResult.StatusCode, response.RelayResult.Reply.Data, checkerMessage)
+		if request, ok := protocolMessage.GetRPCMessage().(graphQLOccurrences); ok {
+			common.ReadGraphQLPathsAsFields(response.RelayResult.ErrorRecords, request.Occurrences())
 		}
 		// A write's copy whose reply says the slot is already used may be this very transaction landed
 		// (PRD §5.2, MAG-5593). Read beside the row, not from it: whatever the row says, the copy is

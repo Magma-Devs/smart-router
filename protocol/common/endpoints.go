@@ -670,6 +670,11 @@ type RelayResult struct {
 	// may have run, is never refused, and the write is not sent again. Set on a write's copies only;
 	// a read keeps its verdict and never reads it.
 	IsSlotAlreadyUsed bool
+	// ErrorRecords are the reply's errors as the rows see them (ErrorRecord, PRD §3.1; MAG-5595),
+	// one per batch element or GraphQL error, built by the reader that classified the reply from the
+	// same body and status. Nil on an answer and on a result no reader built one for. The flags
+	// above are today's verdict from the same reading; the spec rows (MAG-5606) match these.
+	ErrorRecords []ErrorRecord
 	// ClientFacing is what the listener shows the caller when the relay ends in a protocol error:
 	// the upstream's own answer when it gave one, else the leaf cause (MAG-4218).
 	ClientFacing *ClientFacingError

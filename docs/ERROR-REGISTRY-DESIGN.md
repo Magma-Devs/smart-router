@@ -881,3 +881,61 @@ A Cosmos REST `POST /cosmos/tx/v1beta1/txs` refusal was already a node error to 
 empty on some refusals (MAG-5451). A GET of a transaction that was included and failed answers the
 same shape. It is the answer, an error to neither the relay processor nor the sender (§9, MAG-5326).
 
+## 11. The error record, shapes and answer rows (MAG-5595, PRD §2.2, §2.4, §3.1)
+
+Step 0 of the per-chain error classification epic (MAG-5592; `PER-CHAIN-ERROR-CLASSIFICATION-PRD.md`)
+gives every reader of a failed or refused reply one thing to build and one thing for a spec row to
+match: the **error record**, `common.ErrorRecord`.
+
+| Field | Content |
+|---|---|
+| `Interface` | the api's interface, one of five; the router's rows still read the transport it folds into (`ApiInterfaceToTransport`) |
+| `Status` | the HTTP status as received, on GraphQL too (an extension code never makes a status); the gRPC status code on grpc; 0 on a WebSocket frame |
+| `Code` | the chain's code: a `json.Number` (a JSON-RPC `error.code`, a shape's integer), a string (a GraphQL `extensions.code`, a shape's `<space>/<code>`), nil for none |
+| `Text` | `error.message`; on REST the shape's message, else the body's `message`, `error` or `error.message`, else the body; a GraphQL error's `message`; the gRPC status message. Never prefixed with the status |
+| `Detail` | JSON as received: `error.data`, a GraphQL error's `extensions`, gRPC status details once MAG-5129 carries them |
+| `Path` | a GraphQL error's path |
+| `InSuccess` | a shape, or a chain's reply check in router code, found the error inside a 2xx |
+
+**Where it is built.** `chainlib.RecordsFromReply` reads a reply through the interface's standard
+place for an error (`common.ReadJSONRPCReply`, `ReadGraphQLReply`, `ReadRESTReply`, `ReadGRPCReply`)
+and through the chain's **shapes** (`common.ApplyErrorShapes`, PRD §2.4: JSON pointers to where a
+chain's code, codespace and message sit, with a `when` check for an error inside a success; the
+first shape that applies wins, a missing or wrong-type `code` pointer leaves it unapplied, a missing
+`message` pointer leaves the interface's standard text). One record per batch element and per GraphQL
+error. The results manager builds them for every node error it files and for every upstream answer a
+protocol error carries (`routersession.HTTPStatusError`'s body), the cache tiers for a cached node
+error they serve; they ride on `RelayResult.ErrorRecords`. Where a chain's reply check is still router
+code (XRPL's engine result, Tendermint's response code, Cosmos' `tx_response` on REST), the record's
+text is what the check found, and the shape Step 1 writes for it will give it its code.
+
+**What it changes today: nothing.** The record is built beside the inputs the router's rows read,
+not in their place: `common.ClassifyRecord` gives those rows the same inputs from the record (the
+body code or the status, the status put back ahead of the text on a JSON-RPC non-2xx), and
+`TestClassifyRecordKeepsTheLegacyFixturesVerdicts` holds every legacy fixture to it. The spec rows
+that match the record are MAG-5606's; the switch that lets them classify is MAG-5609's. The spec's
+`errors` section (`spectypes.ErrorsSection`: rows, shapes, `write_rows`, `plain_text`, `inherit`) is
+decoded and carried on `Spec.Errors`, not yet inherited or validated (MAG-5606, MAG-5604).
+
+**Answer rows** (`common.MatchAnswerRow`, PRD §2.2 `answer: true`) read a reply's answer rather than
+an error: a success row (`write: took_it`) or a not-found row (`C3 not_found`) names its methods and
+matches the value `at` a JSON pointer by `code` (JSON type and value, null included) or `present`. A
+success row with `at` reads a write copy's body under any status; a row without `at` reads a 2xx
+only. On GraphQL a row names fields, never aliases: `GraphQLMessage.Occurrences` lists each root
+field with the alias the reply carries it under, and `MatchAnswerRowPerOccurrence` reads each
+occurrence with the alias replaced by the field's name, so `{ tx: transaction(digest) }` answering
+`{"data": {"tx": null}}` matches a row's `/data/transaction`, and the same field asked twice under two
+aliases is read twice.
+
+**Fixtures per interface.** `protocol/chainlib/testdata/reply_fixtures.json` holds replies as nodes
+send them, one per interface at least, each with the node software and version it came from; each
+runs through its interface's reader, the fixture's shapes and the record, and the record's verdict
+through `ClassifyRecord`. The two contract fixtures the ticket asks for are there: a GraphQL reply
+with a `data` object and `errors: []` is an answer (`{"data": null}` without errors and `errors: []`
+without data are bare, `C5`), and a shape whose `code` resolves and whose `message` pointer is missing
+applies with the interface's standard text.
+
+One finding for MAG-5254: the REST rows give a 404 two verdicts by which input carries it — the status
+as the code reads `NODE_DATA_NOT_HELD` (`httpStatusCodeMappings`), the status in the text reads
+`NODE_ENDPOINT_NOT_FOUND` (`httpStatusMessageMappings`). The record carries the status in its own
+field and so reads the first, as the live REST sender does.

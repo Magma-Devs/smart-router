@@ -2421,6 +2421,9 @@ func (rpcss *RPCSmartRouterServer) classifyCachedNodeError(protocolMessage chain
 		return
 	}
 	classifyJSONRPCNodeError(result, rpcss.directRelayChainFamily(), statusCode, result.Reply.Data, errorMessage)
+	// A cached node error is served without the results manager, so its record is built here, from
+	// the same bytes and status the verdict above read (PRD §3.1, MAG-5595).
+	result.ErrorRecords = chainlib.RecordsFromReply(nil, apiCollection.CollectionData.ApiInterface, protocolMessage.GetApi().GetName(), statusCode, result.Reply.Data, errorMessage)
 }
 
 // primaryLookupVerdict classifies the primary tier's answer the way the secondary tier
