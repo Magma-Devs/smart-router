@@ -22,15 +22,31 @@ type jsonrpcScanResult struct {
 // string-aware: braces inside string values do not affect nesting.
 //
 // Returns a non-nil error when the input is not a syntactically well-formed
-// JSON object (truncated bytes, top-level array/scalar, structural break).
+// JSON object (truncated bytes, top-level array/scalar, structural break), or
+// holds anything but whitespace after it (expectEndOfInput).
 // Keys are matched by literal byte comparison against the raw bytes inside
 // the quotes — JSON-escape-encoded spellings of the same key (e.g. the
 // "result" key written with each character as a six-byte hex escape) are
 // spec-legal but will not be recognized. No production upstream is known
 // to emit them.
 func scanJsonrpcEnvelope(data []byte) (jsonrpcScanResult, error) {
-	res, _, err := scanJsonrpcEnvelopePrefix(data)
-	return res, err
+	res, end, err := scanJsonrpcEnvelopePrefix(data)
+	if err != nil {
+		return res, err
+	}
+	return res, expectEndOfInput(data, end)
+}
+
+// expectEndOfInput returns an error when data holds anything but whitespace from pos on. A reply
+// is one JSON value, so a body that goes on after it (a page a proxy appended, a second value) is
+// not a reply, whatever its first value says. The sender's json.Valid refuses such a body under a
+// 2xx status only; this is the rule on every status (MAG-5819).
+func expectEndOfInput(data []byte, pos int) error {
+	pos = SkipJSONWhitespace(data, pos)
+	if pos < len(data) {
+		return fmt.Errorf("expected end of input at position %d, got %q", pos, data[pos])
+	}
+	return nil
 }
 
 // scanJsonrpcEnvelopePrefix is scanJsonrpcEnvelope for an object that data starts with and may
@@ -107,7 +123,9 @@ func scanJsonrpcEnvelopePrefix(data []byte) (res jsonrpcScanResult, end int, err
 // refuses (not an object, or broken inside) is walked a second time, to find its end by its
 // brackets, and fn then gets the scan's error for it.
 //
-// Returns a non-nil error when data is not a syntactically well-formed JSON array.
+// Returns a non-nil error when data is not a syntactically well-formed JSON array, or holds
+// anything but whitespace after it (expectEndOfInput). Every element is handed to fn before the
+// bytes after the array are read.
 func scanJsonrpcBatchEnvelopes(data []byte, fn func(scan jsonrpcScanResult, scanErr error, element []byte) bool) error {
 	pos := SkipJSONWhitespace(data, 0)
 	if pos >= len(data) {
@@ -119,7 +137,7 @@ func scanJsonrpcBatchEnvelopes(data []byte, fn func(scan jsonrpcScanResult, scan
 	pos++
 	pos = SkipJSONWhitespace(data, pos)
 	if pos < len(data) && data[pos] == ']' {
-		return nil
+		return expectEndOfInput(data, pos+1)
 	}
 	for {
 		if pos >= len(data) {
@@ -144,7 +162,7 @@ func scanJsonrpcBatchEnvelopes(data []byte, fn func(scan jsonrpcScanResult, scan
 			return errors.New("truncated: expected ',' or ']'")
 		}
 		if data[pos] == ']' {
-			return nil
+			return expectEndOfInput(data, pos+1)
 		}
 		if data[pos] != ',' {
 			return fmt.Errorf("expected ',' or ']' at position %d, got %q", pos, data[pos])
@@ -157,8 +175,8 @@ func scanJsonrpcBatchEnvelopes(data []byte, fn func(scan jsonrpcScanResult, scan
 // IsJsonrpcReply reports whether data is a JSON-RPC reply: an object whose "error" is an error
 // object or that carries a "result", or a non-empty batch of only such objects. A JSON-RPC node
 // answers in JSON-RPC, so a body that is not one (a gateway's HTML page, an empty body, plain
-// text, {}, {"error":"invalid api key"}) is not the node's answer, whatever the router read it as
-// (MAG-5072).
+// text, {}, {"error":"invalid api key"}, a reply followed by other bytes) is not the node's answer,
+// whatever the router read it as (MAG-5072).
 func IsJsonrpcReply(data []byte) bool {
 	if scan, err := scanJsonrpcEnvelope(data); err == nil {
 		return carriesJsonrpcAnswer(scan)
