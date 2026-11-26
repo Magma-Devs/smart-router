@@ -2,17 +2,27 @@ package rpcInterfaceMessages
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/goccy/go-json"
+	"github.com/magma-Devs/smart-router/utils"
 	"github.com/stretchr/testify/require"
 )
 
-// twoWalkBatchElements is the batch walk the one-walk scanJsonrpcBatchEnvelopes replaces: it
-// skips each element to find its end and leaves the envelope scan to the caller. It stays here
-// as the reference the new walk is compared against.
+// quietChecks raises the log level for the test. The checks log a warning with the body attached
+// for every malformed reply, and the corpus is malformed replies.
+func quietChecks(tb testing.TB) {
+	tb.Helper()
+	utils.SetGlobalLoggingLevel("error")
+	tb.Cleanup(func() { utils.SetGlobalLoggingLevel("debug") }) // utils' package default
+}
+
+// twoWalkBatchElements walks a batch reply by its brackets: it skips each element to find its
+// end and leaves the envelope scan to the caller. The tests compare scanJsonrpcBatchEnvelopes
+// with it.
 func twoWalkBatchElements(data []byte, fn func(elementBytes []byte) bool) error {
 	pos := SkipJSONWhitespace(data, 0)
 	if pos >= len(data) {
@@ -83,26 +93,95 @@ func twoWalkBatchCheck(data []byte, elementCheck func(element []byte) (bool, str
 	return true, aggregated.String()
 }
 
+// referenceScanJsonrpcEnvelope is the envelope scan of the two-walk reference: it reads one whole
+// object and reports no end position. It is a scan of its own, apart from
+// scanJsonrpcEnvelopePrefix, so an envelope that scan misreads is a difference the tests see. The
+// two share skipValue, scanString and SkipJSONWhitespace, and the reference takes its verdict from
+// the same rules (classifyJsonrpcEnvelope, checkScannedResponse, carriesJsonrpcAnswer): the
+// comparison covers the batch walk and the envelope scan, not those.
+func referenceScanJsonrpcEnvelope(data []byte) (jsonrpcScanResult, error) {
+	var res jsonrpcScanResult
+	pos := SkipJSONWhitespace(data, 0)
+	if pos >= len(data) {
+		return res, errors.New("empty input")
+	}
+	if data[pos] != '{' {
+		return res, fmt.Errorf("expected '{' at position %d, got %q", pos, data[pos])
+	}
+	pos++
+	pos = SkipJSONWhitespace(data, pos)
+	if pos < len(data) && data[pos] == '}' {
+		return res, nil
+	}
+	for {
+		if pos >= len(data) {
+			return res, errors.New("truncated: expected key")
+		}
+		if data[pos] != '"' {
+			return res, fmt.Errorf("expected string key at position %d, got %q", pos, data[pos])
+		}
+		keyStart := pos + 1
+		keyEnd, next, err := scanString(data, pos)
+		if err != nil {
+			return res, fmt.Errorf("key: %w", err)
+		}
+		pos = next
+		pos = SkipJSONWhitespace(data, pos)
+		if pos >= len(data) || data[pos] != ':' {
+			return res, fmt.Errorf("expected ':' at position %d", pos)
+		}
+		pos++
+		pos = SkipJSONWhitespace(data, pos)
+		valueStart := pos
+		valueEnd, err := skipValue(data, pos)
+		if err != nil {
+			return res, fmt.Errorf("value: %w", err)
+		}
+		key := data[keyStart:keyEnd]
+		if string(key) == "error" {
+			res.hasError = true
+			res.errorBytes = data[valueStart:valueEnd]
+		} else if string(key) == "result" {
+			res.hasResult = true
+			res.resultBytes = data[valueStart:valueEnd]
+		}
+		pos = SkipJSONWhitespace(data, valueEnd)
+		if pos >= len(data) {
+			return res, errors.New("truncated: expected ',' or '}'")
+		}
+		if data[pos] == '}' {
+			return res, nil
+		}
+		if data[pos] != ',' {
+			return res, fmt.Errorf("expected ',' or '}' at position %d, got %q", pos, data[pos])
+		}
+		pos++
+		pos = SkipJSONWhitespace(data, pos)
+	}
+}
+
 func twoWalkJsonRpcBatch(data []byte) (bool, string) {
 	return twoWalkBatchCheck(data, func(element []byte) (bool, string) {
-		hasErr, msg, _ := checkJsonrpcEnvelope(element, "JSON-RPC batch element")
+		scan, err := referenceScanJsonrpcEnvelope(element)
+		hasErr, msg, _ := classifyJsonrpcEnvelope(scan, err, element, "JSON-RPC batch element")
 		return hasErr, msg
 	})
 }
 
 func twoWalkTendermintBatch(data []byte) (bool, string) {
 	return twoWalkBatchCheck(data, func(element []byte) (bool, string) {
-		return TendermintrpcMessage{}.CheckResponseError(element, 200)
+		scan, err := referenceScanJsonrpcEnvelope(element)
+		return TendermintrpcMessage{}.checkScannedResponse(scan, err, element)
 	})
 }
 
 func twoWalkIsJsonrpcReply(data []byte) bool {
-	if scan, err := scanJsonrpcEnvelope(data); err == nil {
+	if scan, err := referenceScanJsonrpcEnvelope(data); err == nil {
 		return carriesJsonrpcAnswer(scan)
 	}
 	replies := 0
 	err := twoWalkBatchElements(data, func(element []byte) bool {
-		scan, err := scanJsonrpcEnvelope(element)
+		scan, err := referenceScanJsonrpcEnvelope(element)
 		if err != nil || !carriesJsonrpcAnswer(scan) {
 			replies = -1
 			return false
@@ -182,6 +261,7 @@ func requireSameAsTwoWalks(t testing.TB, data []byte) {
 // The one-walk batch check returns the verdict and the message of the two-walk check, byte for
 // byte, on every seed and every reply one edit away from one, under both aggregation modes.
 func TestBatchCheck_OneWalkMatchesTwoWalks(t *testing.T) {
+	quietChecks(t)
 	previous := BatchNodeErrorOnAny
 	defer func() { BatchNodeErrorOnAny = previous }()
 	cases := 0
@@ -198,7 +278,8 @@ func TestBatchCheck_OneWalkMatchesTwoWalks(t *testing.T) {
 }
 
 // The walk hands fn, for every element, the scan scanJsonrpcEnvelope gives for that element's
-// bytes, and the bytes the two-walk reference hands out.
+// bytes, and the bytes the two-walk reference hands out. It hands out as many elements as the
+// reference does, also when the walk ends in an error.
 func TestScanJsonrpcBatchEnvelopes_ScanIsTheElementsOwn(t *testing.T) {
 	for _, seed := range batchSeeds {
 		data := []byte(seed)
@@ -227,9 +308,9 @@ func TestScanJsonrpcBatchEnvelopes_ScanIsTheElementsOwn(t *testing.T) {
 		})
 		if wantErr != nil {
 			require.EqualError(t, gotErr, wantErr.Error(), "walk error for %q", seed)
-			continue
+		} else {
+			require.NoError(t, gotErr, "walk error for %q", seed)
 		}
-		require.NoError(t, gotErr, "walk error for %q", seed)
 		require.Equal(t, len(want), index, "element count for %q", seed)
 	}
 }
@@ -251,6 +332,7 @@ func TestScanJsonrpcEnvelopePrefix_ReturnsTheEndOfTheObject(t *testing.T) {
 }
 
 func FuzzBatchCheck_OneWalkMatchesTwoWalks(f *testing.F) {
+	quietChecks(f)
 	for _, seed := range batchSeeds {
 		f.Add([]byte(seed))
 	}
