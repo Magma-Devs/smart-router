@@ -262,8 +262,8 @@ func (rp *ResultsManagerInst) setValidResponse(response *RelayResponse, protocol
 		}
 		// A write's copy whose reply says the slot is already used may be this very transaction landed
 		// (PRD §5.2, MAG-5593). Read beside the row, not from it: whatever the row says, the copy is
-		// never refused and the write is not sent again (relaypolicy.Decide; the server's
-		// unclearWriteOutcomeFor says what the client gets).
+		// never refused and the write is not sent again (relaypolicy.Decide). The client still gets the
+		// node's reply as it came: a match never by itself makes the router speak (PRD §5.2).
 		if isWrite(protocolMessage) {
 			response.RelayResult.IsSlotAlreadyUsed = common.IsSlotAlreadyUsed(chainFamily, apiInterfaceOf(protocolMessage), errorCode, err.Error())
 		}
