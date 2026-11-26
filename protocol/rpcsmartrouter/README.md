@@ -64,6 +64,12 @@ Cross-validation can be turned on two ways, which compose via `clamp(caller, flo
 - **Per-request headers** (the caller opts in per call):
   - `router-cross-validation-max-participants: N` — fan out to N providers.
   - `router-cross-validation-agreement-threshold: M` — require M identical responses.
+  - The names these two headers had before version 1.7.0, `lava-cross-validation-max-participants`
+    and `lava-cross-validation-agreement-threshold`, are still read and mean the same. So is the
+    `lava-*` name of every other request header a caller sends to steer a request
+    (`common.DEPRECATED_DIRECTIVE_HEADER_NAMES`). When a request carries both spellings of one
+    header, the `router-*` one wins. The old names are deprecated: new clients send `router-*`.
+    Reply headers carry the `router-*` names only.
 - **Per-method operator policy** (config-driven, below). An operator policy can *mandate*
   cross-validation even with no caller headers (`enabled: true`), set a **floor** the caller
   may exceed, a **cap** that overrides a stricter caller, or *forbid* caller-driven

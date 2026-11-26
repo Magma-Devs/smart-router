@@ -98,6 +98,11 @@ func dialGrpcDirectivesListener(t *testing.T) (*grpc.ClientConn, *parsingRelaySe
 	for name := range common.SPECIAL_DIRECTIVE_HEADERS {
 		collection.Headers = append(collection.Headers, &spectypes.Header{Name: name, Kind: spectypes.Header_pass_send})
 	}
+	// The pre-1.7.0 directive names are declared too, for the same reason: an old name is the
+	// router's own, and the "not forwarded" assert on it must be able to fail (MAG-5817).
+	for deprecatedName := range common.DEPRECATED_DIRECTIVE_HEADER_NAMES {
+		collection.Headers = append(collection.Headers, &spectypes.Header{Name: deprecatedName, Kind: spectypes.Header_pass_send})
+	}
 	parser, err := chainlib.NewGrpcChainParser()
 	require.NoError(t, err)
 	parser.SetSpec(spec)
@@ -220,6 +225,35 @@ func TestGrpcMetadataCarriesEveryDirective(t *testing.T) {
 			require.Equal(t, value, parsed.GetDirectiveHeaders()[name],
 				"a directive sent as gRPC metadata must land in the directive map")
 			require.NotContains(t, forwardedHeaders(parsed), name, "a directive is for the router and must not reach the node")
+		})
+	}
+}
+
+// A gRPC client that still sends a directive under its pre-1.7.0 name gets the directive: the old
+// name travels as call metadata, lands in the directive map under the current name, and neither
+// spelling reaches the node (MAG-5817).
+func TestGrpcMetadataCarriesEveryDeprecatedDirectiveName(t *testing.T) {
+	values := map[string]string{
+		"lava-relay-timeout": "12s",
+		"lava-extension":     "archive",
+	}
+	for deprecatedName, currentName := range common.DEPRECATED_DIRECTIVE_HEADER_NAMES {
+		t.Run(deprecatedName, func(t *testing.T) {
+			conn, sender := dialGrpcDirectivesListener(t)
+			value, ok := values[deprecatedName]
+			if !ok {
+				value = "directive-value"
+			}
+
+			invokeWithMetadata(t, conn, deprecatedName, value, grpcDirectivesPassthroughHeader, "kept")
+
+			parsed := sender.only(t)
+			require.Equal(t, value, parsed.GetDirectiveHeaders()[currentName],
+				"a directive sent under its old name as gRPC metadata must land in the directive map under the current name")
+			forwarded := forwardedHeaders(parsed)
+			require.Equal(t, "kept", forwarded[grpcDirectivesPassthroughHeader], "a header the spec passes must reach the node")
+			require.NotContains(t, forwarded, deprecatedName, "the old name is for the router and must not reach the node")
+			require.NotContains(t, forwarded, currentName, "the directive is for the router and must not reach the node")
 		})
 	}
 }

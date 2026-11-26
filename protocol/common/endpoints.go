@@ -172,6 +172,28 @@ var SPECIAL_DIRECTIVE_HEADERS = map[string]struct{}{
 	CROSS_VALIDATION_HEADER_AGREEMENT_THRESHOLD: {},
 }
 
+// DEPRECATED_DIRECTIVE_HEADER_NAMES maps the name each client directive carried before version 1.7.0
+// to the name it carries now. Version 1.7.0 renamed the directives from lava-* to router-* with no
+// alias, and a request that still sent an old name got no error while its directive was dropped: a
+// pinned request was not pinned, a cross-validated one was answered by a single provider. An old
+// name is read as the current one, so the directive applies and is stripped like any other
+// (MAG-5817). When a request carries both spellings of one directive, the current name wins.
+//
+// Only the directives a client sends are listed. The monitoring marker, the reply headers and the
+// rest of the 1.7.0 rename keep the current name alone.
+var DEPRECATED_DIRECTIVE_HEADER_NAMES = map[string]string{
+	"lava-select-provider":                      SELECT_PROVIDER_HEADER_NAME,
+	"lava-select-provider-strict":               SELECT_PROVIDER_STRICT_HEADER_NAME,
+	"lava-stickiness":                           STICKINESS_HEADER_NAME,
+	"lava-providers-block":                      BLOCK_PROVIDERS_ADDRESSES_HEADER_NAME,
+	"lava-extension":                            EXTENSION_OVERRIDE_HEADER_NAME,
+	"lava-relay-timeout":                        RELAY_TIMEOUT_HEADER_NAME,
+	"lava-force-cache-refresh":                  FORCE_CACHE_REFRESH_HEADER_NAME,
+	"lava-debug-relay":                          DEBUG_RELAY,
+	"lava-cross-validation-max-participants":    CROSS_VALIDATION_HEADER_MAX_PARTICIPANTS,
+	"lava-cross-validation-agreement-threshold": CROSS_VALIDATION_HEADER_AGREEMENT_THRESHOLD,
+}
+
 type UserData struct {
 	ConsumerIp string
 	DappId     string

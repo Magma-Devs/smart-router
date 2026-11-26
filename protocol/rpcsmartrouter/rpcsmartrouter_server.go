@@ -6470,15 +6470,31 @@ func (rpcss *RPCSmartRouterServer) GetProcessingTimeout(chainMessage chainlib.Ch
 	return processingTimeout, relayTimeout
 }
 
+// DirectiveHeaders splits a request's headers into the ones the node may receive and the directives
+// the router keeps for itself. A directive sent under its pre-1.7.0 name
+// (common.DEPRECATED_DIRECTIVE_HEADER_NAMES) is kept under its current name, so every reader finds
+// it where it looks, and it is held back from the node like any directive. The current name wins
+// over the old one whichever came first in the request (MAG-5817).
 func (rpcss *RPCSmartRouterServer) DirectiveHeaders(metadata []pairingtypes.Metadata) ([]pairingtypes.Metadata, map[string]string) {
 	metadataRet := []pairingtypes.Metadata{}
 	headerDirectives := map[string]string{}
+	var deprecatedDirectives map[string]string
 	for _, metaElement := range metadata {
 		name := strings.ToLower(metaElement.Name)
 		if _, found := common.SPECIAL_DIRECTIVE_HEADERS[name]; found {
 			headerDirectives[name] = metaElement.Value
+		} else if currentName, deprecated := common.DEPRECATED_DIRECTIVE_HEADER_NAMES[name]; deprecated {
+			if deprecatedDirectives == nil {
+				deprecatedDirectives = map[string]string{}
+			}
+			deprecatedDirectives[currentName] = metaElement.Value
 		} else {
 			metadataRet = append(metadataRet, metaElement)
+		}
+	}
+	for currentName, value := range deprecatedDirectives {
+		if _, sent := headerDirectives[currentName]; !sent {
+			headerDirectives[currentName] = value
 		}
 	}
 	return metadataRet, headerDirectives
