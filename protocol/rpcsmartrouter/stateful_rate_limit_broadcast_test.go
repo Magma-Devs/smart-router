@@ -79,33 +79,43 @@ func restWriteParser(t *testing.T) chainlib.ChainParser {
 // submits transactions with.
 func suiGraphQLWriteParser(t *testing.T) chainlib.ChainParser {
 	t.Helper()
-	chainParser, err := chainlib.NewGraphQLChainParser()
-	require.NoError(t, err)
-	chainParser.SetSpec(spectypes.Spec{
-		Index:            "SUI",
-		Enabled:          true,
-		AverageBlockTime: 400,
-		ApiCollections: []*spectypes.ApiCollection{{
-			Enabled:        true,
-			CollectionData: spectypes.CollectionData{ApiInterface: spectypes.APIInterfaceGraphQL, Type: http.MethodPost},
-			Apis: []*spectypes.Api{
-				{
-					Name:         "chainIdentifier",
-					Enabled:      true,
-					ComputeUnits: 10,
-					BlockParsing: spectypes.BlockParser{ParserArg: []string{""}, ParserFunc: spectypes.PARSER_FUNC_EMPTY},
+	return graphQLWriteParser("SUI")(t)
+}
+
+// graphQLWriteParser is suiGraphQLWriteParser's spec under the index chainID. The index sets the
+// chain family, and with it the GraphQL rows the replies are read by: only Sui has write rows
+// (MAG-4909), so on any other index a write's replies keep the handling of a chain without them.
+func graphQLWriteParser(chainID string) func(t *testing.T) chainlib.ChainParser {
+	return func(t *testing.T) chainlib.ChainParser {
+		t.Helper()
+		chainParser, err := chainlib.NewGraphQLChainParser()
+		require.NoError(t, err)
+		chainParser.SetSpec(spectypes.Spec{
+			Index:            chainID,
+			Enabled:          true,
+			AverageBlockTime: 400,
+			ApiCollections: []*spectypes.ApiCollection{{
+				Enabled:        true,
+				CollectionData: spectypes.CollectionData{ApiInterface: spectypes.APIInterfaceGraphQL, Type: http.MethodPost},
+				Apis: []*spectypes.Api{
+					{
+						Name:         "chainIdentifier",
+						Enabled:      true,
+						ComputeUnits: 10,
+						BlockParsing: spectypes.BlockParser{ParserArg: []string{""}, ParserFunc: spectypes.PARSER_FUNC_EMPTY},
+					},
+					{
+						Name:         "executeTransaction",
+						Enabled:      true,
+						ComputeUnits: 100,
+						Category:     spectypes.SpecCategory{Stateful: common.CONSISTENCY_SELECT_ALL_PROVIDERS},
+						BlockParsing: spectypes.BlockParser{ParserArg: []string{""}, ParserFunc: spectypes.PARSER_FUNC_EMPTY},
+					},
 				},
-				{
-					Name:         "executeTransaction",
-					Enabled:      true,
-					ComputeUnits: 100,
-					Category:     spectypes.SpecCategory{Stateful: common.CONSISTENCY_SELECT_ALL_PROVIDERS},
-					BlockParsing: spectypes.BlockParser{ParserArg: []string{""}, ParserFunc: spectypes.PARSER_FUNC_EMPTY},
-				},
-			},
-		}},
-	})
-	return chainParser
+			}},
+		})
+		return chainParser
+	}
 }
 
 var writeInterfaceCases = []writeInterfaceCase{

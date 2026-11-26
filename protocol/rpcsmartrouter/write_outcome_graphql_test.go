@@ -156,6 +156,10 @@ func TestGraphQLWrite_SuiWriteRowsDecideTheOutcome(t *testing.T) {
 		networkNo        = `{"data":null,"errors":[{"message":"Invalid argument: Transaction is rejected as invalid by more than 1/3 of validators by stake (non-retriable). Non-retriable errors: [Transaction 6sW1ruByXbFjZzVvX5b7PBY5ZCyZTzPS2fVZFuMuRH1z was already executed { v1 } with 6667 stake].","path":["executeTransaction"],"extensions":{"code":"BAD_USER_INPUT"}}]}`
 		locked           = `{"data":null,"errors":[{"message":"Failed to execute transaction","path":["executeTransaction"],"extensions":{"chain":["code: 'The system is not in a state required for the operation's execution', message: \"Object (0x5, SequenceNumber(7), o#abc) already locked by a different transaction: TransactionDigest(x)\""],"code":"INTERNAL_SERVER_ERROR"}}]}`
 		internal         = `{"data":null,"errors":[{"message":"Failed to execute transaction","path":["executeTransaction"],"extensions":{"chain":["code: 'The service is currently unavailable', message: \"timed-out before finality could be reached\""],"code":"INTERNAL_SERVER_ERROR"}}]}`
+		// slotText is a slot-already-used text (MAG-5593) with no code. The signatures are read beside
+		// the rows and decide nothing about the reply (common.IsSlotAlreadyUsed), so on Sui it is a
+		// codeless error on a mutation: W11, may have run.
+		slotText = `{"errors":[{"message":"nonce too low"}]}`
 	)
 	for _, c := range []struct {
 		name             string
@@ -191,6 +195,8 @@ func TestGraphQLWrite_SuiWriteRowsDecideTheOutcome(t *testing.T) {
 		{name: "W10 competing transactions: may have run", a: locked, b: locked, header: "unknown"},
 		{name: "W11 an internal error: may have run", a: internal, b: internal, header: "unknown"},
 		{name: "W11 every copy a bare 503 (MAG-5122 T13)", a: "upstream down", statusA: http.StatusServiceUnavailable, b: "upstream down", statusB: http.StatusServiceUnavailable, header: "unknown"},
+		{name: "W11 a codeless slot-already-used text: may have run", a: slotText, b: slotText, header: "unknown"},
+		{name: "W11 a codeless slot-already-used text under a 503: may have run", a: slotText, statusA: http.StatusServiceUnavailable, b: slotText, statusB: http.StatusServiceUnavailable, header: "unknown"},
 		{name: "a refused copy beside one that may have run", a: refusedBcs, b: networkNo, header: "unknown"},
 		{name: "W6 every copy refused: the node's reply as is", a: refusedBcs, b: refusedBcs, served: refusedBcs},
 		{name: "W6 every copy refused under 502", a: refusedBcs, b: refusedBcs, statusA: 502, statusB: 502, served: refusedBcs, servedStatus: 502},
