@@ -21,7 +21,9 @@ import (
 func TestNodeErrorsCarryTheirRecords(t *testing.T) {
 	waitAll := func(t *testing.T, rp *RelayProcessor) {
 		t.Helper()
-		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+		// WaitForResults returns once the relay has every reply; the deadline only bounds a broken run,
+		// and a short one failed a loaded run that had filed nothing yet.
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		_ = rp.WaitForResults(ctx)
 	}
