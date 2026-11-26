@@ -7,6 +7,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
+	"github.com/tidwall/gjson"
 )
 
 // emptyResultReason names why a JSON-RPC or Tendermint RPC reply answers with nothing, or returns ""
@@ -77,22 +78,33 @@ func batchEmptyResultReason(batch []byte) string {
 // in front of result (resultValueIndex) and the first bytes of the value, so a block-sized reply
 // costs no more than a small one. A result of "null" (a string), {}, or a list with one element,
 // null included, is an answer.
+//
+// resultValueIndex steps over scalar members only. When a member in front of result holds an object
+// or a list, or has an escaped name, it cannot tell, and the result member is found by the full
+// read, as its other caller does (extractSolanaContextSlot). Without that read such a reply would
+// count as an answer, and its null or [] would be written and served.
 func emptyResult(obj []byte) string {
 	trimmed := bytes.TrimLeft(obj, " \t\r\n")
 	if len(trimmed) == 0 || trimmed[0] != '{' {
 		return ""
 	}
-	i := resultValueIndex(trimmed)
-	if i < 0 {
-		return ""
+	var value []byte
+	if i := resultValueIndex(trimmed); i >= 0 {
+		value = trimmed[i:]
+	} else {
+		result := gjson.GetBytes(trimmed, "result")
+		if !result.Exists() {
+			return ""
+		}
+		value = []byte(result.Raw)
 	}
-	switch trimmed[i] {
+	switch value[0] {
 	case 'n':
-		if bytes.HasPrefix(trimmed[i:], []byte("null")) {
+		if bytes.HasPrefix(value, []byte("null")) {
 			return "null"
 		}
 	case '[':
-		if j := rpcInterfaceMessages.SkipJSONWhitespace(trimmed, i+1); j < len(trimmed) && trimmed[j] == ']' {
+		if j := rpcInterfaceMessages.SkipJSONWhitespace(value, 1); j < len(value) && value[j] == ']' {
 			return "an empty list"
 		}
 	}

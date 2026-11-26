@@ -51,10 +51,14 @@ func TestCacheWriteNeverKeepsAnEmptyJSONRPCResult(t *testing.T) {
 		{"an empty list of logs", getLogs, emptyList, tip, false},
 		{"a batch with one element answering null", batchRequest, `[{"jsonrpc":"2.0","id":1,"result":"0x5"},{"jsonrpc":"2.0","id":2,"result":null}]`, tip, false},
 		{"a batch with one element answering an empty list", batchRequest, `[{"jsonrpc":"2.0","id":1,"result":[]},{"jsonrpc":"2.0","id":2,"result":"0x5"}]`, tip, false},
+		{"a null behind a member that holds an object", getBlock(fmt.Sprintf("0x%x", tip-1)), `{"jsonrpc":"2.0","id":1,"meta":{"node":"a"},"result":null}`, tip, false},
+		{"an empty list behind a member that holds a list", getLogs, `{"jsonrpc":"2.0","id":1,"warnings":["slow"],"result":[]}`, tip, false},
+		{"a batch whose null element has a member that holds an object", batchRequest, `[{"jsonrpc":"2.0","id":1,"result":"0x5"},{"jsonrpc":"2.0","id":2,"meta":{"node":"a"},"result":null}]`, tip, false},
 		{"a block for a block below the tip", getBlock(fmt.Sprintf("0x%x", tip-1)), fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"result":{"number":"0x%x","transactions":[]}}`, tip-1), tip, true},
 		{"a list with one log", getLogs, fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"result":[{"blockNumber":"0x%x","data":"0x"}]}`, tip-1), tip, true},
 		{"an empty object", getBlock(fmt.Sprintf("0x%x", tip-1)), `{"jsonrpc":"2.0","id":1,"result":{}}`, tip, true},
 		{"a batch whose elements all answer", batchRequest, `[{"jsonrpc":"2.0","id":1,"result":"0x5"},{"jsonrpc":"2.0","id":2,"result":"0x0"}]`, tip, true},
+		{"a block behind a member that holds an object", getBlock(fmt.Sprintf("0x%x", tip-1)), fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"meta":{"result":null},"result":{"number":"0x%x","transactions":[]}}`, tip-1), tip, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -101,6 +105,15 @@ func TestEmptyResultReason(t *testing.T) {
 		{spectypes.APIInterfaceJsonRPC, `[{"jsonrpc":"2.0","id":1,"result":"0x1"},{"jsonrpc":"2.0","id":2,"result":null}]`, "element 2's result is null"},
 		{spectypes.APIInterfaceJsonRPC, `[{"jsonrpc":"2.0","id":1,"result":[]},{"jsonrpc":"2.0","id":2,"result":null}]`, "element 1's result is an empty list"},
 		{spectypes.APIInterfaceJsonRPC, "[\n {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"a\":[1,2]}} ,\n {\"jsonrpc\":\"2.0\",\"id\":\"x]\",\"result\":null}\n]", "element 2's result is null"},
+		// A member in front of result that is not a scalar, or has an escaped name, is beyond the
+		// cheap read (resultValueIndex), so the full read finds result.
+		{spectypes.APIInterfaceJsonRPC, `{"jsonrpc":"2.0","id":1,"meta":{"node":"a"},"result":null}`, "the result is null"},
+		{spectypes.APIInterfaceJsonRPC, `{"jsonrpc":"2.0","id":1,"warnings":["slow"],"result":[]}`, "the result is an empty list"},
+		{spectypes.APIInterfaceJsonRPC, `{"jsonrpc":"2.0","\u0069d":1,"result":null}`, "the result is null"},
+		{spectypes.APIInterfaceTendermintRPC, `{"jsonrpc":"2.0","id":-1,"meta":{"node":"a"},"result":null}`, "the result is null"},
+		{spectypes.APIInterfaceJsonRPC, `[{"jsonrpc":"2.0","id":1,"result":"0x1"},{"jsonrpc":"2.0","id":2,"meta":{"node":"a"},"result":[]}]`, "element 2's result is an empty list"},
+		{spectypes.APIInterfaceJsonRPC, `{"jsonrpc":"2.0","id":1,"meta":{"result":null},"result":"0x1"}`, ""},
+		{spectypes.APIInterfaceJsonRPC, `{"jsonrpc":"2.0","id":1,"meta":{"node":"a"},"error":{"code":-32000,"message":"header not found"}}`, ""},
 		{spectypes.APIInterfaceJsonRPC, `{"jsonrpc":"2.0","id":1,"result":"null"}`, ""},
 		{spectypes.APIInterfaceJsonRPC, `{"jsonrpc":"2.0","id":1,"result":{"hash":null}}`, ""},
 		{spectypes.APIInterfaceJsonRPC, `{"jsonrpc":"2.0","id":1,"result":{}}`, ""},
