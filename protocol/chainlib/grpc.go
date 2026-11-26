@@ -405,8 +405,7 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 	lis := GetListenerWithRetryGrpc("tcp", apil.endpoint.NetworkAddress)
 	apiInterface := apil.endpoint.ApiInterface
 	sendRelayCallback := func(ctx context.Context, method string, reqBody []byte) ([]byte, metadata.MD, error) {
-		guid := utils.GenerateUniqueIdentifier()
-		ctx = utils.WithUniqueIdentifier(ctx, guid)
+		guid := requestGUID(&ctx)
 		// The call's deadline here is the caller's own grpc-timeout. Recorded so an attempt that
 		// ends at it is not counted against the endpoint (common.IsClientCancellation).
 		ctx = common.WithCallerDeadline(ctx)
@@ -564,6 +563,18 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 	}
 }
 
+// requestGUID returns the request id on *ctx, which the gRPC proxy sets on every call so that a
+// failure it answers is logged under the id the request's own lines carry. A context without one
+// (a callback called directly) gets a new id.
+func requestGUID(ctx *context.Context) uint64 {
+	if guid, found := utils.GetUniqueIdentifier(*ctx); found {
+		return guid
+	}
+	guid := utils.GenerateUniqueIdentifier()
+	*ctx = utils.WithUniqueIdentifier(*ctx, guid)
+	return guid
+}
+
 // switchedOffGRPCMethodMessage is the whole sentence a caller gets for a method the chain spec
 // switched off, with status UNIMPLEMENTED.
 const switchedOffGRPCMethodMessage = "The router does not serve this method"
@@ -666,8 +677,7 @@ func (apil *GrpcChainListener) makeStreamRelayCallback(subscriptionManager GRPCS
 			return nil, nil
 		}
 
-		guid := utils.GenerateUniqueIdentifier()
-		ctx = utils.WithUniqueIdentifier(ctx, guid)
+		guid := requestGUID(&ctx)
 
 		// One gRPC stream is one subscriber. The WebSocket path keys clients by
 		// connection UID because a single socket multiplexes many subscriptions; here

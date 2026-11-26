@@ -675,6 +675,7 @@ func (rp *RelayProcessor) GetResultsSummary() ResultsSummary {
 		HasPermanentProtocolError: hasPermanentProtocolError,
 		HasEpochMismatch:          hasEpochMismatch,
 		OnlyRateLimited:           onlyRateLimited(nodeErrorResults, protocolErrorResults),
+		SlotAlreadyUsed:           slotAlreadyUsed(nodeErrorResults, protocolErrorResults),
 		NotFoundAnswers:           notFoundAnswers,
 		ResultsAfterNotFound:      resultsAfterNotFound,
 	}
@@ -834,7 +835,7 @@ func (rp *RelayProcessor) handleResponse(response *RelayResponse) {
 		// The router's own health check is not a client request, so its attempts stay out of the
 		// tally a test reads (review 626-5); the metric above keeps counting them, as before.
 		if recorder, ok := rp.chainIdAndApiInterfaceGetter.(NodeErrorRecorder); ok && !rp.GetUsedProviders().IsRouterHealthCheck() {
-			recorder.RecordNodeError(chainId, apiInterface, response.RelayResult.ProviderInfo.ProviderAddress, rp.RelayStateMachine.GetProtocolMessage().GetApi().Name)
+			recorder.RecordNodeError(chainId, apiInterface, response.RelayResult.ProviderInfo.ProviderAddress, rp.RelayStateMachine.GetProtocolMessage())
 		}
 		utils.FormatInfo("Relay received a node error", utils.LogAttr("GUID", rp.guid), utils.LogAttr("Error", nodeError), utils.LogAttr("provider", response.RelayResult.ProviderInfo), utils.LogAttr("Request", rp.RelayStateMachine.GetProtocolMessage().GetApi().Name))
 	}
@@ -1572,6 +1573,23 @@ func onlyRateLimited(nodeErrorResults []common.RelayResult, protocolErrorResults
 		}
 	}
 	return true
+}
+
+// slotAlreadyUsed reports whether a failed copy's reply carries a slot-already-used signature
+// (common.RelayResult.IsSlotAlreadyUsed, set by the results manager on a write's node errors and on
+// the upstream answers its protocol errors carry). Pure over the slices, like onlyRateLimited.
+func slotAlreadyUsed(nodeErrorResults []common.RelayResult, protocolErrorResults []RelayError) bool {
+	for _, result := range nodeErrorResults {
+		if result.IsSlotAlreadyUsed {
+			return true
+		}
+	}
+	for _, protocolError := range protocolErrorResults {
+		if protocolError.Response != nil && protocolError.Response.RelayResult.IsSlotAlreadyUsed {
+			return true
+		}
+	}
+	return false
 }
 
 // buildFailureResult constructs an error result when no consensus can be reached. It returns the best

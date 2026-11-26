@@ -41,7 +41,15 @@ const (
 	upWrongChain = "wrongchain"
 	// pruned ETH1 node that answers another chain's id: fails chain-id and archive
 	upPrunedWrongChain = "prunedwrongchain"
+	// full ETH1 node that serves the debug add-on, but holds the debug check's request
+	// until the caller gives up
+	upDebugHang = "debughang"
+	// full ETH1 node that holds every eth_blockNumber until the caller gives up
+	upHeadHang = "headhang"
 )
+
+// heldMethod is the one method a personality holds until the caller gives up.
+var heldMethod = map[string]string{upDebugHang: "debug_getRawHeader", upHeadHang: "eth_blockNumber"}
 
 const upLatest = 0x1400000
 
@@ -187,6 +195,16 @@ func (u *fakeUpstreams) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			u.record("http", r.URL.Path, raw)
 			w.WriteHeader(http.StatusTooManyRequests)
 			_, _ = w.Write([]byte(`{"error":"too many requests"}`))
+			return
+		}
+	case upDebugHang, upHeadHang:
+		var request map[string]any
+		if json.Unmarshal(raw, &request) == nil && request["method"] == heldMethod[u.personalityOf(r.URL.Path)] {
+			u.record("http", r.URL.Path, raw)
+			select {
+			case <-r.Context().Done():
+			case <-time.After(time.Minute):
+			}
 			return
 		}
 	}

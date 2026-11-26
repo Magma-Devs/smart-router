@@ -76,11 +76,13 @@ const (
 	SELECTION_STATS_HEADER_NAME           = "router-selection-stats"
 	STICKINESS_HEADER_NAME                = "router-stickiness"
 	SELECT_PROVIDER_HEADER_NAME           = "router-select-provider"
-	// SELECT_PROVIDER_STRICT_HEADER_NAME, set to "true" next to router-select-provider, makes the
-	// selection a strict pin: the named provider answers or the request fails, with no retry, hedge
-	// or consistency-gate reroute on another provider. Without it router-select-provider pins the first
-	// attempt only. router-stickiness is always strict and needs no such header (MAG-4826).
-	SELECT_PROVIDER_STRICT_HEADER_NAME            = "router-select-provider-strict"
+	// SELECT_PROVIDER_ALLOW_RETRY_HEADER_NAME, set to "true" next to router-select-provider, loosens
+	// the selection to the first attempt only: the named provider is tried first, and a retry, a
+	// hedge or the consistency gate may then use the rest of the pool. Without it
+	// router-select-provider is a strict pin: the named provider answers or the request fails, with
+	// no retry, hedge or consistency-gate reroute on another provider (MAG-5711). router-stickiness
+	// is always strict, and this header does not loosen it.
+	SELECT_PROVIDER_ALLOW_RETRY_HEADER_NAME       = "router-select-provider-allow-retry"
 	CROSS_VALIDATION_HEADER_MAX_PARTICIPANTS      = "router-cross-validation-max-participants"
 	CROSS_VALIDATION_HEADER_AGREEMENT_THRESHOLD   = "router-cross-validation-agreement-threshold"
 	CROSS_VALIDATION_ALL_PROVIDERS_HEADER_NAME    = "router-cross-validation-all-providers"
@@ -166,7 +168,7 @@ var SPECIAL_DIRECTIVE_HEADERS = map[string]struct{}{
 	DEBUG_RELAY:                                 {},
 	STICKINESS_HEADER_NAME:                      {},
 	SELECT_PROVIDER_HEADER_NAME:                 {},
-	SELECT_PROVIDER_STRICT_HEADER_NAME:          {},
+	SELECT_PROVIDER_ALLOW_RETRY_HEADER_NAME:     {},
 	INTERNAL_PROBE_HEADER_NAME:                  {},
 	CROSS_VALIDATION_HEADER_MAX_PARTICIPANTS:    {},
 	CROSS_VALIDATION_HEADER_AGREEMENT_THRESHOLD: {},
@@ -671,6 +673,12 @@ type RelayResult struct {
 	// a Sui write): the flags above are that verdict, read from the body, so a status-only step must
 	// not decide the reply again by its status (sendRelayToDirectEndpoints).
 	IsOwnVerdict bool
+	// IsSlotAlreadyUsed — the reply says the write's nonce or sequence is already used, read by the
+	// slot-already-used signatures (IsSlotAlreadyUsed in slot_already_used.go; PRD §5.2, MAG-5593)
+	// beside the row above, not from it: this very transaction may be what used the slot, so the copy
+	// may have run, is never refused, and the write is not sent again. Set on a write's copies only;
+	// a read keeps its verdict and never reads it.
+	IsSlotAlreadyUsed bool
 	// ClientFacing is what the listener shows the caller when the relay ends in a protocol error:
 	// the upstream's own answer when it gave one, else the leaf cause (MAG-4218).
 	ClientFacing *ClientFacingError

@@ -48,7 +48,8 @@ func expandCommaSeparatedPaths(specPaths []string) []string {
 	return expanded
 }
 
-// RegisterForSpecUpdatesOrSetStaticSpecsWithToken loads specs from multiple sources and aggregates them.
+// LoadStaticSpecs loads specs from multiple sources and aggregates them, expands the endpoint's spec with
+// the write-method lock applied (speckeeper.ExpandSpecWithWriteLock) and reports what the lock forced.
 // Sources are processed in order; later sources override earlier ones for the same chain ID.
 //
 // It supports:
@@ -63,9 +64,9 @@ func expandCommaSeparatedPaths(specPaths []string) []string {
 //
 // For remote repositories, the appropriate token (githubToken or gitlabToken) is used for authentication.
 // smart-router loads specs statically; empty specPaths is an error (there is no live blockchain fallback).
-func RegisterForSpecUpdatesOrSetStaticSpecsWithToken(ctx context.Context, chainParser chainlib.ChainParser, specPaths []string, rpcEndpoint routersession.RPCEndpoint, githubToken string, gitlabToken string) error {
+func LoadStaticSpecs(ctx context.Context, chainParser chainlib.ChainParser, specPaths []string, rpcEndpoint routersession.RPCEndpoint, githubToken string, gitlabToken string) (speckeeper.WriteLockReport, error) {
 	if len(specPaths) == 0 {
-		return utils.FormatError("no spec paths provided", nil,
+		return speckeeper.WriteLockReport{}, utils.FormatError("no spec paths provided", nil,
 			utils.LogAttr("chain_id", rpcEndpoint.ChainID))
 	}
 
@@ -73,7 +74,7 @@ func RegisterForSpecUpdatesOrSetStaticSpecsWithToken(ctx context.Context, chainP
 	expandedPaths := expandCommaSeparatedPaths(specPaths)
 
 	if len(expandedPaths) == 0 {
-		return utils.FormatError("no valid spec paths after expansion", nil,
+		return speckeeper.WriteLockReport{}, utils.FormatError("no valid spec paths after expansion", nil,
 			utils.LogAttr("chain_id", rpcEndpoint.ChainID))
 	}
 
@@ -88,7 +89,7 @@ func RegisterForSpecUpdatesOrSetStaticSpecsWithToken(ctx context.Context, chainP
 
 		specs, err := loadAllSpecsFromSource(ctx, specPath, githubToken, gitlabToken)
 		if err != nil {
-			return utils.FormatError("failed loading specs from source", err,
+			return speckeeper.WriteLockReport{}, utils.FormatError("failed loading specs from source", err,
 				utils.LogAttr("source_index", i+1),
 				utils.LogAttr("source", specPath))
 		}
@@ -105,14 +106,14 @@ func RegisterForSpecUpdatesOrSetStaticSpecsWithToken(ctx context.Context, chainP
 	}
 
 	if len(aggregatedSpecs) == 0 {
-		return utils.FormatError("no specs loaded from any source", nil,
+		return speckeeper.WriteLockReport{}, utils.FormatError("no specs loaded from any source", nil,
 			utils.LogAttr("sources", expandedPaths))
 	}
 
 	// Expand the requested spec with its dependencies
-	spec, err := speckeeper.ExpandSpecWithDependencies(aggregatedSpecs, rpcEndpoint.ChainID)
+	spec, writeLock, err := speckeeper.ExpandSpecWithWriteLock(aggregatedSpecs, rpcEndpoint.ChainID)
 	if err != nil {
-		return utils.FormatError("failed expanding spec", err,
+		return speckeeper.WriteLockReport{}, utils.FormatError("failed expanding spec", err,
 			utils.LogAttr("chain_id", rpcEndpoint.ChainID),
 			utils.LogAttr("available_specs", len(aggregatedSpecs)))
 	}
@@ -132,7 +133,14 @@ func RegisterForSpecUpdatesOrSetStaticSpecsWithToken(ctx context.Context, chainP
 	}
 
 	chainParser.SetSpec(*spec)
-	return nil
+	return writeLock, nil
+}
+
+// RegisterForSpecUpdatesOrSetStaticSpecsWithToken is LoadStaticSpecs for a caller that does not publish
+// the write-method lock's gauge: the health command and the tests.
+func RegisterForSpecUpdatesOrSetStaticSpecsWithToken(ctx context.Context, chainParser chainlib.ChainParser, specPaths []string, rpcEndpoint routersession.RPCEndpoint, githubToken string, gitlabToken string) error {
+	_, err := LoadStaticSpecs(ctx, chainParser, specPaths, rpcEndpoint, githubToken, gitlabToken)
+	return err
 }
 
 // loadAllSpecsFromSource loads all specs from a single source without expansion.

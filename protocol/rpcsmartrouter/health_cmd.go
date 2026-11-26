@@ -553,7 +553,7 @@ func routerVerdict(v chainlib.NodeURLValidation, providerExcluded error) healthR
 		reasons = append(reasons, "not defined by this spec, ignored: "+strings.Join(v.UnknownServices, ", "))
 	}
 	if len(v.ThrottledServices) > 0 {
-		reasons = append(reasons, "rate-limited, not verified: "+strings.Join(v.ThrottledServices, ", "))
+		reasons = append(reasons, "rate-limited or cut off by the deadline, not verified: "+strings.Join(v.ThrottledServices, ", "))
 	}
 	verdict.Reason = strings.Join(reasons, "; ")
 	return verdict

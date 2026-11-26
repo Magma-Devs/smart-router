@@ -48,9 +48,10 @@ type ChainIdAndApiInterfaceGetter interface {
 
 // NodeErrorRecorder is implemented by a ChainIdAndApiInterfaceGetter that keeps the router's own
 // count of node errors (RelayErrorTally, MAG-4718). handleResponse records each node error it
-// meters through it, beside the metric rather than inside it.
+// meters through it, beside the metric rather than inside it. It is given the request, not a
+// method name, so the recorder names the request as its other debug routes do (MAG-5422).
 type NodeErrorRecorder interface {
-	RecordNodeError(chainID, apiInterface, providerAddress, method string)
+	RecordNodeError(chainID, apiInterface, providerAddress string, protocolMessage chainlib.ProtocolMessage)
 }
 
 // RelayStateSendInstructions struct for relay instructions
@@ -97,6 +98,11 @@ type ResultsSummary struct {
 	// an upstream rate limit — the one failure that is safe to retry even for a stateful
 	// relay or a batch, because the upstream refused before executing anything.
 	OnlyRateLimited bool
+	// SlotAlreadyUsed is true when a failed copy's reply says the write's nonce or sequence is
+	// already used (common.RelayResult.IsSlotAlreadyUsed; MAG-5593): this very transaction may be
+	// what used it, so the write is not sent again, whatever else the copies answered, and even
+	// when every one of them also read as a rate limit.
+	SlotAlreadyUsed bool
 	// NotFoundAnswers counts the not-found answers (common.RelayResult.IsNotFoundAnswer, MAG-5121
 	// P6), and ResultsAfterNotFound the results of any kind that arrived after the first of them.
 	// A not-found answer gets one more provider, then the null is the answer (MAG-4909 R23).
@@ -154,9 +160,10 @@ type DecisionInput struct {
 	// forwarded it as a Default- API only because the spec cannot rule it out.
 	IsDefaultApi bool
 	// Pinned is true when the request is a strict pin (PinnedByDirectives): router-stickiness, or
-	// router-select-provider with router-select-provider-strict: true. A pinned request is answered by
-	// that upstream or not at all: Decide never retries or hedges it on another one (MAG-2280,
-	// MAG-4123). A plain router-select-provider is not Pinned and keeps its failover (MAG-4826).
+	// router-select-provider without router-select-provider-allow-retry: true. A pinned request is
+	// answered by that upstream or not at all: Decide never retries or hedges it on another one
+	// (MAG-2280, MAG-4123). A router-select-provider sent with the allow-retry header is not Pinned
+	// and keeps its failover (MAG-5711).
 	Pinned bool
 	// IsGraphQLWrite is true when the request is a GraphQL mutation (MAG-5122). It turns off the
 	// Stateful rate-limit carve-out below: a GraphQL write is never re-sent, including when every

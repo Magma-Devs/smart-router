@@ -2702,12 +2702,15 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	// Smart router queries spec once during initialization (no ongoing updates)
 	if len(options.cmdFlags.StaticSpecPaths) > 0 {
 		// Load spec from static file/directory/URL sources
-		err = statetracker.RegisterForSpecUpdatesOrSetStaticSpecsWithToken(ctx, chainParser, options.cmdFlags.StaticSpecPaths, *rpcEndpoint, options.cmdFlags.GitHubToken, options.cmdFlags.GitLabToken)
-		if err != nil {
-			err = utils.FormatError("failed loading static spec", err, utils.Attribute{Key: "endpoint", Value: rpcEndpoint})
+		writeLock, loadErr := statetracker.LoadStaticSpecs(ctx, chainParser, options.cmdFlags.StaticSpecPaths, *rpcEndpoint, options.cmdFlags.GitHubToken, options.cmdFlags.GitLabToken)
+		if loadErr != nil {
+			err = utils.FormatError("failed loading static spec", loadErr, utils.Attribute{Key: "endpoint", Value: rpcEndpoint})
 			errCh <- err
 			return err
 		}
+		// The write-method lock's gauge, written for every endpoint, 0 included (MAG-5593): the lock ran
+		// before the first scrape, so an alert reads the value, not an increase.
+		smartRouterMetricsManager.SetSpecLockEnforced(chainID, rpcEndpoint.ApiInterface, metrics.SpecLockRuleStateful, writeLock.Count(rpcEndpoint.ApiInterface))
 	} else {
 		err = utils.FormatError("no spec source configured; smart router requires --"+common.UseStaticSpecFlag+" to load chain specs", nil, utils.Attribute{Key: "chainID", Value: chainID})
 		errCh <- err

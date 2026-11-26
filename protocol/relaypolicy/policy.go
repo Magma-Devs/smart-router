@@ -24,9 +24,9 @@ func (p *Policy) Decide(input relaycore.DecisionInput) relaycore.DecisionOutput 
 	if input.Selection == relaycore.CrossValidation {
 		return relaycore.DecisionOutput{Action: relaycore.ActionStop, Reason: "CrossValidation"}
 	}
-	// A pinned request (a strict pin: router-stickiness, or router-select-provider with
-	// router-select-provider-strict: true; see relaycore.PinnedByDirectives) is served by the pinned
-	// upstream or not at all (MAG-2280, MAG-4123, MAG-4826). The caller chose the node; a retry or
+	// A pinned request (a strict pin: router-stickiness, or router-select-provider without
+	// router-select-provider-allow-retry: true; see relaycore.PinnedByDirectives) is served by the
+	// pinned upstream or not at all (MAG-2280, MAG-4123, MAG-5711). The caller chose the node; a retry or
 	// a hedge on another one would be the silent substitution the pin exists to prevent. For the
 	// sequence a sticky session protects, read the head then
 	// fetch that block, it is exactly how a false gap is produced: nothing here checks that the
@@ -58,6 +58,14 @@ func (p *Policy) Decide(input relaycore.DecisionInput) relaycore.DecisionOutput 
 	// refusal of the whole batch at the transport (a protocol error) proves a stateful batch is safe
 	// to send again.
 	if input.Selection == relaycore.Stateful && input.IsBatch && input.Summary.NodeErrors+input.Summary.SpecialNodeErrors > 0 {
+		rateLimitRetrySafe = false
+	}
+	// A copy whose reply says the write's nonce or sequence is already used may be this very
+	// transaction, landed through another provider's copy or an earlier send (PRD §5.2, MAG-5593).
+	// The write is not sent again, however the other copies answered, and even when the same reply
+	// also read as a rate limit: a second copy is the double-spend the carve-out above is careful to
+	// rule out.
+	if input.Selection == relaycore.Stateful && input.Summary.SlotAlreadyUsed {
 		rateLimitRetrySafe = false
 	}
 
