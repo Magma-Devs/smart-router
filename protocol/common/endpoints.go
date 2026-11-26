@@ -697,7 +697,10 @@ type RelayResult struct {
 // CleanReplyCheck names the reply a sender checked: the bytes by their address and length, and the
 // status code they were checked under. It holds for those exact bytes only, so a reply that is
 // replaced afterwards (a node error's reply is redacted, a cached reply gets its ids restored) is
-// checked again. The zero value names no reply.
+// checked again. The record compares where the bytes are, not what they hold, so it cannot see an
+// edit made in place: code that changes a reply's bytes assigns Reply.Data a new slice, as
+// utils.RedactSecretsBytes returns one, and never writes into the slice it was handed. The zero
+// value names no reply.
 type CleanReplyCheck struct {
 	first      *byte
 	length     int
