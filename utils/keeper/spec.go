@@ -50,22 +50,23 @@ func GetSpecFromLocalDirs(specPaths []string, index string) (types.Spec, error) 
 	if len(allSpecs) == 0 {
 		return types.Spec{}, fmt.Errorf("no specs loaded from any of %v", specPaths)
 	}
-	spec, err := expandSpecWithDependencies(allSpecs, index)
+	spec, _, err := expandSpecWithDependencies(allSpecs, index)
 	if err != nil {
 		return types.Spec{}, err
 	}
 	return *spec, nil
 }
 
-// expandSpecWithDependencies expands a spec by resolving all its dependencies (inherited specs).
-func expandSpecWithDependencies(specs map[string]types.Spec, index string) (*types.Spec, error) {
+// expandSpecWithDependencies expands a spec by resolving all its dependencies (inherited specs), then
+// applies the write-method lock to the expanded spec (enforceWriteMethods) and reports what it forced.
+func expandSpecWithDependencies(specs map[string]types.Spec, index string) (*types.Spec, WriteLockReport, error) {
 	spec, ok := specs[index]
 	if !ok {
 		availableSpecs := make([]string, 0, len(specs))
 		for id := range specs {
 			availableSpecs = append(availableSpecs, id)
 		}
-		return nil, fmt.Errorf("spec not found for chainId: %s (available specs: %v)", index, availableSpecs)
+		return nil, WriteLockReport{}, fmt.Errorf("spec not found for chainId: %s (available specs: %v)", index, availableSpecs)
 	}
 
 	getBaseSpec := func(_ context.Context, idx string) (types.Spec, bool) {
@@ -78,15 +79,23 @@ func expandSpecWithDependencies(specs map[string]types.Spec, index string) (*typ
 
 	_, err := types.DoExpandSpec(context.Background(), &spec, depends, &inherit, spec.Index, getBaseSpec)
 	if err != nil {
-		return nil, fmt.Errorf("spec expand failed: %w", err)
+		return nil, WriteLockReport{}, fmt.Errorf("spec expand failed: %w", err)
 	}
 
-	return &spec, nil
+	return &spec, enforceWriteMethods(&spec, specs), nil
 }
 
 // ExpandSpecWithDependencies is the public version of expandSpecWithDependencies.
 // It expands a spec by resolving all its dependencies (inherited specs) from a provided spec map.
+// The write-method lock applies; ExpandSpecWithWriteLock also says what it forced.
 func ExpandSpecWithDependencies(specs map[string]types.Spec, index string) (*types.Spec, error) {
+	spec, _, err := expandSpecWithDependencies(specs, index)
+	return spec, err
+}
+
+// ExpandSpecWithWriteLock is ExpandSpecWithDependencies with the write-method lock's report, for the
+// caller that writes smartrouter_spec_lock_enforced.
+func ExpandSpecWithWriteLock(specs map[string]types.Spec, index string) (*types.Spec, WriteLockReport, error) {
 	return expandSpecWithDependencies(specs, index)
 }
 

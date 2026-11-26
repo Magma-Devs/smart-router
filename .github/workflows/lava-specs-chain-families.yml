@@ -57,3 +57,9 @@ jobs:
 
       - name: Check every lava-specs spec has a chain family
         run: go test ./protocol/common -run '^TestEveryLavaSpecHasAChainFamily$' -count=1 -v
+
+      # The write-method lock's table (utils/keeper/write_methods_table.go, MAG-5593) covers every
+      # api lava-specs marks stateful, and forces nothing on the catalog as it stands. A new write
+      # in lava-specs fails here until scripts/gen-write-methods.sh is rerun.
+      - name: Check the write-method table covers every stateful api in lava-specs
+        run: go test ./utils/keeper -run '^TestWriteMethodsTableCoversLavaSpecs$' -count=1 -v
