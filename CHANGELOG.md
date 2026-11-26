@@ -8,6 +8,144 @@ Versions follow [Semantic Versioning](https://semver.org/). Commit hashes
 in `### Changes` link to the canonical commit on GitHub via reference-style
 links collected at the bottom of each section.
 
+## v1.7.1 — 2026-11-26
+
+### Highlights
+
+Version 1.7.1 introduces several breaking changes that require operator action, starting with the removal of the bundled `LAVA` chain specification from the `specs/` directory; configurations serving LAVA must now explicitly load it via `--use-static-spec https://github.com/Magma-Devs/lava-specs`. Additionally, requests directed by the `router-select-provider` header no longer fail over to other nodes by default, and the `router-select-provider-strict` header is completely removed; clients must now send `router-select-provider-allow-retry: true` to retain the previous hedging and retry behavior. gRPC error handling is also strictly overhauled: unserved methods and bidirectional streams now return `UNIMPLEMENTED` instead of `UNKNOWN` or hanging, unanswered calls return `UNAVAILABLE` or `DEADLINE_EXCEEDED` rather than `UNKNOWN`, and the `grpc.health.v1` endpoint now correctly answers instead of returning `INTERNAL`. Furthermore, refused transaction broadcasts on Tendermint, Cosmos, and Tron—along with CometBFT errors parsed from `error.data`—are now treated as node errors rather than successful answers, injecting `router-identified-node-error: true` into the response and logging the exact refusal code in the `smartrouter_errors_total` metric instead of `UNKNOWN_ERROR` or `NODE_INTERNAL_ERROR`. Beyond these strict protocol corrections, this release stabilizes stateful write methods so that a `slot-already-used` reply never triggers a retry, flattens XRP Ledger WebSocket requests for `rippled` compatibility, and ensures that node-cancelled WebSocket subscriptions correctly terminate the client connection.
+
+### Changes
+
+#### ⚠ Breaking changes
+- fix(routersession,chainlib)!: a gRPC connection cut during the call is no reply, and the client gets the router's own status without addresses (MAG-5130) ([#810]) [`b2118372`]
+  - a gRPC caller whose call no provider answered gets UNAVAILABLE (DEADLINE_EXCEEDED when a provider timed out and none answered) with the router's sentence and router-guid, instead of UNKNOWN with the {"Error_GUID","Error"} text. A connection cut during the call gives that reply, or the next provider's answer, instead of status 14 with grpc-go's text.
+- fix(chainlib)!: treat a refused broadcast as the node's error on Tendermint, Cosmos gRPC and Tron, not the answer (MAG-5323) (#769) ([#811]) [`5e4fc577`]
+  - on Tendermint RPC broadcast_tx_sync and broadcast_tx_commit, Cosmos gRPC BroadcastTx, and Tron /wallet/broadcasttransaction and /wallet/broadcasthex, a broadcast returns another node's acceptance instead of a refusal that arrived first, and a refusal that reaches the client carries router-identified-node-error: true. A refusal next to a node that did not answer (silent, timed out, or cut off after the request was sent) now ends as "transaction status unclear" with HTTP 500, not as the refusal; with a silent node that comes when the write's budget runs out. smartrouter_errors_total counts each refusal under its code, and relay_end reports it as node_error. A Tron NO_CONNECTION, or a NOT_ENOUGH_EFFECTIVE_CONNECTION before the node took the transaction, now counts toward --bench-after and the availability score. A Tron SERVER_BUSY holds the endpoint off.
+- fix(chainlib,rpcsmartrouter)!: refuse the gRPC calls the router does not serve before any provider, and answer the gRPC health check (MAG-5133) ([#764]) [`7909b9c0`]
+  - a gRPC caller now gets UNIMPLEMENTED for a method the chain spec switched off (was UNKNOWN), for a server stream the spec does not name (was UNKNOWN), and for a client stream or a two-way stream (were relayed as a single-reply call, or hung). The grpc.health.v1 service now answers (it failed with INTERNAL).
+- chore!: drop the bundled Lava chain spec and the remaining Lava names (MAG-5749) ([#818]) [`91d14eac`]
+  - the bundled specs/ directory no longer holds the LAVA chain. A config that serves LAVA loads its spec from the lava-specs catalog (--use-static-spec https://github.com/Magma-Devs/lava-specs).
+- fix(chainlib,common)!: read CometBFT's error.data, so a duplicate, a full mempool or a pruned height is not the endpoint's fault (MAG-5325) ([#794]) [`4d65bde5`]
+  - the error-code label of these replies' metrics and log lines moves from NODE_INTERNAL_ERROR to the codes above, and the logged message carries the data. The client's body is unchanged.
+- fix(chainlib)!: flag a refused Cosmos REST broadcast as the node's error and classify it by its code (MAG-5451) ([#783]) [`b2040a3a`]
+  - a Cosmos REST broadcast that every node refuses now carries router-identified-node-error: true. Its smartrouter_errors_total label is the refusal's code instead of UNKNOWN_ERROR or an HTTP status row. When nodes refuse with different codes, the client gets the first refusal, not the one the old rows called non-retryable. A refusal that arrives after a sibling's acceptance no longer resets the refuser's failure count. relay_end's error and error_code name the refusal and its code row.
+- fix(protocol)!: a router-select-provider request is answered by the named node or fails; router-select-provider-allow-retry opts in to failover (MAG-5711) ([#802]) [`5fd3f4a8`]
+  - a request with router-select-provider is no longer retried or hedged on another node, and is no longer served by a fresher node when the named node lags the chain tip. Send router-select-provider-allow-retry: true with it to keep the previous behaviour. router-select-provider-strict is removed and has no effect.
+
+#### Dependency updates
+- fix(deps): bump gorilla/websocket to the commit that fixes GO-2026-6278 (MAG-5732) ([#808]) [`556d077b`]
+- chore(deps): bump the github-actions group across 1 directory with 2 updates ([#836]) [`00f1b29c`]
+- chore(deps): bump github.com/tidwall/gjson from 1.20.3 to 1.20.6 ([#834]) [`55cce94a`]
+- chore(deps): bump github.com/tidwall/sjson from 1.2.9 to 1.2.11 ([#832]) [`336cbfe0`]
+- chore(deps): bump github.com/klauspost/compress from 1.20.4 to 1.20.5 ([#833]) [`d8850ab5`]
+- chore(deps): bump golang.org/x/net from 0.62.0 to 0.63.0 ([#835]) [`f45706c2`]
+
+#### New Features
+- feat(chainlib,rpcsmartrouter): read each copy of a Sui gRPC send by Sui's rows, and record its digest (MAG-5186) ([#767]) [`44ad6d55`]
+- feat(keeper,relaycore): write methods stay stateful whatever the spec says, and a slot-already-used reply never refuses a write or sends it again (MAG-5593) ([#812]) [`550ad9e0`]
+- feat(common,chainlib,relaycore): the error record every reader builds, the shapes engine, the answer rows and replies as fixtures per interface (MAG-5595) ([#814]) [`76c23d20`]
+- feat(common,relaycore): the classification order — the prefix ahead of spec rows, and the XRP rows that stay in code (MAG-5597) ([#815]) [`8abd9576`]
+
+#### Bug fixes
+- fix(chainlib): publish the gRPC listener's address once its parser is set up, and skip one allocation count under -race (MAG-5710) ([#799]) [`1b393242`]
+- fix(release): list breaking chore commits and chore(deps) bumps in the generated changelog (MAG-5733) ([#809]) [`3e2d2e5b`]
+- fix(routersession,chainlib)!: a gRPC connection cut during the call is no reply, and the client gets the router's own status without addresses (MAG-5130) ([#810]) [`b2118372`]
+- fix(chainlib)!: treat a refused broadcast as the node's error on Tendermint, Cosmos gRPC and Tron, not the answer (MAG-5323) (#769) ([#811]) [`5e4fc577`]
+- fix(chainlib,rpcsmartrouter)!: refuse the gRPC calls the router does not serve before any provider, and answer the gRPC health check (MAG-5133) ([#764]) [`7909b9c0`]
+- fix(routersession,chainlib): stop four unit tests flaking under load, at their causes (MAG-4919) ([#771]) [`2631e5ea`]
+- fix(routersession): keep the blocks an add-on release does not readmit, and never claim a sticky session to a dead primary (MAG-5078) ([#749]) [`eacb8cdc`]
+- fix(routersession): flatten XRP Ledger WebSocket requests so rippled reads them (MAG-5452) ([#782]) [`18e9a1aa`]
+- fix(rpcsmartrouter): a gRPC RESOURCE_EXHAUSTED that asks for a wait is a rate limit (MAG-5488) ([#777]) [`de0fb8e8`]
+- fix(routersession,rpcsmartrouter): release a JSON gRPC relay this node gave no method definition for without scoring or benching its endpoint (MAG-5675) ([#790]) [`ae305470`]
+- fix(common): file a REST 5xx no status row names as a provider fault (MAG-5490) ([#779]) [`54cabc56`]
+- fix(common): read an HTTP status only where the router wrote it, not inside a node's own text (MAG-5324) ([#795]) [`59252ced`]
+- fix(chainlib,common)!: read CometBFT's error.data, so a duplicate, a full mempool or a pruned height is not the endpoint's fault (MAG-5325) ([#794]) [`4d65bde5`]
+- fix(chainstate): keep a load balancer's bad backend from moving a single-endpoint tip (MAG-5080) ([#766]) [`a49ffa1b`]
+- fix(chainlib)!: flag a refused Cosmos REST broadcast as the node's error and classify it by its code (MAG-5451) ([#783]) [`b2040a3a`]
+- fix(chainlib): read a Cosmos tx_response code as a node error on the broadcast only, not on a read (MAG-5326) ([#792]) [`16cee79c`]
+- fix(chainstate): let a single-url tip that starts on a load balancer's absurd block give way to the honest head (MAG-5450) ([#785]) [`b64640e5`]
+- fix(tracing): record a gRPC relay's status code as rpc.grpc.status_code, not http.status_code (MAG-5444) ([#805]) [`1a91a755`]
+- fix(chainlib,grpcproxy): answer a request whose body does not decode with an error, and keep serving when a handler fails (MAG-5673) ([#786]) [`aaf35420`]
+- fix(chainlib,rpcsmartrouter): run a url's own checks before its add-ons', and make a check the deadline cut off cost nothing (MAG-3950) ([#801]) [`8d2aede8`]
+- fix(protocol)!: a router-select-provider request is answered by the named node or fails; router-select-provider-allow-retry opts in to failover (MAG-5711) ([#802]) [`5fd3f4a8`]
+- fix(rpcsmartrouter,relaycore): name a request on the cross-validation events and /debug/relay-errors as relay_end names it (MAG-5422) ([#793]) [`6f91c6b3`]
+- fix(rpcsmartrouter): advance the rs_ subscription id counter by a random stride, like the numeric ids (MAG-5438) ([#804]) [`65f74295`]
+- fix(chainlib): end a WebSocket subscription the node cancels, instead of dropping the cancel frame (MAG-5327) ([#807]) [`7dc62a37`]
+
+#### Other work
+- chore!: drop the bundled Lava chain spec and the remaining Lava names (MAG-5749) ([#818]) [`91d14eac`]
+
+[#749]: https://github.com/magma-Devs/smart-router/pull/749
+[#764]: https://github.com/magma-Devs/smart-router/pull/764
+[#766]: https://github.com/magma-Devs/smart-router/pull/766
+[#767]: https://github.com/magma-Devs/smart-router/pull/767
+[#771]: https://github.com/magma-Devs/smart-router/pull/771
+[#777]: https://github.com/magma-Devs/smart-router/pull/777
+[#779]: https://github.com/magma-Devs/smart-router/pull/779
+[#782]: https://github.com/magma-Devs/smart-router/pull/782
+[#783]: https://github.com/magma-Devs/smart-router/pull/783
+[#785]: https://github.com/magma-Devs/smart-router/pull/785
+[#786]: https://github.com/magma-Devs/smart-router/pull/786
+[#790]: https://github.com/magma-Devs/smart-router/pull/790
+[#792]: https://github.com/magma-Devs/smart-router/pull/792
+[#793]: https://github.com/magma-Devs/smart-router/pull/793
+[#794]: https://github.com/magma-Devs/smart-router/pull/794
+[#795]: https://github.com/magma-Devs/smart-router/pull/795
+[#799]: https://github.com/magma-Devs/smart-router/pull/799
+[#801]: https://github.com/magma-Devs/smart-router/pull/801
+[#802]: https://github.com/magma-Devs/smart-router/pull/802
+[#804]: https://github.com/magma-Devs/smart-router/pull/804
+[#805]: https://github.com/magma-Devs/smart-router/pull/805
+[#807]: https://github.com/magma-Devs/smart-router/pull/807
+[#808]: https://github.com/magma-Devs/smart-router/pull/808
+[#809]: https://github.com/magma-Devs/smart-router/pull/809
+[#810]: https://github.com/magma-Devs/smart-router/pull/810
+[#811]: https://github.com/magma-Devs/smart-router/pull/811
+[#812]: https://github.com/magma-Devs/smart-router/pull/812
+[#814]: https://github.com/magma-Devs/smart-router/pull/814
+[#815]: https://github.com/magma-Devs/smart-router/pull/815
+[#818]: https://github.com/magma-Devs/smart-router/pull/818
+[#832]: https://github.com/magma-Devs/smart-router/pull/832
+[#833]: https://github.com/magma-Devs/smart-router/pull/833
+[#834]: https://github.com/magma-Devs/smart-router/pull/834
+[#835]: https://github.com/magma-Devs/smart-router/pull/835
+[#836]: https://github.com/magma-Devs/smart-router/pull/836
+[`00f1b29c`]: https://github.com/magma-Devs/smart-router/commit/00f1b29c873cbb8af45158dfb73f2f99e76a3a7f
+[`16cee79c`]: https://github.com/magma-Devs/smart-router/commit/16cee79cde192d433d2fed3e51e42592a2ddd963
+[`18e9a1aa`]: https://github.com/magma-Devs/smart-router/commit/18e9a1aa3d0c4f54b721dc1fe48d1eecd2a0dc20
+[`1a91a755`]: https://github.com/magma-Devs/smart-router/commit/1a91a75522e22eb653a8d528029a1e5b588dfafe
+[`1b393242`]: https://github.com/magma-Devs/smart-router/commit/1b393242769691f8d7ae6a0b889bc334e68a72bd
+[`2631e5ea`]: https://github.com/magma-Devs/smart-router/commit/2631e5eae86d38510019d724543d6bea13f4d8eb
+[`336cbfe0`]: https://github.com/magma-Devs/smart-router/commit/336cbfe04a7aa9fc512dd6ce6fbc53017ed419bc
+[`3e2d2e5b`]: https://github.com/magma-Devs/smart-router/commit/3e2d2e5b27bfe32ff92f584fbc3eb8083e0ebfb3
+[`44ad6d55`]: https://github.com/magma-Devs/smart-router/commit/44ad6d55f35985a05a4df15ef9172f2f6843d1eb
+[`4d65bde5`]: https://github.com/magma-Devs/smart-router/commit/4d65bde5271de61da51013bf2d16ba8d48d01113
+[`54cabc56`]: https://github.com/magma-Devs/smart-router/commit/54cabc56a2415e7fae61584c5807498bd71a1c91
+[`550ad9e0`]: https://github.com/magma-Devs/smart-router/commit/550ad9e0cd0f03682564e86367f1ece2da3bb64f
+[`556d077b`]: https://github.com/magma-Devs/smart-router/commit/556d077bfedd23ce97b664b3a97c51d67ce8f726
+[`55cce94a`]: https://github.com/magma-Devs/smart-router/commit/55cce94a80760db7c9532693a19743364a9e5342
+[`59252ced`]: https://github.com/magma-Devs/smart-router/commit/59252ced3086b72d8d49609ea7a0755259fc17db
+[`5e4fc577`]: https://github.com/magma-Devs/smart-router/commit/5e4fc577c4cc6dfb414d5383f0f2371fdba5ea80
+[`5fd3f4a8`]: https://github.com/magma-Devs/smart-router/commit/5fd3f4a8b20dc877c7f2367e5643185a56befe3a
+[`65f74295`]: https://github.com/magma-Devs/smart-router/commit/65f74295138428431b1313e0dd3409a919949064
+[`6f91c6b3`]: https://github.com/magma-Devs/smart-router/commit/6f91c6b3f7bba3c41d00825cc0bb961a1984cf54
+[`76c23d20`]: https://github.com/magma-Devs/smart-router/commit/76c23d20417cd8a7d457035e0ea8c1b248f128b1
+[`7909b9c0`]: https://github.com/magma-Devs/smart-router/commit/7909b9c077669882971b1f70b1550c58de78bcfd
+[`7dc62a37`]: https://github.com/magma-Devs/smart-router/commit/7dc62a37ae9c9ab9dbd2b833d4d6309939ad8403
+[`8abd9576`]: https://github.com/magma-Devs/smart-router/commit/8abd95764b034e00a88daf4648732fc7eff8d4cc
+[`8d2aede8`]: https://github.com/magma-Devs/smart-router/commit/8d2aede8402eb25287412be261499a03f0a42c69
+[`91d14eac`]: https://github.com/magma-Devs/smart-router/commit/91d14eac5ab347cba325f801a248059b5eecb2c6
+[`a49ffa1b`]: https://github.com/magma-Devs/smart-router/commit/a49ffa1b3f216e83f714bfd9b3aeb4b654f46361
+[`aaf35420`]: https://github.com/magma-Devs/smart-router/commit/aaf35420d83dd53bb80a2e10b585219adb4d9072
+[`ae305470`]: https://github.com/magma-Devs/smart-router/commit/ae3054704b908f49989932fb9ad2144db2315aba
+[`b2040a3a`]: https://github.com/magma-Devs/smart-router/commit/b2040a3af119ef0c7d1caa6fae68d421eb83125b
+[`b2118372`]: https://github.com/magma-Devs/smart-router/commit/b211837200af382b3a0f21dade25690f38939e94
+[`b64640e5`]: https://github.com/magma-Devs/smart-router/commit/b64640e58c78332d935f068d7e37cf2a49a44054
+[`d8850ab5`]: https://github.com/magma-Devs/smart-router/commit/d8850ab510e62f5442b7a6efe1b380de0d4092ef
+[`de0fb8e8`]: https://github.com/magma-Devs/smart-router/commit/de0fb8e88bc89155e5658128c277dd6c78d7edab
+[`eacb8cdc`]: https://github.com/magma-Devs/smart-router/commit/eacb8cdcf700c04e269b32d34b3cac25dd01d513
+[`f45706c2`]: https://github.com/magma-Devs/smart-router/commit/f45706c27009d97ca70022b0871b82d51039b3e7
+
 ## v1.7.0 — 2026-11-23
 
 ### Highlights
