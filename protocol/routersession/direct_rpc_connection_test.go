@@ -279,6 +279,92 @@ func TestWebSocketSendRequest_RoundTrip(t *testing.T) {
 	assert.Contains(t, string(resp2.Data), `"id":2`)
 }
 
+// newTestRippledWSServer answers like rippled's WebSocket API: it reads a request's fields
+// from the top level and ignores a nested "params" entirely. It echoes back whatever
+// ledger_index it found at the top level (or "none" if there wasn't one), so a test can tell
+// apart a flattened request from an unflattened one by the result alone.
+func newTestRippledWSServer(t *testing.T) (string, func()) {
+	t.Helper()
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		for {
+			_, msg, err := c.ReadMessage()
+			if err != nil {
+				return
+			}
+			var req struct {
+				ID          json.RawMessage `json:"id"`
+				LedgerIndex string          `json:"ledger_index"`
+			}
+			if err := json.Unmarshal(msg, &req); err != nil {
+				return
+			}
+			seen := req.LedgerIndex
+			if seen == "" {
+				seen = "none"
+			}
+			resp := fmt.Sprintf(`{"id":%s,"result":{"ledger_index":%q}}`, string(req.ID), seen)
+			if err := c.WriteMessage(websocket.TextMessage, []byte(resp)); err != nil {
+				return
+			}
+		}
+	}))
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+	return wsURL, srv.Close
+}
+
+// TestWebSocketSendRequest_XRPLFlattensParams verifies MAG-5452's fix: once
+// SetXRPLWebSocketFlattening is set, a request built like the XRP spec's GET_BLOCKNUM template —
+// a single params object — reaches rippled's WebSocket-style server with its fields at the top
+// level, where the real node actually reads them, instead of nested under "params".
+func TestWebSocketSendRequest_XRPLFlattensParams(t *testing.T) {
+	wsURL, cleanup := newTestRippledWSServer(t)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	conn, err := NewDirectRPCConnection(ctx, common.NodeUrl{Url: wsURL}, 5, "")
+	require.NoError(t, err)
+	defer conn.Close()
+	wsConn, ok := conn.(*WebSocketDirectRPCConnection)
+	require.True(t, ok)
+	wsConn.SetXRPLWebSocketFlattening()
+
+	body := `{"method":"ledger","params":[{"ledger_index":"validated","transactions":false}]}`
+	resp, err := conn.SendRequest(ctx, []byte(body), nil)
+	require.NoError(t, err)
+	assert.Contains(t, string(resp.Data), `"ledger_index":"validated"`,
+		"flattened request should have put ledger_index where rippled's WS API reads it")
+}
+
+// TestWebSocketSendRequest_NoFlatteningKeepsNestedParams is the control: without
+// SetXRPLWebSocketFlattening, the same single-params-object request is sent unchanged, so a
+// rippled-shaped server sees no top-level ledger_index — proving the flag, not the request
+// shape, decides whether a request is flattened.
+func TestWebSocketSendRequest_NoFlatteningKeepsNestedParams(t *testing.T) {
+	wsURL, cleanup := newTestRippledWSServer(t)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	conn, err := NewDirectRPCConnection(ctx, common.NodeUrl{Url: wsURL}, 5, "")
+	require.NoError(t, err)
+	defer conn.Close()
+
+	body := `{"method":"ledger","params":[{"ledger_index":"validated","transactions":false}]}`
+	resp, err := conn.SendRequest(ctx, []byte(body), nil)
+	require.NoError(t, err)
+	assert.Contains(t, string(resp.Data), `"ledger_index":"none"`,
+		"without the flag, ledger_index stays nested under params and never reaches the server's top level")
+}
+
 // TestWebSocketSendRequest_ConcurrentSameID fires many concurrent requests that
 // all reuse caller id "1". Because rpcclient multiplexes them on one socket and
 // routes replies by id, the connection must issue unique wire ids internally —

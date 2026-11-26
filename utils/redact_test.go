@@ -50,7 +50,7 @@ func TestRedactSecrets_LeavesNonURLTextAlone(t *testing.T) {
 		"provider eth-primary-1 blocked",
 		"eth-primary-1",
 		"provider@harvestGenProvider",
-		"lava@1abcdefghijklmnop",
+		"cosmos1abcdefghijklmnop",
 		"ep:8545",
 		"",
 	} {
@@ -154,7 +154,7 @@ func TestRedactIfURL(t *testing.T) {
 		// Not urls — must survive byte-for-byte. A provider address carries an "@",
 		// which RedactURL would otherwise read as userinfo and strip.
 		{"provider address", "provider@harvestGenProvider", "provider@harvestGenProvider"},
-		{"lava bech32 address", "lava@1abcdefghijklmnop", "lava@1abcdefghijklmnop"},
+		{"cosmos bech32 address", "cosmos1abcdefghijklmnop", "cosmos1abcdefghijklmnop"},
 		{"provider name", "eth-primary-1", "eth-primary-1"},
 		{"host and port", "ep:8545", "ep:8545"},
 		{"empty", "", ""},

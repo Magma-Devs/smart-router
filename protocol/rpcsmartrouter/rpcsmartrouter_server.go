@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -311,6 +312,9 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 		// Feed every positive poll/relay block into the per-chain tip (cheap monotonic write)
 		// and mirror the resulting guarded tip into the router-wide latest-block gauge (MAG-2629).
 		OnTipObservation: rpcss.onTipObservation,
+		// Every block a url answered this pod with, polls and relays, into the per-chain tip's
+		// freshness and its bound on a sole voter's jump (MAG-5080).
+		OnAnswer: rpcss.onEndpointAnswer,
 		// Each url's head on rpc_endpoint_url_latest_block, on every answered poll (MAG-4204).
 		OnPollBlock: rpcss.onEndpointPollBlock,
 		// Fleet tracker gate (MAG-2981): with --shared-state AND a cache backend, pods share
@@ -2175,9 +2179,10 @@ func (rpcss *RPCSmartRouterServer) GetChainIdAndApiInterface() (string, string) 
 }
 
 // RecordNodeError is relaycore.NodeErrorRecorder: the relay processor counts each node error it
-// meters into the router's own tally (MAG-4718).
-func (rpcss *RPCSmartRouterServer) RecordNodeError(chainID, apiInterface, providerAddress, method string) {
-	rpcss.relayErrors.RecordNodeError(chainID, apiInterface, providerAddress, method)
+// meters into the router's own tally (MAG-4718), under the request's name as relay_end gives it
+// (relayAnswerMethod, MAG-5422).
+func (rpcss *RPCSmartRouterServer) RecordNodeError(chainID, apiInterface, providerAddress string, protocolMessage chainlib.ProtocolMessage) {
+	rpcss.relayErrors.RecordNodeError(chainID, apiInterface, providerAddress, relayAnswerMethod(protocolMessage, apiInterface))
 }
 
 func (rpcss *RPCSmartRouterServer) ProcessRelaySend(ctx context.Context, protocolMessage chainlib.ProtocolMessage, analytics *metrics.RelayMetrics) (*relaycore.RelayProcessor, error) {
@@ -3292,6 +3297,13 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 			// broadcast it is derived from a WithoutCancel parent, so a detached relay is correctly
 			// NOT seen as cancelled.
 			isClientCancel := err != nil && common.IsClientCancellation(err, goroutineCtx)
+			// A gRPC call type the router does not serve, found in this attempt (MAG-5133): the
+			// call's, not the endpoint's, so the endpoint is released with no score, as a cancel is.
+			unservedCall := err != nil && errors.Is(err, common.UnservedGRPCCallError)
+			// A JSON gRPC request this node's lookup gave no method definition for was never sent
+			// (MAG-5675): the endpoint is released with no score below, and the metric does not count
+			// it as the endpoint's error either.
+			noMethodDescriptor := err != nil && errors.Is(err, routersession.ErrNoMethodDescriptor)
 
 			if rpcss.smartRouterEndpointMetrics != nil {
 				// analytics is read-only here (classification flags set once pre-launch, Success set
@@ -3303,7 +3315,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 					// Silent when the budget ran out. Cancelled would keep it out of the error and
 					// latency series, which is right for a race loser and wrong for a hang.
 					outcome = metrics.RelayOutcomeError
-				case isClientCancel:
+				case isClientCancel, unservedCall, noMethodDescriptor:
 					outcome = metrics.RelayOutcomeCancelled
 				case err != nil:
 					outcome = metrics.RelayOutcomeError
@@ -3390,6 +3402,24 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 				)
 				if errSession := rpcss.sessionManager.OnSessionUnresponsive(singleConsumerSession, err); errSession != nil {
 					utils.FormatWarning("OnSessionUnresponsive failed for direct RPC", errSession,
+						utils.LogAttr("GUID", goroutineCtx),
+					)
+				}
+			} else if unservedCall {
+				if errSession := rpcss.sessionManager.OnSessionCancelled(singleConsumerSession, err); errSession != nil {
+					utils.FormatWarning("OnSessionCancelled failed for direct RPC", errSession,
+						utils.LogAttr("GUID", goroutineCtx),
+					)
+				}
+			} else if noMethodDescriptor {
+				// The node's lookup gave no definition of the gRPC method to convert the JSON request
+				// with, so nothing was sent and the endpoint's availability was never tested
+				// (MAG-5675). The failure arm below would score it 0 and count a consecutive error
+				// against an endpoint that was never asked. Released like a session that was
+				// selected and not used. A cancelled relay keeps its own release: the error carries
+				// this only when the lookup ended with the relay's context still live.
+				if errSession := rpcss.sessionManager.OnSessionDiscarded(singleConsumerSession, err); errSession != nil {
+					utils.FormatWarning("OnSessionDiscarded failed for direct RPC", errSession,
 						utils.LogAttr("GUID", goroutineCtx),
 					)
 				}
@@ -4394,6 +4424,29 @@ func (rpcss *RPCSmartRouterServer) onTipObservation(endpointURL string, block in
 		return
 	}
 	rpcss.chainState.SetLatestBlock(block)
+	rpcss.mirrorRouterLatestBlock()
+}
+
+// onEndpointAnswer is the EndpointMonitor's OnAnswer hook: it hands ChainState every block a url
+// answered this pod with first-hand, polls and relays alike, including the ones the url's tip store
+// dropped (ChainState.NoteAnswer, MAG-5080). That keeps the tip fresh past a load balancer whose bad
+// backend's block sits in the url's store, and it is what lets ChainState tell such a url from one in
+// a block storm before following a sole voter's jump. A url held as head-stalled is left out, as its
+// repeat votes are in onTipObservation: its answers at the tip are what kept a wrong tip fresh
+// (MAG-3986). A block that is news for it still reaches the tip through onTipObservation, because
+// its store takes a higher block. When the answer moves the tip up, the router-wide gauge follows.
+func (rpcss *RPCSmartRouterServer) onEndpointAnswer(endpointURL string, block int64) {
+	if rpcss.chainState == nil || rpcss.headStall.isStalled(endpointURL) {
+		return
+	}
+	if rpcss.chainState.NoteAnswer(endpointURL, block) {
+		rpcss.mirrorRouterLatestBlock()
+	}
+}
+
+// mirrorRouterLatestBlock writes the guarded tip to the router-wide smartrouter_latest_block gauge
+// when it is fresh, and leaves the gauge alone otherwise (see onTipObservation for why).
+func (rpcss *RPCSmartRouterServer) mirrorRouterLatestBlock() {
 	if rpcss.smartRouterEndpointMetrics == nil || rpcss.listenEndpoint == nil {
 		return
 	}
@@ -5057,8 +5110,9 @@ func (rpcss *RPCSmartRouterServer) adoptSharedStateTip(ctx context.Context, peer
 //
 // GraphQL adds a third: a root field whose answer differs from provider to provider because
 // each runs its own server version, such as introspection or Sui's serviceConfig
-// (graphQLNeverCacheRootFields, MAG-5123). It is read on both gates too, so an entry an
-// older router wrote for such a field is not served either.
+// (graphQLNeverCacheRootFields, MAG-5123), and gRPC a method of the same kind, such as Sui's
+// SimulateTransaction (grpcNeverCacheMethods, MAG-5186). They are read on both gates too, so an
+// entry an older router wrote for such a request is not served either.
 func cacheExclusionReason(protocolMessage chainlib.ProtocolMessage) string {
 	if chainlib.GetStateful(protocolMessage) == common.CONSISTENCY_SELECT_ALL_PROVIDERS {
 		return "stateful"
@@ -5066,20 +5120,23 @@ func cacheExclusionReason(protocolMessage chainlib.ProtocolMessage) string {
 	if nodeBoundReason(protocolMessage.GetApi().Name) != "" {
 		return "node-bound"
 	}
-	if graphQLNeverCacheReason(protocolMessage) != "" {
+	if graphQLNeverCacheReason(protocolMessage) != "" || grpcNeverCacheReason(protocolMessage) != "" {
 		return "never-cache"
 	}
 	return ""
 }
 
 // cacheExclusionWhy is the detail behind cacheExclusionReason for the log: which method is
-// node-bound or which GraphQL field is never cached, and why. "" for a stateful request,
-// whose reason says it all.
+// node-bound, or which GraphQL field or gRPC method is never cached, and why. "" for a stateful
+// request, whose reason says it all.
 func cacheExclusionWhy(protocolMessage chainlib.ProtocolMessage) string {
 	if why := nodeBoundReason(protocolMessage.GetApi().Name); why != "" {
 		return why
 	}
-	return graphQLNeverCacheReason(protocolMessage)
+	if why := graphQLNeverCacheReason(protocolMessage); why != "" {
+		return why
+	}
+	return grpcNeverCacheReason(protocolMessage)
 }
 
 // cacheAnsweredEarlierAttempt reports whether the cache answered an earlier attempt of this relay.
@@ -5535,23 +5592,25 @@ func (rpcss *RPCSmartRouterServer) cachedReplyDirectives(protocolMessage chainli
 // resolvePinDirectives returns the router-select-provider and router-stickiness directives for one
 // attempt.
 //
-// A strict pin (relaycore.PinnedByDirectives: router-stickiness, or router-select-provider with
-// router-select-provider-strict: true) is honoured on every attempt. Such a request is answered by
-// the pinned upstream or fails with that upstream's error: the retry policy never retries or
-// hedges it (Policy.Decide, "Pinned"), so a second batch cannot normally exist. Should one ever be
-// sent, the pin still applies and selection refuses the already-tried upstream loudly
+// A strict pin (relaycore.PinnedByDirectives: router-stickiness, or router-select-provider without
+// router-select-provider-allow-retry: true) is honoured on every attempt. Such a request is
+// answered by the pinned upstream or fails with that upstream's error: the retry policy never
+// retries or hedges it (Policy.Decide, "Pinned"), so a second batch cannot normally exist. Should
+// one ever be sent, the pin still applies and selection refuses the already-tried upstream loudly
 // (SelectedProviderAlreadyFailedError) rather than quietly serving the request elsewhere.
 //
-// A plain router-select-provider pins the first attempt only, its documented behaviour (MAG-2228):
-// once a batch has been dispatched (firstAttempt false) no pin is read, so a retry or hedge may
-// reach the rest of the pool instead of re-pinning the upstream that just failed. firstAttempt
-// stays true while nothing has been dispatched, so a resend after a selection failure keeps it.
+// A router-select-provider sent with router-select-provider-allow-retry: true pins the first
+// attempt only (the MAG-2228 rule): once a batch has been dispatched (firstAttempt false) no pin
+// is read, so a retry or hedge may reach the rest of the pool instead of re-pinning the upstream
+// that just failed. firstAttempt stays true while nothing has been dispatched, so a resend after a
+// selection failure keeps it.
 //
-// MAG-2228 used to apply the first-attempt rule to router-stickiness too. That made a sticky session
-// straddle two nodes mid-sequence: for the head-then-fetch pattern the header exists for, the
-// exact false gap it was meant to prevent, since the peer is not checked to have reached the
-// block. MAG-2280 made sticky strict, MAG-4123 is the same rule for the router's own consistency
-// gate, and MAG-4826 keeps router-select-provider's failover with strict selection as an opt-in.
+// MAG-2228 used to apply the first-attempt rule to every pin. For router-stickiness that made a
+// session straddle two nodes mid-sequence: for the head-then-fetch pattern the header exists for,
+// the exact false gap it was meant to prevent, since the peer is not checked to have reached the
+// block. MAG-2280 made sticky strict, and MAG-4123 is the same rule for the router's own
+// consistency gate. MAG-5711 made router-select-provider strict too, because a header that names
+// one upstream should not be answered by another, and left the first-attempt rule as an opt-in.
 func resolvePinDirectives(ctx context.Context, directiveHeaders map[string]string, firstAttempt bool) (selectedProvider, stickiness string) {
 	if !firstAttempt && !relaycore.PinnedByDirectives(directiveHeaders) {
 		return "", ""
@@ -5909,9 +5968,10 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 	usedProviders := relayProcessor.GetUsedProviders()
 	directiveHeaders := protocolMessage.GetDirectiveHeaders()
 
-	// A strict pin (router-stickiness, or router-select-provider with router-select-provider-strict: true)
-	// applies to every attempt and is never served by another provider (MAG-2280, MAG-4123); a plain
-	// router-select-provider pins the first attempt only (MAG-4826). See resolvePinDirectives.
+	// A strict pin (router-stickiness, or router-select-provider without
+	// router-select-provider-allow-retry: true) applies to every attempt and is never served by
+	// another provider (MAG-2280, MAG-4123, MAG-5711); with the allow-retry header
+	// router-select-provider pins the first attempt only. See resolvePinDirectives.
 	selectedProvider, stickiness := resolvePinDirectives(ctx, directiveHeaders, usedProviders.BatchNumber() == 0)
 
 	// Dropped here rather than inside routersession so the rest of this call stays coherent: the
@@ -5971,7 +6031,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 	// served prefers the upstream that accepted the write. A preference, not a pin: selection falls
 	// back on its own when that upstream cannot take the read (GetSessionsOptions.PreferredProvider).
 	// The caller's own directives outrank it, cross-validation needs more than one upstream, and
-	// like the directives it holds for the first attempt only.
+	// it holds for the first attempt only.
 	if selectedProvider == "" && stickiness == "" && selection != relaycore.CrossValidation && usedProviders.BatchNumber() == 0 {
 		if pin := rpcss.readYourWrites.pinFor(protocolMessage); pin != "" {
 			sessionOpts.PreferredProvider = pin
@@ -6154,6 +6214,11 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	// message and then fails the response-must-be-single check, so the caller gets a
 	// truncated stream after waiting out the (typically generous, hanging_api) timeout.
 	// A refusal is a worse-looking but far more honest answer.
+	//
+	// The listener's gate refuses both before any provider is picked whenever the router
+	// already holds the method's definition (MAG-5133). What reaches here is a definition
+	// this attempt's own lookup found. The refusal is common.UnservedGRPCCallError: the
+	// call type's, not the endpoint's, so it is never retried and blames no one.
 	if directConnection.GetProtocol() == routersession.DirectRPCProtocolGRPC {
 		methodPath := chainMessage.GetApi().Name
 
@@ -6168,7 +6233,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 				utils.LogAttr("endpoint", singleConsumerSession.Parent.PublicAddress),
 				utils.LogAttr("GUID", ctx),
 			)
-			return 0, fmt.Errorf("gRPC streaming method %q must be served through the streaming listener, not as a unary relay", methodPath)
+			return 0, fmt.Errorf("%w: gRPC streaming method %q must be served through the streaming listener, not as a unary relay", common.UnservedGRPCCallError, methodPath)
 		}
 
 		// Second line of defence for methods the spec does not declare as
@@ -6182,7 +6247,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 					utils.LogAttr("endpoint", singleConsumerSession.Parent.PublicAddress),
 					utils.LogAttr("GUID", ctx),
 				)
-				return 0, fmt.Errorf("gRPC method %q is server-streaming upstream but the %s spec gives it no SUBSCRIBE parse directive; refusing to invoke it as a unary call", methodPath, rpcss.listenEndpoint.ChainID)
+				return 0, fmt.Errorf("%w: gRPC method %q is server-streaming upstream but the %s spec gives it no SUBSCRIBE parse directive; refusing to invoke it as a unary call", common.UnservedGRPCCallError, methodPath, rpcss.listenEndpoint.ChainID)
 			}
 		}
 	}
@@ -6222,6 +6287,13 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 			utils.LogAttr("latency", relayLatency),
 			utils.LogAttr("GUID", ctx),
 		)
+
+		// The node streamed its replies to a call the router made as a single-reply call: the
+		// router's mistake about the call type, not the endpoint's failure (MAG-5133). Nothing
+		// below applies to it.
+		if errors.Is(err, common.UnservedGRPCCallError) {
+			return relayLatency, err
+		}
 
 		// Classify error using the error registry and decide on health tracking. A status error
 		// is judged by its body here, while the verdict it carries decides retry (healthVerdict).
@@ -6279,7 +6351,8 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		silentThroughWindow := relayTimeout > 0 && relayLatency >= relayTimeout
 		if !routerHealthCheck && chainlib.GetStateful(chainMessage) != common.CONSISTENCY_SELECT_ALL_PROVIDERS &&
 			isProtocolFailure(rpcss.directRelayTransport(directConnection), err, isClientCancel, budgetExpired, silentThroughWindow) {
-			rpcss.relayErrors.RecordProtocolError(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointName, chainMessage.GetApi().Name)
+			rpcss.relayErrors.RecordProtocolError(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointName,
+				relayEndMethod(chainMessage.GetApi().Name, requestNamedByURL(rpcss.listenEndpoint.ApiInterface, originalRequestData)))
 		}
 
 		// Apply health tracking based on error classification.
@@ -6418,7 +6491,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	// A node's error goes back to the caller as the reply, so it is redacted like every error the
 	// router writes itself, before it is returned, cached or compared: a node that repeats the
 	// url it was called on, or the key, must not hand the operator's key to the caller (MAG-4863).
-	if result.IsNodeError {
+	if result.IsNodeError && !isProtobufNodeReply(directConnection, result.Reply) {
 		redactNodeReply(result.Reply)
 	}
 
@@ -6721,7 +6794,7 @@ func (rpcss *RPCSmartRouterServer) watchCrossValidationStragglers(ctx context.Co
 			ChainID:         chainId,
 			ApiInterface:    apiInterface,
 			RequestID:       crossValidationRequestID(ctx),
-			Method:          apiName,
+			Method:          relayEndMethod(apiName, relayEndNamedByURL(protocolMessage, apiInterface)),
 			ProviderAddress: straggler.ProviderAddress,
 			ProviderGroup:   group,
 			Outcome:         straggler.Outcome,
@@ -6898,7 +6971,7 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 					ChainID:         chainId,
 					ApiInterface:    apiInterface,
 					RequestID:       requestID,
-					Method:          apiName,
+					Method:          relayEndMethod(apiName, relayEndNamedByURL(protocolMessage, apiInterface)),
 					ProviderAddress: outlier.ProviderInfo.ProviderAddress,
 					ProviderGroup:   group,
 					// A reply-time content outlier is by construction a dissent: crossValidationSuccessOutliers
@@ -7338,13 +7411,10 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 		// caller and needs no deploy change. It is safe to gate on a client-settable
 		// header precisely because these two values name nothing internal.
 		//
-		// router-debug-relay is also the only directive that can carry this without
-		// breaking it: hashCacheRequest marshals the whole RelayPrivateData, metadata
-		// included, into the cache key, so a newly minted request header would put the
-		// flagged request in its own cache lane — it would never hit, and a test would
-		// assert against a miss having measured nothing. router-debug-relay is registered
-		// in common.SPECIAL_DIRECTIVE_HEADERS and stripped by DirectiveHeaders
-		// before ParseMsg, so it never reaches the key.
+		// router-debug-relay stays out of the cache key: it is registered in
+		// common.SPECIAL_DIRECTIVE_HEADERS and stripped by DirectiveHeaders before ParseMsg.
+		// The key hashes only the metadata HandleHeaders keeps, which is the headers the
+		// spec declares plus a REST body's Content-Type, so the flag leaves the lane as is.
 		//
 		// Both are emitted unconditionally under the directive, including "none" and
 		// the not-consulted outcomes: an absent header must be able to mean only
@@ -7630,4 +7700,13 @@ func redactNodeReply(reply *pairingtypes.RelayReply) {
 	if reply != nil {
 		reply.Data = utils.RedactSecretsBytes(reply.Data)
 	}
+}
+
+// isProtobufNodeReply reports whether a node error's reply is a gRPC node's own protobuf message: a
+// BroadcastTx refusing the transaction under gRPC OK (MAG-5323). It is not redacted. Its strings
+// are framed by their lengths, so rewriting one breaks the message and the client cannot read the
+// refusal at all. A failed gRPC status's reply is the router's JSON, which is.
+func isProtobufNodeReply(connection routersession.DirectRPCConnection, reply *pairingtypes.RelayReply) bool {
+	return connection != nil && connection.GetProtocol() == routersession.DirectRPCProtocolGRPC &&
+		reply != nil && !json.Valid(reply.Data)
 }

@@ -33,6 +33,9 @@ type GrpcMessage struct {
 	Registry *dyncodec.Registry
 	Codec    *dyncodec.Codec
 	chainproxy.BaseMessage
+
+	// chainRows is the chain's gRPC list (MAG-5186), nil on a chain without one (SetChainFamily).
+	chainRows *grpcChainRows
 }
 
 // get msg hash byte array containing all the relevant information for a unique request. (headers / api / params)
@@ -40,12 +43,15 @@ func (gm *GrpcMessage) GetRawRequestHash() ([]byte, error) {
 	return rawRequestHash("jsonRpc", gm.GetHeaders(), gm.Path, gm.Msg)
 }
 
+// CheckResponseError reports whether a gRPC reply is a node error. A status other than OK is one,
+// with no message: the sender reads the node's status message itself. An OK reply is a success,
+// unless it is a BroadcastTx reply refusing the transaction (checkGRPCBroadcast, MAG-5323).
 func (jm GrpcMessage) CheckResponseError(data []byte, httpStatusCode int) (hasError bool, errorMessage string) {
 	// grpc status code different than OK or 0 is a node error.
 	if httpStatusCode != 0 && httpStatusCode != http.StatusOK {
 		return true, ""
 	}
-	return false, ""
+	return checkGRPCBroadcast(jm.Path, data)
 }
 
 // GetParams will be deprecated after we remove old client
@@ -70,13 +76,27 @@ func (gm GrpcMessage) GetParams() interface{} {
 	return parsedData
 }
 
-func (gm GrpcMessage) dynamicResolve() (interface{}, error) {
+// decodeRequestBody decodes a binary request body into msg. It is a variable so a test can stand in
+// a decoder that fails in any way a decoder can.
+var decodeRequestBody = func(codec *dyncodec.Codec, body []byte, msg *dynamicpb.Message) error {
+	return codec.UnmarshalProto(body, msg)
+}
+
+// dynamicResolve decodes the request body with its method's descriptor and returns it as JSON
+// values. A body that does not decode is an error, whichever way the decoding fails, so the
+// request's block is NOT_APPLICABLE and the request goes on instead of stopping the handler.
+func (gm GrpcMessage) dynamicResolve() (parsedData interface{}, err error) {
+	defer func() {
+		if failure := recover(); failure != nil {
+			parsedData, err = nil, fmt.Errorf("the request body does not decode as %s: %v", gm.Path, failure)
+		}
+	}()
 	md, err := gm.Registry.FindDescriptorByName(protoreflect.FullName(strings.ReplaceAll(gm.Path, "/", ".")))
 	if err != nil {
 		return nil, err
 	}
 	msg := dynamicpb.NewMessage(md.(protoreflect.MethodDescriptor).Input())
-	err = gm.Codec.UnmarshalProto(gm.Msg, msg)
+	err = decodeRequestBody(gm.Codec, gm.Msg, msg)
 	if err != nil {
 		return nil, err
 	}
@@ -84,7 +104,6 @@ func (gm GrpcMessage) dynamicResolve() (interface{}, error) {
 	if err != nil {
 		return nil, err
 	}
-	var parsedData interface{}
 	err = json.Unmarshal(jsonMsg, &parsedData)
 	if err != nil {
 		return nil, err

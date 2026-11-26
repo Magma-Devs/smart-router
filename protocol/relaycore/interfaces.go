@@ -48,9 +48,10 @@ type ChainIdAndApiInterfaceGetter interface {
 
 // NodeErrorRecorder is implemented by a ChainIdAndApiInterfaceGetter that keeps the router's own
 // count of node errors (RelayErrorTally, MAG-4718). handleResponse records each node error it
-// meters through it, beside the metric rather than inside it.
+// meters through it, beside the metric rather than inside it. It is given the request, not a
+// method name, so the recorder names the request as its other debug routes do (MAG-5422).
 type NodeErrorRecorder interface {
-	RecordNodeError(chainID, apiInterface, providerAddress, method string)
+	RecordNodeError(chainID, apiInterface, providerAddress string, protocolMessage chainlib.ProtocolMessage)
 }
 
 // RelayStateSendInstructions struct for relay instructions
@@ -149,9 +150,10 @@ type DecisionInput struct {
 	// forwarded it as a Default- API only because the spec cannot rule it out.
 	IsDefaultApi bool
 	// Pinned is true when the request is a strict pin (PinnedByDirectives): router-stickiness, or
-	// router-select-provider with router-select-provider-strict: true. A pinned request is answered by
-	// that upstream or not at all: Decide never retries or hedges it on another one (MAG-2280,
-	// MAG-4123). A plain router-select-provider is not Pinned and keeps its failover (MAG-4826).
+	// router-select-provider without router-select-provider-allow-retry: true. A pinned request is
+	// answered by that upstream or not at all: Decide never retries or hedges it on another one
+	// (MAG-2280, MAG-4123). A router-select-provider sent with the allow-retry header is not Pinned
+	// and keeps its failover (MAG-5711).
 	Pinned bool
 	// IsGraphQLWrite is true when the request is a GraphQL mutation (MAG-5122). It turns off the
 	// Stateful rate-limit carve-out below: a GraphQL write is never re-sent, including when every
@@ -159,6 +161,10 @@ type DecisionInput struct {
 	// send risks the double-spend this subtask exists to prevent. Every other interface keeps the
 	// carve-out until MAG-5061 decides whether to remove it there too.
 	IsGraphQLWrite bool
+	// IsChainListWrite is true when the request is the chain's gRPC write on a chain whose list reads
+	// each copy (MAG-5186, Sui). That list files a throttle as a rate limit the client retries after,
+	// and the router never re-sends the write, so the carve-out is off for it as for a GraphQL write.
+	IsChainListWrite bool
 }
 
 // RelayPolicyInf is the interface that the policy engine must implement.

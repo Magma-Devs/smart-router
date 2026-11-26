@@ -33,7 +33,7 @@ func TestRetryAfterPropagatesOutOfChainProxies(t *testing.T) {
 
 	t.Run("rest", func(t *testing.T) {
 		ctx := context.Background()
-		chainParser, chainRouter, _, closeServer, _, err := CreateChainLibMocks(ctx, "LAVA", spectypes.APIInterfaceRest, rateLimitHandler, nil, "../../", nil)
+		chainParser, chainRouter, _, closeServer, _, err := CreateChainLibMocks(ctx, "COSMOSHUB", spectypes.APIInterfaceRest, rateLimitHandler, nil, "../../", nil)
 		require.NoError(t, err)
 		if closeServer != nil {
 			defer closeServer()
@@ -68,7 +68,7 @@ func TestRetryAfterPropagatesOutOfChainProxies(t *testing.T) {
 
 	t.Run("tendermint uri", func(t *testing.T) {
 		ctx := context.Background()
-		chainParser, chainRouter, _, closeServer, _, err := CreateChainLibMocks(ctx, "LAVA", spectypes.APIInterfaceTendermintRPC, rateLimitHandler, nil, "../../", nil)
+		chainParser, chainRouter, _, closeServer, _, err := CreateChainLibMocks(ctx, "COSMOSHUB", spectypes.APIInterfaceTendermintRPC, rateLimitHandler, nil, "../../", nil)
 		require.NoError(t, err)
 		if closeServer != nil {
 			defer closeServer()

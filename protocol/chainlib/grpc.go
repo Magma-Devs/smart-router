@@ -143,6 +143,24 @@ func (apip *GrpcChainParser) getSupportedApi(name, connectionType string) (*ApiC
 	return apip.BaseChainParser.getSupportedApi(apiKey)
 }
 
+// methodInSpec reads what the chain spec says about a gRPC method before any of the call's
+// messages: switchedOff when the spec lists it with "enabled": false, subscription when a
+// SUBSCRIBE parse directive names it. A method the spec does not list is neither.
+func (apip *GrpcChainParser) methodInSpec(method string) (switchedOff, subscription bool) {
+	if apip == nil {
+		return false, false
+	}
+	api, collection, ok := apip.specEntry(ApiKey{Name: method})
+	if !ok {
+		return false, false
+	}
+	if !api.Enabled {
+		return true, false
+	}
+	directive := GetParseDirective(api, collection)
+	return false, directive != nil && directive.FunctionTag == spectypes.FUNCTION_TAG_SUBSCRIBE
+}
+
 // setupForConsumer builds the listener's registry for block parsing on the router's
 // upstream reflection snapshots. It never relays reflection: the relay path refuses
 // it as a streaming method (MAG-4217). Without a source no descriptor resolves, and
@@ -285,6 +303,8 @@ func (apip *GrpcChainParser) ParseMsg(url string, data []byte, connectionType st
 		Registry:    apip.registry,
 		BaseMessage: chainproxy.BaseMessage{Headers: metadata, LatestBlockHeaderSetter: settingHeaderDirective},
 	}
+	// The chain's list reads the replies to its write (MAG-5186): what a Sui status means is Sui's to say.
+	grpcMessage.SetChainFamily(apip.chainFamily())
 
 	// // Fetch requested block, it is used for data reliability
 	// // Extract default block parser
@@ -385,8 +405,7 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 	lis := GetListenerWithRetryGrpc("tcp", apil.endpoint.NetworkAddress)
 	apiInterface := apil.endpoint.ApiInterface
 	sendRelayCallback := func(ctx context.Context, method string, reqBody []byte) ([]byte, metadata.MD, error) {
-		guid := utils.GenerateUniqueIdentifier()
-		ctx = utils.WithUniqueIdentifier(ctx, guid)
+		guid := requestGUID(&ctx)
 		// The call's deadline here is the caller's own grpc-timeout. Recorded so an attempt that
 		// ends at it is not counted against the endpoint (common.IsClientCancellation).
 		ctx = common.WithCallerDeadline(ctx)
@@ -426,6 +445,28 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 				replyMetadata.Set(common.GUID_HEADER_NAME, msgSeed)
 				return nil, replyMetadata, status.Error(codes.InvalidArgument, message)
 			}
+			if errors.Is(err, common.UnservedGRPCCallError) {
+				// A call type the router does not serve, found only once a provider was asked: a
+				// method that streams its replies without the router knowing beforehand (MAG-5133).
+				// It is refused as the listener's gate refuses it, UNIMPLEMENTED with one fixed sentence.
+				// It comes before the no-answer reply below: a refusal of the call type is the same
+				// from every provider, so the caller must not read it as UNAVAILABLE and try again,
+				// whatever the relay's verdict says about the other attempts.
+				message := common.UnservedGRPCCallError.Error()
+				apil.logger.LogRequestAndResponse("grpc in/out", true, method, relayBodyForLog(string(reqBody), cmdFlags.DebugRelays), "", message, msgSeed, time.Since(startTime), err)
+				replyMetadata := convertRelayMetaDataToMDMetaData(relayReply.GetMetadata())
+				replyMetadata.Set(common.GUID_HEADER_NAME, msgSeed)
+				return nil, replyMetadata, status.Error(codes.Unimplemented, message)
+			}
+			if noAnswer, ok := grpcNoAnswerStatus(relayResult); ok {
+				// No provider answered: the router's own status and sentence, never the transport
+				// error, which can hold the router's and a provider's addresses (MAG-5130). The
+				// request id goes in router-guid, as on the refusal above.
+				apil.logger.LogRequestAndResponse("grpc in/out", true, method, relayBodyForLog(string(reqBody), cmdFlags.DebugRelays), "", noAnswer.Message(), msgSeed, time.Since(startTime), err)
+				replyMetadata := convertRelayMetaDataToMDMetaData(relayReply.GetMetadata())
+				replyMetadata.Set(common.GUID_HEADER_NAME, msgSeed)
+				return nil, replyMetadata, noAnswer.Err()
+			}
 			errMasking := apil.logger.GetUniqueGuidResponseForError(err, msgSeed)
 			apil.logger.LogRequestAndResponse("grpc in/out", true, method, relayBodyForLog(string(reqBody), cmdFlags.DebugRelays), "", errMasking, msgSeed, time.Since(startTime), err)
 			// Even on error the relay result may carry response metadata — notably the
@@ -461,8 +502,8 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 	// unless BOTH the relay sender has a subscription manager and this chain's spec
 	// carries a SUBSCRIBE directive — the callback parses every request it is offered,
 	// and that parse is pure overhead on a chain with no streaming methods to find.
-	// When it is nil, a streaming method is refused further down the relay path rather
-	// than being invoked as a unary call.
+	// When it is nil, the listener's gate refuses a streaming method (refuseUnservedCall)
+	// rather than having it invoked as a unary call.
 	_, _, specHasSubscription := apil.chainParser.GetParsingByTag(spectypes.FUNCTION_TAG_SUBSCRIBE)
 	var streamCallback grpcproxy.StreamProxyCallBack
 	if subscriptionProvider, ok := apil.relaySender.(GRPCSubscriptionProvider); ok && specHasSubscription {
@@ -475,7 +516,12 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 		}
 	}
 
-	_, httpServer, err := grpcproxy.NewGRPCProxyWithReflection(sendRelayCallback, apil.endpoint.HealthCheckPath, cmdFlags, apil.healthReporter, reflectionSource, streamCallback)
+	servesSubscriptions := streamCallback != nil
+	callGate := func(ctx context.Context, method string) error {
+		return apil.refuseUnservedCall(ctx, method, servesSubscriptions)
+	}
+
+	_, httpServer, err := grpcproxy.NewGRPCProxyWithReflection(sendRelayCallback, apil.endpoint.HealthCheckPath, cmdFlags, apil.healthReporter, reflectionSource, streamCallback, grpcproxy.WithCallGate(callGate))
 	if err != nil {
 		utils.FormatFatal("provider failure RegisterServer", err, utils.Attribute{Key: "listenAddr", Value: apil.endpoint.NetworkAddress})
 	}
@@ -517,6 +563,93 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 	}
 }
 
+// requestGUID returns the request id on *ctx, which the gRPC proxy sets on every call so that a
+// failure it answers is logged under the id the request's own lines carry. A context without one
+// (a callback called directly) gets a new id.
+func requestGUID(ctx *context.Context) uint64 {
+	if guid, found := utils.GetUniqueIdentifier(*ctx); found {
+		return guid
+	}
+	guid := utils.GenerateUniqueIdentifier()
+	*ctx = utils.WithUniqueIdentifier(*ctx, guid)
+	return guid
+}
+
+// switchedOffGRPCMethodMessage is the whole sentence a caller gets for a method the chain spec
+// switched off, with status UNIMPLEMENTED.
+const switchedOffGRPCMethodMessage = "The router does not serve this method"
+
+// refuseUnservedCall refuses, before any of the call's messages is read and before any provider is
+// asked, a call the router does not serve (MAG-5133):
+//   - a method the chain spec switched off;
+//   - a client stream or a two-way stream;
+//   - a server stream, unless the spec names it as a subscription and this listener serves
+//     subscriptions.
+//
+// The shape comes from a method definition the router already holds (GRPCCallShapes). Without one
+// the call goes ahead: a stream is then caught by what it does, when its client sends a second
+// message or its node a second reply, and refused with the same status.
+//
+// The refusal is UNIMPLEMENTED, gRPC's status for a call the server does not serve, with a fixed
+// sentence and the request id (common.GUID_HEADER_NAME) in the trailers. The relay sender records
+// the refusal under that id (RelayRejectionReporter), as it records every refused request. It ends
+// this call only, never the connection.
+func (apil *GrpcChainListener) refuseUnservedCall(ctx context.Context, method string, servesSubscriptions bool) error {
+	reason, message := apil.unservedCallReason(method, servesSubscriptions)
+	if reason == "" {
+		return nil
+	}
+	start := time.Now()
+	guid := utils.GenerateUniqueIdentifier()
+	msgSeed := strconv.FormatUint(guid, 10)
+	if err := grpc.SetTrailer(ctx, metadata.Pairs(common.GUID_HEADER_NAME, msgSeed)); err != nil {
+		utils.FormatDebug("could not set the request id on a refused gRPC call", utils.LogAttr("error", err.Error()))
+	}
+	utils.FormatInfo("refused a gRPC call the router does not serve",
+		utils.LogAttr("GUID", msgSeed),
+		utils.LogAttr("_method", method),
+		utils.LogAttr("reason", reason),
+		utils.LogAttr("chainID", apil.endpoint.ChainID),
+	)
+	if reporter, ok := apil.relaySender.(RelayRejectionReporter); ok {
+		metadataValues, _ := metadata.FromIncomingContext(ctx)
+		reportCtx := utils.ExtractWantedHeadersFromCachedMap(metadataValues, utils.WithUniqueIdentifier(ctx, guid))
+		reporter.ReportRejectedRelay(reportCtx, start, extractDappIDFromGrpcHeader(metadataValues), errors.New(reason+": "+message))
+	}
+	return status.Error(codes.Unimplemented, message)
+}
+
+// unservedCallReason returns why the router does not serve a call to method, and the sentence the
+// caller gets, or "" when it serves it or cannot tell yet.
+func (apil *GrpcChainListener) unservedCallReason(method string, servesSubscriptions bool) (reason, message string) {
+	switchedOff, subscription := apil.chainParser.methodInSpec(method)
+	if switchedOff {
+		return "switched off in the chain spec", switchedOffGRPCMethodMessage
+	}
+	if subscription {
+		if servesSubscriptions {
+			return "", ""
+		}
+		return "subscription, and this listener serves none", common.UnservedGRPCCallError.Error()
+	}
+	shapes, ok := apil.relaySender.(GRPCCallShapes)
+	if !ok {
+		return "", ""
+	}
+	clientStreams, serverStreams, known := shapes.GRPCCallShape(method)
+	switch {
+	case !known:
+		return "", ""
+	case clientStreams && serverStreams:
+		return "two-way stream", common.UnservedGRPCCallError.Error()
+	case clientStreams:
+		return "client stream", common.UnservedGRPCCallError.Error()
+	case serverStreams:
+		return "server stream the chain spec does not name as a subscription", common.UnservedGRPCCallError.Error()
+	}
+	return "", ""
+}
+
 // makeStreamRelayCallback builds the gRPC listener's server-streaming entry point
 // (MAG-2643). It mirrors what ConsumerWebsocketManager does for eth_subscribe: parse
 // the request, recognise it as a subscription, start (or join) the upstream stream,
@@ -544,8 +677,7 @@ func (apil *GrpcChainListener) makeStreamRelayCallback(subscriptionManager GRPCS
 			return nil, nil
 		}
 
-		guid := utils.GenerateUniqueIdentifier()
-		ctx = utils.WithUniqueIdentifier(ctx, guid)
+		guid := requestGUID(&ctx)
 
 		// One gRPC stream is one subscriber. The WebSocket path keys clients by
 		// connection UID because a single socket multiplexes many subscriptions; here

@@ -232,6 +232,14 @@ func (inputs *chainReverifyInputs) noteFailure(tier reverifyTier, name string, e
 		return
 	}
 	check := failureCheck(err)
+	if check == chainlib.CheckNotRun {
+		// The deadline cut the check off: like a rate limit it ran nothing, so nothing is
+		// counted and the check the provider last failed stands (MAG-3950).
+		if _, known := inputs.lastFailure[key]; !known {
+			inputs.lastFailure[key] = check
+		}
+		return
+	}
 	inputs.lastFailure[key] = check
 	// A retry that kept the failing check's verdict from an earlier pass ran nothing that
 	// failed under it, so it counts no failed run.
@@ -245,14 +253,15 @@ func (inputs *chainReverifyInputs) noteFailure(tier reverifyTier, name string, e
 
 // countRefusals counts each service and node url this pass refused a provider it
 // admits, and each Warning check it failed, one failed run each. A missing websocket
-// url is not counted: no check ran, and the gauge already holds it while it lasts. A
-// retry counts only the checks it ran, not the verdicts it kept from an earlier pass.
+// url is not counted: no check ran, and the gauge already holds it while it lasts. Nor
+// is a url refused only by checks the deadline cut off: none of them ran. A retry
+// counts only the checks it ran, not the verdicts it kept from an earlier pass.
 func (inputs *chainReverifyInputs) countRefusals(tier reverifyTier, provider *routersession.RPCStaticProviderEndpoint, admission chainlib.ProviderAdmission) {
 	if inputs.countFailedCheck == nil {
 		return
 	}
 	for _, failure := range refusalsOf(inputs.chainParser, provider, admission.Rerun()) {
-		if failure.Check == chainlib.CheckMissingURL {
+		if failure.Check == chainlib.CheckMissingURL || failure.Check == chainlib.CheckNotRun {
 			continue
 		}
 		inputs.countFailedCheck(tier, provider.Name, failure)
@@ -713,6 +722,7 @@ func decideReverification(
 		if refused, ok := chainlib.FailedPass(err); ok && wasActive && !refused.RefusalRan() {
 			// A retry that kept the failing verdicts instead of running those checks again
 			// found nothing new: the grace advances on the retry of what failed (MAG-3950).
+			// Nor did a pass whose failing checks the deadline cut off: none of them ran.
 			healthyNames[p.Name] = struct{}{}
 			continue
 		}

@@ -24,9 +24,9 @@ func (p *Policy) Decide(input relaycore.DecisionInput) relaycore.DecisionOutput 
 	if input.Selection == relaycore.CrossValidation {
 		return relaycore.DecisionOutput{Action: relaycore.ActionStop, Reason: "CrossValidation"}
 	}
-	// A pinned request (a strict pin: router-stickiness, or router-select-provider with
-	// router-select-provider-strict: true; see relaycore.PinnedByDirectives) is served by the pinned
-	// upstream or not at all (MAG-2280, MAG-4123, MAG-4826). The caller chose the node; a retry or
+	// A pinned request (a strict pin: router-stickiness, or router-select-provider without
+	// router-select-provider-allow-retry: true; see relaycore.PinnedByDirectives) is served by the
+	// pinned upstream or not at all (MAG-2280, MAG-4123, MAG-5711). The caller chose the node; a retry or
 	// a hedge on another one would be the silent substitution the pin exists to prevent. For the
 	// sequence a sticky session protects, read the head then
 	// fetch that block, it is exactly how a false gap is produced: nothing here checks that the
@@ -49,8 +49,9 @@ func (p *Policy) Decide(input relaycore.DecisionInput) relaycore.DecisionOutput 
 	// A GraphQL write has no such carve-out (MAG-5122, Part I R-L point 2): never re-sent,
 	// including when every copy answered 429. The interface's own clients treat the one send as
 	// final, so a retry here is a second send the ticket exists to rule out — unlike the other
-	// interfaces this carve-out still serves, which MAG-5061 owns.
-	rateLimitRetrySafe := input.Summary.OnlyRateLimited && !input.IsTickerHedge && !input.IsGraphQLWrite
+	// interfaces this carve-out still serves, which MAG-5061 owns. A gRPC write whose chain list reads
+	// each copy has none either (MAG-5186): that list files a throttle as the client's to retry after.
+	rateLimitRetrySafe := input.Summary.OnlyRateLimited && !input.IsTickerHedge && !input.IsGraphQLWrite && !input.IsChainListWrite
 	// A batch node error is not proof that nothing ran. Under --batch-node-error-on-any one failed
 	// element makes the whole reply a node error, classified by the failed elements' text alone, so a
 	// rate-limited sibling can stand for a batch whose eth_sendRawTransaction was accepted. Only a

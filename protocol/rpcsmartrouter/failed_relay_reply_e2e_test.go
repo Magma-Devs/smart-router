@@ -75,11 +75,11 @@ func failedReplyInterfaces() []failedReplyInterface {
 			method: http.MethodPost, path: "/", body: `{"jsonrpc":"2.0","id":77,"method":"eth_blockNumber","params":[]}`, jsonRpcShape: true,
 		},
 		{
-			name: "rest", chainID: "LAVA", apiInterface: spectypes.APIInterfaceRest, parser: mockParser("LAVA", spectypes.APIInterfaceRest),
+			name: "rest", chainID: "COSMOSHUB", apiInterface: spectypes.APIInterfaceRest, parser: mockParser("COSMOSHUB", spectypes.APIInterfaceRest),
 			method: http.MethodGet, path: "/cosmos/base/tendermint/v1beta1/blocks/17",
 		},
 		{
-			name: "tendermintrpc", chainID: "LAVA", apiInterface: spectypes.APIInterfaceTendermintRPC, parser: mockParser("LAVA", spectypes.APIInterfaceTendermintRPC),
+			name: "tendermintrpc", chainID: "COSMOSHUB", apiInterface: spectypes.APIInterfaceTendermintRPC, parser: mockParser("COSMOSHUB", spectypes.APIInterfaceTendermintRPC),
 			method: http.MethodPost, path: "/", body: `{"jsonrpc":"2.0","id":77,"method":"status","params":[]}`, jsonRpcShape: true,
 		},
 		{
@@ -422,7 +422,7 @@ func TestFailedRelayReply_ARequestRefusedBeforeDispatchKeepsTheRequestHeaders_MA
 		upstreams int
 	}{
 		{"pin", map[string]string{common.SELECT_PROVIDER_HEADER_NAME: "upstream-9"}, 1},
-		{"strict pin", map[string]string{common.SELECT_PROVIDER_HEADER_NAME: "upstream-9", common.SELECT_PROVIDER_STRICT_HEADER_NAME: "true"}, 1},
+		{"pin with allow-retry", map[string]string{common.SELECT_PROVIDER_HEADER_NAME: "upstream-9", common.SELECT_PROVIDER_ALLOW_RETRY_HEADER_NAME: "true"}, 1},
 		{"no provider", nil, 0},
 	}
 	for _, iface := range failedReplyInterfaces() {
@@ -460,7 +460,7 @@ func TestFailedRelayReply_AStrictPinTheConsistencyGateTurnsAwayKeepsTheRequestHe
 	iface := failedReplyInterfaces()[0]
 	require.Equal(t, "jsonrpc", iface.name)
 	iface.staleUpstreams = true
-	iface.headers = map[string]string{common.SELECT_PROVIDER_HEADER_NAME: "upstream-1", common.SELECT_PROVIDER_STRICT_HEADER_NAME: "true"}
+	iface.headers = map[string]string{common.SELECT_PROVIDER_HEADER_NAME: "upstream-1"}
 	for _, tc := range []struct {
 		name   string
 		body   string
