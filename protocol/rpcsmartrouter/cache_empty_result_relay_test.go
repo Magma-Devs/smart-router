@@ -102,13 +102,15 @@ func TestAPinnedReadsAnswerIsNotServedToTheNextCaller(t *testing.T) {
 		{Name: common.STICKINESS_HEADER_NAME, Value: "session-1"},
 	} {
 		t.Run(pin.Name, func(t *testing.T) {
-			primary, _ := startCacheServerForTest(t)
+			primary, rcs := startCacheServerForTest(t)
 			eth := ethJsonRPCParser(t)
 			server := newRelayEndServer(t, "ETH1", spectypes.APIInterfaceJsonRPC, eth,
 				relayEndNode{"node-1", relayEndReply(http.StatusOK, node1Answer, 0)},
 				relayEndNode{"node-2", relayEndReply(http.StatusOK, node2Answer, 0)},
 			)
 			server.cache = primary
+			key, _, err := ethProtocolMessage(t, eth, body, 0).HashCacheRequest("ETH1")
+			require.NoError(t, err)
 
 			pinned, err := sendRelayEnd(t, server, 7410, relayEndShortWait, "", body, pin)
 			require.NoError(t, err)
@@ -127,15 +129,15 @@ func TestAPinnedReadsAnswerIsNotServedToTheNextCaller(t *testing.T) {
 			require.Equal(t, common.CacheOutcomeMiss, unpinned.CacheLookup.PrimaryOutcome)
 			require.Contains(t, []string{"node-1", "node-2"}, unpinned.ProviderInfo.ProviderAddress, "a node answers it")
 
-			require.Eventually(t, func() bool {
-				repeat, err := sendRelayEnd(t, server, 7412, relayEndShortWait, "", body)
-				require.NoError(t, err)
-				if repeat.CacheLookup.ServedTier != common.CacheTierPrimary {
-					return false
-				}
-				require.JSONEq(t, string(unpinned.Reply.Data), string(repeat.Reply.Data), "the cached answer is the unpinned read's")
-				return true
-			}, 3*time.Second, 50*time.Millisecond, "control: an unpinned repeat of an unpinned read is served from the cache")
+			// The write is asynchronous. A repeat sent before it lands misses, goes to a node and
+			// writes that node's answer, which can be the other node's; so the repeat waits for the
+			// unpinned read's entry, the only one the scene leaves.
+			require.Eventually(t, func() bool { return directGetOn(rcs, "ETH1", key, 0x1000000, 0).GetReply() != nil },
+				3*time.Second, 20*time.Millisecond, "the unpinned read's answer is written")
+			repeat, err := sendRelayEnd(t, server, 7412, relayEndShortWait, "", body)
+			require.NoError(t, err)
+			require.Equal(t, common.CacheTierPrimary, repeat.CacheLookup.ServedTier, "control: an unpinned repeat of an unpinned read is served from the cache")
+			require.JSONEq(t, string(unpinned.Reply.Data), string(repeat.Reply.Data), "the cached answer is the unpinned read's")
 		})
 	}
 }

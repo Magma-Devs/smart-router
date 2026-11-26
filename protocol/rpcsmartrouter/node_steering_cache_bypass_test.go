@@ -183,7 +183,8 @@ func TestNodeSteeringDirective_TheTicketsReproductionOnARealCache(t *testing.T) 
 }
 
 // plantCacheEntry stores body on the cache server under key and block as the router's own write
-// would, for a scene that needs an entry no request of the test may leave behind.
+// would, for a scene that needs an entry no request of the test may leave behind. The in-memory
+// store buffers a set (ristretto's SetWithTTL), so the entry is waited for, not read at once.
 func plantCacheEntry(t *testing.T, rcs *ecocache.RelayerCacheServer, chainID string, key []byte, block int64, body string) {
 	t.Helper()
 	_, err := rcs.SetRelay(context.Background(), &pairingtypes.RelayCacheSet{
@@ -195,7 +196,8 @@ func plantCacheEntry(t *testing.T, rcs *ecocache.RelayerCacheServer, chainID str
 		StatusCode:       http.StatusOK,
 	})
 	require.NoError(t, err)
-	require.NotNil(t, directGetOn(rcs, chainID, key, block, 0).GetReply(), "the planted entry is readable")
+	require.Eventually(t, func() bool { return directGetOn(rcs, chainID, key, block, 0).GetReply() != nil },
+		3*time.Second, 10*time.Millisecond, "the planted entry is readable")
 }
 
 // A pinned request's answer never reaches the cache, whichever of the two pin directives carries it
