@@ -435,10 +435,10 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 
 	// Counts the chain tip moving DOWN (MAG-4153). smartrouter_latest_block is a per-pod gauge that
 	// is also written on every relay, so a drop in it cannot be told apart from a pod restart; this
-	// counter is the alertable signal. reason is chainstate.RegressionReason* — a closed set of two.
+	// counter is the alertable signal. reason is chainstate.RegressionReason* — a closed set of three.
 	m.routerLatestBlockRegressions = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_latest_block_regressions_total",
-		Help: "Times the router's latest block for this chain/interface moved backwards, by reason (consensus, stale_tip).",
+		Help: "Times the router's latest block for this chain/interface moved backwards, by reason (consensus, stale_tip, unconfirmed_start).",
 	}, []string{"spec", "apiInterface", "reason"}))
 
 	// Idle mode per chain/interface: 1 while the chain has served no client relay for the idle

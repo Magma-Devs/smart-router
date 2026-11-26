@@ -2356,7 +2356,7 @@ func TestCheckAndUnblock_BackupRoutedToComprehensiveProbe(t *testing.T) {
 	// can assert that the call flow reaches the comprehensive branch by checking the debug-log
 	// marker indirectly via state: validAddresses should not contain the backup afterwards either
 	// way, and the backup should not have been silently restored to pairing.
-	csm.checkAndUnblockHealthyReBlockedProviders(context.Background(), firstEpochHeight)
+	csm.checkAndUnblockHealthyReBlockedProviders(context.Background(), firstEpochHeight, csm.pairingGeneration)
 
 	csm.lock.RLock()
 	_, inPairing := csm.pairing[backupAddr]
@@ -2405,7 +2405,7 @@ func TestCheckAndUnblock_BackupUnblockedWhenHealthy(t *testing.T) {
 	csm.lock.Unlock()
 
 	// Run the unblock pass. Comprehensive probe against grpcListener should succeed → unblock.
-	csm.checkAndUnblockHealthyReBlockedProviders(context.Background(), secondEpochHeight)
+	csm.checkAndUnblockHealthyReBlockedProviders(context.Background(), secondEpochHeight, csm.pairingGeneration)
 
 	csm.lock.RLock()
 	_, stillBlocked := csm.blockedBackupProviders[backupAddr]

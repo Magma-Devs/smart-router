@@ -29,8 +29,8 @@ require (
 	github.com/jhump/protoreflect v1.19.0
 	github.com/redis/go-redis/v9 v9.23.0
 	github.com/spf13/pflag v1.1.0
-	github.com/tidwall/gjson v1.20.3
-	github.com/tidwall/sjson v1.2.9
+	github.com/tidwall/gjson v1.20.6
+	github.com/tidwall/sjson v1.2.11
 	github.com/vektah/gqlparser/v2 v2.5.64
 	go.opentelemetry.io/contrib/exporters/autoexport v0.72.0
 	go.opentelemetry.io/otel v1.47.0
@@ -110,7 +110,7 @@ require (
 	github.com/gorilla/websocket v1.5.4-0.20240701034025-d67f41855da4
 	github.com/improbable-eng/grpc-web v0.15.0
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
-	github.com/klauspost/compress v1.20.4
+	github.com/klauspost/compress v1.20.5
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/mitchellh/mapstructure v1.5.0
@@ -131,10 +131,10 @@ require (
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
 	github.com/valyala/fasthttp v1.51.0 // indirect
 	github.com/valyala/tcplisten v1.0.0 // indirect
-	golang.org/x/net v0.62.0
-	golang.org/x/sync v0.24.0 // indirect
-	golang.org/x/sys v0.49.0 // indirect
-	golang.org/x/text v0.43.0 // indirect
+	golang.org/x/net v0.63.0
+	golang.org/x/sync v0.25.0 // indirect
+	golang.org/x/sys v0.50.0 // indirect
+	golang.org/x/text v0.44.0 // indirect
 	gopkg.in/natefinch/npipe.v2 v2.0.0-20160621034901-c1b8fa8bdcce
 	nhooyr.io/websocket v1.8.6 // indirect
 )

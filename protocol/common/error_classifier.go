@@ -207,16 +207,16 @@ func xrplMessageStartsWith(alternatives ...string) ErrorMatcher {
 }
 
 // ---------------------------------------------------------------------------
-// A node's refusal of a broadcast transaction, inside an ordinary reply (MAG-5323)
+// A node's refusal of a broadcast transaction, inside an ordinary reply (MAG-5323, MAG-5451)
 // ---------------------------------------------------------------------------
 //
-// Tendermint RPC's broadcast_tx_sync and broadcast_tx_commit, Cosmos gRPC's BroadcastTx and Tron's
-// /wallet/broadcasttransaction and /wallet/broadcasthex answer a refused transaction with HTTP 200
-// or gRPC OK. rpcInterfaceMessages flags those replies and writes a message that starts with what
-// the node said, through CosmosTxRefusalMessage and TronTxRefusalMessage, and the rows below
-// classify that message. Each set ends in a catch-all, so a flagged refusal is never UNKNOWN_ERROR:
-// that is retryable and scored by the availability gate, which would blame a node for a client's
-// re-sent transaction.
+// Tendermint RPC's broadcast_tx_sync and broadcast_tx_commit, Cosmos gRPC's BroadcastTx, Cosmos
+// REST's POST /cosmos/tx/v1beta1/txs, and Tron's /wallet/broadcasttransaction and
+// /wallet/broadcasthex answer a refused transaction with HTTP 200 or gRPC OK. rpcInterfaceMessages
+// flags those replies and writes a message that starts with what the node said, through
+// CosmosTxRefusalMessage and TronTxRefusalMessage, and the rows below classify that message. Each
+// set ends in a catch-all, so a flagged refusal is never UNKNOWN_ERROR: that is retryable and
+// scored by the availability gate, which would blame a node for a client's re-sent transaction.
 //
 // The readers are chosen by the request (the method, the path), not by the chain, so the rows are
 // Tier-1 on the transports those readers run on: CANTO serves Cosmos interfaces and is an EVM
@@ -349,6 +349,33 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 		{CodeAndMessage(-32600, "unsupported method"), RouterErrorNodeMethodNotSupported},
 		{CodeEquals(-32600), RouterErrorUserInvalidRequest},
 		{CodeEquals(-32602), RouterErrorUserInvalidParams},
+		// CometBFT's -32603 "Internal error", by the reason in its data (MAG-5325; cometbft v0.38
+		// mempool/errors.go, rpc/core). None is the endpoint failing: the transaction is a
+		// duplicate, too big, or met a full mempool; the height or transaction is outside what
+		// this node holds, and another node may hold it; or the transaction passed CheckTx and was
+		// not committed within the node's timeout, which says nothing of the node and leaves the
+		// transaction able to land (NODE_ABORTED, as Sui's answer of the same kind). Any other
+		// data stays NODE_INTERNAL_ERROR below.
+		{cometBFTInternalError(`tx already exists in cache`), RouterErrorChainTxAlreadyKnown},
+		{cometBFTInternalError(`mempool is (?:full|still rechecking)`), RouterErrorChainMempoolFull},
+		{cometBFTInternalError(`Tx too large\. Max size is`), RouterErrorChainTxTooLarge},
+		// The mempool's pre-check against the block's data size (mempool.PreCheckMaxBytes, set from the
+		// consensus params, so every node of the chain says the same).
+		{cometBFTInternalError(`tx pre check: tx size is too big`), RouterErrorChainTxTooLarge},
+		{cometBFTInternalError(`height \d+ is not available, lowest height is`), RouterErrorChainStatePruned},
+		{cometBFTInternalError(`height \d+ must be less than or equal to the current blockchain height`), RouterErrorChainBlockNotFound},
+		{cometBFTInternalError(`tx \([0-9A-Fa-f]*\) not found`), RouterErrorChainTxNotFound},
+		{cometBFTInternalError(`timed out waiting for tx to be included in a block`), RouterErrorNodeAborted},
+		// A batch is classified with its HTTP status for a code, so the -32603 row below never
+		// reaches an element, and on main a batch's internal error was UNKNOWN_ERROR: retried, and
+		// not the endpoint's fault. An element's internal error whose data no row above reads keeps
+		// that verdict, and its data reaches no message row after this one. Not NODE_INTERNAL_ERROR:
+		// a batch joins its elements' texts, and an element that echoes what the caller sent can
+		// write this row's words, so the row must not blame anyone. Anchored on an element's start,
+		// so a 4xx's status pass ("HTTP 413: ...") still reaches its status row; a single reply's
+		// own JSON-RPC code skips it, and so does a revert, which the revert row below reads first
+		// (batchElementInternalError).
+		{batchElementInternalError(), RouterErrorUnknown},
 		{CodeEquals(-32603), RouterErrorNodeInternalError},
 
 		// EIP-1474 server error codes
@@ -719,8 +746,8 @@ func grpcProviderFaultMappings() []errorMapping {
 // httpStatusRows is the one list of HTTP error statuses the registry knows, with the verdict each
 // row form gives it. byCode is the CodeEquals verdict, appended to the REST table only (see init),
 // where the error code is the HTTP status itself. byMessage is the HTTPStatusContains verdict,
-// for a status that reaches the classifier as digits in the message (e.g. "HTTP status 429"); every
-// transport gets it. The two agree except on 401 and 404, which split on purpose.
+// for a status the router wrote into the message (e.g. "HTTP 429: …"), never one in the node's own
+// text (MAG-5324); every transport gets it. The two agree except on 401 and 404, which split on purpose.
 var httpStatusRows = []struct {
 	status    int
 	byCode    *RouterError
@@ -770,7 +797,7 @@ func httpStatusCodeMappings() []errorMapping {
 }
 
 // httpStatusMessageMappings returns HTTPStatusContains matchers for common HTTP error status codes.
-// These match status codes appearing as substrings in error messages (e.g., "HTTP status 429").
+// These match a status the router wrote into an error message (e.g., "HTTP 429: …").
 func httpStatusMessageMappings() []errorMapping {
 	mappings := make([]errorMapping, 0, len(httpStatusRows))
 	for _, row := range httpStatusRows {
@@ -784,17 +811,21 @@ func httpStatusMessageMappings() []errorMapping {
 // package init") holds. Do not add mutations outside this function.
 func init() {
 	// A broadcast's refusal opens the table of each transport its reader runs on: Tendermint RPC
-	// (JSON-RPC) and gRPC for Cosmos, REST for Tron. Their messages start with a prefix no node
-	// writes, so they shadow no row below, and first, no row below reads the node's free text.
+	// (JSON-RPC) and gRPC for Cosmos, REST for Cosmos and Tron. Their messages start with a prefix no
+	// node writes, so they shadow no row below, and first, no row below reads the node's free text.
 	genericErrorMappings[TransportJsonRPC] = slices.Concat(cosmosTxRefusalRows, genericErrorMappings[TransportJsonRPC])
 	genericErrorMappings[TransportGRPC] = slices.Concat(cosmosTxRefusalRows, genericErrorMappings[TransportGRPC])
-	genericErrorMappings[TransportREST] = slices.Concat(tronTxRefusalRows, genericErrorMappings[TransportREST])
+	genericErrorMappings[TransportREST] = slices.Concat(cosmosTxRefusalRows, tronTxRefusalRows, genericErrorMappings[TransportREST])
 
 	// Append shared HTTP status message matchers to JSON-RPC transport
 	genericErrorMappings[TransportJsonRPC] = append(genericErrorMappings[TransportJsonRPC], httpStatusMessageMappings()...)
 
-	// Append both CodeEquals and HTTPStatusContains matchers to REST transport
+	// Append both CodeEquals and HTTPStatusContains matchers to REST transport, with a 5xx no
+	// status row names between them: every 5xx but 501 is a provider fault (rulebook Part V 3.1 P8),
+	// and a 505 or a 599 was UNKNOWN_ERROR, recorded as nobody's fault (MAG-5490). It follows the
+	// CodeEquals rows, so a listed 5xx keeps its own verdict.
 	genericErrorMappings[TransportREST] = append(genericErrorMappings[TransportREST], httpStatusCodeMappings()...)
+	genericErrorMappings[TransportREST] = append(genericErrorMappings[TransportREST], errorMapping{CodeInRange(500, 599), RouterErrorNodeUnlistedServerError})
 	genericErrorMappings[TransportREST] = append(genericErrorMappings[TransportREST], httpStatusMessageMappings()...)
 
 	// Append HTTPStatusContains matchers to gRPC transport — HTTP status codes can appear

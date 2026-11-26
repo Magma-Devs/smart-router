@@ -54,9 +54,10 @@ func newStatefulRestProcessor(t *testing.T) *RelayProcessor {
 	usedProviders := routersession.NewUsedProviders(nil)
 	relayProcessor := NewRelayProcessor(ctx, nil, RelayProcessorMetrics, RelayProcessorMetrics, newMockRelayStateMachineWithSelection(protocolMessage, usedProviders, Stateful))
 
-	lockCtx, cancel := context.WithTimeout(ctx, 10*time.Millisecond)
-	defer cancel()
-	require.Nil(t, usedProviders.TryLockSelection(lockCtx))
+	// A fresh relay's selection lock is free, so this takes it at once. A deadline here only failed
+	// the setup when a loaded run descheduled the test for longer than it (TryLockSelection checks
+	// the context first); newStatefulBroadcastProcessor takes it the same way.
+	require.NoError(t, usedProviders.TryLockSelection(ctx))
 	usedProviders.AddUsed(routersession.ConsumerSessionsMap{"gateway@test": &routersession.SessionInfo{}, "node@test": &routersession.SessionInfo{}}, nil)
 	return relayProcessor
 }
@@ -127,9 +128,10 @@ func newStatefulGraphQLProcessor(t *testing.T) *RelayProcessor {
 	usedProviders := routersession.NewUsedProviders(nil)
 	relayProcessor := NewRelayProcessor(ctx, nil, RelayProcessorMetrics, RelayProcessorMetrics, newMockRelayStateMachineWithSelection(protocolMessage, usedProviders, Stateful))
 
-	lockCtx, cancel := context.WithTimeout(ctx, 10*time.Millisecond)
-	defer cancel()
-	require.Nil(t, usedProviders.TryLockSelection(lockCtx))
+	// A fresh relay's selection lock is free, so this takes it at once. A deadline here only failed
+	// the setup when a loaded run descheduled the test for longer than it (TryLockSelection checks
+	// the context first); newStatefulBroadcastProcessor takes it the same way.
+	require.NoError(t, usedProviders.TryLockSelection(ctx))
 	usedProviders.AddUsed(routersession.ConsumerSessionsMap{"gateway@test": &routersession.SessionInfo{}, "node@test": &routersession.SessionInfo{}}, nil)
 	return relayProcessor
 }
