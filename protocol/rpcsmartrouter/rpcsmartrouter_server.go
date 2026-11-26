@@ -1769,6 +1769,11 @@ func (rpcss *RPCSmartRouterServer) appendGraphQLWriteOutcomeHeader(result *commo
 // MAG-4742), with or without errors beside it and under any status, or an error below it (W2). No
 // other reply gets the header: not a node error (a refused transaction answers with a GraphQL error
 // inside a 200, which still returns err == nil), and no write on a chain without write rows.
+//
+// The status is HTTP 200 even when the copy that ran came back inside a 429 or a 5xx (MAG-5122 T14,
+// ruled on MAG-4909 on 18 Nov and confirmed on 23 Nov): most GraphQL clients read a 429 or a 5xx as
+// a failure without reading the body, so the app may sign the transaction again and pay twice. It
+// is the same reasoning as the unknown reply's 200 (graphQLUnclearWriteStatus).
 func (rpcss *RPCSmartRouterServer) setGraphQLWriteAccepted(result *common.RelayResult, protocolMessage chainlib.ProtocolMessage) {
 	if result == nil || result.IsNodeError || result.Reply == nil || !isGraphQLWrite(protocolMessage) {
 		return
