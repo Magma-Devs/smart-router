@@ -37,6 +37,16 @@ func apiNameOf(pm chainlib.ProtocolMessage) string {
 	return pm.GetApi().Name
 }
 
+// firstRecord is the record the prefix reads (common.ClassifyPrefix): the first of the reply's
+// records, which share its status (a batch's elements, a GraphQL reply's errors), or a bare record of
+// the status when the reader built none.
+func firstRecord(result common.RelayResult, apiInterface string) common.ErrorRecord {
+	if len(result.ErrorRecords) > 0 {
+		return result.ErrorRecords[0]
+	}
+	return common.ErrorRecord{Interface: apiInterface, Status: result.StatusCode}
+}
+
 // isWrite reports whether protocolMessage is a stateful request: a write, relayed to every provider
 // at once and never again.
 func isWrite(protocolMessage chainlib.ProtocolMessage) bool {
@@ -306,20 +316,37 @@ func (rp *ResultsManagerInst) setValidResponse(response *RelayResponse, protocol
 		// through the JSON-RPC generic bucket as NODE_METHOD_NOT_SUPPORTED
 		// (zero CU, no retry) — a silent retry-starvation bug.
 		chainFamily := common.GetChainFamilyOrDefault(rp.chainID)
-		// err is the node's reply text, so the transport-only rows stay out of it (MAG-4242).
+		// The reply as the rows see it (common.ErrorRecord, PRD §3.1; MAG-5595): one record per batch
+		// element or GraphQL error, from the same body and status the verdict below is read from. The
+		// spec rows (MAG-5606) match these.
+		response.RelayResult.ErrorRecords = chainlib.RecordsFromReply(nil, apiInterfaceOf(protocolMessage), apiNameOf(protocolMessage), response.RelayResult.StatusCode, response.RelayResult.Reply.Data, checkerMessage)
+		if request, ok := protocolMessage.GetRPCMessage().(graphQLOccurrences); ok {
+			common.ReadGraphQLPathsAsFields(response.RelayResult.ErrorRecords, request.Occurrences())
+		}
+		// The order (PRD §3.2; MAG-5597). The interface's own rows (OwnClassification, MAG-5121) decide
+		// first, as today. Then the prefix, steps 1 to 3, reads the record ahead of every row: a
+		// connection fault in the reply's text is no reply, a 429 is a rate limit whatever the body (no
+		// direct sender files a 429 as a node error, MAG-3030, so this is the verdict those replies get
+		// already). Then the router's rows, with the inputs they read today: err is the node's reply
+		// text, so the transport-only rows stay out of it (MAG-4242); giving them the record instead is
+		// MAG-5248's (JSON-RPC), MAG-5254's (REST) and MAG-5132's (gRPC). The chain's policy (nil here)
+		// arrives with MAG-5606 and MAG-5609.
 		nodeClassified := ownClassification
 		if rowReader, ok := protocolMessage.GetRPCMessage().(chainRowVerdictReader); ok && nodeClassified == nil {
 			nodeClassified = rowReader.ChainRowVerdict(response.RelayResult.Reply.Data)
 		}
 		if nodeClassified == nil {
-			nodeClassified = common.ClassifyError(common.DetectConnectionErrorInReplyText(errorMessage), chainFamily, transport, errorCode, err.Error())
-		}
-		// The reply as the rows see it (common.ErrorRecord, PRD §3.1; MAG-5595): one record per batch
-		// element or GraphQL error, from the same body and status the verdict above was read from.
-		// Built beside that verdict, not in its place; the spec rows (MAG-5606) match these.
-		response.RelayResult.ErrorRecords = chainlib.RecordsFromReply(nil, apiInterfaceOf(protocolMessage), apiNameOf(protocolMessage), response.RelayResult.StatusCode, response.RelayResult.Reply.Data, checkerMessage)
-		if request, ok := protocolMessage.GetRPCMessage().(graphQLOccurrences); ok {
-			common.ReadGraphQLPathsAsFields(response.RelayResult.ErrorRecords, request.Occurrences())
+			replyContext := common.ReplyContext{
+				Method:          apiNameOf(protocolMessage),
+				IsWrite:         isWrite(protocolMessage),
+				Body:            response.RelayResult.Reply.Data,
+				ConnectionError: common.DetectConnectionErrorInReplyText(errorMessage),
+			}
+			if verdict, ok := common.ClassifyPrefix(nil, chainFamily, firstRecord(response.RelayResult, apiInterfaceOf(protocolMessage)), replyContext); ok {
+				nodeClassified = verdict.Classified()
+			} else {
+				nodeClassified = common.ClassifyError(nil, chainFamily, transport, errorCode, err.Error())
+			}
 		}
 		// A write's copy whose reply says the slot is already used may be this very transaction landed
 		// (PRD §5.2, MAG-5593). Read beside the row, not from it: whatever the row says, the copy is
