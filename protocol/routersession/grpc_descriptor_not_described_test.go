@@ -186,3 +186,35 @@ func TestDescriptorResolver_ABorrowThatFailedNamesNoNodeAndIsNotRemembered(t *te
 	}
 	require.Equal(t, int32(2), borrows.Load(), "each request after a failed borrow asks again")
 }
+
+// A relay whose own context has ended gets that context's error, not a remembered answer: the
+// router ends relays itself (a race it lost, a client that went away, a deadline that passed), and
+// the cancellation is what keeps such a relay off its endpoint's record. The node is not asked.
+func TestDescriptorResolver_ARelayThatHasEndedGetsItsOwnContextNotARememberedAnswer(t *testing.T) {
+	s := startSlowReflectionServer(t, 0)
+	g := newGRPCConnOverServer(t, s)
+	remembered := []struct{ service, method string }{
+		{undescribedService, "Get"},       // a service the node does not describe
+		{"grpc.health.v1.Health", "Nope"}, // a method a described service lacks
+	}
+	for _, m := range remembered {
+		requireNotDescribed(t, g, m.service, m.method)
+	}
+	streams := s.reflectionStream.Load()
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	expired, cancelExpired := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancelExpired()
+	for _, m := range remembered {
+		_, err := g.resolver.MethodDescriptor(cancelled, m.service, m.method)
+		require.ErrorIs(t, err, context.Canceled, "%s/%s", m.service, m.method)
+		_, err = g.resolver.MethodDescriptor(expired, m.service, m.method)
+		require.ErrorIs(t, err, context.DeadlineExceeded, "%s/%s", m.service, m.method)
+	}
+	require.Equal(t, streams, s.reflectionStream.Load(), "the node is not asked again")
+
+	// A live relay still gets the remembered answer.
+	requireNotDescribed(t, g, undescribedService, "Get")
+	require.Equal(t, streams, s.reflectionStream.Load())
+}

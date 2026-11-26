@@ -8,6 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
+	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
@@ -86,4 +89,42 @@ func TestGRPCListener_RepeatedJSONRequestsForAnUndescribedMethodCostTheNodeOneLo
 	}
 	require.LessOrEqual(t, reflectionStreams.Load()-before, int32(1),
 		"%d requests for a method the node does not describe cost it at most one reflection lookup", requests)
+}
+
+// A relay the router has ended, for a method whose "not described" answer is remembered, is a
+// cancellation and not the endpoint's fault, as it was before the answer was remembered. Without
+// the sentinel the answer is an unclassified error, which marks the endpoint unhealthy.
+func TestSendGRPCRelay_AnEndedRelayForARememberedMethodIsNotTheEndpointsFault(t *testing.T) {
+	addr, _ := startReflectingNode(t)
+	nodeUrl := common.NodeUrl{Url: "grpc://" + addr, GrpcConfig: common.GrpcConfig{AllowInsecure: true, ReflectionTimeout: time.Second}}
+	connection, err := routersession.NewDirectRPCConnection(context.Background(), nodeUrl, 5, "")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = connection.Close() })
+	sender := &DirectRPCRelaySender{directConnection: connection, endpointName: "grpc-endpoint", chainFamily: common.ChainFamily(-1)}
+	relay := func(ctx context.Context, path string) error {
+		_, err := sender.sendGRPCRelay(ctx, &grpcStatusChainMessage{mockChainMessage: &mockChainMessage{
+			apiInterface: "grpc",
+			rpcMessage:   &rpcInterfaceMessages.GrpcMessage{Path: path, Msg: []byte(`{"id":"7"}`)},
+		}}, 2*time.Second)
+		return err
+	}
+
+	for _, path := range []string{undescribedReadMethod, "routertest.reflected.v1.Query/Nope"} {
+		// A live relay: no definition, and the answer is remembered from here on.
+		require.ErrorIs(t, relay(context.Background(), path), routersession.ErrNoMethodDescriptor, path)
+
+		cancelled, cancel := context.WithCancel(context.Background())
+		cancel()
+		expired, cancelExpired := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+		for name, ctx := range map[string]context.Context{"cancelled": cancelled, "past the caller's deadline": common.WithCallerDeadline(expired)} {
+			err := relay(ctx, path)
+			require.Error(t, err)
+			clientCancel := common.IsClientCancellation(err, ctx)
+			require.True(t, clientCancel, "%s, %s: the relay's end is its own: %v", path, name, err)
+			unhealthy, backoff := classifyEndpointHealth(healthVerdict(err, common.ChainFamily(-1), common.TransportGRPC), clientCancel)
+			require.False(t, unhealthy, "%s, %s: the endpoint is not marked unhealthy", path, name)
+			require.False(t, backoff, "%s, %s: nor held off", path, name)
+		}
+		cancelExpired()
+	}
 }

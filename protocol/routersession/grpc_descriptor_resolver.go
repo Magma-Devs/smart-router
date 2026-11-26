@@ -132,8 +132,14 @@ func (r *GRPCDescriptorResolver) MethodDescriptor(
 		return methodDesc, nil
 	}
 
-	// What the node said it does not describe is answered without asking it again.
+	// What the node said it does not describe is answered without asking it again. The caller's
+	// own context still wins over that answer, for the reason given below: a relay the router has
+	// ended must keep its cancellation, and the send path adds ErrNoMethodDescriptor only to a
+	// live relay's error, so without the sentinel the answer would be scored as the endpoint's.
 	if err := r.rememberedNotDescribed(service, methodName); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, fmt.Errorf("gRPC descriptor not looked up, the relay had ended: %w", ctxErr)
+		}
 		return nil, err
 	}
 
