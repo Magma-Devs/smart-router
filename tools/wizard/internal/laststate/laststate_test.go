@@ -3,17 +3,22 @@ package laststate
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
 
-// withConfigDir points XDG at a temp dir for the duration of the test so we
-// never touch the real ~/.config. os.UserConfigDir honours $XDG_CONFIG_HOME on
-// Linux, so this fully isolates Save/Load/Path.
+// withConfigDir points the package's config dir at a temp dir for the duration
+// of the test, so a test never touches the developer's real wizard record. It
+// overrides userConfigDir rather than setting $XDG_CONFIG_HOME, which only Linux
+// reads: on macOS os.UserConfigDir is ~/Library/Application Support whatever XDG
+// says (MAG-5406).
 func withConfigDir(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
+	prev := userConfigDir
+	userConfigDir = func() (string, error) { return dir, nil }
+	t.Cleanup(func() { userConfigDir = prev })
 	return dir
 }
 
@@ -30,8 +35,27 @@ func sampleRecord() Record {
 	}
 }
 
-func TestPathUsesXDGConfigHome(t *testing.T) {
+func TestPathIsUnderTheConfigDir(t *testing.T) {
 	base := withConfigDir(t)
+	got, err := Path()
+	if err != nil {
+		t.Fatalf("Path: %v", err)
+	}
+	want := filepath.Join(base, "smartrouter-wizard", "last-run.json")
+	if got != want {
+		t.Fatalf("Path = %q, want %q", got, want)
+	}
+}
+
+// TestPathUsesXDGConfigHomeOnLinux checks the real os.UserConfigDir, unseamed, on
+// the one OS that reads $XDG_CONFIG_HOME. It computes the path only and writes
+// nothing.
+func TestPathUsesXDGConfigHomeOnLinux(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("only Linux reads $XDG_CONFIG_HOME")
+	}
+	base := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", base)
 	got, err := Path()
 	if err != nil {
 		t.Fatalf("Path: %v", err)

@@ -102,6 +102,21 @@ func TestClassifyRecord(t *testing.T) {
 		require.Equal(t, ClassifyError(nil, ChainFamilyCosmosSDK, TransportJsonRPC, -32603, "Internal error").Name,
 			ClassifyRecord(ChainFamilyCosmosSDK, ErrorRecord{Interface: "tendermintrpc", Status: 200, Code: json.Number("-32603"), Text: "Internal error"}).Name)
 	})
+	t.Run("tendermintrpc: CometBFT's reason for an internal error, its data, reaches the rows", func(t *testing.T) {
+		for data, want := range map[string]string{
+			`"tx already exists in cache"`:                       "CHAIN_TX_ALREADY_KNOWN",
+			`"height 5 is not available, lowest height is 100"`:  "CHAIN_STATE_PRUNED",
+			`"mempool is full: number of txs 5000 (max: 5000)"`:  "CHAIN_MEMPOOL_FULL",
+			`{"reason": "an object is not CometBFT's sentence"}`: "NODE_INTERNAL_ERROR",
+		} {
+			record := ErrorRecord{Interface: "tendermintrpc", Status: 200, Code: json.Number("-32603"), Text: "Internal error", Detail: json.RawMessage(data)}
+			require.Equal(t, want, ClassifyRecord(ChainFamilyCosmosSDK, record).Name, data)
+		}
+		under500 := ErrorRecord{Interface: "tendermintrpc", Status: 500, Code: json.Number("-32603"), Text: "Internal error", Detail: json.RawMessage(`"height 5 must be less than or equal to the current blockchain height 3"`)}
+		require.Equal(t, "CHAIN_BLOCK_NOT_FOUND", ClassifyRecord(ChainFamilyCosmosSDK, under500).Name)
+		revert := ErrorRecord{Interface: "jsonrpc", Status: 200, Code: json.Number("3"), Text: "execution reverted", Detail: json.RawMessage(`"0x08c379a0"`)}
+		require.Equal(t, "CHAIN_EXECUTION_REVERTED", ClassifyRecord(ChainFamilyEVM, revert).Name, "data beside another code stays out of the text")
+	})
 	t.Run("rest: the status is the code, a shape's code reaches the spec rows only", func(t *testing.T) {
 		withCode := ClassifyRecord(ChainFamilyCosmosSDK, ErrorRecord{Interface: "rest", Status: 404, Code: json.Number("5"), Text: "account not found"})
 		without := ClassifyRecord(ChainFamilyCosmosSDK, ErrorRecord{Interface: "rest", Status: 404, Text: "account not found"})

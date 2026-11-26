@@ -33,7 +33,8 @@ func (rr *RelayResult) ApplyNodeErrorClassificationForInterface(family ChainFami
 // through its record keeps its verdict:
 //
 //   - JSON-RPC and Tendermint RPC rows read the body's error code when it is an integer, else the
-//     HTTP status, and the text with the status put back ahead of it under a non-2xx ("HTTP 503: "),
+//     HTTP status, and the text as the readers write it (JSONRPCErrorText: an internal error's string
+//     data after its message) with the status put back ahead of it under a non-2xx ("HTTP 503: "),
 //     as the direct sender writes it for the status rows (classifyJSONRPCNodeError, MAG-1666). The
 //     record itself keeps the text clean: the status is its own field (§3.2);
 //   - REST and gRPC rows read the status (the HTTP status; the gRPC status code, GRPCCode, also
@@ -49,8 +50,15 @@ func ClassifyRecord(family ChainFamily, record ErrorRecord) *RouterError {
 	}
 	message := record.Text
 	if transport == TransportJsonRPC {
-		if bodyCode, ok := record.IntCode(); ok && bodyCode != 0 {
-			code = bodyCode
+		if bodyCode, ok := record.IntCode(); ok {
+			if bodyCode != 0 {
+				code = bodyCode
+			}
+			// The rows read an error object's text as the JSON-RPC readers write it: CometBFT's
+			// reason for an internal error, a string error.data, after the message (#794).
+			if detail, ok := DecodeJSONDocument(record.Detail); ok {
+				message = JSONRPCErrorText(bodyCode, message, detail)
+			}
 		}
 		if record.Status != 0 && !IsSuccessStatus(record.Status) {
 			message = fmt.Sprintf("HTTP %d: %s", record.Status, message)

@@ -15,10 +15,9 @@ import (
 // rate limit). The signatures are read beside the rows, not from them, so a spec row cannot switch
 // them off; MAG-4898 completes the table per node software, each addition a write-safety change.
 //
-// A match decides nothing about what the client gets. A 2xx that says so is the node's own answer
-// and goes back as it came while Part IV decision 3 parks the rule (MAG-4748); under a 5xx the copy
-// is unknown (rpcsmartrouter unclearWriteOutcomeFor). On a read the same words keep their verdict
-// and the signatures are not consulted.
+// A match decides nothing about what the client gets: under any status, the node's reply goes back
+// as it came, as PRD §5.2 says ("A match never by itself makes the router speak"). On a read the same
+// words keep their verdict and the signatures are not consulted.
 
 // slotSignature is one row of the table: the family and interface it applies to, and what it reads
 // in the reply's code and text.

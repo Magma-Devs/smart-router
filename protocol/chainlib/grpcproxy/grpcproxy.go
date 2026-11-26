@@ -2,7 +2,10 @@ package grpcproxy
 
 import (
 	"context"
+	"fmt"
 	"net/http"
+	"runtime/debug"
+	"strconv"
 	"strings"
 	"time"
 
@@ -162,16 +165,52 @@ func NewGRPCProxyWithReflection(cb ProxyCallBack, healthCheckPath string, cmdFla
 	return s, httpServer, nil
 }
 
+// HandlerFailedMessage is all a caller is told when the router fails while handling its request:
+// the details go to the router's log, under the request id the caller gets in router-guid.
+const HandlerFailedMessage = "the router failed to handle the request"
+
 func makeProxyFunc(callBack ProxyCallBack, streamCallBack StreamProxyCallBack, callGate CallGate) grpc.StreamHandler {
-	return func(srv interface{}, stream grpc.ServerStream) error {
+	handle := proxyHandler(callBack, streamCallBack, callGate)
+	return func(srv interface{}, stream grpc.ServerStream) (err error) {
 		// currently the callback function does not account for headers.
 		methodName, ok := grpc.MethodFromServerStream(stream)
 		if !ok {
 			return status.Error(codes.Unavailable, "unable to get method name")
 		}
+		// The request id is set here, before anything runs, so a failure below is logged and
+		// answered under the id the request's own log lines carry: the callbacks keep it.
+		ctx := utils.WithUniqueIdentifier(stream.Context(), utils.GenerateUniqueIdentifier())
+		defer func() {
+			if failure := recover(); failure != nil {
+				err = handlerFailed(ctx, stream, methodName, failure)
+			}
+		}()
+		return handle(ctx, stream, methodName)
+	}
+}
+
+// handlerFailed answers a call whose handling stopped with a panic: INTERNAL with
+// HandlerFailedMessage and the request id in router-guid, while the failure and its stack go to the
+// router's log at ERROR under that id. The server keeps serving every other call.
+func handlerFailed(ctx context.Context, stream grpc.ServerStream, methodName string, failure any) error {
+	guid, _ := utils.GetUniqueIdentifier(ctx)
+	utils.FormatError("gRPC handler failed", fmt.Errorf("%v", failure),
+		utils.LogAttr("GUID", ctx),
+		utils.LogAttr("method", methodName),
+		utils.LogAttr("stack", string(debug.Stack())),
+	)
+	stream.SetTrailer(metadata.Pairs(common.GUID_HEADER_NAME, strconv.FormatUint(guid, 10)))
+	return status.Error(codes.Internal, HandlerFailedMessage)
+}
+
+// proxyHandler serves one call: it refuses a call the router does not serve (callGate), reads the
+// request, offers it to the stream callback, and hands it to the unary callback when that callback
+// does not take it. ctx carries the request id.
+func proxyHandler(callBack ProxyCallBack, streamCallBack StreamProxyCallBack, callGate CallGate) func(ctx context.Context, stream grpc.ServerStream, methodName string) error {
+	return func(ctx context.Context, stream grpc.ServerStream, methodName string) error {
 		method := methodName[1:] // strip first '/' of the method name
 		if callGate != nil {
-			if err := callGate(stream.Context(), method); err != nil {
+			if err := callGate(ctx, method); err != nil {
 				return err
 			}
 		}
@@ -182,7 +221,7 @@ func makeProxyFunc(callBack ProxyCallBack, streamCallBack StreamProxyCallBack, c
 		}
 
 		if streamCallBack != nil {
-			streamResponse, streamErr := streamCallBack(stream.Context(), method, reqBytes)
+			streamResponse, streamErr := streamCallBack(ctx, method, reqBytes)
 			if streamErr != nil {
 				return streamErr
 			}
@@ -204,7 +243,7 @@ func makeProxyFunc(callBack ProxyCallBack, streamCallBack StreamProxyCallBack, c
 			sentMore <- stream.RecvMsg(&next) == nil
 		}()
 
-		respBytes, md, err := callBack(stream.Context(), method, reqBytes)
+		respBytes, md, err := callBack(ctx, method, reqBytes)
 
 		md = lowercaseMetadata(md)
 

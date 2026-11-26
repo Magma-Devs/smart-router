@@ -38,6 +38,9 @@ type quietGroupRequest struct {
 	processor  *relaycore.RelayProcessor
 	tasks      chan relaycore.RelayStateSendInstructions
 	nodeGroups map[string]string
+	// started is read before the state machine starts, so it is never later than the clocks of the
+	// budget and the attempt window.
+	started time.Time
 }
 
 // startQuietGroupRequest starts a request under a policy of agreement 2 and min-groups 2 that is sent to every
@@ -76,6 +79,9 @@ func startQuietGroupRequest(t *testing.T, budget, window time.Duration, nodeGrou
 	require.Equal(t, relaycore.CrossValidation, stateMachine.GetSelection())
 	relayProcessor := relaycore.NewRelayProcessor(ctx, stateMachine.GetCrossValidationParams(),
 		relaycoretest.RelayProcessorMetrics, relaycoretest.RelayProcessorMetrics, stateMachine)
+	// The state machine starts the attempt window's ticker as soon as it has queued the first batch,
+	// and the channel is buffered, so the ticker can start before this test even reads that batch.
+	started := time.Now()
 	relayTaskChannel, err := relayProcessor.GetRelayTaskChannel()
 	require.NoError(t, err)
 
@@ -92,7 +98,7 @@ func startQuietGroupRequest(t *testing.T, budget, window time.Duration, nodeGrou
 	relayProcessor.SetCrossValidationQueriedProviders(queried)
 	relayProcessor.SetCrossValidationGroupLayout(nodeGroups, groupsBelowThreshold(groupSizes, agreementThreshold))
 	relayProcessor.UpdateBatch(nil)
-	return &quietGroupRequest{processor: relayProcessor, tasks: relayTaskChannel, nodeGroups: nodeGroups}
+	return &quietGroupRequest{processor: relayProcessor, tasks: relayTaskChannel, nodeGroups: nodeGroups, started: started}
 }
 
 func (r *quietGroupRequest) answer(node, data string) {
@@ -147,7 +153,6 @@ func TestCrossValidation_QuietSoleGroupMemberStopsAtTheAttemptWindow(t *testing.
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			request := startQuietGroupRequest(t, budget, window, nodeGroups, groupSizes)
-			started := time.Now()
 
 			// Every node but the quiet one answers at once, and they all agree.
 			for node := range nodeGroups {
@@ -157,9 +162,9 @@ func TestCrossValidation_QuietSoleGroupMemberStopsAtTheAttemptWindow(t *testing.
 			}
 
 			done := request.waitDone(t, budget)
-			elapsed := time.Since(started)
-			// Half the budget, not the budget: started is taken after the budget's clock, so a request
-			// that did wait it out could still measure just under it.
+			// Measured from before the state machine started. Taken after the setup instead, it could
+			// read just under the window when the ticker had started first (MAG-4919).
+			elapsed := time.Since(request.started)
 			require.Less(t, elapsed, budget/2,
 				"with %s quiet the request must not wait out its %s budget", tc.quiet, budget)
 

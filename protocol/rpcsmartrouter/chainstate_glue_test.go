@@ -709,6 +709,44 @@ func TestOnTipObservation_GaugeAdvancesUnderPollOnlyTraffic(t *testing.T) {
 	(&RPCSmartRouterServer{chainState: cs}).onTipObservation("https://poll.example", 1, false)
 }
 
+// MAG-5080: onEndpointAnswer hands ChainState the answers a url's tip store dropped, here every one of
+// them (a load balancer's bad backend holds the url's stored block), so OnTipObservation never fires. They
+// still move the tip and keep it fresh, and the router-wide gauge follows. A head-stalled url's answers
+// are left out, like its repeat votes in onTipObservation: they must not keep a wrong tip fresh (MAG-3986).
+func TestOnEndpointAnswer_FeedsTheTipAndSkipsAStalledURL(t *testing.T) {
+	mm := metrics.NewSmartRouterMetricsManager(metrics.SmartRouterMetricsManagerOptions{})
+	clk := &manualClock{t: time.Unix(1_758_784_000, 0)}
+	cs := chainstate.NewWithClock("ETH1", chainstate.Config{
+		BucketWidth: 5, OutlierThreshold: 512, StalenessWindow: 10 * time.Second, TTL: 10 * time.Second,
+	}, clk.now)
+	rpcss := &RPCSmartRouterServer{
+		chainState:                 cs,
+		smartRouterEndpointMetrics: mm,
+		listenEndpoint:             &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+	}
+	const head = int64(25_000_000)
+	rpcss.onTipObservation("https://lb", head, false)
+
+	for i := int64(1); i <= 15; i++ { // 15 s of answers: past the 10 s TTL
+		clk.advance(time.Second)
+		rpcss.onEndpointAnswer("https://lb", head+i)
+	}
+	tip, fresh := cs.GetLatestBlock()
+	require.True(t, fresh, "answers the url's store dropped keep the tip fresh")
+	require.Equal(t, head+15, tip)
+	require.Equal(t, float64(head+15), readRouterLatestBlockGauge(t), "the gauge follows a tip an answer moved")
+
+	rpcss.headStall.sync(map[string]struct{}{"https://stuck": {}}, nil)
+	for i := 0; i < 15; i++ {
+		clk.advance(time.Second)
+		rpcss.onEndpointAnswer("https://stuck", head+15)
+	}
+	_, fresh = cs.GetLatestBlock()
+	require.False(t, fresh, "a head-stalled url's answers do not keep the tip fresh")
+
+	(&RPCSmartRouterServer{}).onEndpointAnswer("https://lb", 1) // no ChainState wired: no panic
+}
+
 // readBlockRegressions reads smartrouter_latest_block_regressions_total for ETH1/jsonrpc and one
 // reason off the default registry; 0 when the series does not exist yet. Shared registry, so
 // callers assert on a before/after delta.
@@ -763,4 +801,32 @@ func TestChainBlockRegression_CountedAndGaugeFollows(t *testing.T) {
 	rpcss.chainState.SetLatestBlock(19_999_990)
 	require.Equal(t, staleBefore+1, readBlockRegressions(t, chainstate.RegressionReasonStaleTip))
 	require.Equal(t, float64(19_999_990), readRouterLatestBlockGauge(t))
+}
+
+// MAG-5450: a load balancer's bad backend answers first, so its absurd block is the tip before anything
+// can check it. The good backend's head, far below, takes the tip once it moves forward; the move is
+// counted under unconfirmed_start and the gauge follows it down. Built through newChainState, so
+// dropping the regression hook from production wiring fails this test.
+func TestOnEndpointAnswer_ColdStartLieCountedAndGaugeFollows(t *testing.T) {
+	mm := metrics.NewSmartRouterMetricsManager(metrics.SmartRouterMetricsManagerOptions{})
+	rpcss := &RPCSmartRouterServer{
+		smartRouterEndpointMetrics: mm,
+		listenEndpoint:             &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+	}
+	rpcss.chainState = rpcss.newChainState(12 * time.Second)
+	before := readBlockRegressions(t, chainstate.RegressionReasonUnconfirmedStart)
+
+	const absurd, head = int64(1) << 50, int64(20_000_000)
+	rpcss.onTipObservation("https://lb", absurd, false) // the bad backend answers first
+	rpcss.onEndpointAnswer("https://lb", head)          // the good one: far below, not moving yet
+	require.Equal(t, before, readBlockRegressions(t, chainstate.RegressionReasonUnconfirmedStart))
+
+	// Three block times on: the absurd block has not advanced, and the good backend's head moved forward.
+	rpcss.chainState.SetDebugClockOffset(36 * time.Second)
+	rpcss.onEndpointAnswer("https://lb", head+1)
+	tip, fresh := rpcss.chainState.GetLatestBlock()
+	require.True(t, fresh)
+	require.Equal(t, head+1, tip)
+	require.Equal(t, before+1, readBlockRegressions(t, chainstate.RegressionReasonUnconfirmedStart))
+	require.Equal(t, float64(head+1), readRouterLatestBlockGauge(t), "the gauge follows the tip down")
 }

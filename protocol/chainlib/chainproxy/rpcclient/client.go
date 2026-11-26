@@ -349,6 +349,45 @@ func (c *Client) CallContext(ctx context.Context, id json.RawMessage, method str
 	return &out, nil
 }
 
+// CallContextFlat is CallContext for a server that reads a request's arguments from its own
+// top-level fields instead of a nested "params" — rippled's WebSocket API convention (MAG-5452).
+// fields are merged into the outgoing message beside "id" and "method"; "params" is never sent.
+// WebSocket-only: nothing needs this shape over HTTP today.
+func (c *Client) CallContextFlat(ctx context.Context, id json.RawMessage, method string, fields map[string]interface{}) (*JsonrpcMessage, error) {
+	if c.isHTTP {
+		return nil, fmt.Errorf("CallContextFlat is WebSocket-only, got an HTTP client")
+	}
+
+	// Mirrors CallContext: the wire id is always the client's own monotonic id, so concurrent
+	// calls on one socket cannot collide; the caller's id (or the wire id, if none given) comes
+	// back on the reply.
+	callerID := id
+	wireID := c.nextID()
+	if callerID == nil {
+		callerID = wireID
+	}
+
+	msg := make(map[string]interface{}, len(fields)+2)
+	for k, v := range fields {
+		msg[k] = v
+	}
+	msg["id"] = wireID
+	msg["method"] = method
+
+	op := &requestOp{ids: []json.RawMessage{wireID}, resp: make(chan *JsonrpcMessage, 1)}
+	if err := c.send(ctx, op, msg); err != nil {
+		return nil, err
+	}
+
+	resp, err := op.wait(ctx, c)
+	if err != nil {
+		return nil, err
+	}
+	out := *resp
+	out.ID = callerID
+	return &out, nil
+}
+
 // BatchCall sends all given requests as a single batch and waits for the server
 // to return a response for all of them.
 //

@@ -30,6 +30,10 @@ import (
 // CosmosGRPCBroadcastMethod is Cosmos SDK's gRPC transaction broadcast.
 const CosmosGRPCBroadcastMethod = "cosmos.tx.v1beta1.Service/BroadcastTx"
 
+// CosmosRESTBroadcastPath is Cosmos SDK's REST transaction broadcast, a POST. A GET of the same path
+// is the search by events.
+const CosmosRESTBroadcastPath = "/cosmos/tx/v1beta1/txs"
+
 // cosmosABCIResult is the part of an ABCI result that says whether the node took the transaction.
 type cosmosABCIResult struct {
 	Code      uint32 `json:"code"`

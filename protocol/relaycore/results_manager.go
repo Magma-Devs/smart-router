@@ -121,9 +121,20 @@ func (rp *ResultsManagerInst) setErrorResponse(response *RelayResponse, protocol
 	// Protocol errors are plain Go errors (nothing in this fork carries an sdkerrors ABCI code any
 	// more), so they are classified by connection shape and message text. TransportGRPC is the
 	// historical choice for the message-based fallback and is kept so the verdicts do not move.
+	//
+	// One exception, for what that text cannot name: a REST attempt that failed on the upstream's
+	// own status (relayInnerDirect's status branch: a 5xx not read as the node's reply). Its text is
+	// "HTTP 507 Insufficient Storage", and the text rows name only the statuses httpStatusRows lists,
+	// so a 505 to 599 was UNKNOWN_ERROR here while the sender and the health gate filed it as
+	// NODE_UNLISTED_SERVER_ERROR. Such an error is read by its status on the REST table, which is
+	// what the log line, the error metric and relay_end report (MAG-5490). Only an UNKNOWN_ERROR
+	// verdict is re-read, so every status the text rows name keeps its name.
 	var classified *common.RouterError
 	if response.Err != nil {
 		classified = common.ClassifyError(common.DetectConnectionError(response.Err), common.ChainFamilyUnknown, common.TransportGRPC, 0, response.Err.Error())
+		if status, ok := restUpstreamStatus(response.Err, protocolMessage); ok && classified == common.RouterErrorUnknown {
+			classified = common.ClassifyError(nil, common.GetChainFamilyOrDefault(rp.chainID), common.TransportREST, status, "")
+		}
 	}
 	// A write's copy the sender failed on an upstream's status still carries the upstream's answer,
 	// and that answer is read for the slot-already-used signatures (PRD §5.2, MAG-5593): a gateway's
@@ -153,6 +164,23 @@ func (rp *ResultsManagerInst) setErrorResponse(response *RelayResponse, protocol
 		utils.Attribute{Key: "providerTrailer", Value: response.RelayResult.ProviderTrailer},
 	)
 	rp.protocolResponseErrors.AddError(RelayError{Err: response.Err, ProviderInfo: response.RelayResult.ProviderInfo, Response: response, RouterError: classified})
+}
+
+// restUpstreamStatus is the status a REST upstream answered with, when err is a REST attempt's
+// failure on that status (routersession.HTTPStatusError). GraphQL, which classifies by the REST
+// table too, is left out: a write's failure on its status has the same gap, outside MAG-5490.
+func restUpstreamStatus(err error, protocolMessage chainlib.ProtocolMessage) (int, bool) {
+	if protocolMessage == nil {
+		return 0, false
+	}
+	if collection := protocolMessage.GetApiCollection(); collection == nil || collection.CollectionData.ApiInterface != spectypes.APIInterfaceRest {
+		return 0, false
+	}
+	var statusErr *routersession.HTTPStatusError
+	if !errors.As(err, &statusErr) || statusErr == nil {
+		return 0, false
+	}
+	return statusErr.StatusCode, true
 }
 
 // only when locked
@@ -295,8 +323,8 @@ func (rp *ResultsManagerInst) setValidResponse(response *RelayResponse, protocol
 		}
 		// A write's copy whose reply says the slot is already used may be this very transaction landed
 		// (PRD §5.2, MAG-5593). Read beside the row, not from it: whatever the row says, the copy is
-		// never refused and the write is not sent again (relaypolicy.Decide; the server's
-		// unclearWriteOutcomeFor says what the client gets).
+		// never refused and the write is not sent again (relaypolicy.Decide). The client still gets the
+		// node's reply as it came: a match never by itself makes the router speak (PRD §5.2).
 		if isWrite(protocolMessage) {
 			response.RelayResult.IsSlotAlreadyUsed = common.IsSlotAlreadyUsed(chainFamily, apiInterfaceOf(protocolMessage), errorCode, err.Error())
 		}

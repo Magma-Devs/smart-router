@@ -92,6 +92,30 @@ func verificationsForNodeUrl(url common.NodeUrl, verifications []VerificationCon
 	return kept
 }
 
+// inCostOrder sorts a url's checks by what failing one costs, keeping the spec's order
+// among equals: first the checks that refuse the url (a basic check, or an add-on check
+// the spec made Fail), then the ones that refuse one service, then the Warnings.
+// GetVerifications lists a url's add-on checks before the base collection's, and one
+// deadline covers the url's whole pass: a debug check that hung until it ran out left
+// chain-id unrun, and the url was refused for it (MAG-3950).
+func inCostOrder(verifications []VerificationContainer) []VerificationContainer {
+	ordered := slices.Clone(verifications)
+	slices.SortStableFunc(ordered, func(x, y VerificationContainer) int { return costRank(x) - costRank(y) })
+	return ordered
+}
+
+// costRank is what failing a check costs: 0 the url, 1 one service, 2 nothing.
+func costRank(verification VerificationContainer) int {
+	severity := EffectiveSeverity(verification)
+	switch {
+	case severity == spectypes.ParseValue_Warning:
+		return 2
+	case refusedServiceFor(verification) == "" || severity == spectypes.ParseValue_Fail:
+		return 0
+	}
+	return 1
+}
+
 // needsLatestBlock reports whether any verification that will ACTUALLY RUN for this
 // node-url depends on the chain head, and therefore whether Validate has to spend a
 // FetchLatestBlockNum relay against the upstream before verifying.
@@ -254,7 +278,9 @@ type admissionKey struct {
 // does Endpoint.Addons/.Extensions, both of which are built from that one list.
 //
 // A failure that was only a rate limit refuses nothing: it says nothing about the
-// node. It is held apart (Throttled) so re-verification can keep what it knew.
+// node. It is held apart (Throttled) so re-verification can keep what it knew, and so
+// is a service check the deadline cut off. A basic check the deadline cut off still
+// refuses its url, but it is no strike (URLRefusalRan).
 //
 // Empty means everything a url declared was admitted.
 type ProviderAdmission struct {
@@ -363,6 +389,9 @@ func (a ProviderAdmission) URLAsked(index int) bool {
 // position: the url could not be dialed or listed, or a check it ran this time, one that
 // costs the url, failed. A url refused only by verdicts a retry kept from an earlier pass
 // is not: that failure was already counted, and the url grace must not count it twice.
+// Nor is one refused only by checks the deadline cut off, or a rate limit kept from
+// answering: they decided nothing, so they are no strike, and a url serving keeps its
+// place (MAG-3950).
 func (a ProviderAdmission) URLRefusalRan(index int) bool {
 	if index >= len(a.pass) {
 		return true
@@ -372,7 +401,7 @@ func (a ProviderAdmission) URLRefusalRan(index int) bool {
 		return true
 	}
 	for _, check := range outcome.checks {
-		if check.err == nil || check.kept || IsRateLimitFailure(check.err) {
+		if check.err == nil || check.kept || inconclusive(check.err) {
 			continue
 		}
 		severity := EffectiveSeverity(check.verification)
@@ -703,7 +732,7 @@ func (a ProviderAdmission) RefusedURLs() []int {
 }
 
 // Throttled is the first rate limit this pass met in place of an answer, or nil. A
-// Warning check the deadline cut off counts too: it decided nothing either.
+// Warning or service check the deadline cut off counts too: it decided nothing either.
 func (a ProviderAdmission) Throttled() error { return a.throttle }
 
 // Any reports whether any service or url was refused.
@@ -925,7 +954,7 @@ func (a ProviderAdmission) servingError(nodeUrls []common.NodeUrl) error {
 		case len(state.throttle) == 0:
 			lost = append(lost, path)
 			if failed == nil {
-				failed = fmt.Errorf("no node url left serving %s: %w", where(path), state.refused[0])
+				failed = fmt.Errorf("no node url left serving %s: %w", where(path), firstFailure(state.refused))
 			}
 		case unknown == nil:
 			unknown = fmt.Errorf("no node url verified serving %s: %w", where(path), state.throttle[0])
@@ -939,6 +968,18 @@ func (a ProviderAdmission) servingError(nodeUrls []common.NodeUrl) error {
 			utils.LogAttr("internalPath", path))
 	}
 	return unknown
+}
+
+// firstFailure is the first of a path's url refusals that a check failed, not the
+// deadline cut off, so a provider refused on several urls is refused under what failed;
+// the first refusal when the deadline cut off every one.
+func firstFailure(refusals []error) error {
+	for _, cause := range refusals {
+		if FailedCheck(cause) != CheckNotRun {
+			return cause
+		}
+	}
+	return refusals[0]
 }
 
 // Validate reports the first failure on any node url that costs anything (Fail or
@@ -1043,8 +1084,8 @@ type NodeURLValidation struct {
 	// Refused: the router builds nothing for this url, for the reason Refusal
 	// gives. Throttled: its checks were only rate-limited, which decides nothing.
 	// RefusedServices / ThrottledServices: the same, for one service of a url the
-	// router otherwise admits. UnknownServices are the refused ones the spec does
-	// not define at all.
+	// router otherwise admits; a service check the deadline cut off is throttled too.
+	// UnknownServices are the refused ones the spec does not define at all.
 	Refused           bool
 	Refusal           string
 	Throttled         string
@@ -1183,12 +1224,18 @@ func admissionFrom(outcomes []nodeUrlOutcome) (ProviderAdmission, error) {
 func admit(outcomes []nodeUrlOutcome, logRefusals bool) (ProviderAdmission, error) {
 	var admission ProviderAdmission
 	for index, outcome := range outcomes {
-		var failed, throttled error
+		var failed, throttled, cutOff error
 		charge := func(err error) {
 			switch {
 			case IsRateLimitFailure(err):
 				if throttled == nil {
 					throttled = err
+				}
+			case FailedCheck(err) == CheckNotRun:
+				// Charged only when nothing that ran failed: a url is refused under the
+				// check that failed, not under one the deadline never reached.
+				if cutOff == nil {
+					cutOff = err
 				}
 			case failed == nil:
 				failed = err
@@ -1228,7 +1275,9 @@ func admit(outcomes []nodeUrlOutcome, logRefusals bool) (ProviderAdmission, erro
 			case service == "" || severity == spectypes.ParseValue_Fail:
 				// A basic check, or an add-on check the spec made mandatory: the url goes.
 				charge(chargedTo(check.verification.Name, fmt.Errorf("%s verification failed: %w", check.verification.Name, check.err)))
-			case IsRateLimitFailure(check.err):
+			case inconclusive(check.err):
+				// A rate limit, or the deadline cut the check off: it decided nothing, and
+				// the service keeps what the last pass knew (KeepingThrottledFrom).
 				admission.throttleService(outcome.url, service, check.err)
 			default:
 				admission.fail(outcome.url, service, FailedCheck(chargedTo(check.verification.Name, check.err)))
@@ -1254,6 +1303,13 @@ func admit(outcomes []nodeUrlOutcome, logRefusals bool) (ProviderAdmission, erro
 			admission.throttleURL(index, outcome.url, throttled)
 			if logRefusals && !errors.Is(throttled, ErrNotAskedHeldOff) {
 				utils.FormatWarning("node url rate-limited its checks; not refusing it", throttled, utils.LogAttr("url", outcome.url.String()))
+			}
+		case cutOff != nil:
+			// Refused, since nothing proves the url serves, but no strike against one
+			// that does (URLRefusalRan).
+			admission.refuseURL(index, cutOff)
+			if logRefusals {
+				utils.FormatWarning("refusing node url", cutOff, utils.LogAttr("url", outcome.url.String()))
 			}
 		}
 	}
@@ -1399,6 +1455,7 @@ func (g *connectionGroup) verify(ctx context.Context, url common.NodeUrl, opts v
 		outcome.err = chargedTo(CheckUnsupportedAddon, err)
 		return outcome
 	}
+	verifications = inCostOrder(verifications)
 	socket := IsWebSocketURL(url.Url)
 	if socket {
 		verifications = socketVerifications(g.parser, verifications)
@@ -1453,9 +1510,14 @@ func (g *connectionGroup) verify(ctx context.Context, url common.NodeUrl, opts v
 	}
 
 	needHead := needsLatestBlock(url, toRun)
-	if needHead || (opts.readEveryHead && readsOwnHead(g.parser, url, socket)) {
+	switch {
+	case ctx.Err() != nil:
+		// The deadline passed before this url's turn, on a connection another url kept
+		// busy: nothing is asked, and every check below is not run.
+		outcome.head = spectypes.NOT_APPLICABLE
+	case needHead || (opts.readEveryHead && readsOwnHead(g.parser, url, socket)):
 		outcome.head, outcome.headErr = g.head(ctx, router, url)
-	} else if kept != nil {
+	case kept != nil:
 		outcome.head, outcome.headErr = kept.head, kept.headErr
 	}
 	// Only a check that needs the head is handed one, so every mode verifies alike.
@@ -1475,10 +1537,12 @@ func (g *connectionGroup) verify(ctx context.Context, url common.NodeUrl, opts v
 		}
 		var verifyErr error
 		switch {
+		case verificationNeedsHead(verification) && outcome.headErr != nil:
+			// Before the deadline: a head read that ran and hung is the url's failure,
+			// not a check the deadline cut off, which is no strike.
+			verifyErr = &VerificationFailure{Check: CheckLatestBlock, Err: fmt.Errorf("latest block unavailable: %w", outcome.headErr)}
 		case ctx.Err() != nil:
 			verifyErr = errCheckNotRun
-		case verificationNeedsHead(verification) && outcome.headErr != nil:
-			verifyErr = &VerificationFailure{Check: CheckLatestBlock, Err: fmt.Errorf("latest block unavailable: %w", outcome.headErr)}
 		default:
 			verifyErr = g.check(ctx, router, verification, latestBlock)
 		}
@@ -1665,11 +1729,25 @@ func (cf *ChainFetcher) verifyWithRetries(ctx context.Context, router ChainRoute
 
 // deadlineContext says so when a failure came with the pass's deadline: the
 // connector closes as the deadline passes, and its own words would hide why.
+//
+// The clock decides, not ctx.Err() alone. A dial or read that runs into the deadline
+// fails at the deadline's own time, and ctx.Err() stays nil until the runtime has run
+// the context's timer. Read in that gap, a dial the deadline cut off came back as a
+// bare "dial tcp ...: i/o timeout" (MAG-4919).
 func deadlineContext(ctx context.Context, err error) error {
-	if err == nil || ctx.Err() == nil {
+	if err == nil || !deadlinePassed(ctx) {
 		return err
 	}
 	return fmt.Errorf("verification deadline exceeded: %w", err)
+}
+
+// deadlinePassed reports whether ctx has ended or its deadline is behind the clock.
+func deadlinePassed(ctx context.Context) bool {
+	if ctx.Err() != nil {
+		return true
+	}
+	deadline, ok := ctx.Deadline()
+	return ok && !time.Now().Before(deadline)
 }
 
 func (cf *ChainFetcher) populateCache(relayData *pairingtypes.RelayPrivateData, reply *pairingtypes.RelayReply, requestedBlockHash []byte, finalized bool) {

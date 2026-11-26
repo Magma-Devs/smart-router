@@ -50,7 +50,9 @@ func TestNodeErrorsCarryTheirRecords(t *testing.T) {
 		require.Equal(t, "rest", record.Interface)
 		require.Equal(t, 200, record.Status)
 		require.Nil(t, record.Code, "the Cosmos shape is Step 1's; the check is router code today")
-		require.Equal(t, "account sequence mismatch, expected 5, got 3: incorrect account sequence", record.Text)
+		// The REST checker's refusal message (common.CosmosTxRefusalMessage): the record carries what
+		// the router acted on until Step 1's shape reads the code and raw_log.
+		require.Equal(t, "cosmos tx refused: code 32: account sequence mismatch, expected 5, got 3: incorrect account sequence", record.Text)
 		require.True(t, record.InSuccess)
 		require.True(t, nodeErrors[0].IsSlotAlreadyUsed, "the signature reads the same reply (MAG-5593)")
 	})
