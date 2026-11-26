@@ -1,6 +1,7 @@
 package rpcInterfaceMessages
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -304,4 +305,68 @@ func TestScanJsonrpcBatchEnvelopes_HeterogeneousElements(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Equal(t, 6, count)
+}
+
+// A reply is one JSON value. Anything but whitespace after the object is refused, and the error
+// names the first byte of it and where it is (MAG-5819).
+func TestScanJsonrpcEnvelope_BytesAfterTheObjectAreRefused(t *testing.T) {
+	for _, object := range []string{`{"jsonrpc":"2.0","id":1,"result":"0x1"}`, `{}`, ` { "error" : null } `} {
+		for _, tail := range []string{`<html>`, `x`, `{}`, `{"id":2,"result":2}`, `]`, `}`, `,`, `null`, "\x00"} {
+			for _, gap := range []string{``, ` `, "\r\n"} {
+				_, err := scanJsonrpcEnvelope([]byte(object + gap + tail))
+				require.EqualError(t, err,
+					fmt.Sprintf("expected end of input at position %d, got %q", len(object)+len(gap), tail[0]),
+					"object %q gap %q tail %q", object, gap, tail)
+			}
+		}
+	}
+}
+
+// Whitespace after the object is part of no value: a reply that ends in a newline, as many nodes
+// write it, is read as the reply alone.
+func TestScanJsonrpcEnvelope_WhitespaceAfterTheObjectIsAccepted(t *testing.T) {
+	object := `{"jsonrpc":"2.0","id":1,"result":"0x1"}`
+	for _, tail := range []string{``, "\n", "\r\n", ` `, "\t", " \r\n\t \n"} {
+		res, err := scanJsonrpcEnvelope([]byte(object + tail))
+		require.NoError(t, err, "tail %q", tail)
+		require.True(t, res.hasResult, "tail %q", tail)
+		require.Equal(t, `"0x1"`, string(res.resultBytes), "tail %q", tail)
+	}
+	_, err := scanJsonrpcEnvelope([]byte("{}\n"))
+	require.NoError(t, err)
+}
+
+// Anything but whitespace after the batch's closing bracket is refused, for an empty batch too,
+// and every element is handed out before the refusal.
+func TestScanJsonrpcBatchEnvelopes_BytesAfterTheBatchAreRefused(t *testing.T) {
+	for batch, elements := range map[string]int{`[{"id":1,"result":1},{"id":2,"result":2}]`: 2, `[]`: 0, `[ ]`: 0, ` [42] `: 1} {
+		for _, tail := range []string{`trailing`, `]`, `[]`, `{"id":3,"result":3}`, `,`, "\x00"} {
+			for _, gap := range []string{``, ` `, "\n"} {
+				handed := 0
+				err := scanJsonrpcBatchEnvelopes([]byte(batch+gap+tail), func(jsonrpcScanResult, error, []byte) bool {
+					handed++
+					return true
+				})
+				require.EqualError(t, err,
+					fmt.Sprintf("expected end of input at position %d, got %q", len(batch)+len(gap), tail[0]),
+					"batch %q gap %q tail %q", batch, gap, tail)
+				require.Equal(t, elements, handed, "batch %q gap %q tail %q", batch, gap, tail)
+			}
+		}
+	}
+}
+
+// Whitespace after the batch is accepted, as it is after a single reply.
+func TestScanJsonrpcBatchEnvelopes_WhitespaceAfterTheBatchIsAccepted(t *testing.T) {
+	for batch, elements := range map[string]int{`[{"id":1,"result":1},{"id":2,"result":2}]`: 2, `[]`: 0} {
+		for _, tail := range []string{``, "\n", "\r\n", ` `, "\t", " \r\n\t \n"} {
+			handed := 0
+			err := scanJsonrpcBatchEnvelopes([]byte(batch+tail), func(jsonrpcScanResult, error, []byte) bool {
+				handed++
+				return true
+			})
+			require.NoError(t, err, "batch %q tail %q", batch, tail)
+			require.Equal(t, elements, handed, "batch %q tail %q", batch, tail)
+		}
+	}
 }

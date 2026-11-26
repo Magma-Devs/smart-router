@@ -20,6 +20,17 @@ func quietChecks(tb testing.TB) {
 	tb.Cleanup(func() { utils.SetGlobalLoggingLevel("debug") }) // utils' package default
 }
 
+// referenceEndOfInput is the reference's own check that nothing but whitespace follows a reply.
+// It shares no code with expectEndOfInput.
+func referenceEndOfInput(data []byte, pos int) error {
+	for ; pos < len(data); pos++ {
+		if b := data[pos]; b != ' ' && b != '\t' && b != '\n' && b != '\r' {
+			return fmt.Errorf("expected end of input at position %d, got %q", pos, b)
+		}
+	}
+	return nil
+}
+
 // twoWalkBatchElements walks a batch reply by its brackets: it skips each element to find its
 // end and leaves the envelope scan to the caller. The tests compare scanJsonrpcBatchEnvelopes
 // with it.
@@ -34,7 +45,7 @@ func twoWalkBatchElements(data []byte, fn func(elementBytes []byte) bool) error 
 	pos++
 	pos = SkipJSONWhitespace(data, pos)
 	if pos < len(data) && data[pos] == ']' {
-		return nil
+		return referenceEndOfInput(data, pos+1)
 	}
 	for {
 		if pos >= len(data) {
@@ -53,7 +64,7 @@ func twoWalkBatchElements(data []byte, fn func(elementBytes []byte) bool) error 
 			return fmt.Errorf("truncated: expected ',' or ']'")
 		}
 		if data[pos] == ']' {
-			return nil
+			return referenceEndOfInput(data, pos+1)
 		}
 		if data[pos] != ',' {
 			return fmt.Errorf("expected ',' or ']' at position %d, got %q", pos, data[pos])
@@ -94,8 +105,9 @@ func twoWalkBatchCheck(data []byte, elementCheck func(element []byte) (bool, str
 }
 
 // referenceScanJsonrpcEnvelope is the envelope scan of the two-walk reference: it reads one whole
-// object and reports no end position. It is a scan of its own, apart from
-// scanJsonrpcEnvelopePrefix, so an envelope that scan misreads is a difference the tests see. The
+// object, refuses anything but whitespace after it, and reports no end position. It is a scan of
+// its own, apart from scanJsonrpcEnvelopePrefix, so an envelope that scan misreads is a difference
+// the tests see. The
 // two share skipValue, scanString and SkipJSONWhitespace, and the reference takes its verdict from
 // the same rules (classifyJsonrpcEnvelope, checkScannedResponse, carriesJsonrpcAnswer): the
 // comparison covers the batch walk and the envelope scan, not those.
@@ -111,7 +123,7 @@ func referenceScanJsonrpcEnvelope(data []byte) (jsonrpcScanResult, error) {
 	pos++
 	pos = SkipJSONWhitespace(data, pos)
 	if pos < len(data) && data[pos] == '}' {
-		return res, nil
+		return res, referenceEndOfInput(data, pos+1)
 	}
 	for {
 		if pos >= len(data) {
@@ -150,7 +162,7 @@ func referenceScanJsonrpcEnvelope(data []byte) (jsonrpcScanResult, error) {
 			return res, errors.New("truncated: expected ',' or '}'")
 		}
 		if data[pos] == '}' {
-			return res, nil
+			return res, referenceEndOfInput(data, pos+1)
 		}
 		if data[pos] != ',' {
 			return res, fmt.Errorf("expected ',' or '}' at position %d, got %q", pos, data[pos])
@@ -195,7 +207,7 @@ func twoWalkIsJsonrpcReply(data []byte) bool {
 // batchSeeds are batch replies of every shape the checks tell apart, plus the shapes that break
 // a scanner: brackets and quotes inside strings, escapes at the end of a string, an element that
 // is balanced by its bracket count and wrong by its bracket kinds (before and after its result),
-// and elements that are no object.
+// elements that are no object, and a reply followed by other bytes or by whitespace.
 var batchSeeds = []string{
 	`[]`,
 	`[{"jsonrpc":"2.0","id":1,"result":"0x1"}]`,
@@ -220,7 +232,13 @@ var batchSeeds = []string{
 	`[{"id":1,"result":1},]`,
 	`[{"id":1 "result":1}]`,
 	`[{"id":1,"result":1}] trailing`,
+	`[{"id":1,"result":1}][]`,
+	"[{\"id\":1,\"result\":1}]\r\n",
+	`[] x`,
 	`{"jsonrpc":"2.0","id":1,"result":1}`,
+	`{"jsonrpc":"2.0","id":1,"result":1}<html>`,
+	`{"id":1,"result":1}{"id":2,"result":2}`,
+	"{\"id\":1,\"error\":{\"code\":-1,\"message\":\"m\"}} \n",
 	`<html><body>502 Bad Gateway</body></html>`,
 	``,
 }
