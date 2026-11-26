@@ -1,8 +1,9 @@
 // Package laststate persists the most recently generated run plan so a later
 // `wizard --last` invocation can reprint it without re-walking the whole wizard.
 //
-// The record lives in the user's config dir (XDG: $XDG_CONFIG_HOME, else
-// ~/.config) under smartrouter-wizard/last-run.json — NOT in the repo, so the
+// The record lives in the OS user config dir (os.UserConfigDir: $XDG_CONFIG_HOME,
+// else ~/.config, on Linux; ~/Library/Application Support on macOS; %AppData% on
+// Windows) under smartrouter-wizard/last-run.json — NOT in the repo, so the
 // generated configs the wizard writes into config/local stay the only repo
 // artifacts (and those are gitignored separately). One global "most recent"
 // record, overwritten on each finish, readable from any working directory.
@@ -30,11 +31,15 @@ type Record struct {
 	Dashboard   bool   `json:"dashboard"`
 }
 
-// dir returns the directory the record lives in: $XDG_CONFIG_HOME/smartrouter-wizard
-// or ~/.config/smartrouter-wizard. os.UserConfigDir already implements that XDG
-// fallback, so we defer to it.
+// userConfigDir resolves the base config dir. It is os.UserConfigDir, held in a
+// variable so tests can point it at a temp dir on every OS: only Linux reads
+// $XDG_CONFIG_HOME, so setting that variable does not isolate a test on macOS.
+var userConfigDir = os.UserConfigDir
+
+// dir returns the directory the record lives in: smartrouter-wizard under the OS
+// user config dir.
 func dir() (string, error) {
-	base, err := os.UserConfigDir()
+	base, err := userConfigDir()
 	if err != nil {
 		return "", err
 	}

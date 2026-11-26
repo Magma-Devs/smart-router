@@ -103,6 +103,7 @@ func (apip *RestChainParser) ParseMsg(urlPath string, data []byte, connectionTyp
 	restMessage := rpcInterfaceMessages.RestMessage{
 		Msg:         data,
 		Path:        urlPath,
+		Broadcast:   isRESTBroadcast(api, connectionType, urlWithNoQuery),
 		BaseMessage: chainproxy.BaseMessage{Headers: metadata, LatestBlockHeaderSetter: settingHeaderDirective},
 	}
 	// add spec path to rest message so we can extract the requested block.
@@ -129,6 +130,19 @@ func (apip *RestChainParser) ParseMsg(urlPath string, data []byte, connectionTyp
 	nodeMsg.applyParsedRange(parsedInput)
 	apip.BaseChainParser.ExtensionParsing(apiCollection.CollectionData.AddOn, nodeMsg, extensionInfo)
 	return nodeMsg, nil
+}
+
+// isRESTBroadcast reports whether a REST request broadcasts a transaction, so that a tx_response.code
+// in its reply is the node's verdict on it (RestMessage.Broadcast, MAG-5326): an api the spec marks
+// stateful, or a POST to Cosmos SDK's broadcast path, whether the spec lists it or not. A spec that
+// does not list it relays it as an unlisted read (defaultApiContainer). Without this, a node's
+// refusal there would be read as the answer, and the client would get it while another node would
+// take the transaction.
+func isRESTBroadcast(api *spectypes.Api, connectionType, path string) bool {
+	if api.Category.Stateful == common.CONSISTENCY_SELECT_ALL_PROVIDERS {
+		return true
+	}
+	return connectionType == http.MethodPost && strings.TrimSuffix(path, "/") == rpcInterfaceMessages.CosmosRESTBroadcastPath
 }
 
 func (apip *RestChainParser) getApiCollection(connectionType, internalPath, addon string) (*spectypes.ApiCollection, error) {
