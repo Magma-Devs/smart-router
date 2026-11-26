@@ -67,10 +67,11 @@ func NoAnswerStatus(cf *common.ClientFacingError) int {
 }
 
 // replyProtocolError chooses the error the client's reply is built from (MAG-4218). An upstream's
-// answer beats any other error, a fault beats a throttle (a 503 next to two 429s is the 503), and
-// a transport failure is used only when every attempt failed in transport. Among transport
-// failures a timeout wins, so a refused connection next to a timeout is always the 504, never a
-// 502 on some runs: the majority pick breaks a tie at random (MAG-4481). Within a rank the
+// answer beats any other error, and answers rank by kind (failureKind, Part I R-K): a fault beats a
+// throttle (a 503 next to two 429s is the 503), and a throttle beats a refusal (a 429 next to a 403
+// is the 429). A transport failure is used only when every attempt failed in transport. Among
+// transport failures a timeout wins, so a refused connection next to a timeout is always the 504,
+// never a 502 on some runs: the majority pick breaks a tie at random (MAG-4481). Within a rank the
 // majority pick stands; a higher rank takes the first such error.
 func replyProtocolError(picked RelayError, all []RelayError) RelayError {
 	best, bestRank := picked, replyRank(picked)
@@ -83,23 +84,24 @@ func replyProtocolError(picked RelayError, all []RelayError) RelayError {
 }
 
 func replyRank(relayError RelayError) int {
+	// An upstream's answer ranks above every other error, by its kind.
+	if kind, answered := upstreamAnswerKind(relayError); answered {
+		return answeredRank + int(kind)
+	}
 	cf := clientFacingFromProtocolError(relayError.Err, relayError.RouterError)
 	switch {
 	case cf == nil:
 		return 2 // today's reply
-	case cf.UpstreamStatus == http.StatusTooManyRequests:
-		// The upstream answered, but only to say it is throttling us. Before MAG-4481 a 429
-		// carried no body and ranked as today's reply, so another upstream's fault won; keeping
-		// the body must not change that.
-		return 3
-	case cf.UpstreamStatus != 0:
-		return 4 // the upstream answered
 	case cf.TimedOut:
 		return 1 // no upstream answered in time: 504
 	default:
 		return 0 // no upstream answered: 502
 	}
 }
+
+// answeredRank is where the upstreams' answers start in replyRank, above the errors no upstream
+// answered with.
+const answeredRank = 3
 
 // leafCause returns the innermost error's text, skipping the registry wrapper's own description.
 func leafCause(err error) string {

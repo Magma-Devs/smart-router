@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -105,41 +104,6 @@ func TestGraphQLWrite_AcceptedOnlyOnTheChainSuccessRow(t *testing.T) {
 	}
 }
 
-// TestGraphQLWrite_NeverRetriedWhenEveryCopyIsRateLimited is MAG-5122's Sending point 2: never
-// re-sent, including today's re-send when every provider answered 429. Both primaries answer 429,
-// which holds both off, so the re-send the Stateful rate-limit carve-out allows can only go to the
-// backup: the tier a write reaches when no primary can be selected, and one the broadcast did not
-// reach. With two primaries and no backup the re-send has nowhere to go, so a test of that shape
-// passes with the carve-out still on.
-//
-// The JSON-RPC and REST writes keep the carve-out (MAG-5061 owns changing it there): their backup
-// is hit, which is what proves this setup can see a re-send at all.
-func TestGraphQLWrite_NeverRetriedWhenEveryCopyIsRateLimited(t *testing.T) {
-	rand.InitRandomSeed()
-	for _, tc := range writeInterfaceCases {
-		t.Run(tc.name, func(t *testing.T) {
-			chainParser := tc.parser(t)
-			rateLimited := writeUpstream{status: http.StatusTooManyRequests, body: `{"code":-32007,"message":"50/second request limit reached"}`}
-			a, b := rateLimited, rateLimited
-			a.name, b.name = "a-"+t.Name(), "b-"+t.Name()
-			backup := writeUpstream{name: "backup-" + t.Name(), status: http.StatusOK, body: tc.success}
-			hits := make([]int64, 3)
-			server := newWriteServer(t, tc, chainParser, []writeUpstream{a, b}, []writeUpstream{backup}, hits)
-
-			_, _ = sendWrite(t, tc, chainParser, server)
-			require.Equal(t, int64(1), atomic.LoadInt64(&hits[0]), "each primary got the broadcast once")
-			require.Equal(t, int64(1), atomic.LoadInt64(&hits[1]), "each primary got the broadcast once")
-			if tc.apiInterface != spectypes.APIInterfaceGraphQL {
-				require.Equal(t, int64(1), atomic.LoadInt64(&hits[2]),
-					"control: this interface keeps the carve-out, so its re-send reaches the backup")
-				return
-			}
-			require.Never(t, func() bool { return atomic.LoadInt64(&hits[2]) > 0 }, 200*time.Millisecond, 10*time.Millisecond,
-				"a GraphQL write is never re-sent, not even when every primary answered 429")
-		})
-	}
-}
-
 // writeOutcomeHeader reads Router-Write-Outcome off a RelayResult's reply, or "" when absent.
 func writeOutcomeHeader(t *testing.T, result *common.RelayResult) string {
 	t.Helper()
@@ -156,9 +120,10 @@ func writeOutcomeHeader(t *testing.T, result *common.RelayResult) string {
 
 // MAG-3800: a write pinned to a router-select-provider name the router does not have is refused
 // before any provider is asked. On GraphQL its reply says Router-Write-Outcome: not_sent, as the
-// listener's other refusals of a GraphQL write do (Part I R-Q, Part II Q8). The other interfaces
-// carry no write outcome yet (MAG-5232), so they get no header.
-func TestGraphQLWrite_APinToANameTheRouterDoesNotHaveIsNotSent(t *testing.T) {
+// listener's other refusals of a GraphQL write do (Part I R-Q, Part II Q8), and so does a JSON-RPC
+// write (MAG-5232). REST carries no write outcome yet (MAG-5256), so it gets no header. Every
+// interface's refusal carries the request's own headers (MAG-5076).
+func TestWrite_APinToANameTheRouterDoesNotHaveIsNotSent(t *testing.T) {
 	rand.InitRandomSeed()
 	for _, tc := range writeInterfaceCases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -174,10 +139,11 @@ func TestGraphQLWrite_APinToANameTheRouterDoesNotHaveIsNotSent(t *testing.T) {
 			require.ErrorIs(t, err, routersession.SelectedProviderNotConfiguredError)
 			require.Equal(t, [2]int64{0, 0}, [2]int64{atomic.LoadInt64(&hits[0]), atomic.LoadInt64(&hits[1])}, "no provider is asked")
 			want := ""
-			if tc.apiInterface == spectypes.APIInterfaceGraphQL {
-				want = "not_sent"
+			if tc.apiInterface != spectypes.APIInterfaceRest {
+				want = writeOutcomeNotSent
 			}
 			require.Equal(t, want, writeOutcomeHeader(t, result))
+			require.NotEmpty(t, refusalReplyHeader(result, common.USER_REQUEST_TYPE), "the refusal carries no router-user-request-type")
 		})
 	}
 }

@@ -375,9 +375,9 @@ func TestRelayEnd_ExitPaths(t *testing.T) {
 			},
 		},
 		{
-			// Nothing comes back at all: the router answers for itself, and the client still gets
-			// 500. That reply carries the request's headers, as a write some upstream answered does
-			// (MAG-3980): the GUID, and every upstream the write went to.
+			// Nothing comes back at all: the router answers for itself, with its OUTCOME_UNKNOWN reply
+			// and HTTP 200 (MAG-5232). That reply carries the request's headers, as a write some
+			// upstream answered does (MAG-3980): the GUID, and every upstream the write went to.
 			name:   "write_unknown_every_upstream_silent",
 			fanOut: true,
 			nodes: func(*testing.T) []relayEndNode {
@@ -388,7 +388,9 @@ func TestRelayEnd_ExitPaths(t *testing.T) {
 			check: func(t *testing.T, result *common.RelayResult, err error) {
 				require.ErrorIs(t, err, errUnknownWriteOutcome)
 				require.NotNil(t, result, "the reply carries no headers")
-				require.Equal(t, http.StatusInternalServerError, result.StatusCode)
+				require.Equal(t, http.StatusOK, result.StatusCode)
+				outcome, _ := replyHeader(result.GetReply().GetMetadata(), common.WRITE_OUTCOME_HEADER_NAME)
+				require.Equal(t, writeOutcomeUnknown, outcome)
 				guid, _ := replyHeader(result.GetReply().GetMetadata(), common.GUID_HEADER_NAME)
 				require.Equal(t, strconv.FormatUint(relayEndCaseGUID("write_unknown_every_upstream_silent"), 10), guid)
 				providers, _ := replyHeader(result.GetReply().GetMetadata(), common.PROVIDER_ADDRESS_HEADER_NAME)

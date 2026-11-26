@@ -28,7 +28,9 @@ import (
 
 // writeUpstream is one upstream of a two-provider write broadcast: what it answers and how long it
 // takes to answer. firstStatus and firstBody, when set, are what it answers its first request
-// with instead.
+// with instead. refuse makes it an address whose port refuses every connection, so no byte of a
+// request sent to it leaves the router. disabled switches its url off, as the router does after
+// consecutive failures, so selection ejects the provider.
 type writeUpstream struct {
 	name        string
 	status      int
@@ -36,6 +38,8 @@ type writeUpstream struct {
 	delay       time.Duration
 	firstStatus int
 	firstBody   string
+	refuse      bool
+	disabled    bool
 }
 
 // writeInterfaceCase is one api interface's write: the request that is stateful on it, and the parser
@@ -172,14 +176,18 @@ func newWriteServer(t *testing.T, tc writeInterfaceCase, chainParser chainlib.Ch
 			_, _ = w.Write([]byte(body))
 		}))
 		t.Cleanup(upstream.Close)
+		upstreamURL := upstream.URL
+		if upstreamCfg.refuse {
+			upstreamURL = refusingUpstream(t)
+		}
 		// The relay path records a 429 on the process-wide registry, keyed on the provider and the
 		// url it dialed. Clear it, or this upstream's hold-off outlives the test.
-		name, url := upstreamCfg.name, upstream.URL+tc.nodeURLPath
+		name, url := upstreamCfg.name, upstreamURL+tc.nodeURLPath
 		t.Cleanup(func() { holdoff.Shared.RecordAnswer(name, url) })
 
 		connection, err := routersession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: url}, 5, "")
 		require.NoError(t, err)
-		endpoint := &routersession.Endpoint{NetworkAddress: url, Enabled: true, DirectConnections: []routersession.DirectRPCConnection{connection}}
+		endpoint := &routersession.Endpoint{NetworkAddress: url, Enabled: !upstreamCfg.disabled, DirectConnections: []routersession.DirectRPCConnection{connection}}
 		provider := routersession.NewConsumerSessionWithProvider(upstreamCfg.name, []*routersession.Endpoint{endpoint}, 100000, 1, 1)
 		provider.StaticProvider = true
 		if i < len(primaryUpstreams) {
@@ -210,12 +218,13 @@ func sendWrite(t *testing.T, tc writeInterfaceCase, chainParser chainlib.ChainPa
 }
 
 // sendWriteWithDirectives is sendWrite with the request's router-* directive headers, such as a
-// router-select-provider pin.
+// router-select-provider pin or router-relay-timeout, applied as ParseRelay applies them.
 func sendWriteWithDirectives(t *testing.T, tc writeInterfaceCase, chainParser chainlib.ChainParser, server *RPCSmartRouterServer, directives map[string]string) (*common.RelayResult, error) {
 	t.Helper()
 	ctx := context.Background()
 	chainMessage, err := chainParser.ParseMsg(tc.path, []byte(tc.body), tc.method, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 	require.NoError(t, err)
+	server.HandleDirectiveHeadersForMessage(chainMessage, directives)
 	relayData := relayprotocol.NewRelayData(ctx, tc.method, tc.path, []byte(tc.body), 0, spectypes.NOT_APPLICABLE, tc.apiInterface,
 		chainMessage.GetRPCMessage().GetHeaders(), chainlib.GetAddon(chainMessage), common.GetExtensionNames(chainMessage.GetExtensions()))
 	protocolMessage := chainlib.NewProtocolMessage(chainMessage, directives, relayData, "dapp", "1.2.3.4")

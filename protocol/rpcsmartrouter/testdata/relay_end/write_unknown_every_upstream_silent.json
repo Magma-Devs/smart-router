@@ -37,6 +37,6 @@
   "selection": "stateful",
   "served_by": "",
   "stateful": true,
-  "status": 500,
+  "status": 200,
   "stop_reason": "ProcessingTimeout"
 }

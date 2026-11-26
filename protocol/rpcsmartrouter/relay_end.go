@@ -407,15 +407,17 @@ func (rpcss *RPCSmartRouterServer) buildRelayEnd(ctx context.Context, in relayEn
 			end.errorCode, end.errorText = returned.errorCode, returned.message
 		}
 	case relayOutcomeWriteUnknown:
-		// What the listener sends, whether or not the router returned a result to carry it. A
-		// GraphQL write is the one exception (MAG-5122): graphQLUnclearWriteStatus answers it with
-		// HTTP 200, not 500, so the audit line has to read the status the client actually got.
+		// What the listener sends, whether or not the router returned a result to carry it: 500 on
+		// REST, and 200 on GraphQL (graphQLUnclearWriteStatus, MAG-5122), JSON-RPC and Tendermint
+		// RPC (writeOutcomeReply, MAG-5232), whose clients re-send a write on a 5xx. The audit line
+		// reads the status the client actually got.
 		end.status = http.StatusInternalServerError
-		if isGraphQLWrite(in.protocolMessage) {
+		if isGraphQLWrite(in.protocolMessage) || statesWriteOutcome(in.protocolMessage) {
 			end.status = http.StatusOK
 		}
 		end.errorCode = relayEndWriteUnknownCode(in.cause, end.attempts, requestRanOutOfRoad(end.stopReason))
-		// The message the client reads, with the reason it gives (MAG-4380).
+		// Why the outcome is unknown (MAG-4380). REST's client reads this message; JSON-RPC's and
+		// Tendermint's read Part I's sentence, and this is the router's own account of it.
 		end.errorText = relayEndText(unclearWrite.Error())
 	default:
 		cause := in.cause

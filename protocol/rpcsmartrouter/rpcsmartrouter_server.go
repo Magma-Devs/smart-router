@@ -1510,10 +1510,9 @@ func unclearWriteOutcomeFor(protocolMessage chainlib.ProtocolMessage, relayProce
 	successResults, nodeErrors, protocolErrors := relayProcessor.GetResultsData()
 	answered := len(successResults) + len(nodeErrors) + len(protocolErrors)
 	// Both sides of this comparison must count the same thing. answered is cumulative, so dispatched
-	// is too: SessionsLatestBatch resets on each new batch, and a write is NOT always a single batch
-	// — relaypolicy carves out a retry for a stateful relay whose whole batch was rate limited (the
-	// upstream refused before executing anything). On that path a per-batch count reads as fewer
-	// endpoints than answered, and the verdict flips to "failed" while one is still silent.
+	// is too. A write is one batch today (relaypolicy never sends one again, MAG-5232), but
+	// SessionsLatestBatch resets on each new batch, and a per-batch count read against a cumulative
+	// answered count would flip the verdict to "failed" while an endpoint is still silent.
 	dispatched := relayProcessor.GetUsedProviders().SessionsDispatched()
 
 	ranOutOfRoad := requestRanOutOfRoad(relayProcessor.GetStopReason())
@@ -1661,23 +1660,12 @@ func unclearWriteReason(answered, dispatched int, cutOffs writeCutOffs) *unclear
 	}
 }
 
-// graphQLWriteOutcomeAccepted and graphQLWriteOutcomeUnknown are the Router-Write-Outcome values this
-// router can state for a GraphQL write today (MAG-5122, Part I R-L point 4: accepted > unknown >
-// rejected > not_sent). accepted is the chain's success row only (appendGraphQLWriteAcceptedHeader),
-// unknown comes from each copy's status and transport (unclearWriteOutcomeFor). rejected and
-// not_sent read from a node's reply need the chain's refusal rows (MAG-4909, MAG-5121); the
-// router's own refusal of a write before any provider is asked says not_sent (MAG-3800). Any other
-// reply keeps the ticket's rule for a chain without those rows: the node's body is forwarded as
-// is, with no header.
-const (
-	graphQLWriteOutcomeAccepted = "accepted"
-	graphQLWriteOutcomeUnknown  = "unknown"
-)
-
-// isGraphQLWrite reports whether protocolMessage is a GraphQL write. MAG-5122 scopes its write-
-// outcome behaviour — the HTTP 200 unclear-write reply, the Router-Write-Outcome header, the
-// rate-limit retry carve-out removal (relaypolicy.Policy.Decide) — to this interface only; every
-// other interface's write behaviour is MAG-5061's to change.
+// isGraphQLWrite reports whether protocolMessage is a GraphQL write. MAG-5122 states its write
+// outcome on its own rows: the HTTP 200 unclear-write reply, and Router-Write-Outcome accepted on the
+// chain's success row and unknown when unclearWriteOutcomeFor could not settle it; rejected and
+// not_sent read from a node's reply need the chain's refusal rows (MAG-4909, MAG-5121), and the
+// router's own refusal of a write before any provider is asked says not_sent (MAG-3800). JSON-RPC
+// and Tendermint RPC state theirs in write_outcome.go (MAG-5232).
 func isGraphQLWrite(protocolMessage chainlib.ProtocolMessage) bool {
 	if chainlib.GetStateful(protocolMessage) != common.CONSISTENCY_SELECT_ALL_PROVIDERS {
 		return false
@@ -1709,7 +1697,7 @@ func (rpcss *RPCSmartRouterServer) appendGraphQLWriteOutcomeHeader(result *commo
 	if result == nil || unclear == nil || !isGraphQLWrite(protocolMessage) {
 		return
 	}
-	ensureWriteOutcomeHeader(result, graphQLWriteOutcomeUnknown)
+	ensureWriteOutcomeHeader(result, writeOutcomeUnknown)
 }
 
 // appendGraphQLWriteAcceptedHeader adds Router-Write-Outcome: accepted (MAG-5122) to a served GraphQL
@@ -1727,7 +1715,7 @@ func (rpcss *RPCSmartRouterServer) appendGraphQLWriteAcceptedHeader(result *comm
 		return
 	}
 	if _, status, _ := suiGraphQLExecution(result.Reply.Data); status == relayEndTxSuccess || status == relayEndTxFailure {
-		ensureWriteOutcomeHeader(result, graphQLWriteOutcomeAccepted)
+		ensureWriteOutcomeHeader(result, writeOutcomeAccepted)
 	}
 }
 
@@ -1756,17 +1744,13 @@ func (rpcss *RPCSmartRouterServer) graphQLUnclearWriteStatus(ctx context.Context
 		result = &common.RelayResult{}
 	}
 	stamped := *result
-	guidStr := ""
-	if guid, found := utils.GetUniqueIdentifier(ctx); found && guid != 0 {
-		guidStr = strconv.FormatUint(guid, 10)
-	}
 	stamped.StatusCode = http.StatusOK
 	// Router-authored, not an upstream's bytes: UpstreamStatus/Body/ContentType is the one channel
 	// the listener forwards verbatim — status included, no masking (chainlib.buildFailedRelayReply)
 	// — so it is reused here to carry this router-written GraphQL document.
 	stamped.ClientFacing = &common.ClientFacingError{
 		UpstreamStatus:      http.StatusOK,
-		UpstreamBody:        chainlib.ConvertToGraphQLWriteOutcomeError(graphQLUnknownWriteMessage, guidStr, graphQLWriteOutcomeUnknown, ""),
+		UpstreamBody:        chainlib.ConvertToGraphQLWriteOutcomeError(graphQLUnknownWriteMessage, requestGUID(ctx), writeOutcomeUnknown, ""),
 		UpstreamContentType: common.JSONContentType,
 	}
 	return &stamped
@@ -1875,6 +1859,17 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 		})
 		return unknownWriteAnswer
 	}
+	// A JSON-RPC or Tendermint RPC write states its verdict itself (MAG-5232, write_outcome.go), in
+	// place of unknownWrite, which stays REST's and GraphQL's.
+	var writeVerdictOnce sync.Once
+	var writeVerdictAnswer writeVerdict
+	var hasWriteVerdict bool
+	verdictOfWrite := func() (writeVerdict, bool) {
+		writeVerdictOnce.Do(func() {
+			writeVerdictAnswer, hasWriteVerdict = writeVerdictFor(protocolMessage, relayProcessor)
+		})
+		return writeVerdictAnswer, hasWriteVerdict
+	}
 	if err != nil && (relayProcessor == nil || !relayProcessor.HasResults()) {
 		// we can't send anymore, and we don't have any responses
 		cause = err
@@ -1891,13 +1886,61 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 			}
 		}
 
-		// The two replies below are the router's own, made when the budget ran out before any
-		// attempt it dispatched came back. They carry this request's headers all the same, as a
-		// reply some upstream produced does (MAG-3980). Returning before appendHeadersToRelayResult
-		// sent them with no Router-* header at all: no Router-Guid for the customer to quote on the
-		// failure hardest to diagnose, a silent upstream, and no Router-Retries or
-		// Router-Provider-Address to say what was tried. unknownWrite is true only for a processor
-		// that dispatched, so the processor is never nil there.
+		// A request that ended before any provider was asked: a pin on a provider the router cannot
+		// use, no provider to ask, a deadline before the first dispatch. The listener writes the
+		// router's error, and this reply carries the request's own headers on it, Router-Guid and
+		// router-user-request-type among them, as every other failed reply does (MAG-5076; Part I §1:
+		// Router-Guid on every reply). Returning nil sent the error with none. No attempt went out, so
+		// the reply names no provider and no retry. A cross-validated request is left out: the header
+		// builder would count a round that never ran. ok is false for any other request.
+		refusedBeforeDispatch := func() (refused *common.RelayResult, ok bool) {
+			if relayProcessor == nil || relayProcessor.GetSelection() == relaycore.CrossValidation || relayProcessor.GetUsedProviders().SessionsDispatched() != 0 {
+				return nil, false
+			}
+			// A write's targets are recorded when selection picks them. The consistency gate can then
+			// turn every one away, as it does a strict pin on a node too far behind the chain tip. No
+			// node received this write, so router-fast-tx-participants must name none.
+			relayProcessor.SetStatefulRelayTargets(nil)
+			refused = &common.RelayResult{}
+			rpcss.appendHeadersToRelayResult(ctx, refused, relayProcessor.ProtocolErrors(), relayProcessor, protocolMessage, protocolMessage.GetApi().GetName(), analytics, false)
+			return refused, true
+		}
+
+		// A write pinned to a router-select-provider name the router does not have is refused before
+		// any provider is asked, so its reply says the write was never sent, as the listener's other
+		// refusals of a GraphQL write do (MAG-3800; Part I R-Q, Part II Q8). The listener writes the
+		// refusal, REQUEST_REFUSED, the one router reply to a write that is not HTTP 200 (MAG-5232),
+		// and passes this reply's headers on; only this function knows the request is a write.
+		if (isGraphQLWrite(protocolMessage) || statesWriteOutcome(protocolMessage)) && errors.Is(err, routersession.SelectedProviderNotConfiguredError) {
+			refused, ok := refusedBeforeDispatch()
+			if !ok {
+				refused = &common.RelayResult{}
+			}
+			ensureWriteOutcomeHeader(refused, writeOutcomeNotSent)
+			return refused, err
+		}
+
+		// The replies below are the router's own, made when the budget ran out before any attempt
+		// it dispatched came back. They carry this request's headers all the same, as a reply some
+		// upstream produced does (MAG-3980). Returning before appendHeadersToRelayResult sent them
+		// with no Router-* header at all: no Router-Guid for the customer to quote on the failure
+		// hardest to diagnose, a silent upstream, and no Router-Retries or Router-Provider-Address to
+		// say what was tried. unknownWrite is true only for a processor that dispatched, so the
+		// processor is never nil there.
+		//
+		// A JSON-RPC or Tendermint RPC write gets the router's reply that states its verdict: unknown
+		// when a copy it dispatched is still silent, not sent when none was dispatched (MAG-5232).
+		if verdict, ok := verdictOfWrite(); ok {
+			dispatched := relayProcessor.GetUsedProviders().SessionsDispatched()
+			if dispatched == 0 {
+				// No node received this write, so router-fast-tx-participants names none (MAG-5076).
+				relayProcessor.SetStatefulRelayTargets(nil)
+			}
+			reply, txHash := rpcss.writeOutcomeReply(requestGUID(ctx), protocolMessage, nil, verdict, err, dispatched)
+			rpcss.appendHeadersToRelayResult(ctx, reply, relayProcessor.ProtocolErrors(), relayProcessor, protocolMessage, protocolMessage.GetApi().GetName(), analytics, false)
+			stampWriteOutcome(reply, verdict.outcome, txHash)
+			return reply, writeOutcomeReplyError(verdict, err)
+		}
 		if unclear := unknownWrite(); unclear != nil {
 			var unclearResult *common.RelayResult
 			if isGraphQLWrite(protocolMessage) {
@@ -1935,27 +1978,9 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 			return timedOut, err
 		}
 
-		// A request that ended before any provider was asked: a pin on a provider the router cannot
-		// use, no provider to ask, a deadline before the first dispatch. The listener writes the
-		// router's error, and this reply carries the request's own headers on it, Router-Guid and
-		// router-user-request-type among them, as every other failed reply does (MAG-5076; Part I §1:
-		// Router-Guid on every reply). Returning nil sent the error with none. No attempt went out, so
-		// the reply names no provider and no retry. A cross-validated request is left out: the header
-		// builder would count a round that never ran.
-		if relayProcessor != nil && relayProcessor.GetSelection() != relaycore.CrossValidation && relayProcessor.GetUsedProviders().SessionsDispatched() == 0 {
-			// A write's targets are recorded when selection picks them. The consistency gate can then
-			// turn every one away, as it does a strict pin on a node too far behind the chain tip. No
-			// node received this write, so router-fast-tx-participants must name none.
-			relayProcessor.SetStatefulRelayTargets(nil)
-			refused := &common.RelayResult{}
-			rpcss.appendHeadersToRelayResult(ctx, refused, relayProcessor.ProtocolErrors(), relayProcessor, protocolMessage, protocolMessage.GetApi().GetName(), analytics, false)
-			// A GraphQL write pinned to a router-select-provider name the router does not have is
-			// refused, so its reply says the write was never sent, as the listener's other refusals
-			// of a GraphQL write do (MAG-3800; Part I R-Q, Part II Q8). Only this function knows the
-			// request is a write.
-			if isGraphQLWrite(protocolMessage) && errors.Is(err, routersession.SelectedProviderNotConfiguredError) {
-				ensureWriteOutcomeHeader(refused, rpcInterfaceMessages.GraphQLWriteOutcomeNotSent)
-			}
+		// Any other request that ended before a provider was asked carries its own headers too
+		// (MAG-5076, refusedBeforeDispatch above).
+		if refused, ok := refusedBeforeDispatch(); ok {
 			return refused, err
 		}
 		return nil, err
@@ -2024,7 +2049,22 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 	//
 	// Safe to hoist: writeOutcomeIsUnknown returns false unless this is a stateful relay with no
 	// successes, so a served write and every read are unaffected.
-	if unclear := unknownWrite(); unclear != nil {
+	//
+	// A JSON-RPC or Tendermint RPC write states its verdict (MAG-5232): an unknown or not-sent write
+	// gets the router's reply, and a rejected one the node's best-ranked reply as it came, with
+	// Router-Write-Outcome and Router-Tx-Hash.
+	if verdict, ok := verdictOfWrite(); ok {
+		if verdict.outcome == writeOutcomeRejected {
+			stampWriteOutcome(returnedResult, writeOutcomeRejected, rpcss.writeTxHash(protocolMessage))
+		} else {
+			if analytics != nil {
+				analytics.Success = false
+			}
+			reply, txHash := rpcss.writeOutcomeReply(requestGUID(ctx), protocolMessage, returnedResult, verdict, err, relayProcessor.GetUsedProviders().SessionsDispatched())
+			stampWriteOutcome(reply, verdict.outcome, txHash)
+			return reply, writeOutcomeReplyError(verdict, err)
+		}
+	} else if unclear := unknownWrite(); unclear != nil {
 		if analytics != nil {
 			analytics.Success = false
 		}

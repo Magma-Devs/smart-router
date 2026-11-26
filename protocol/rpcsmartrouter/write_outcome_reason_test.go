@@ -27,6 +27,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
+	specutils "github.com/magma-Devs/smart-router/utils/keeper"
 	"github.com/magma-Devs/smart-router/utils/rand"
 )
 
@@ -49,6 +50,18 @@ type restWriteUpstream struct {
 	hang   bool
 	status int
 	body   string
+}
+
+// shortenWriteWindow makes chainID's write window short enough for a test that waits out a write's
+// budget. A write ignores router-relay-timeout (MAG-5232), so the window is its own: its compute units
+// plus twice the block time, as it is a hanging api. A short block time keeps it under the 6 x
+// common.DefaultTimeout stateful budget the test sets.
+func shortenWriteWindow(t *testing.T, parser chainlib.ChainParser, chainID string) {
+	t.Helper()
+	spec, err := specutils.GetSpecFromLocalDirs([]string{"../../specs/"}, chainID)
+	require.NoError(t, err)
+	spec.AverageBlockTime = 50
+	parser.SetSpec(spec)
 }
 
 type restWriteOutcome struct {
@@ -95,6 +108,9 @@ func sendRESTWriteThroughListener(t *testing.T, upstreams []restWriteUpstream) r
 		ctx, "COSMOSHUB", spectypes.APIInterfaceRest, handlerFor(upstreams[0]), nil, "../../", nil)
 	require.NoError(t, err)
 	t.Cleanup(closeServer)
+	if anyHang {
+		shortenWriteWindow(t, parser, "COSMOSHUB")
+	}
 
 	releases := []func(){}
 	defer func() {
@@ -169,9 +185,6 @@ func sendRESTWriteThroughListener(t *testing.T, upstreams []restWriteUpstream) r
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+listener.GetListeningAddress()+path, bytes.NewReader(data))
 	require.NoError(t, err)
 	req.Header.Set("Content-Type", "application/json")
-	if anyHang {
-		req.Header.Set(common.RELAY_TIMEOUT_HEADER_NAME, "200ms")
-	}
 	response, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	defer response.Body.Close()

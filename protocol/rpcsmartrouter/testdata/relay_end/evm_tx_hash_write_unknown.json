@@ -28,7 +28,7 @@
   "selection": "stateful",
   "served_by": "",
   "stateful": true,
-  "status": 500,
+  "status": 200,
   "stop_reason": "ProcessingTimeout",
   "tx_hash": "0x2620d49b3fa2ff073b49bce2b5f0382521afd075691e695251929cd67be4f460"
 }

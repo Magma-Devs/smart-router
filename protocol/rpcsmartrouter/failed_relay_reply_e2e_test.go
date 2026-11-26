@@ -474,8 +474,15 @@ func TestFailedRelayReply_AStrictPinTheConsistencyGateTurnsAwayKeepsTheRequestHe
 			iface.body = tc.body
 			var arrivals atomic.Int32
 			read := startFailedReplyRouter(t, iface, hangingUpstream(t, &arrivals))()
-			require.Equal(t, http.StatusInternalServerError, read.status, read.body)
-			require.Contains(t, read.body, "too far behind the chain tip", "setup: the consistency gate must be what refused the pin")
+			if tc.write {
+				// A write sent nowhere gets the router's not-sent reply, HTTP 200 (MAG-5232).
+				require.Equal(t, http.StatusOK, read.status, read.body)
+				require.Contains(t, read.body, `"router_error":"PROVIDER_UNAVAILABLE"`, "setup: the refused pin must be what ended the write")
+				require.Equal(t, writeOutcomeNotSent, read.header.Get(common.WRITE_OUTCOME_HEADER_NAME))
+			} else {
+				require.Equal(t, http.StatusInternalServerError, read.status, read.body)
+				require.Contains(t, read.body, "too far behind the chain tip", "setup: the consistency gate must be what refused the pin")
+			}
 			require.Zero(t, arrivals.Load(), "setup: the pinned upstream must not be asked")
 
 			require.NotEmpty(t, read.guid, "the reply carries no Router-Guid")

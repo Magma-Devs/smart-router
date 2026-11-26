@@ -97,6 +97,9 @@ func TestRESTListener_WriteOutcome(t *testing.T) {
 				}), nil, "../../", nil)
 			require.NoError(t, err)
 			defer closeServer()
+			if tc.hang {
+				shortenWriteWindow(t, parser, "COSMOSHUB")
+			}
 			chainMessage, err := parser.ParseMsg(path, data, tc.method, nil, extensionslib.ExtensionInfo{})
 			require.NoError(t, err)
 			relayData := relayprotocol.NewRelayData(ctx, tc.method, path, data, 0, spectypes.NOT_APPLICABLE,
@@ -174,9 +177,6 @@ func TestRESTListener_WriteOutcome(t *testing.T) {
 			req, err := http.NewRequestWithContext(ctx, tc.method, "http://"+listener.GetListeningAddress()+path, bytes.NewReader(data))
 			require.NoError(t, err)
 			req.Header.Set("Content-Type", "application/json")
-			if tc.hang {
-				req.Header.Set(common.RELAY_TIMEOUT_HEADER_NAME, "200ms")
-			}
 			response, err := http.DefaultClient.Do(req)
 			require.NoError(t, err)
 			defer response.Body.Close()
