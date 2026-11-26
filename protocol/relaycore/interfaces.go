@@ -103,6 +103,11 @@ type ResultsSummary struct {
 	// what used it, so the write is not sent again, whatever else the copies answered, and even
 	// when every one of them also read as a rate limit.
 	SlotAlreadyUsed bool
+	// NotFoundAnswers counts the not-found answers (common.RelayResult.IsNotFoundAnswer, MAG-5121
+	// P6), and ResultsAfterNotFound the results of any kind that arrived after the first of them.
+	// A not-found answer gets one more provider, then the null is the answer (MAG-4909 R23).
+	NotFoundAnswers      int
+	ResultsAfterNotFound int
 }
 
 // Action represents the post-relay decision action.

@@ -122,6 +122,8 @@ type relayEndAttempt struct {
 
 	// Not written: what the relay-level fields are derived from.
 	reply       *pairingtypes.RelayReply
+	statusCode  int    // the reply's HTTP status, which a GraphQL write's rows read beside its body
+	statusBody  []byte // the body of an upstream's error status on a transport attempt (a gateway's 503), read the same way
 	routerError *common.RouterError
 	transport   bool // a protocol error: no node reply came back
 }
@@ -445,10 +447,11 @@ func relayEndAttemptsOf(dispatched []routersession.Dispatch, start time.Time, su
 	}
 	for i := range successes {
 		recorded = append(recorded, relayEndAttempt{
-			upstream: relayEndUpstream(&successes[i]),
-			outcome:  attemptOutcomeOK,
-			latency:  successes[i].AttemptLatency,
-			reply:    successes[i].Reply,
+			upstream:   relayEndUpstream(&successes[i]),
+			outcome:    attemptOutcomeOK,
+			latency:    successes[i].AttemptLatency,
+			reply:      successes[i].Reply,
+			statusCode: successes[i].StatusCode,
 		})
 	}
 
@@ -485,24 +488,49 @@ func relayEndAttemptsOf(dispatched []routersession.Dispatch, start time.Time, su
 }
 
 // readWriteOutcomes fills each answered attempt's write_outcome when the request is its chain's
-// write on a chain whose list reads each copy (MAG-5186): a copy that succeeded ran; a node error is
-// read by the chain's write rows. An attempt with no reply has its outcome (timeout, transport_error,
-// cancelled) and no reading.
+// write on a chain whose list reads each copy: over gRPC (MAG-5186) a copy that succeeded ran and a
+// node error is read by the chain's write rows; over GraphQL (MAG-4909) every reply is read by them,
+// its body and its status, an upstream's error status with a body included. An attempt with no
+// reply has its outcome (timeout, transport_error, cancelled) and no reading.
 func (attempts relayEndAttempts) readWriteOutcomes(protocolMessage chainlib.ProtocolMessage) {
 	if protocolMessage == nil {
 		return
 	}
-	grpcMessage, ok := protocolMessage.GetRPCMessage().(*rpcInterfaceMessages.GrpcMessage)
-	if !ok || !grpcMessage.IsChainListWrite() {
+	var read func(attempt *relayEndAttempt) (outcome string, known bool)
+	switch message := protocolMessage.GetRPCMessage().(type) {
+	case *rpcInterfaceMessages.GrpcMessage:
+		if !message.IsChainListWrite() {
+			return
+		}
+		read = func(attempt *relayEndAttempt) (string, bool) {
+			if attempt.transport || attempt.reply == nil {
+				return "", false
+			}
+			reading, known := message.WriteCopyOfReply(attempt.reply.Data, attempt.outcome != attemptOutcomeOK)
+			return reading.Outcome.String(), known
+		}
+	case *rpcInterfaceMessages.GraphQLMessage:
+		if message == nil {
+			return
+		}
+		read = func(attempt *relayEndAttempt) (string, bool) {
+			body := attempt.statusBody
+			if attempt.reply != nil {
+				body = attempt.reply.Data
+			}
+			outcome, known := message.WriteOutcome(body, attempt.statusCode)
+			return outcome.String(), known
+		}
+	default:
 		return
 	}
 	for i := range attempts {
 		attempt := &attempts[i]
-		if attempt.reply == nil || attempt.transport {
+		if attempt.reply == nil && attempt.statusBody == nil {
 			continue
 		}
-		if reading, known := grpcMessage.WriteCopyOfReply(attempt.reply.Data, attempt.outcome != attemptOutcomeOK); known {
-			attempt.writeOutcome = reading.Outcome.String()
+		if outcome, known := read(attempt); known {
+			attempt.writeOutcome = outcome
 		}
 	}
 }
@@ -524,6 +552,7 @@ func relayEndNodeErrorAttempt(nodeError relaycore.RelayError) relayEndAttempt {
 		attempt.upstream = relayEndUpstream(result)
 		attempt.latency = result.AttemptLatency
 		attempt.reply = result.Reply
+		attempt.statusCode = result.StatusCode
 		if result.IsRateLimited {
 			attempt.outcome = attemptOutcomeRateLimited
 		}
@@ -547,6 +576,14 @@ func relayEndProtocolErrorAttempt(protocolError relaycore.RelayError, ranOutOfRo
 	}
 	attempt.outcome = protocolErrorOutcome(protocolError, ranOutOfRoad)
 	attempt.errorCode = relayEndCode(protocolError.RouterError)
+	// An upstream that answered with an error status came back without a node reply, but what it
+	// sent is what a GraphQL write's rows read (a gateway's 503 is "may have run", MAG-4909), so the
+	// attempt keeps the body beside the status.
+	var httpErr *routersession.HTTPStatusError
+	if errors.As(protocolError.Err, &httpErr) {
+		attempt.statusCode = httpErr.StatusCode
+		attempt.statusBody = httpErr.Body
+	}
 	if err := protocolError.GetError(); err != nil {
 		attempt.message = relayEndText(err.Error())
 	}
@@ -614,15 +651,23 @@ func relayEndErrorCode(cause error, result *common.RelayResult, attempts relayEn
 }
 
 // relayEndWriteUnknownCode names why a write's outcome is unknown: the budget ran out with an
-// upstream still silent, or an upstream's connection died after the request went out.
+// upstream still silent, an upstream's connection died after the request went out, or an upstream
+// answered with an error its chain's write rows read as "may have run".
 func relayEndWriteUnknownCode(cause error, attempts relayEndAttempts, ranOutOfRoad bool) string {
 	if ranOutOfRoad {
 		return common.RouterErrorContextDeadline.Name
 	}
-	// Only a transport error can leave a write unsettled; a node's reply settles its upstream, as in
-	// writeOutcomeIsUnknown.
+	// A transport error may leave a write unsettled.
 	for i := range attempts {
 		if attempts[i].transport && attempts[i].routerError != nil && attempts[i].routerError.MayHaveReachedNode {
+			return attempts[i].errorCode
+		}
+	}
+	// A node's reply settles its upstream, unless its chain's write rows read it as "may have run"
+	// (MAG-4909, unclearWriteOutcomeFor): then the reply is why the outcome is open. The same for an
+	// upstream's error status whose body the rows read so, a gateway's 503.
+	for i := range attempts {
+		if attempts[i].writeOutcome == rpcInterfaceMessages.GraphQLWriteMayHaveRun.String() {
 			return attempts[i].errorCode
 		}
 	}

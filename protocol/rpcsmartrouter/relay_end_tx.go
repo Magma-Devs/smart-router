@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/ethereum/go-ethereum/common/hexutil"
-	"github.com/ethereum/go-ethereum/crypto/blake2b"
 	"google.golang.org/protobuf/encoding/protowire"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
@@ -85,6 +84,12 @@ func (e *relayEnd) readTransaction(protocolMessage chainlib.ProtocolMessage, rep
 		// One root field: a mutation that selects several has no single transaction to name.
 		if api.Name == suiGraphQLExecuteRootField {
 			e.txHash, e.txStatus, e.txError = suiGraphQLExecution(reply)
+			// With no digest in the reply (the mutation did not select it, or the client got a node
+			// error, the router's unknown reply or none), the digest is computed from the
+			// transaction in the request (MAG-4909), the one the unknown reply hands the client.
+			if e.txHash == "" {
+				e.txHash = graphQLWriteDigest(protocolMessage)
+			}
 		}
 	case spectypes.APIInterfaceTendermintRPC, spectypes.APIInterfaceRest:
 		// A Cosmos node answers a refused transaction with a normal reply, so the outcome stays ok and
@@ -205,9 +210,9 @@ func suiGRPCExecution(reply []byte) (hash, status, errorText string) {
 }
 
 // suiGRPCRequestDigest is the digest of the transaction an ExecuteTransaction request carries, by
-// Sui's formula (suiTransactionDataDigest), or "" when the request holds no transaction bytes. The
-// transaction is the request's field 1, a Transaction whose BCS is field 1, a Bcs whose value is
-// field 2. A JSON request names the same fields, with the bytes in base64.
+// Sui's formula (rpcInterfaceMessages.SuiTransactionDataDigest), or "" when the request holds no
+// transaction bytes. The transaction is the request's field 1, a Transaction whose BCS is field 1,
+// a Bcs whose value is field 2. A JSON request names the same fields, with the bytes in base64.
 func suiGRPCRequestDigest(protocolMessage chainlib.ProtocolMessage) string {
 	grpcMessage, ok := protocolMessage.GetRPCMessage().(*rpcInterfaceMessages.GrpcMessage)
 	if !ok || grpcMessage == nil {
@@ -250,44 +255,7 @@ func suiGRPCRequestDigest(protocolMessage chainlib.ProtocolMessage) string {
 	if len(transactionData) == 0 {
 		return ""
 	}
-	return suiTransactionDataDigest(transactionData)
-}
-
-// suiTransactionDigestSalt opens the bytes Sui hashes into a transaction's digest: the type's name and
-// "::" (sui-sdk-types, hash.rs, impl Transaction::digest).
-const suiTransactionDigestSalt = "TransactionData::"
-
-// suiTransactionDataDigest is Sui's transaction digest of a TransactionData's BCS bytes:
-// Base58(Blake2b-256("TransactionData::" || bytes)).
-func suiTransactionDataDigest(transactionData []byte) string {
-	hashed := make([]byte, 0, len(suiTransactionDigestSalt)+len(transactionData))
-	hashed = append(hashed, suiTransactionDigestSalt...)
-	hashed = append(hashed, transactionData...)
-	digest := blake2b.Sum256(hashed)
-	return base58Text(digest[:])
-}
-
-// base58Text writes data in base58, Bitcoin's alphabet: the bytes read as one big-endian number in
-// base 58, with a '1' for each leading zero byte.
-func base58Text(data []byte) string {
-	number := new(big.Int).SetBytes(data)
-	radix, remainder := big.NewInt(58), new(big.Int)
-	var reversed []byte
-	for number.Sign() > 0 {
-		number.QuoRem(number, radix, remainder)
-		reversed = append(reversed, base58Alphabet[remainder.Int64()])
-	}
-	for _, b := range data {
-		if b != 0 {
-			break
-		}
-		reversed = append(reversed, base58Alphabet[0])
-	}
-	text := make([]byte, len(reversed))
-	for i, c := range reversed {
-		text[len(reversed)-1-i] = c
-	}
-	return string(text)
+	return rpcInterfaceMessages.SuiTransactionDataDigest(transactionData)
 }
 
 // protoWireBytesField is a message's last top-level length-delimited field num, as protobuf's own

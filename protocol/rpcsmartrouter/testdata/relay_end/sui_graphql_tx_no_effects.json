@@ -10,7 +10,8 @@
       "outcome": "ok",
       "returned_to_client": true,
       "sent_ms": "<ms>",
-      "upstream": "node-a"
+      "upstream": "node-a",
+      "write_outcome": "accepted"
     }
   ],
   "chain": "SUI",
@@ -31,5 +32,6 @@
   "served_by": "node-a",
   "stateful": true,
   "status": 200,
-  "stop_reason": "Success"
+  "stop_reason": "Success",
+  "tx_hash": "GK8fnZskpCCP75wNBqrFWmBHze11oqY6N7dQpwr4gN7r"
 }

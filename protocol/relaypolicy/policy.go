@@ -90,6 +90,14 @@ func (p *Policy) Decide(input relaycore.DecisionInput) relaycore.DecisionOutput 
 	if input.IsDefaultApi && input.Summary.HasNodeCapabilityRefusal {
 		return relaycore.DecisionOutput{Action: relaycore.ActionStop, Reason: "UnlistedMethodRefused"}
 	}
+	// A not-found answer (MAG-5121 P6) says this provider does not hold the record, which may only
+	// mean it is behind. One more provider is asked, then the null is the answer (MAG-4909 R23,
+	// Omer, 4 Nov), not the whole retry budget. So once one is in there is no hedge, since the
+	// retry that follows it is that one more provider, and once a result has come after it there
+	// is no retry either.
+	if input.Summary.NotFoundAnswers > 0 && (input.IsTickerHedge || input.Summary.ResultsAfterNotFound > 0) {
+		return relaycore.DecisionOutput{Action: relaycore.ActionStop, Reason: "NotFoundAnswered"}
+	}
 
 	// 3. LIMIT CHECKS
 	if input.AttemptNumber >= p.config.MaxRetries {

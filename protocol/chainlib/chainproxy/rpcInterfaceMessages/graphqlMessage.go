@@ -24,8 +24,8 @@ const GraphQLMethodSeparator = "&"
 
 // graphQLWriteNodeErrorCodes are the codes that make an error on a MUTATION the node's fault, each
 // with the HTTP status the error registry classifies it under. A mutation's other errors are the
-// caller's (a 400). Writes keep this table until their own verdicts land (MAG-5122); reads use
-// graphQLReadRows (MAG-5121).
+// caller's (a 400). A write on a chain whose list has write rows is read by them instead (MAG-4909);
+// reads use the chain's rows, then graphQLReadRows (MAG-5121).
 var graphQLWriteNodeErrorCodes = map[string]int{
 	graphQLRateLimitCode:    http.StatusTooManyRequests,
 	"INTERNAL_SERVER_ERROR": http.StatusInternalServerError,
@@ -177,6 +177,9 @@ type GraphQLRootField struct {
 	// "foo" and escape the mutation's own compute units, stateful flag and cross-validation
 	// policy.
 	Name string
+	// ResponseKey is the key the field's result sits under in the reply's data, and the first
+	// element of the path of an error on it: the caller's alias, or Name when there is none.
+	ResponseKey string
 	// Args holds the field's literal arguments with variable references already resolved from
 	// the request's `variables`, so block_parsing can read a pinned checkpoint out of the body.
 	Args map[string]interface{}
@@ -194,6 +197,12 @@ type GraphQLMessage struct {
 	// RootFields are the operation's root selections, in document order.
 	RootFields []GraphQLRootField
 	chainproxy.BaseMessage
+	// mutationField describes the executable mutation field. RootFields also retains skipped
+	// selections for routing when every root is skipped.
+	mutationField *graphQLMutationField
+	// chainRows is the list of the chain the request is sent to (SetChainFamily), nil for a chain
+	// that has none.
+	chainRows *graphQLChainRows
 }
 
 // ParseGraphQLMsg decodes a GraphQL-over-HTTP POST body and resolves the operation's root field
@@ -245,7 +254,11 @@ func ParseGraphQLMsg(data []byte) (*GraphQLMessage, error) {
 		return nil, RefuseGraphQLRequest("graphql subscriptions are not served over HTTP POST")
 	}
 
-	rootFields, err := graphQLRootFields(doc, operation, envelope.Variables)
+	var mutationField *graphQLMutationField
+	if operation.Operation == ast.Mutation {
+		mutationField = &graphQLMutationField{}
+	}
+	rootFields, err := graphQLRootFields(doc, operation, envelope.Variables, mutationField)
 	if err != nil {
 		return nil, err
 	}
@@ -262,6 +275,7 @@ func ParseGraphQLMsg(data []byte) (*GraphQLMessage, error) {
 		Variables:     envelope.Variables,
 		Operation:     operation.Operation,
 		RootFields:    rootFields,
+		mutationField: mutationField,
 	}, nil
 }
 
@@ -345,7 +359,7 @@ func selectGraphQLOperation(doc *ast.QueryDocument, operationName string) (*ast.
 // Every field selection still counts toward MaxGraphQLRootFields, left out or repeated, and every
 // fragment is still walked and checked, because the limit and the fragment checks bound and read
 // the document as written (MAG-4360, MAG-4351), not what runs.
-func graphQLRootFields(doc *ast.QueryDocument, operation *ast.OperationDefinition, variables map[string]interface{}) ([]GraphQLRootField, error) {
+func graphQLRootFields(doc *ast.QueryDocument, operation *ast.OperationDefinition, variables map[string]interface{}, mutationField *graphQLMutationField) ([]GraphQLRootField, error) {
 	variables = graphQLVariablesWithDefaults(operation, variables)
 	rootFields := []GraphQLRootField{}
 	// leftOut holds the root fields @skip / @include leave out, only to name an operation whose
@@ -365,6 +379,7 @@ func graphQLRootFields(doc *ast.QueryDocument, operation *ast.OperationDefinitio
 	// would refuse it.
 	expanding := map[string]struct{}{}
 	fragments := graphQLFragmentsByName(doc.Fragments)
+	visitedChildFragments := make(map[string]bool)
 
 	// nesting counts the fragments being expanded around selectionSet. It and the root field
 	// count bound how much of the document the walk visits (MAG-4360). skipped is true inside a
@@ -382,14 +397,18 @@ func graphQLRootFields(doc *ast.QueryDocument, operation *ast.OperationDefinitio
 				}
 				selections++
 				rootField := GraphQLRootField{
-					Name: typed.Name,
-					Args: graphQLArguments(typed.Arguments, variables),
+					Name:        typed.Name,
+					ResponseKey: graphQLResponseKey(typed),
+					Args:        graphQLArguments(typed.Arguments, variables),
 				}
 				if skipped || graphQLSelectionIsLeftOut(typed.Directives, variables) {
-					leftOut = appendGraphQLRootField(leftOut, leftOutKeys, graphQLResponseKey(typed), rootField)
+					leftOut = appendGraphQLRootField(leftOut, leftOutKeys, rootField.ResponseKey, rootField)
 					continue
 				}
-				rootFields = appendGraphQLRootField(rootFields, responseKeys, graphQLResponseKey(typed), rootField)
+				rootFields = appendGraphQLRootField(rootFields, responseKeys, rootField.ResponseKey, rootField)
+				if mutationField != nil && typed.Name != graphQLTypenameField {
+					mutationField.collect(rootField, typed.SelectionSet, fragments, variables, visitedChildFragments)
+				}
 			case *ast.InlineFragment:
 				if err := walk(typed.SelectionSet, nesting+1, skipped || graphQLSelectionIsLeftOut(typed.Directives, variables)); err != nil {
 					return err
@@ -608,9 +627,8 @@ func (gm *GraphQLMessage) GetRawRequestHash() ([]byte, error) {
 // CheckResponseError classifies a GraphQL reply: hasError is false only for an answer.
 //
 // GraphQL answers most errors inside an HTTP 200, so the status alone cannot say what a reply
-// means. A read is classified by readVerdict (MAG-5121) and filed under OwnClassification's entry; a
-// write by writeVerdict, filed by the shared rows under ClassificationStatus, until the write
-// verdicts land (MAG-5122).
+// means. Reads and writes with chain-specific rows supply their own classification. Other writes
+// use the default write verdict and the shared registry.
 func (gm *GraphQLMessage) CheckResponseError(data []byte, httpStatusCode int) (hasError bool, errorMessage string) {
 	verdict, isError := gm.verdict(data, httpStatusCode)
 	if !isError {
@@ -619,10 +637,8 @@ func (gm *GraphQLMessage) CheckResponseError(data []byte, httpStatusCode int) (h
 	return true, verdict.message
 }
 
-// ClassificationStatus returns the HTTP status a GraphQL node error stands for (see
-// graphQLVerdictKind): the code its log line carries, and on a write the status the shared registry
-// rows classify it under. A read is filed by OwnClassification instead. For an answer it is the
-// reply's own status.
+// ClassificationStatus returns the status recorded for the verdict. A write that uses the shared
+// registry is classified under this status. An answer retains the upstream status.
 func (gm *GraphQLMessage) ClassificationStatus(data []byte, httpStatusCode int) int {
 	verdict, isError := gm.verdict(data, httpStatusCode)
 	if !isError {
@@ -631,9 +647,8 @@ func (gm *GraphQLMessage) ClassificationStatus(data []byte, httpStatusCode int) 
 	return verdict.status
 }
 
-// OwnClassification is the registry entry a read's error reply is filed under by GraphQL's own
-// rows (MAG-5121). It is nil for an answer and for a write: a write is still filed by the shared
-// rows under ClassificationStatus, until the write verdicts land (MAG-5122).
+// OwnClassification returns the registry entry selected by GraphQL's read or chain write rows.
+// It returns nil for an answer or when the shared registry classifies a write.
 func (gm *GraphQLMessage) OwnClassification(data []byte, httpStatusCode int) *common.RouterError {
 	verdict, isError := gm.verdict(data, httpStatusCode)
 	if !isError {
@@ -653,10 +668,22 @@ func (gm *GraphQLMessage) ReplyVerdict(data []byte, httpStatusCode int) (hasErro
 }
 
 func (gm *GraphQLMessage) verdict(data []byte, httpStatusCode int) (graphQLVerdict, bool) {
+	if gm.hasChainWriteRows() {
+		copyReading := gm.chainRows.writeCopy(gm.mutationField, data, httpStatusCode)
+		if copyReading.outcome == GraphQLWriteAccepted {
+			return graphQLVerdict{kind: graphQLVerdictAnswer, status: httpStatusCode}, false
+		}
+		if copyReading.outcome == GraphQLWriteMayHaveRun && httpStatusCode >= 500 {
+			// An ambiguous 5xx can come from a gateway after delivery. Keep the existing
+			// transport handling for that status. Only a definitive Sui verdict overrides it.
+			copyReading.verdict.classified = nil
+		}
+		return copyReading.verdict, true
+	}
 	if gm.IsMutation() {
 		return writeVerdict(data, httpStatusCode)
 	}
-	verdict, isError := readVerdict(data, httpStatusCode)
+	verdict, isError := readVerdict(data, httpStatusCode, gm)
 	if isError && verdict.classified == nil {
 		// A read's error is never filed by the shared rows: a row that names no registry entry
 		// (a chain's row added without one) is filed by its kind instead (MAG-5121).

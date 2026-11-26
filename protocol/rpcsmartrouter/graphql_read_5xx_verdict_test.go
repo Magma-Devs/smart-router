@@ -50,8 +50,10 @@ func TestRelayInnerDirect_GraphQLReadVerdictDecidesUnderEvery5xx(t *testing.T) {
 		{"a 502 carrying INTERNAL_SERVER_ERROR is still blamed", read, http.StatusBadGateway, fault, true, false, false, true},
 		{"a 502 page is still blamed", read, http.StatusBadGateway, page, true, false, false, true},
 		{"control: a 500 carrying the caller's error was already served as is", read, http.StatusInternalServerError, caller, true, true, true, false},
-		// Writes still stand on the shared rows (MAG-5122): the status step decides them as before.
-		{"a write's 502 is still decided by its status", mutation, http.StatusBadGateway, caller, false, false, false, false},
+		// The unrecognized BAD_USER_INPUT write row leaves delivery uncertain. A generic 502
+		// still takes the transport path. A pre-submission refusal settles the copy.
+		{"an ambiguous write's 502 is still decided by its status", mutation, http.StatusBadGateway, caller, false, false, false, false},
+		{"a write's explicit refusal survives a 502", mutation, http.StatusBadGateway, `{"errors":[{"message":"Invalid signature format","extensions":{"code":"BAD_USER_INPUT"}}]}`, true, true, true, false},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

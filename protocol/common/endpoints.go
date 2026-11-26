@@ -33,9 +33,9 @@ const (
 	STATEFUL_ALL_PROVIDERS_HEADER_NAME              = "router-fast-tx-participants"
 	REQUESTED_BLOCK_HEADER_NAME                     = "router-parsed-requested-block"
 	// WRITE_OUTCOME_HEADER_NAME names a GraphQL write's verdict across the copies it was sent to
-	// (MAG-5122): "accepted" on the chain's success row (Sui: effects with SUCCESS or FAILURE) or
-	// "unknown" today; "rejected" and "not_sent" need the chain's refusal rows (MAG-4909, MAG-5121),
-	// and any other reply carries no header. Absent on a read and on every other interface's
+	// (MAG-5122): "accepted" when the chain's write rows read a copy as run (MAG-4909; Sui: the
+	// write field with its effects) or "unknown" today; "rejected" and "not_sent" are not stated
+	// yet, and any other reply carries no header. Absent on a read and on every other interface's
 	// write, which this ticket does not change.
 	WRITE_OUTCOME_HEADER_NAME        = "Router-Write-Outcome"
 	IDENTIFIED_NODE_ERROR_HEADER     = "router-identified-node-error"
@@ -656,12 +656,21 @@ type RelayResult struct {
 	// different tier may serve it — but the endpoint is healthy, so the direct-RPC
 	// availability gate excludes it. Same axis as IsDataScope, one level up.
 	IsNodeCapability bool
+	// IsNotFoundAnswer — the reply is an answer whose record this provider says it does not hold,
+	// sent in a 2xx (a GraphQL chain not-found row, MAG-5121: Sui's null transaction looked up by its
+	// digest). While a request is in flight it is a data-scope node error, so one more provider is
+	// asked (MAG-4909 R23, ResultsSummary.NotFoundAnswers). When that one does not hold the record
+	// either, it is served as an answer: no node-error header, and never cached, since a provider
+	// that holds the record later must be asked again. A cross-validated read has already asked
+	// several providers, so there it is an answer from the start, and counts toward the quorum as
+	// any other reply does.
+	IsNotFoundAnswer bool
 	// IsNodeAtFault — positive evidence the endpoint itself is broken or unable to serve, as
 	// opposed to answering truthfully about a request it cannot satisfy. This is what the
 	// endpoint-health counter reads; see RouterError.EndpointAtFault for why it is not Retryable.
 	IsNodeAtFault bool
-	// IsOwnVerdict — the sender filed this reply by its interface's own rows (a GraphQL read,
-	// MAG-5121): the flags above are that verdict, read from the body, so a status-only step must
+	// IsOwnVerdict — the sender filed this reply by its interface's own rows (a GraphQL read or
+	// a Sui write): the flags above are that verdict, read from the body, so a status-only step must
 	// not decide the reply again by its status (sendRelayToDirectEndpoints).
 	IsOwnVerdict bool
 	// IsSlotAlreadyUsed — the reply says the write's nonce or sequence is already used, read by the

@@ -29,17 +29,14 @@ var (
 
 func readEffect(t *testing.T, message *GraphQLMessage, body string, status int) graphQLEffect {
 	t.Helper()
-	hasError, errorMessage := message.CheckResponseError([]byte(body), status)
+	hasError, errorMessage, classificationStatus, classified := message.ReplyVerdict([]byte(body), status)
 	if !hasError {
 		return effectAnswer
 	}
-	// As the sender files it: a read by GraphQL's own rows, a write by the shared rows.
-	classified := message.OwnClassification([]byte(body), status)
-	if message.IsMutation() {
-		require.Nil(t, classified, "a write is filed by the shared rows until MAG-5122")
-		classified = common.ClassifyError(nil, common.ChainFamilyUnknown, common.TransportREST, message.ClassificationStatus([]byte(body), status), errorMessage)
+	if classified == nil {
+		require.True(t, message.IsMutation(), "a read's error is always filed by its own rows")
+		classified = common.ClassifyError(nil, common.ChainFamilyUnknown, common.TransportREST, classificationStatus, errorMessage)
 	}
-	require.NotNil(t, classified, "a read's error is always filed by its own rows")
 	return graphQLEffect{
 		nodeError: true,
 		retried:   classified.Retryable,
@@ -214,7 +211,7 @@ func BenchmarkGraphQLReadVerdictManyErrorsUnder400(b *testing.B) {
 	body := []byte(`{"data":null,"errors":[` + strings.TrimSuffix(strings.Repeat(`{"message":"codeless error with some text in it"},`, 8000), ",") + `]}`)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		readVerdict(body, 400)
+		readVerdict(body, 400, nil)
 	}
 }
 

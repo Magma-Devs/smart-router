@@ -1038,15 +1038,16 @@ func (d *DirectRPCRelaySender) sendGraphQLRelay(
 			ProviderGroup:   d.groupLabel,
 		},
 		IsNodeError: isNodeError,
+		// A Sui transaction looked up by its digest and answered null (MAG-5121 P6, R23).
+		IsNotFoundAnswer: hasError && graphqlMessage.ReplyIsNotFound(response.Body, response.StatusCode),
 	}
 	switch {
 	case ownClassification != nil:
-		// A read is filed by GraphQL's own rows, never by the shared REST rows (MAG-5121).
+		// Preserve the body verdict from GraphQL's read or chain write rows even under a 5xx.
 		result.ApplyRouterErrorClassification(ownClassification)
 		result.IsOwnVerdict = true
 	case hasError:
-		// A write is still filed by the shared rows under the status its verdict stands for (a
-		// caller's error as a 400), until the write verdicts land (MAG-5122).
+		// A write without chain rows uses the shared registry under its classification status.
 		result.ApplyNodeErrorClassification(d.chainFamily, common.TransportREST, classificationStatus, errorMessage)
 	}
 

@@ -69,12 +69,19 @@ func jsonRPCWriteParser(chainID, write string) func(t *testing.T) chainlib.Chain
 }
 
 // slotWriteCases are the writes of every interface and chain family the signatures read, each with its
-// node's slot-already-used reply: the EVM node's "nonce too low" (also a text row on Sui's GraphQL), the
-// Cosmos SDK's sequence mismatch on REST and Tendermint RPC, bitcoind's -26 and -25 in its legacy
-// JSON-RPC shape (HTTP 500 for an error), XRP's tefPAST_SEQ and Starknet's 52.
+// node's slot-already-used reply: the EVM node's "nonce too low" (the same text row reads it in a
+// GraphQL reply), the Cosmos SDK's sequence mismatch on REST and Tendermint RPC, bitcoind's -26 and -25
+// in its legacy JSON-RPC shape (HTTP 500 for an error), XRP's tefPAST_SEQ and Starknet's 52.
+//
+// The GraphQL write is on Fuel's index, a chain with no GraphQL write rows. On Sui, the chain's write
+// rows (MAG-4909) read a codeless error on a mutation as "may have run" and answer with the router's
+// unknown reply. The signature does not change that, and TestGraphQLWrite_SuiWriteRowsDecideTheOutcome
+// pins it.
 func slotWriteCases() []slotWriteCase {
 	ethNonce := `{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"nonce too low"}}`
 	graphQLNonce := `{"errors":[{"message":"nonce too low"}]}`
+	fuelGraphQL := writeInterfaceCases[2]
+	fuelGraphQL.chainID, fuelGraphQL.parser = "FUELNETWORK", graphQLWriteParser("FUELNETWORK")
 	xrpPastSeq := `{"result":{"engine_result":"tefPAST_SEQ","engine_result_code":-190,"engine_result_message":"This sequence number has already passed.","status":"success","tx_blob":"1200"}}`
 	starknetNonce := `{"jsonrpc":"2.0","id":1,"error":{"code":52,"message":"Invalid transaction nonce"}}`
 	bitcoin := func(name string, code int, message string) slotWriteCase {
@@ -98,7 +105,7 @@ func slotWriteCases() []slotWriteCase {
 			status5xx:          http.StatusServiceUnavailable,
 			slot5xx:            `{"code":32,"message":"account sequence mismatch, expected 5, got 3: incorrect account sequence","details":[]}`,
 		},
-		{writeInterfaceCase: writeInterfaceCases[2], slot2xx: graphQLNonce, status5xx: http.StatusServiceUnavailable, slot5xx: graphQLNonce},
+		{writeInterfaceCase: fuelGraphQL, slot2xx: graphQLNonce, status5xx: http.StatusServiceUnavailable, slot5xx: graphQLNonce},
 		{
 			writeInterfaceCase: writeInterfaceCase{
 				name: "tendermintrpc", chainID: "COSMOSHUB", apiInterface: spectypes.APIInterfaceTendermintRPC, parser: lavaSpecWriteParser("COSMOSHUB", spectypes.APIInterfaceTendermintRPC),

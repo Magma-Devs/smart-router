@@ -146,7 +146,8 @@ func TestRelayEnd_TransactionFields(t *testing.T) {
 			body: relayEndSuiGraphQLAliasSubmit,
 		},
 		{
-			// The client selected no effects, so the reply says nothing the event could carry.
+			// The client selected no effects, so the reply names no digest and no status: tx_hash is
+			// computed from the transaction bytes in the request (MAG-4909), and tx_status is absent.
 			name: "sui_graphql_tx_no_effects", chainID: "SUI", apiInterface: spectypes.APIInterfaceGraphQL, parser: relayEndSuiGraphQLParser,
 			node: relayEndReply(200, `{"data":{"executeTransaction":{"__typename":"ExecutionResult"}}}`, 0),
 			body: `{"query":"mutation { executeTransaction(transactionDataBcs: \"AAACAAgA\", signatures: [\"AKsS\"]) { __typename } }"}`,
