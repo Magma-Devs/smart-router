@@ -61,6 +61,11 @@ var chainErrorMappings = map[ChainFamily][]errorMapping{
 		{MessageContains("already spent"), RouterErrorChainDoubleSpend},
 		{MessageContains("double spend"), RouterErrorChainDoubleSpend},
 		{MessageContains("txn-mempool-conflict"), RouterErrorChainDoubleSpend}, // Bitcoin Core specific
+		// The request's own bytes and types (MAG-5674). bitcoind answers a JSON-RPC 1.0 request's error
+		// with HTTP 500, and without these rows the 500 decided them: NODE_INTERNAL_ERROR, a strike on
+		// every endpoint asked. Matched by code, so a fork's wording lands on the same row.
+		{CodeEquals(-22), RouterErrorChainBitcoinDeserializationError}, // RPC_DESERIALIZATION_ERROR: "TX decode failed"
+		{CodeEquals(-3), RouterErrorChainBitcoinTypeError},             // RPC_TYPE_ERROR: "JSON value of type string is not of expected type number"
 	},
 	// A refused broadcast's code decides first (cosmosTxRefusalRows): its log is free text, and the
 	// rows below would otherwise read it.

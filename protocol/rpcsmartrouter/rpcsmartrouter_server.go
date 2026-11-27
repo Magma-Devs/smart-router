@@ -3381,8 +3381,16 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 			// Update session manager with result
 			// Check status code to determine if session should fail
 			// For REST 5xx/429, err == nil but we still want to fail the session for QoS/retry
+			//
+			// A JSON-RPC 5xx whose body is an answer the endpoint is not at fault for is scored as
+			// that answer inside a 2xx (answerInsideStatusError, MAG-5674): scoredErr and scored are
+			// what the release below reads. The relay itself still fails with err.
 			statusCode := localRelayResult.StatusCode
-			shouldFailSession := shouldFailSessionForResult(err, localRelayResult)
+			scoredErr, scored := err, localRelayResult
+			if answer, status := answerInsideStatusError(err, rpcss.directRelayChainFamily()); answer != nil {
+				scoredErr, scored, statusCode = nil, answer, status
+			}
+			shouldFailSession := shouldFailSessionForResult(scoredErr, scored)
 
 			// Hold-off registry keys for this attempt (docs/RATE-LIMIT-HOLDOFF.md): the
 			// provider on this chain and api-interface, and the node URL actually dialed.
@@ -3438,7 +3446,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 						utils.LogAttr("GUID", goroutineCtx),
 					)
 				}
-			} else if err == nil && !localRelayResult.IsRateLimited && lostBroadcast(localRelayResult.IsNodeError) {
+			} else if scoredErr == nil && !scored.IsRateLimited && lostBroadcast(scored.IsNodeError) {
 				// A rejection after another upstream accepted the write is about the transaction,
 				// not this upstream (lostBroadcastRejection): no score either way, as when a loser
 				// was still cancelled on the first acceptance. A rate limit is excluded so it keeps
@@ -3452,7 +3460,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 						utils.LogAttr("GUID", goroutineCtx),
 					)
 				}
-			} else if isRateLimitedRelayOutcome(err, localRelayResult) {
+			} else if isRateLimitedRelayOutcome(err, scored) {
 				// A rate-limit is neither failure nor success — the upstream is healthy but
 				// busy, and both scoring directions get it wrong: OnSessionFailure lets a
 				// busy vendor hard-block a healthy endpoint after 15 consecutive failures,
@@ -3481,7 +3489,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 						utils.LogAttr("GUID", goroutineCtx),
 					)
 				}
-			} else if isDataScopeRelayOutcome(err, localRelayResult) {
+			} else if isDataScopeRelayOutcome(scoredErr, scored) {
 				// "I do not hold this data" is neither failure nor success. It comes back fast, so
 				// OnSessionDone would reward a lagging or pruned node with availability and latency
 				// for data it did not serve. The request still fails over; only the endpoint's tip is scored.

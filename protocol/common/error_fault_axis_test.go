@@ -61,6 +61,7 @@ var faultAxisTable = []faultAxisCase{
 	{3303, "CHAIN_SOLANA_LEDGER_JUMP", SubCategoryDataScope, true, "missing due to ledger jump/snapshot"},
 	{3309, "CHAIN_SOLANA_BLOCK_STATUS_UNAVAILABLE", SubCategoryDataScope, true, ""},
 	{3311, "CHAIN_SOLANA_MIN_CONTEXT_SLOT_NOT_REACHED", SubCategoryDataScope, true, "this node's ledger does not reach that slot"},
+	{3348, "CHAIN_BITCOIN_TYPE_ERROR", SubCategoryDataScope, true, "bitcoind -3: versions disagree on some parameter types (MAG-5674)"},
 	{3331, "CHAIN_STARKNET_BLOCK_NOT_FOUND", SubCategoryDataScope, true, ""},
 	{3332, "CHAIN_STARKNET_TX_HASH_NOT_FOUND", SubCategoryDataScope, true, ""},
 	{3360, "CHAIN_NEAR_UNKNOWN_BLOCK", SubCategoryDataScope, true, "not found or garbage-collected"},
@@ -148,6 +149,7 @@ var faultAxisTable = []faultAxisCase{
 	{3342, "CHAIN_BITCOIN_VERIFY_REJECTED", SubCategoryNone, false, ""},
 	{3343, "CHAIN_BITCOIN_ALREADY_IN_CHAIN", SubCategoryNone, false, ""},
 	{3344, "CHAIN_BITCOIN_WALLET_INSUFFICIENT_FUNDS", SubCategoryNone, false, ""},
+	{3347, "CHAIN_BITCOIN_DESERIALIZATION_ERROR", SubCategoryNone, false, "bitcoind -22: every node decodes the same bytes the same way (MAG-5674)"},
 	{3362, "CHAIN_NEAR_INVALID_SHARD_ID", SubCategoryNone, false, ""},
 }
 

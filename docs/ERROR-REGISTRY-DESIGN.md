@@ -166,6 +166,8 @@ Uses a **tiered classification system** (see Section 3 for details):
 | 3342 | `CHAIN_BITCOIN_VERIFY_REJECTED` | Transaction rejected by rules (-26 / RPC_VERIFY_REJECTED) | No | Bitcoin/UTXO |
 | 3343 | `CHAIN_BITCOIN_ALREADY_IN_CHAIN` | Transaction already confirmed (-27 / RPC_VERIFY_ALREADY_IN_CHAIN) | No | Bitcoin/UTXO |
 | 3344 | `CHAIN_BITCOIN_WALLET_INSUFFICIENT_FUNDS` | Wallet UTXO coin selection failed (-6 / RPC_WALLET_INSUFFICIENT_FUNDS). Distinct from EVM CHAIN_INSUFFICIENT_FUNDS (3003) which is a tx submission failure. | No | Bitcoin/UTXO |
+| 3347 | `CHAIN_BITCOIN_DESERIALIZATION_ERROR` | Raw data in the request could not be decoded (-22 / RPC_DESERIALIZATION_ERROR): a transaction ("TX decode failed"), a PSBT, a block or a header. The request's answer: not the endpoint's fault | No | Bitcoin/UTXO |
+| 3348 | `CHAIN_BITCOIN_TYPE_ERROR` | A parameter of a JSON type the method does not take (-3 / RPC_TYPE_ERROR). Data scope, as bitcoind versions disagree on some types: another provider is asked, the endpoint is not blamed | Yes | Bitcoin/UTXO |
 | **NEAR-Specific (3360-3379) — Tier 2** |||||
 | 3360 | `CHAIN_NEAR_UNKNOWN_BLOCK` | Block not found or garbage-collected (UNKNOWN_BLOCK) | Yes | NEAR |
 | 3361 | `CHAIN_NEAR_UNKNOWN_CHUNK` | Chunk not found (UNKNOWN_CHUNK) | Yes | NEAR |
