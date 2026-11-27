@@ -275,3 +275,61 @@ func TestRelayInnerDirect_A5xxAroundARevertByTextAloneStillFailsOverWithoutBlami
 	assert.Zero(t, h.endpoint.ConnectionRefusals, "a reverted call is not the endpoint's fault")
 	assert.True(t, h.endpoint.IsEnabled())
 }
+
+// MAG-4448: bitcoind answers a JSON-RPC 1.0 request's error with HTTP 500, and its -8 and -5 each
+// carry several meanings, so their Bitcoin rows make none of them the caller's. The body decides:
+// the relay fails over to another provider, and the endpoint is not blamed (rulebook Part IV, test
+// T13). A height above the node's tip is the behind row (Reference Q146). Before, -8 and -5 had no
+// row, the 500 decided, and every provider asked took a strike.
+func TestClassifyDirectRPCError_ABitcoindMinus8OrMinus5InsideA500FailsOverWithoutBlame(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want *common.RouterError
+	}{
+		{"-8 past this node's tip", `{"result":null,"error":{"code":-8,"message":"Block height out of range"},"id":7}`, common.RouterErrorChainBlockNotFound},
+		{"-8 a parameter", `{"result":null,"error":{"code":-8,"message":"Invalid parameter, vout cannot be negative"},"id":7}`, common.RouterErrorChainBitcoinInvalidParameter},
+		{"-5 no txindex", `{"result":null,"error":{"code":-5,"message":"No such mempool transaction. Use -txindex or provide a block hash to enable blockchain transaction queries. Use gettransaction for wallet transactions."},"id":7}`, common.RouterErrorNodeDataNotHeld},
+		{"-5 block not found", `{"result":null,"error":{"code":-5,"message":"Block not found"},"id":7}`, common.RouterErrorChainBlockNotFound},
+		{"-5 transaction not found", `{"result":null,"error":{"code":-5,"message":"No such mempool or blockchain transaction. Use gettransaction for wallet transactions."},"id":7}`, common.RouterErrorChainTxNotFound},
+		{"-5 a key or descriptor", `{"result":null,"error":{"code":-5,"message":"Unknown filtertype"},"id":7}`, common.RouterErrorChainBitcoinInvalidAddressOrKey},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			httpErr := &routersession.HTTPStatusError{StatusCode: 500, Status: "500 Internal Server Error", Body: []byte(tc.body)}
+
+			classified, wrapped := classifyDirectRPCError(httpErr, common.ChainFamilyBitcoin, common.TransportJsonRPC)
+
+			require.Same(t, tc.want, classified)
+			assert.Same(t, classified, common.AsRouterError(wrapped), "the body's verdict carries the retry")
+			assert.True(t, chainlib.ShouldRetryError(wrapped), "another provider is asked")
+			assert.False(t, chainlib.IsUnsupportedMethodError(wrapped))
+			unhealthy, backoff := classifyEndpointHealth(healthVerdict(wrapped, common.ChainFamilyBitcoin, common.TransportJsonRPC), false)
+			assert.False(t, unhealthy, "the endpoint is not blamed")
+			assert.False(t, backoff)
+		})
+	}
+}
+
+// The ticket's own example end to end through relayInnerDirect against a real HTTP upstream: a
+// JSON-RPC 1.0 getblockhash for height -1, which bitcoind answers with HTTP 500 and -8 "Block height
+// out of range". The attempt fails over, and however often it is sent the endpoint takes no strike,
+// so it is never benched for a caller's request.
+func TestRelayInnerDirect_ABitcoindMinus8InsideA500FailsOverWithoutAStrike(t *testing.T) {
+	h := newDirectRelayHarness(t, http.StatusInternalServerError,
+		`{"result":null,"error":{"code":-8,"message":"Block height out of range"},"id":7}`)
+	h.rpcss.listenEndpoint.ChainID = "BTC"
+	msg := &mockChainMessage{requestData: []byte(`{"jsonrpc":"1.0","id":7,"method":"getblockhash","params":[-1]}`)}
+
+	for range 3 {
+		_, err := h.rpcss.relayInnerDirect(
+			context.Background(), h.session, &common.RelayResult{}, 5*time.Second, 30*time.Second,
+			msg, msg.requestData, func() bool { return false }, nil, false,
+		)
+
+		require.Error(t, err)
+		assert.True(t, chainlib.ShouldRetryError(err), "another provider is asked")
+	}
+	assert.Zero(t, h.endpoint.ConnectionRefusals, "no strike for a -8")
+	assert.True(t, h.endpoint.IsEnabled())
+}

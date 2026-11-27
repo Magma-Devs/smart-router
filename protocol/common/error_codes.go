@@ -738,6 +738,27 @@ var (
 		Code: 3344, Name: "CHAIN_BITCOIN_WALLET_INSUFFICIENT_FUNDS", Category: CategoryExternal,
 		Description: "Wallet UTXO coin selection failed (RPC_WALLET_INSUFFICIENT_FUNDS, Bitcoin -6). Distinct from EVM CHAIN_INSUFFICIENT_FUNDS (3003) which is a tx submission failure.", Retryable: false,
 	})
+	// CHAIN_BITCOIN_INVALID_PARAMETER: an RPC_INVALID_PARAMETER (-8) that no narrower Bitcoin row
+	// reads (MAG-4448). bitcoind raises -8 for a parameter the caller got wrong and for this node's
+	// own state, such as an index it was not started with, and the code alone cannot tell them
+	// apart. So another provider is asked and the endpoint is not blamed, the data-scope axis. A row
+	// that makes a -8 message the caller's needs a production example (rulebook Q229).
+	RouterErrorChainBitcoinInvalidParameter = registerError(&RouterError{
+		Code: 3345, Name: "CHAIN_BITCOIN_INVALID_PARAMETER", Category: CategoryExternal,
+		SubCategory: SubCategoryDataScope,
+		Description: "Invalid parameter, or a parameter this node cannot serve (RPC_INVALID_PARAMETER, Bitcoin -8); another provider may answer", Retryable: true,
+	})
+	// CHAIN_BITCOIN_INVALID_ADDRESS_OR_KEY: an RPC_INVALID_ADDRESS_OR_KEY (-5) that no narrower
+	// Bitcoin row reads (MAG-4448). bitcoind raises -5 for a key or descriptor the caller got wrong
+	// and for an object this node does not hold, so it is read as -8 is: another provider is asked
+	// and the endpoint is not blamed. Its Description must not hold a phrase a caller's-mistake text
+	// row matches ("invalid address"): ShouldRetryError re-reads a wrapped error's text, which
+	// carries the Description, and would end the relay.
+	RouterErrorChainBitcoinInvalidAddressOrKey = registerError(&RouterError{
+		Code: 3346, Name: "CHAIN_BITCOIN_INVALID_ADDRESS_OR_KEY", Category: CategoryExternal,
+		SubCategory: SubCategoryDataScope,
+		Description: "A key, address or object this node rejects or does not hold (RPC_INVALID_ADDRESS_OR_KEY, Bitcoin -5); another provider may answer", Retryable: true,
+	})
 
 	// NEAR-specific (3360-3379) — Tier 2
 	// Source: NEAR RPC docs (error names in JSON-RPC error.cause.name)

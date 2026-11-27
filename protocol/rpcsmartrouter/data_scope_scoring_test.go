@@ -3,6 +3,7 @@ package rpcsmartrouter
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -58,6 +59,8 @@ func (s *scoringSpyOptimizer) AppendSyncData(provider string, syncBlock uint64, 
 func TestDataScopeAnswerScoresSyncOnly(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
+		chainID       string // "" is ETH1
+		status        int    // the upstream's HTTP status; 0 is 200
 		reply         string
 		wantSuccesses int32
 		wantFailures  int32
@@ -85,6 +88,34 @@ func TestDataScopeAnswerScoresSyncOnly(t *testing.T) {
 			wantStreak: 1,
 		},
 		{
+			// MAG-4448: bitcoind answers a JSON-RPC 1.0 request's error with HTTP 500. The body
+			// decides here too, as it does for the endpoint's health and the retry: a -8 or -5 inside
+			// the 500 scores as it would inside a 200, on sync only.
+			name:       "bitcoind -8 inside a 500",
+			chainID:    "BTC",
+			status:     http.StatusInternalServerError,
+			reply:      `{"result":null,"error":{"code":-8,"message":"Block height out of range"},"id":1}`,
+			wantSyncs:  1,
+			wantStreak: 1,
+		},
+		{
+			name:       "bitcoind -5 inside a 500",
+			chainID:    "BTC",
+			status:     http.StatusInternalServerError,
+			reply:      `{"result":null,"error":{"code":-5,"message":"No such mempool or blockchain transaction. Use gettransaction for wallet transactions."},"id":1}`,
+			wantSyncs:  1,
+			wantStreak: 1,
+		},
+		{
+			// A 5xx whose body explains nothing stays a failure.
+			name:         "control: bitcoind code no row knows inside a 500",
+			chainID:      "BTC",
+			status:       http.StatusInternalServerError,
+			reply:        `{"result":null,"error":{"code":-12345,"message":"something the node never documented"},"id":1}`,
+			wantFailures: 1,
+			wantStreak:   2,
+		},
+		{
 			name:          "control: a result",
 			reply:         `{"jsonrpc":"2.0","id":1,"result":"0x10"}`,
 			wantSuccesses: 1,
@@ -99,18 +130,26 @@ func TestDataScopeAnswerScoresSyncOnly(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
+			chainID, status := tc.chainID, tc.status
+			if chainID == "" {
+				chainID = "ETH1"
+			}
+			if status == 0 {
+				status = http.StatusOK
+			}
 
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(status)
 				_, _ = w.Write([]byte(tc.reply))
 			}))
 			defer upstream.Close()
 			// A known tip for the endpoint, so a sync sample has something to report.
-			seedEndpointTip("ETH1", "jsonrpc", upstream.URL, 700)
-			t.Cleanup(func() { endpointtip.Default().Remove(endpointtip.Key("ETH1", "jsonrpc", upstream.URL)) })
+			seedEndpointTip(chainID, "jsonrpc", upstream.URL, 700)
+			t.Cleanup(func() { endpointtip.Default().Remove(endpointtip.Key(chainID, "jsonrpc", upstream.URL)) })
 
 			chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(
-				ctx, "ETH1", spectypes.APIInterfaceJsonRPC,
+				ctx, chainID, spectypes.APIInterfaceJsonRPC,
 				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }),
 				nil, "../../", nil)
 			if closeServer != nil {
@@ -119,6 +158,9 @@ func TestDataScopeAnswerScoresSyncOnly(t *testing.T) {
 			require.NoError(t, err)
 
 			body := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_getBalance","params":["0x0000000000000000000000000000000000000000","0x10"]}`)
+			if chainID == "BTC" {
+				body = []byte(`{"jsonrpc":"1.0","id":1,"method":"getblockhash","params":[900000]}`)
+			}
 			chainMsg, err := chainParser.ParseMsg("", body, http.MethodPost, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 			require.NoError(t, err)
 			relayData := relayprotocol.NewRelayData(ctx, http.MethodPost, "", body, 0, 16, "jsonrpc",
@@ -151,9 +193,9 @@ func TestDataScopeAnswerScoresSyncOnly(t *testing.T) {
 			require.NoError(t, session.SetUsageForSession(0, nil, usedProviders, routersession.NewRouterKey(nil)))
 
 			spy := &scoringSpyOptimizer{
-				ProviderOptimizer: provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "ETH1"),
+				ProviderOptimizer: provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, chainID),
 			}
-			rpcEndpoint := &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"}
+			rpcEndpoint := &routersession.RPCEndpoint{ChainID: chainID, ApiInterface: "jsonrpc"}
 			rpcss := &RPCSmartRouterServer{
 				listenEndpoint:    rpcEndpoint,
 				chainParser:       chainParser,
@@ -203,6 +245,10 @@ func TestIsDataScopeRelayOutcome(t *testing.T) {
 		result.ApplyNodeErrorClassification(common.ChainFamilyEVM, common.TransportJsonRPC, code, message)
 		return result
 	}
+	// A JSON-RPC 5xx as the direct sender returns it: the status error, classified and wrapped.
+	statusErr := func(family common.ChainFamily, status int, body string) error {
+		return classifyAndWrap(&routersession.HTTPStatusError{StatusCode: status, Status: fmt.Sprintf("%d %s", status, http.StatusText(status)), Body: []byte(body)}, family, common.TransportJsonRPC)
+	}
 	// A REST or gRPC answer is classified by its transport status, as the direct senders do
 	// (sendRESTRelay / sendGRPCRelay call ApplyNodeErrorClassification with the response code).
 	classifiedStatus := func(family common.ChainFamily, transport common.TransportType, status int, message string) *common.RelayResult {
@@ -237,6 +283,14 @@ func TestIsDataScopeRelayOutcome(t *testing.T) {
 			result: &common.RelayResult{StatusCode: http.StatusBadGateway, IsNodeError: true, IsDataScope: true},
 			want:   false,
 		},
+		// MAG-4448: a JSON-RPC 5xx whose body is data scope is read by its body, as the sender's
+		// wrapped verdict carries it. A 5xx the body does not explain stays a failure.
+		{name: "bitcoind -8 inside a 500", err: statusErr(common.ChainFamilyBitcoin, 500, `{"result":null,"error":{"code":-8,"message":"Block height out of range"},"id":1}`), want: true},
+		{name: "bitcoind -5 inside a 500", err: statusErr(common.ChainFamilyBitcoin, 500, `{"result":null,"error":{"code":-5,"message":"Transaction not in mempool"},"id":1}`), want: true},
+		{name: "a not-found body inside a 503", err: statusErr(common.ChainFamilyEVM, 503, `{"jsonrpc":"2.0","id":1,"error":{"code":-32001,"message":"block not found"}}`), want: true},
+		{name: "an internal error inside a 500 stays a failure", err: statusErr(common.ChainFamilyBitcoin, 500, `{"result":null,"error":{"code":-32603,"message":"internal error"},"id":1}`), want: false},
+		{name: "a 500 with no body stays a failure", err: statusErr(common.ChainFamilyBitcoin, 500, ``), want: false},
+		{name: "a code no row knows inside a 500 stays a failure", err: statusErr(common.ChainFamilyEVM, 500, `{"jsonrpc":"2.0","id":1,"error":{"code":-8,"message":"Block height out of range"}}`), want: false},
 		{
 			name:   "data scope with a transport error stays a failure",
 			err:    errors.New("connection reset"),
