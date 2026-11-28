@@ -19,6 +19,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
+	"github.com/magma-Devs/smart-router/utils"
 	specutils "github.com/magma-Devs/smart-router/utils/keeper"
 )
 
@@ -106,6 +107,10 @@ func TestGrpcNodeErrorReply(t *testing.T) {
 	grpcMessage := &rpcInterfaceMessages.GrpcMessage{Path: "routertest.v1.BlockService/GetLatestBlock"}
 	nodeErrorBody, err := json.Marshal(GrpcNodeErrorResponse{ErrorCode: uint32(codes.Unknown), ErrorMessage: methodRefusedMessage})
 	require.NoError(t, err)
+	const registered = "MAG5698GrpcNodeErrorKey0123456789"
+	utils.RegisterSecrets(registered)
+	keyNamingBody, err := json.Marshal(GrpcNodeErrorResponse{ErrorCode: uint32(codes.PermissionDenied), ErrorMessage: "invalid api key " + registered})
+	require.NoError(t, err)
 
 	tests := []struct {
 		name        string
@@ -121,11 +126,22 @@ func TestGrpcNodeErrorReply(t *testing.T) {
 			body:       []byte{0x08, 0x2a},
 		},
 		{
+			// The message is written as a log line writes it (MAG-5698), and to the url pass a
+			// gRPC method path is a scheme-less url with a path: the method's name is withheld, as
+			// it is in the log line and in the verification row of `smartrouter health` already.
 			name:        "a node error",
 			rpcMessage:  grpcMessage,
 			statusCode:  int(codes.Unknown),
 			body:        nodeErrorBody,
-			wantErrText: "gRPC status Unknown: " + methodRefusedMessage,
+			wantErrText: "gRPC status Unknown: Method /routertest.v1.BlockService/[redacted] is not allowed",
+		},
+		{
+			// MAG-5698: the message is the node's own text, redacted here as a logged one is.
+			name:        "a node error naming a registered value writes it as [redacted]",
+			rpcMessage:  grpcMessage,
+			statusCode:  int(codes.PermissionDenied),
+			body:        keyNamingBody,
+			wantErrText: "gRPC status PermissionDenied: invalid api key [redacted]",
 		},
 		{
 			name:        "a node error whose body does not decode keeps its status",

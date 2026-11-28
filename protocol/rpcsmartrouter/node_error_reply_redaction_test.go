@@ -8,11 +8,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/magma-Devs/smart-router/protocol/chainlib"
+	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/magma-Devs/smart-router/utils/rand"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
 )
 
 // relayNodeError runs one relay through relayInnerDirect against an upstream that answers HTTP 200
@@ -132,6 +136,44 @@ func TestFailedRelayReply_EndToEnd_NodeErrorBodyWithholdsTheKey(t *testing.T) {
 			require.NotContains(t, read.body, key)
 			require.Equal(t, want, read.body, "the node's body, as the node wrote it but for the key")
 			require.Equal(t, "application/json", read.contentType)
+		})
+	}
+}
+
+// grpcFakeConn is fakeDirectConn on a gRPC connection.
+type grpcFakeConn struct{ fakeDirectConn }
+
+func (*grpcFakeConn) GetProtocol() routersession.DirectRPCProtocol {
+	return routersession.DirectRPCProtocolGRPC
+}
+
+// The one node error reply the redaction leaves alone is a Cosmos BroadcastTx refusing the
+// transaction under gRPC OK (MAG-5323), read by the method and the status its sender read it by.
+// Every other gRPC node error is redacted, whatever its body looks like (MAG-5698).
+func TestIsRefusedGRPCBroadcast(t *testing.T) {
+	grpcRequest := func(path string) chainlib.ChainMessage {
+		return &mockChainMessage{rpcMessage: &rpcInterfaceMessages.GrpcMessage{Path: path}}
+	}
+	grpcConn, httpConn := &grpcFakeConn{}, &fakeDirectConn{}
+	okStatus := &common.RelayResult{StatusCode: http.StatusOK}
+	failedStatus := &common.RelayResult{StatusCode: int(codes.PermissionDenied)}
+	for _, tc := range []struct {
+		name   string
+		conn   routersession.DirectRPCConnection
+		msg    chainlib.ChainMessage
+		result *common.RelayResult
+		want   bool
+	}{
+		{"a refused BroadcastTx", grpcConn, grpcRequest(cosmosGRPCBroadcastMethod), okStatus, true},
+		{"with a leading slash", grpcConn, grpcRequest("/" + cosmosGRPCBroadcastMethod), okStatus, true},
+		{"a read under OK", grpcConn, grpcRequest("cosmos.bank.v1beta1.Query/Balance"), okStatus, false},
+		{"a BroadcastTx under a failed status", grpcConn, grpcRequest(cosmosGRPCBroadcastMethod), failedStatus, false},
+		{"not a gRPC connection", httpConn, grpcRequest(cosmosGRPCBroadcastMethod), okStatus, false},
+		{"not a gRPC request", grpcConn, &mockChainMessage{}, okStatus, false},
+		{"no connection", nil, grpcRequest(cosmosGRPCBroadcastMethod), okStatus, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, isRefusedGRPCBroadcast(tc.conn, tc.msg, tc.result))
 		})
 	}
 }

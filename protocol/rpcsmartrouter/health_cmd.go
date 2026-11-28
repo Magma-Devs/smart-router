@@ -392,8 +392,8 @@ func probeProvider(ctx context.Context, provider healthProvider, opts healthOpti
 		rows := make([]healthEndpointResult, 0, len(provider.nodeUrls))
 		for _, url := range provider.nodeUrls {
 			row := baseRow(provider, url)
-			row.Error = err.Error()
-			row.Router.Reason = err.Error()
+			row.Error = healthText(err)
+			row.Router.Reason = row.Error
 			rows = append(rows, row)
 		}
 		return rows
@@ -534,14 +534,21 @@ func applyValidation(row *healthEndpointResult, v chainlib.NodeURLValidation) {
 	row.Ok = allOk
 }
 
+// healthText is an error's text as a health row prints it: redacted, as the node url's own
+// rows are (chainlib's report). A provider's exclusion is the refusal of its first failing url,
+// built from a check's error as it came back, and a transport error names the url it was sent to.
+func healthText(err error) string {
+	return utils.RedactSecrets(err.Error())
+}
+
 // routerVerdict is what the router does with one node url, given the provider's fate.
 // A rate limit decides nothing, so a url or provider that only met one is unknown.
 func routerVerdict(v chainlib.NodeURLValidation, providerExcluded error) healthRouterVerdict {
 	switch {
 	case providerExcluded != nil && chainlib.IsRateLimitFailure(providerExcluded):
-		return healthRouterVerdict{Verdict: routerUnknown, RefusedServices: []string{}, Reason: "rate-limited: " + providerExcluded.Error()}
+		return healthRouterVerdict{Verdict: routerUnknown, RefusedServices: []string{}, Reason: "rate-limited: " + healthText(providerExcluded)}
 	case providerExcluded != nil:
-		return healthRouterVerdict{Verdict: routerExcluded, RefusedServices: []string{}, Reason: providerExcluded.Error()}
+		return healthRouterVerdict{Verdict: routerExcluded, RefusedServices: []string{}, Reason: healthText(providerExcluded)}
 	case v.Refused:
 		return healthRouterVerdict{Verdict: routerRefused, RefusedServices: []string{}, Reason: v.Refusal}
 	case v.Throttled != "":

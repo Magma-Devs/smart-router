@@ -135,6 +135,7 @@ func TestRedactSecrets_Idempotent(t *testing.T) {
 		"https://node.example.com/v2/AbC123SecretKey",
 		"https://node.example.com:9090/rpc?apikey=AbC123SecretKey",
 		`Post "https://node.example.com/v2/AbC123SecretKey": connection reset`,
+		`https://node.example.com/abci_query?path="/store/acc/key"&apikey=AbC123SecretKey`,
 	} {
 		once := RedactSecrets(in)
 		assert.Equal(t, once, RedactSecrets(once), "second pass changed %q", once)

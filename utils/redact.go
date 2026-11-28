@@ -24,10 +24,24 @@ const (
 	queryStop = `\s"'` + "`" + `<>\\^{}|\[\],)`
 )
 
+// queryChar matches one character of a query, or a quoted query value whole. Tendermint RPC takes
+// a string parameter JSON-quoted ("abci_query?path="/store/acc/key"&apikey=<key>"), and clients
+// send the quotes raw, so a quote that follows "=" opens a value and the next one closes it: the
+// match stopped at the opening quote, as at any other, and the query past the closing one stood
+// (MAG-5698). A value holds no space, because a url holds no raw space; a quote that never closes
+// still ends the url. The quoted form is the first alternative because the match is leftmost-first:
+// the single-character form would take the "=" alone, and the quote would end the match.
+//
+// A quoted value holds none of ",{}[]" either. A url at the end of a JSON string whose query ends
+// in "=" (an empty value, base64 padding) is followed by the string's closing quote, and the next
+// quote is the next key's: read as a quoted value, the match took ",\"b" with it, and a redacted
+// JSON body lost the key and was no longer JSON.
+const queryChar = `(?:="[^"\s,{}\[\]]*"|[^` + queryStop + `])`
+
 // urlInText matches a scheme-qualified url inside arbitrary text. Anchoring on
 // "://" keeps prose and scheme-less identifiers — a host:port listen address, a
 // provider name, a "dial tcp 10.0.0.1:443" — untouched.
-var urlInText = regexp.MustCompile(`[a-zA-Z][a-zA-Z0-9+.\-]*://[^` + urlStop + `?]+(?:\?[^` + queryStop + `]*)?`)
+var urlInText = regexp.MustCompile(`[a-zA-Z][a-zA-Z0-9+.\-]*://[^` + urlStop + `?]+(?:\?` + queryChar + `*)?`)
 
 // escapedURLInText matches a url whose slashes are escaped, as JSON allows
 // ("https:\/\/host\/v2\/<key>"). A backslash is part of the match only in "\/",
@@ -37,7 +51,7 @@ var escapedURLInText = regexp.MustCompile(`[a-zA-Z][a-zA-Z0-9+.\-]*:\\/\\/(?:[^`
 // schemeLessURLInText matches a credential-bearing scheme-less node url while
 // requiring a recognizable host. That keeps ordinary prose, provider names,
 // provider addresses and bare host:port values untouched.
-var schemeLessURLInText = regexp.MustCompile(`\b(?:(?:localhost|(?:[a-zA-Z0-9-]+\.)+[a-zA-Z0-9-]+)(?::[0-9]+)?|[a-zA-Z0-9-]+:[0-9]+)(?:[/#][^` + urlStop + `?]*(?:\?[^` + queryStop + `]*)?|\?[^` + queryStop + `]+)`)
+var schemeLessURLInText = regexp.MustCompile(`\b(?:(?:localhost|(?:[a-zA-Z0-9-]+\.)+[a-zA-Z0-9-]+)(?::[0-9]+)?|[a-zA-Z0-9-]+:[0-9]+)(?:[/#][^` + urlStop + `?]*(?:\?` + queryChar + `*)?|\?` + queryChar + `+)`)
 
 // RedactURL reduces one url to scheme://host[:port]. Upstream vendors carry the
 // api key in the userinfo, the path (".../v2/<key>") or the query
