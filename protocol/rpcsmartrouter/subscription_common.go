@@ -292,15 +292,19 @@ func (se *subscriptionEndpoints) rankURLs(byURL map[string]*common.NodeUrl) map[
 // selectEndpoint gives a new subscription: a node behind the chain, or one that kept failing,
 // beats no subscription at all. A url held off after a 429 is still in rotation, as it is for
 // selection, so a hold-off never displaces anything.
+//
+// A url in neither tier is out of rotation whatever it ranks. It left the live pairing (a failed
+// re-verification, a pairing reset), so selection never places a new subscription on it, and the
+// session manager, which holds no endpoint for it any more, ranks it in rotation.
 func (se *subscriptionEndpoints) outOfRotationWhileOneIsLeft(url string) bool {
 	lendRank := se.lendRank.Load()
 	if lendRank == nil || *lendRank == nil {
 		return false
 	}
-	if (*lendRank)(url) == inRotationRank {
+	snapshot := se.endpointsSnapshot()
+	if _, inTiers := snapshot.byURL[url]; inTiers && (*lendRank)(url) == inRotationRank {
 		return false
 	}
-	snapshot := se.endpointsSnapshot()
 	for _, tier := range [][]*common.NodeUrl{snapshot.primary, snapshot.backup} {
 		for _, ep := range tier {
 			if (*lendRank)(ep.Url) == inRotationRank {

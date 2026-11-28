@@ -67,6 +67,18 @@ func TestOutOfRotationWhileOneIsLeft(t *testing.T) {
 			ranks: map[string]int{"departed": switchedOff, "primary-1": inRotation},
 			url:   "departed", want: true,
 		},
+		{
+			// The session manager ranks a url it holds no endpoint for in rotation
+			// (URLLendRank), and that is what a url whose provider left the pairing reads.
+			name:  "a url that left the tiers is out of rotation, whatever it ranks",
+			ranks: map[string]int{"primary-1": inRotation},
+			url:   "departed", want: true,
+		},
+		{
+			name:  "a url that left the tiers while nothing in rotation is left",
+			ranks: map[string]int{"primary-1": switchedOff, "primary-2": switchedOff, "backup-1": switchedOff},
+			url:   "departed",
+		},
 	}
 
 	for _, manager := range subscriptionManagerCases() {
@@ -279,6 +291,31 @@ func TestWSJoin_NewClientDoesNotJoinASubscriptionOnAUrlOutOfRotation(t *testing.
 	require.Equal(t, 1, subscribeCalls(h.second), "a further client joins the subscription in rotation")
 	require.Equal(t, 2, h.activeSubscriptionCountLocked())
 	require.Equal(t, h.second.URL(), h.urlOfSubscriptionFor(third.clientKey))
+}
+
+// TestWSJoin_NewClientDoesNotJoinASubscriptionOnAUrlThatLeftTheTiers: the first node's
+// provider leaves the live pairing (a failed re-verification), so its url leaves both tiers and
+// the session manager, which holds no endpoint for it any more, ranks it in rotation. The
+// subscription on it keeps its client, and the arriving client opens one on the node that is
+// still in the tiers, as a new subscription would.
+func TestWSJoin_NewClientDoesNotJoinASubscriptionOnAUrlThatLeftTheTiers(t *testing.T) {
+	h := newDisplacementHarness(t)
+
+	first := h.subscribe("ws-first")
+	t.Cleanup(first.disconnect)
+	require.Equal(t, 1, subscribeCalls(h.first))
+
+	h.manager.SetEndpoints([]*common.NodeUrl{{Url: h.second.URL()}}, nil)
+
+	second := h.subscribe("ws-second")
+	t.Cleanup(second.disconnect)
+
+	require.Equal(t, 1, subscribeCalls(h.second), "the arriving client's subscription opens on the node still in the tiers")
+	require.Equal(t, 1, subscribeCalls(h.first))
+	require.Equal(t, h.second.URL(), h.urlOfSubscriptionFor(second.clientKey))
+	require.Equal(t, h.first.URL(), h.urlOfSubscriptionFor(first.clientKey), "the client already on it stays")
+	requirePush(t, first.replies, "the client on the url that left the tiers")
+	requirePush(t, second.replies, "the arriving client")
 }
 
 // TestWSJoin_StillJoinsWhenNoUrlIsInRotation keeps the last chance: with every url out of
