@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -16,7 +17,9 @@ import (
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 )
 
 // --- test doubles -----------------------------------------------------------
@@ -388,18 +391,35 @@ func TestStreamRelayCallback_ReleasesClientOnClose(t *testing.T) {
 	}
 }
 
-// TestStreamRelayCallback_StartFailurePropagates: a failed subscribe (no endpoints,
-// rate limit, reflection down) must surface to the client instead of an empty stream.
+// TestStreamRelayCallback_StartFailurePropagates: a failed subscribe (no endpoints, a node that is
+// down, reflection down, a limit) must surface to the client instead of an empty stream, with the
+// router's own status: the manager's reason is for the router's log and relay_end (MAG-5697).
 func TestStreamRelayCallback_StartFailurePropagates(t *testing.T) {
-	sender := &stubRelaySender{parser: grpcParserWithSubscription()}
-	listener := newStreamingListener(t, sender)
-	manager := newStubGRPCSubscriptionManager()
-	manager.startErr = errors.New("no gRPC endpoints available")
+	for _, tc := range []struct {
+		name     string
+		startErr error
+		code     codes.Code
+		message  string
+	}{
+		{"no endpoint", errors.New("failed to select endpoint: no gRPC endpoints available"), codes.Unavailable, "subscription could not be started"},
+		{"a node that is down", fmt.Errorf("failed to create stream: %w", status.Error(codes.Unavailable, `connection error: desc = "transport: Error while dialing: dial tcp 10.0.0.7:9090: connect: connection refused"`)), codes.Unavailable, "subscription could not be started"},
+		{"a client at its limit", fmt.Errorf("client %w (10)", ErrSubscriptionLimitReached), codes.ResourceExhausted, "subscription limit reached"},
+		{"the router at its limit", fmt.Errorf("global %w (5000)", ErrSubscriptionLimitReached), codes.ResourceExhausted, "subscription limit reached"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sender := &stubRelaySender{parser: grpcParserWithSubscription()}
+			listener := newStreamingListener(t, sender)
+			manager := newStubGRPCSubscriptionManager()
+			manager.startErr = tc.startErr
 
-	response, err := listener.makeStreamRelayCallback(manager, false)(context.Background(), streamingApiName, []byte("{}"))
-	require.Error(t, err)
-	require.Nil(t, response)
-	require.Contains(t, err.Error(), "no gRPC endpoints available")
+			response, err := listener.makeStreamRelayCallback(manager, false)(context.Background(), streamingApiName, []byte("{}"))
+			require.Nil(t, response)
+			st, ok := status.FromError(err)
+			require.True(t, ok, "a status of the router's own: %v", err)
+			require.Equal(t, tc.code, st.Code())
+			require.Equal(t, tc.message, st.Message())
+		})
+	}
 }
 
 // reportingRelaySender records the subscription requests a listener reports.
@@ -457,7 +477,7 @@ func TestStreamRelayCallback_ReportsEachStreamOpen(t *testing.T) {
 			}
 			report := sender.reports[0]
 			require.Equal(t, tc.method, report.method)
-			require.Equal(t, tc.startErr, report.err, "the manager's error, as the client gets it")
+			require.Equal(t, tc.startErr, report.err, "the manager's error, which relay_end records")
 			require.True(t, report.guid, "the stream's GUID")
 			require.True(t, report.recordsSent, "the manager could say what it did upstream")
 		})

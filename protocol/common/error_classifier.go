@@ -13,6 +13,7 @@ import (
 	"time"
 
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
+	"github.com/magma-Devs/smart-router/utils"
 	"google.golang.org/grpc/status"
 )
 
@@ -1147,8 +1148,16 @@ func DetectConnectionError(err error) *RouterError {
 // `node-error` through the registry's row for a node-sent UNAVAILABLE.
 type GRPCCallUndeliveredError struct {
 	// Err is the status grpc-go returned, or the error that kept the connection from being set
-	// up, kept for logs and for the text rows above.
+	// up, kept for logs and for the text rows above. NewGRPCCallUndeliveredError replaces the
+	// node's address in its text.
 	Err error
+}
+
+// NewGRPCCallUndeliveredError wraps the error of a call that never reached the node at nodeURL.
+// Its text has the node's address replaced (WithoutNodeAddress), as GRPCReplyLostError's has the
+// socket's, so neither relay_end nor a log line built from the error carries it.
+func NewGRPCCallUndeliveredError(err error, nodeURL string) *GRPCCallUndeliveredError {
+	return &GRPCCallUndeliveredError{Err: WithoutNodeAddress(err, nodeURL)}
 }
 
 func (e *GRPCCallUndeliveredError) Error() string {
@@ -1193,6 +1202,66 @@ var socketAddressInText = regexp.MustCompile(`\[[0-9A-Fa-f:.%]*:[0-9A-Fa-f:.%]*\
 func RedactSocketAddresses(text string) string {
 	return socketAddressInText.ReplaceAllString(text, "[address]")
 }
+
+// RedactNodeAddress replaces the address of the node at nodeURL in text with "[address]": the url's
+// host, with its port when one follows, and each IP address with its port (RedactSocketAddresses),
+// which is how a dial names the address a host resolved to. A url's path, query and user info are
+// withheld first (utils.RedactSecrets). A host is matched with or without the dot that ends a fully
+// qualified name, since a dial writes the name as it was configured.
+func RedactNodeAddress(text, nodeURL string) string {
+	text = utils.RedactSecrets(text)
+	if host := nodeHostName(nodeURL); host != "" {
+		text = regexp.MustCompile(`(?i)\b`+regexp.QuoteMeta(host)+`\b(?:\.?:\d+\b)?`).ReplaceAllString(text, "[address]")
+	}
+	return RedactSocketAddresses(text)
+}
+
+// nodeHostName is the host nodeURL names, read as utils.RedactURL reads it, with or without a
+// scheme, and without the dot that ends a fully qualified name. It is "" for an IP address, which
+// RedactSocketAddresses replaces wherever it appears.
+func nodeHostName(nodeURL string) string {
+	host := nodeURL
+	if i := strings.Index(host, "://"); i >= 0 {
+		host = host[i+3:]
+	}
+	if i := strings.IndexAny(host, "/?#"); i >= 0 {
+		host = host[:i]
+	}
+	if i := strings.LastIndex(host, "@"); i >= 0 {
+		host = host[i+1:]
+	}
+	if name, _, err := net.SplitHostPort(host); err == nil {
+		host = name
+	}
+	if net.ParseIP(strings.Trim(host, "[]")) != nil {
+		return ""
+	}
+	return strings.TrimSuffix(host, ".")
+}
+
+// WithoutNodeAddress returns err with its text passed through RedactNodeAddress, or err itself when
+// there is nothing to replace. errors.Is and errors.As still reach err, and status.FromError its gRPC
+// code, with the replaced text as the message.
+func WithoutNodeAddress(err error, nodeURL string) error {
+	if err == nil {
+		return nil
+	}
+	text := err.Error()
+	if redacted := RedactNodeAddress(text, nodeURL); redacted != text {
+		return &nodeAddressRedactedError{text: redacted, cause: err}
+	}
+	return err
+}
+
+// nodeAddressRedactedError is an error whose text WithoutNodeAddress replaced.
+type nodeAddressRedactedError struct {
+	text  string
+	cause error
+}
+
+func (e *nodeAddressRedactedError) Error() string { return e.text }
+
+func (e *nodeAddressRedactedError) Unwrap() error { return e.cause }
 
 // stringConnectionFallback is one row of the string-fallback table used by
 // detectConnectionErrorFromString. The first matching row wins, so ordering

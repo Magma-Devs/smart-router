@@ -618,6 +618,9 @@ func (dgm *DirectGRPCSubscriptionManager) createNewSubscription(
 	defer func() {
 		chainlib.SubscriptionUpstreamFrom(ctx).Sent(dgm.endpointNames.name(endpoint.Url), sentAt, time.Since(sentAt), err)
 	}()
+	// Runs ahead of the record above. relay_end names the endpoint by provider, so the reason, which
+	// it records and the listener logs, carries the node's address as [address].
+	defer func() { err = common.WithoutNodeAddress(err, endpoint.Url) }()
 
 	// Get or create pool
 	pool, err := dgm.getOrCreatePool(endpoint)
@@ -1380,7 +1383,7 @@ func (dgm *DirectGRPCSubscriptionManager) checkClientSubscriptionLimit(clientKey
 
 	if count >= dgm.config.MaxSubscriptionsPerClient {
 		if dgm.config.ShouldRejectOnClientLimit() {
-			return fmt.Errorf("client subscription limit reached (%d)", dgm.config.MaxSubscriptionsPerClient)
+			return fmt.Errorf("client %w (%d)", chainlib.ErrSubscriptionLimitReached, dgm.config.MaxSubscriptionsPerClient)
 		}
 		utils.FormatWarning("DirectGRPC: client near subscription limit",
 			nil,
@@ -1395,7 +1398,7 @@ func (dgm *DirectGRPCSubscriptionManager) checkGlobalSubscriptionLimit() error {
 	total := dgm.totalSubscriptions.Load()
 	if total >= int64(dgm.config.MaxTotalSubscriptions) {
 		if dgm.config.ShouldRejectOnTotalLimit() {
-			return fmt.Errorf("global subscription limit reached (%d)", dgm.config.MaxTotalSubscriptions)
+			return fmt.Errorf("global %w (%d)", chainlib.ErrSubscriptionLimitReached, dgm.config.MaxTotalSubscriptions)
 		}
 		utils.FormatWarning("DirectGRPC: approaching global subscription limit",
 			nil,

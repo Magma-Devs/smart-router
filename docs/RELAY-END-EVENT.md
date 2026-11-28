@@ -12,7 +12,9 @@ contract for `schema` 2.
   and subscription requests (see [Subscription requests](#subscription-requests)).
 - **Redacted.** `error` and `attempts[].message` go through the router's own redactor
   (`utils.RedactSecrets`) and are capped at 512 bytes plus the `...truncated...` marker, which
-  replaces the middle of a longer text.
+  replaces the middle of a longer text. A gRPC call that never reached its node, and a gRPC
+  subscription that could not start, write the node's address as `[address]`
+  (`common.RedactNodeAddress`); `upstream` names the node by provider.
 
 ```json
 {"level":"info","event":"relay_end","schema":2,"GUID":"7003","stateful":true,"method":"eth_sendRawTransaction","api_interface":"jsonrpc","selection":"stateful","outcome":"ok","stop_reason":"Success","served_by":"node-b","status":200,"has_reply":true,"error_code":"","error":"","latency_ms":305,"is_batch":false,"request_bytes":304,"reply_bytes":102,"tx_hash":"0x2620d49b3fa2ff073b49bce2b5f0382521afd075691e695251929cd67be4f460","attempts":[{"upstream":"node-a","outcome":"node_error","error_code":"CHAIN_NONCE_TOO_LOW","message":"nonce too low: next nonce 7, tx nonce 6","node_code":-32000,"latency_ms":2,"returned_to_client":false},{"upstream":"node-b","outcome":"ok","error_code":"","message":"","latency_ms":304,"returned_to_client":true}],"time":1792323767487910421,"message":"relay_end"}

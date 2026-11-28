@@ -1195,7 +1195,7 @@ func (g *GRPCDirectRPCConnection) SendRequest(
 		if errors.Is(err, ErrGRPCConnectionClosed) {
 			return nil, err
 		}
-		return nil, &common.GRPCCallUndeliveredError{Err: err}
+		return nil, common.NewGRPCCallUndeliveredError(err, g.nodeUrl.Url)
 	}
 
 	// Hold connMu in read mode across the whole checkout, not just the field read.
@@ -1221,8 +1221,9 @@ func (g *GRPCDirectRPCConnection) SendRequest(
 	g.connMu.RUnlock()
 
 	if err != nil {
-		return nil, utils.FormatError("gRPC get connection failed", err,
-			utils.LogAttr("url", g.nodeUrl.Url))
+		// The line logged here names the node; the error, which relay_end records, does not.
+		return nil, common.WithoutNodeAddress(utils.FormatError("gRPC get connection failed", err,
+			utils.LogAttr("url", g.nodeUrl.Url)), g.nodeUrl.Url)
 	}
 
 	// Return the conn to the same connector that issued it. Go evaluates and saves
@@ -1264,8 +1265,11 @@ func (g *GRPCDirectRPCConnection) SendRequest(
 		if ctx.Err() == nil {
 			err = fmt.Errorf("%w: %w", ErrNoMethodDescriptor, err)
 		}
-		return nil, utils.FormatError("failed to get method descriptor", err,
-			utils.LogAttr("method", methodPath))
+		// The lookup asks the node, so its failure can name the node: a dial that was refused, or
+		// the url of a client it could not borrow. The line logged here names it; the error, which
+		// relay_end records, does not.
+		return nil, common.WithoutNodeAddress(utils.FormatError("failed to get method descriptor", err,
+			utils.LogAttr("method", methodPath)), g.nodeUrl.Url)
 	}
 
 	// Create dynamic message factory
@@ -2317,7 +2321,7 @@ func (g *GRPCDirectRPCConnection) handleGRPCError(ctx context.Context, err error
 	// classifier reads the wrapper as a connection fault, which disables the endpoint as
 	// `unreachable`, as the same fault on JSON-RPC does (MAG-4355).
 	if reach == grpcCallUndelivered {
-		return nil, &common.GRPCCallUndeliveredError{Err: err}
+		return nil, common.NewGRPCCallUndeliveredError(err, g.nodeUrl.Url)
 	}
 
 	// The stream was open, and the connection or the stream ended before the node sent its status:

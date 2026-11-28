@@ -2,6 +2,7 @@ package chainlib
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -153,6 +154,10 @@ type GRPCSubscriptionManager interface {
 	// firstReply is the router's acknowledgement, carrying the assigned subscription
 	// id in its metadata. Its payload is deliberately not forwarded on the wire —
 	// see grpcproxy.StreamResponse.Metadata.
+	//
+	// err is for the router's log and relay_end: the client gets the listener's own
+	// status (grpcSubscriptionStartStatus). A subscription turned away at a limit wraps
+	// ErrSubscriptionLimitReached.
 	StartSubscription(
 		ctx context.Context,
 		chainMessage ChainMessage,
@@ -169,6 +174,10 @@ type GRPCSubscriptionManager interface {
 	// so the listener never has to reproduce the manager's key format.
 	ClientKey(dappID, consumerIp, connectionUniqueId string) string
 }
+
+// ErrSubscriptionLimitReached is what a GRPCSubscriptionManager wraps when it turns a
+// subscription away at its per-client or its global limit.
+var ErrSubscriptionLimitReached = errors.New("subscription limit reached")
 
 // GRPCSubscriptionEndReporter is an optional interface on GRPCSubscriptionManager. A
 // manager that gives up on a subscription, rather than seeing its upstream end, reports
