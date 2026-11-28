@@ -30,9 +30,25 @@ func AptosErrorMessage(errorCode, message string) string {
 }
 
 // aptosError matches AptosErrorMessage's message for one error_code, with or without the direct-RPC
-// sender's "HTTP <status>: " prefix.
+// sender's "HTTP <status>: " prefix, under a 5xx no status row names only.
 func aptosError(errorCode string) ErrorMatcher {
-	return MessageRegex(`^(?:HTTP \d+: )?` + regexp.QuoteMeta(aptosErrorPrefix+errorCode+":"))
+	return underUnlistedServerStatus{MessageRegex(`^(?:HTTP \d+: )?` + regexp.QuoteMeta(aptosErrorPrefix+errorCode+":"))}
+}
+
+// underUnlistedServerStatus matches what its matcher matches, under a REST status no status row
+// names only: the statuses ChainClaimsServerErrorReply claims a reply under. A row here then decides
+// only the replies it claims. Under any other status (a 500, a 503, a 4xx) the reply gets the
+// verdict any chain's would, and the session release, which reads that status, agrees with it.
+type underUnlistedServerStatus struct{ ErrorMatcher }
+
+func (m underUnlistedServerStatus) Matches(errorCode int, errorMessage string) bool {
+	return m.ErrorMatcher.Matches(errorCode, errorMessage) && isUnlistedServerStatus(errorCode)
+}
+
+// isUnlistedServerStatus reports whether status is a REST 5xx no status row names
+// (NODE_UNLISTED_SERVER_ERROR: 505-511, 528, 529, 531-599).
+func isUnlistedServerStatus(status int) bool {
+	return ClassifyError(nil, ChainFamilyUnknown, TransportREST, status, "") == RouterErrorNodeUnlistedServerError
 }
 
 // aptosServerErrorRows are Aptos's own errors under a 5xx. A submitted transaction the node's
@@ -57,7 +73,7 @@ var chainServerErrorReplyRows = map[ChainFamily][]errorMapping{
 // than taking the status as a transport failure.
 func ChainClaimsServerErrorReply(family ChainFamily, statusCode int, message string) bool {
 	rows, found := chainServerErrorReplyRows[family]
-	if !found || ClassifyError(nil, ChainFamilyUnknown, TransportREST, statusCode, "") != RouterErrorNodeUnlistedServerError {
+	if !found || !isUnlistedServerStatus(statusCode) {
 		return false
 	}
 	for _, row := range rows {

@@ -59,3 +59,22 @@ func TestChainClaimsServerErrorReply_OnlyUnderAnUnlistedStatus(t *testing.T) {
 		require.False(t, ChainClaimsServerErrorReply(ChainFamilyAptos, status, text), "status %d", status)
 	}
 }
+
+// The Aptos row decides only the replies the claim takes: under a 5xx a status row names, or any
+// other status, an Aptos reply gets the verdict any chain's would. Under a 500 or a 503 the row used
+// to file it CHAIN_MEMPOOL_FULL, so the endpoint was excused while the session release, which reads
+// the status there, still scored it as failed.
+func TestAptosMempoolFullRow_DecidesOnlyUnderAnUnlistedStatus(t *testing.T) {
+	text := AptosErrorMessage("mempool_is_full", "Mempool is full. Mempool size: 2000000, Capacity: 2000000")
+	for _, message := range []string{text, "HTTP 503: " + text} {
+		for _, status := range []int{400, 404, 429, 500, 501, 502, 503, 504, 520, 522, 524, 530} {
+			require.Equal(t, ClassifyError(nil, ChainFamilyUnknown, TransportREST, status, message).Name,
+				ClassifyError(nil, ChainFamilyAptos, TransportREST, status, message).Name, "status %d: %q", status, message)
+		}
+		for _, status := range []int{505, 507, 529, 599} {
+			require.Equal(t, RouterErrorChainMempoolFull, ClassifyError(nil, ChainFamilyAptos, TransportREST, status, message), "status %d", status)
+		}
+	}
+	require.Equal(t, RouterErrorNodeInternalError, ClassifyError(nil, ChainFamilyAptos, TransportREST, 500, text))
+	require.Equal(t, RouterErrorNodeServiceUnavailable, ClassifyError(nil, ChainFamilyAptos, TransportREST, 503, text))
+}
