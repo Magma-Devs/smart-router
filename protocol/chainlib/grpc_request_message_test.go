@@ -671,7 +671,11 @@ func TestDecodeAsMessage_AllocatesNothing(t *testing.T) {
 		"a packed list of one-byte varints": wire(nil).bytes(10, packed),
 	} {
 		require.NoError(t, decodeAsMessage(md, body), name)
-		require.Zero(t, testing.AllocsPerRun(5, func() { _ = decodeAsMessage(md, body) }), name)
+		// AllocsPerRun counts every goroutine's allocations and rounds the average down.
+		// Over 100 reads, the few that another goroutine makes in the window (fasthttp's
+		// once-a-second server date refresh, for one) round down to zero, while a single
+		// allocation per read still counts.
+		require.Zero(t, testing.AllocsPerRun(100, func() { _ = decodeAsMessage(md, body) }), name)
 	}
 }
 
