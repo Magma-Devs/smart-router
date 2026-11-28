@@ -2,17 +2,21 @@ package rpcsmartrouter
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	rpcclient "github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/holdoff"
+	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/magma-Devs/smart-router/utils"
 	"golang.org/x/time/rate"
+	"google.golang.org/grpc/status"
 )
 
 // The WebSocket and gRPC subscription managers are one design with two transports. What
@@ -197,6 +201,16 @@ type subscriptionEndpoints struct {
 	logPrefix string // "DirectWS" or "DirectGRPC"
 	// exhausted is the error selectEndpoint returns when neither tier has an endpoint to give.
 	exhausted string
+	// chainID names the chain whose family the error registry reads a node's refusal of a
+	// subscribe by (everyEndpointWouldRefuse). The family is read at each refusal, not here:
+	// it is registered when the spec loads (RegisterChainFamilies), which can come after the
+	// manager is built.
+	chainID string
+
+	// relayRetryLimit is the retry limit a new subscription's walk stops at
+	// (subscribeWithFailover). Nil reads relaycore.RelayRetryLimit, the
+	// --set-relay-retry-limit flag, at the time of the call.
+	relayRetryLimit func() int
 
 	optimizer   WebSocketEndpointOptimizer // can be nil: first-available selection
 	stickyStore *routersession.StickySessionStore
@@ -218,10 +232,11 @@ type subscriptionEndpoints struct {
 	endpointsByURL map[string]*common.NodeUrl // Lookup by URL across both tiers (sticky-session uniformity)
 }
 
-func newSubscriptionEndpoints(logPrefix, exhausted string, primary, backup []*common.NodeUrl, optimizer WebSocketEndpointOptimizer) subscriptionEndpoints {
+func newSubscriptionEndpoints(logPrefix, exhausted, chainID string, primary, backup []*common.NodeUrl, optimizer WebSocketEndpointOptimizer) subscriptionEndpoints {
 	return subscriptionEndpoints{
 		logPrefix:      logPrefix,
 		exhausted:      exhausted,
+		chainID:        chainID,
 		optimizer:      optimizer,
 		stickyStore:    routersession.NewStickySessionStore(),
 		primary:        primary,
@@ -320,6 +335,24 @@ func (se *subscriptionEndpoints) endpointsSnapshot() endpointsSnapshot {
 	}
 }
 
+// without returns the snapshot with the endpoints in tried left out of both tiers and the index.
+func (snapshot endpointsSnapshot) without(tried map[string]struct{}) endpointsSnapshot {
+	if len(tried) == 0 {
+		return snapshot
+	}
+	untried := func(tier []*common.NodeUrl) []*common.NodeUrl {
+		kept := make([]*common.NodeUrl, 0, len(tier))
+		for _, ep := range tier {
+			if _, done := tried[ep.Url]; !done {
+				kept = append(kept, ep)
+			}
+		}
+		return kept
+	}
+	primary, backup := untried(snapshot.primary), untried(snapshot.backup)
+	return endpointsSnapshot{primary: primary, backup: backup, byURL: indexEndpoints(primary, backup)}
+}
+
 // setEndpoints replaces both tiers and reports whether anything changed.
 //
 // The tiers are built once at boot from the providers that passed verification, so
@@ -328,11 +361,10 @@ func (se *subscriptionEndpoints) endpointsSnapshot() endpointsSnapshot {
 // provider recovered, and a chain that booted on backups alone would never promote a
 // recovered primary back into tier 1 (MAG-2525).
 //
-// Callers pass only endpoints that are live in the pairing. Seeding a tier with
-// configured-but-dead endpoints would be worse than an empty tier: selectEndpoint is
-// called once per subscription with no retry loop, so a dead entry is handed straight
-// to the client, and a non-empty primary tier suppresses the primary→backup cascade
-// entirely.
+// Callers pass only endpoints that are live in the pairing. A configured-but-dead entry
+// would cost a new subscription one of the few attempts the retry limit gives it before
+// subscribeWithFailover moves past it, and where the endpoint drops packets rather than
+// refusing them, that attempt lasts the whole connect timeout.
 //
 // Existing upstream pools are not torn down here. A pool keyed by a URL that just left
 // the tiers still serves its live subscriptions until they close; tearing it down here
@@ -395,10 +427,18 @@ func sameEndpointURLs(a, b []*common.NodeUrl) bool {
 
 // selectEndpoint selects the endpoint a client's new subscription goes to.
 func (se *subscriptionEndpoints) selectEndpoint(ctx context.Context, clientKey string) (*common.NodeUrl, error) {
+	return se.selectUntriedEndpoint(ctx, clientKey, nil)
+}
+
+// selectUntriedEndpoint is selectEndpoint over the endpoints not in tried, the ones this
+// subscribe has not failed on (subscribeWithFailover). A tried endpoint is left out of every
+// step: a sticky one is passed over, and the ranks and the hold-off are read among the rest,
+// so a held-off endpoint is tried before the backup tier when the ready one has failed.
+func (se *subscriptionEndpoints) selectUntriedEndpoint(ctx context.Context, clientKey string, tried map[string]struct{}) (*common.NodeUrl, error) {
 	// One snapshot for the whole cascade: setEndpoints can swap the tiers underneath
 	// us, and re-reading between tiers could see primary from before the swap and
 	// backup from after.
-	snapshot := se.endpointsSnapshot()
+	snapshot := se.endpointsSnapshot().without(tried)
 
 	// One ranking for the whole selection too: a url's state can change while it runs, and the
 	// sticky check and every pass below must read the same one. Without a lookup every url
@@ -474,6 +514,84 @@ func (se *subscriptionEndpoints) selectFromTiers(ctx context.Context, primary, b
 		utils.LogAttr("backupCount", len(backup)),
 	)
 	return se.selectFromTier(ctx, backup, byURL)
+}
+
+// subscribeWithFailover opens a new subscription with subscribe on endpoint, the one
+// selectEndpoint chose for clientKey, and while subscribe fails, on the next endpoint the
+// cascade selects with every endpoint already tried left out: past a dead sticky endpoint,
+// through the rest of the primary tier, then the backup tier. It stops at the relay retry
+// limit, as an HTTP relay does, primaries and backups alike: the first attempt and at most
+// --set-relay-retry-limit more (MAG-5092). It returns the endpoint subscribe succeeded on, or
+// the error of the last one tried. A node's refusal that every endpoint would repeat ends the
+// walk at once, as it ends an HTTP relay's retries (everyEndpointWouldRefuse).
+//
+// A subscribe used to try the one endpoint only, so a single refused connect failed it while
+// a healthy primary or backup went untried, until re-verification demoted the dead endpoint
+// about two epochs later, long after HTTP relays had failed over (MAG-4730). subscribe records
+// each failure against its own endpoint, as it did when it was the only attempt.
+func (se *subscriptionEndpoints) subscribeWithFailover(ctx context.Context, clientKey string, endpoint *common.NodeUrl, subscribe func(*common.NodeUrl) error) (*common.NodeUrl, error) {
+	retries := se.retryLimit()
+	tried := make(map[string]struct{}, retries+1)
+	for attempt := 0; ; attempt++ {
+		err := subscribe(endpoint)
+		if err == nil {
+			return endpoint, nil
+		}
+		// A client that left, or ran out of time, is served by no endpoint, and the next one
+		// would be charged with a failure it did not cause. So would every endpoint asked
+		// again with a request the node refused for good: one malformed subscribe would cost
+		// each of them a round trip and a failure in its score. The retry limit bounds the
+		// rest: without it one subscribe could reach every paid backup, and a client whose
+		// endpoints drop packets would wait a connect timeout for each of them.
+		if ctx.Err() != nil || attempt >= retries || se.everyEndpointWouldRefuse(err) {
+			return nil, err
+		}
+		tried[endpoint.Url] = struct{}{}
+		next, selectErr := se.selectUntriedEndpoint(ctx, clientKey, tried)
+		if selectErr != nil {
+			// Every endpoint failed. The client gets the last one's error, which is also the
+			// attempt its relay record names.
+			return nil, err
+		}
+		utils.FormatWarning(se.logPrefix+": subscribe failed on an endpoint, trying the next", err,
+			utils.LogAttr("endpoint", sanitizeEndpointURL(endpoint.Url)),
+			utils.LogAttr("next", sanitizeEndpointURL(next.Url)),
+			utils.LogAttr("retry", attempt+1),
+			utils.LogAttr("retryLimit", retries),
+		)
+		endpoint = next
+	}
+}
+
+// retryLimit is the number of retries a new subscription gets after its first attempt fails.
+// A negative limit gives none, as it gives a relay none.
+func (se *subscriptionEndpoints) retryLimit() int {
+	limit := relaycore.RelayRetryLimit
+	if se.relayRetryLimit != nil {
+		limit = se.relayRetryLimit()
+	}
+	return max(limit, 0)
+}
+
+// everyEndpointWouldRefuse reports whether err, a failed subscribe attempt, carries the node's
+// own answer and the error registry rates that answer non-retryable: the verdict an HTTP relay
+// stops retrying on, because every endpoint answers the same request the same way (invalid
+// params). The answer's type names its transport, whose registry rows read it: a JSON-RPC
+// error object (WebSocket), a gRPC status. Anything else may succeed on another endpoint: a
+// dial, handshake or transport failure, a timeout, an answer the registry rates retryable (a
+// rate limit, an unavailable node, a method this node does not offer), or one it does not know.
+func (se *subscriptionEndpoints) everyEndpointWouldRefuse(err error) bool {
+	var jsonRPCAnswer *rpcclient.JsonError
+	if errors.As(err, &jsonRPCAnswer) {
+		return common.ClassifyNodeErrorForRetry(common.GetChainFamilyOrDefault(se.chainID), common.TransportJsonRPC, jsonRPCAnswer.Code, jsonRPCAnswer.Message).IsNonRetryable
+	}
+	// The status's own message, not err's text: the wrapping is ours, not the node's evidence.
+	var grpcAnswer interface{ GRPCStatus() *status.Status }
+	if errors.As(err, &grpcAnswer) {
+		answer := grpcAnswer.GRPCStatus()
+		return common.ClassifyNodeErrorForRetry(common.GetChainFamilyOrDefault(se.chainID), common.TransportGRPC, int(answer.Code()), answer.Message()).IsNonRetryable
+	}
+	return false
 }
 
 // notHeldOff returns the endpoints of tier that registry is not currently holding off for a
