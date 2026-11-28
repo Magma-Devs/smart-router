@@ -30,6 +30,9 @@ type subscriptionCascade struct {
 	stickyStore    *routersession.StickySessionStore
 	endpointsByURL map[string]*common.NodeUrl
 	setURLLendRank func(lendRank func(url string) int)
+	// outOfRotationWhileOneIsLeft is the question a join asks of the same ranking selection
+	// reads, so both are exercised against each manager as constructed.
+	outOfRotationWhileOneIsLeft func(url string) bool
 }
 
 func subscriptionManagerCases() []subscriptionManagerCase {
@@ -39,7 +42,10 @@ func subscriptionManagerCases() []subscriptionManagerCase {
 			url:  func(endpoint string) string { return "wss://" + endpoint + ".example.com" },
 			build: func(primary, backup []*common.NodeUrl, optimizer WebSocketEndpointOptimizer) subscriptionCascade {
 				manager := NewDirectWSSubscriptionManager(getTestMetricsManager(), "jsonrpc", "ETH", "jsonrpc", primary, backup, optimizer, nil)
-				return subscriptionCascade{manager.selectEndpoint, manager.stickyStore, manager.endpointsByURL, manager.SetURLLendRank}
+				return subscriptionCascade{
+					manager.selectEndpoint, manager.stickyStore, manager.endpointsByURL,
+					manager.SetURLLendRank, manager.outOfRotationWhileOneIsLeft,
+				}
 			},
 			exhausted: "no WebSocket endpoints available (primary and backup both exhausted)",
 		},
@@ -48,7 +54,10 @@ func subscriptionManagerCases() []subscriptionManagerCase {
 			url:  func(endpoint string) string { return "grpc://" + endpoint + ".example.com:9090" },
 			build: func(primary, backup []*common.NodeUrl, optimizer WebSocketEndpointOptimizer) subscriptionCascade {
 				manager := NewDirectGRPCSubscriptionManager(nil, "ETH", "grpc", primary, backup, optimizer, nil)
-				return subscriptionCascade{manager.selectEndpoint, manager.stickyStore, manager.endpointsByURL, manager.SetURLLendRank}
+				return subscriptionCascade{
+					manager.selectEndpoint, manager.stickyStore, manager.endpointsByURL,
+					manager.SetURLLendRank, manager.outOfRotationWhileOneIsLeft,
+				}
 			},
 			exhausted: "no gRPC endpoints available",
 		},

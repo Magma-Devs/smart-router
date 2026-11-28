@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -275,6 +276,62 @@ func (se *subscriptionEndpoints) rankURLs(byURL map[string]*common.NodeUrl) map[
 		}
 	}
 	return ranks
+}
+
+// outOfRotationWhileOneIsLeft reports whether url is one the router has taken out of rotation
+// while a url in rotation is left in either tier.
+//
+// A live subscription on such a url takes no new clients. The clients it has stay on it —
+// moving a live subscription is separate work — but a client arriving now would be attached
+// to a node relay selection has stopped using, and because the managers look for a matching
+// live subscription before they pick a url at all, the placement MAG-4161 added would almost
+// never run: on the most common subscriptions, newHeads above all, some client nearly always
+// holds one already (MAG-5405).
+//
+// When nothing in rotation is left, joining stays allowed. That is the same last chance
+// selectEndpoint gives a new subscription: a node behind the chain, or one that kept failing,
+// beats no subscription at all. A url held off after a 429 is still in rotation, as it is for
+// selection, so a hold-off never displaces anything.
+//
+// A url in neither tier is out of rotation whatever it ranks. It left the live pairing (a failed
+// re-verification, a pairing reset), so selection never places a new subscription on it, and the
+// session manager, which holds no endpoint for it any more, ranks it in rotation.
+func (se *subscriptionEndpoints) outOfRotationWhileOneIsLeft(url string) bool {
+	lendRank := se.lendRank.Load()
+	if lendRank == nil || *lendRank == nil {
+		return false
+	}
+	snapshot := se.endpointsSnapshot()
+	if _, inTiers := snapshot.byURL[url]; inTiers && (*lendRank)(url) == inRotationRank {
+		return false
+	}
+	for _, tier := range [][]*common.NodeUrl{snapshot.primary, snapshot.backup} {
+		for _, ep := range tier {
+			if (*lendRank)(ep.Url) == inRotationRank {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// displacedSubscriptionKeyPrefix marks the key a subscription keeps once it has been
+// displaced, or the key a subscription created while a displaced one holds the params key
+// takes instead. Such a key must be one no client can arrive with, or a client would find a
+// subscription the manager has decided it may not join.
+//
+// It cannot be a params key on either manager. The WebSocket manager's keys are
+// rpcclient.CreateHashFromParams' digest, which is fixed width, and this is longer than that;
+// the gRPC manager's are utils.ToHexString output, which holds hex digits alone, and this
+// holds bytes that are not hex digits. TestDisplacedSubscriptionKeyCannotBeAParamsKey pins
+// both halves against the managers' own hashing.
+const displacedSubscriptionKeyPrefix = "\x00displaced-subscription:"
+
+// displacedSubscriptionKey is the key for the seq-th subscription of this manager that had to
+// take one. The params key it was derived from is kept in the key so an operator reading a log
+// line can still tell which subscription it belongs to.
+func displacedSubscriptionKey(seq uint64, hashedParams string) string {
+	return displacedSubscriptionKeyPrefix + strconv.FormatUint(seq, 10) + ":" + hashedParams
 }
 
 // candidateRanks are the ranks the urls have, best first.

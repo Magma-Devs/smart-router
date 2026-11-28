@@ -34,15 +34,16 @@ func storeCreatedSubscription(t *testing.T, manager *DirectWSSubscriptionManager
 		upstreamID:       upstreamID,
 		clientRouterIDs:  make(map[string]string),
 		connectedClients: make(map[string]*common.SafeChannelSender[*pairingtypes.RelayReply]),
-		hashedParams:     hashedParams,
 		firstReply:       &pairingtypes.RelayReply{Data: firstReply},
 		ctx:              ctx,
 		cancel:           cancel,
 	}
 	activeSub.attachClientLocked(clientKey, routerID, sender)
 	manager.lock.Lock()
-	manager.activeSubscriptions[hashedParams] = activeSub
-	manager.connectedClients[clientKey] = map[string]*common.SafeChannelSender[*pairingtypes.RelayReply]{hashedParams: sender}
+	// Through the manager's own registration, so this stays what a creator leaves behind: a
+	// subscription both findable by its key and joinable by its params.
+	key := manager.registerSubscriptionLocked(hashedParams, activeSub)
+	manager.connectedClients[clientKey] = map[string]*common.SafeChannelSender[*pairingtypes.RelayReply]{key: sender}
 	manager.lock.Unlock()
 	manager.totalSubscriptions.Add(1)
 	return activeSub

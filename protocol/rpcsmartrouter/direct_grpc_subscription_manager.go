@@ -59,7 +59,18 @@ type grpcActiveSubscription struct {
 
 	// Router-generated unique subscription ID
 	routerSubscriptionID string
-	hashedParams         string // Hash of method + request params
+
+	// hashedParams is the key activeSubscriptions holds this subscription under, fixed when it
+	// is registered. The listener, the reconnect handler and the per-client tracking all carry
+	// this key, so it must never change: a key that moved would leave each of them looking at
+	// whichever subscription held the key afterwards, or at none.
+	hashedParams string
+
+	// paramsHash is the hash of the method and request params a client sends, and the key of
+	// the joinableSubscriptions entry that sends such a client here. The same string as
+	// hashedParams, except for a subscription registered while a displaced one still held the
+	// params key (registerSubscriptionLocked).
+	paramsHash string
 
 	// Client tracking - multiple clients can share ONE upstream stream
 	clientRouterIDs  map[string]string // clientKey -> routerID
@@ -134,6 +145,19 @@ func (sub *grpcActiveSubscription) signalClose() {
 type DirectGRPCSubscriptionManager struct {
 	// Active subscriptions keyed by hashedParams (method + request params)
 	activeSubscriptions map[string]*grpcActiveSubscription
+
+	// joinableSubscriptions is the subscription a client arriving with these params joins,
+	// keyed by the hash of the method and request params it sent; activeSubscriptions is the
+	// lifecycle record every sweep, scan and teardown works through. Same split as the
+	// WebSocket manager's: a subscription whose url the router took out of rotation is dropped
+	// from here and keeps its activeSubscriptions entry under its own key, which no arriving
+	// client can hash to (displaceSubscriptionLocked, MAG-5405). Guarded by lock.
+	joinableSubscriptions map[string]*grpcActiveSubscription
+
+	// displacedSubscriptions counts how many subscriptions this manager has displaced, so a
+	// subscription registered while a displaced one holds the params key takes a key of its
+	// own. Guarded by lock.
+	displacedSubscriptions uint64
 
 	// endpointNames names each endpoint's provider for relay_end (SetEndpointNames).
 	endpointNames subscriptionEndpointNames
@@ -217,13 +241,14 @@ func NewDirectGRPCSubscriptionManager(
 	ctx, cancel := context.WithCancel(context.Background())
 
 	manager := &DirectGRPCSubscriptionManager{
-		activeSubscriptions:  make(map[string]*grpcActiveSubscription),
-		pendingSubscriptions: make(map[string]*pendingSubscriptionsBroadcastManager),
-		upstreamPools:        make(map[string]*UpstreamGRPCPool),
-		idMapper:             NewSubscriptionIDMapper(),
-		metricsManager:       metrics.SafeMetrics(metricsManager),
-		chainID:              chainID,
-		apiInterface:         apiInterface,
+		activeSubscriptions:   make(map[string]*grpcActiveSubscription),
+		joinableSubscriptions: make(map[string]*grpcActiveSubscription),
+		pendingSubscriptions:  make(map[string]*pendingSubscriptionsBroadcastManager),
+		upstreamPools:         make(map[string]*UpstreamGRPCPool),
+		idMapper:              NewSubscriptionIDMapper(),
+		metricsManager:        metrics.SafeMetrics(metricsManager),
+		chainID:               chainID,
+		apiInterface:          apiInterface,
 		subscriptionEndpoints: newSubscriptionEndpoints("DirectGRPC", "no gRPC endpoints available",
 			grpcEndpoints, grpcBackupEndpoints, optimizer),
 		config:              config,
@@ -286,6 +311,7 @@ func (dgm *DirectGRPCSubscriptionManager) Stop() {
 		sub.signalClose()
 	}
 	dgm.activeSubscriptions = make(map[string]*grpcActiveSubscription)
+	dgm.joinableSubscriptions = make(map[string]*grpcActiveSubscription)
 
 	// Close all pools
 	for _, pool := range dgm.upstreamPools {
@@ -404,10 +430,21 @@ func (dgm *DirectGRPCSubscriptionManager) StartSubscription(
 	// Create hash for deduplication
 	hashedParams := dgm.hashSubscriptionParams(methodPath, requestData)
 
-	// Check for existing subscription to join
-	dgm.lock.RLock()
-	existingSub, exists := dgm.activeSubscriptions[hashedParams]
-	dgm.lock.RUnlock()
+	// Check for existing subscription to join.
+	//
+	// A subscription on a url the router took out of rotation while a url in rotation is left
+	// is not one a new client may join, and it is dropped from joinableSubscriptions here so
+	// the next client does not have to look again. The clients it has stay on it; this client
+	// creates a subscription of its own below (MAG-5405). A client whose lookup read the
+	// subscription just before it was displaced still joins it, the same one-instant window a
+	// client joining a subscription whose last client is leaving already has.
+	dgm.lock.Lock()
+	existingSub, exists := dgm.joinableSubscriptions[hashedParams]
+	if exists && dgm.outOfRotationWhileOneIsLeft(existingSub.endpointURL) {
+		dgm.displaceSubscriptionLocked(existingSub)
+		exists = false
+	}
+	dgm.lock.Unlock()
 
 	// refused is a subscription the join turned away: dead, but still registered under the
 	// key until its listener gets round to releasing it. The dedup below must not read it as
@@ -447,8 +484,12 @@ func (dgm *DirectGRPCSubscriptionManager) StartSubscription(
 				return nil, nil, ctx.Err()
 			}
 			if created {
+				// joinableSubscriptions, as the first lookup above: a displaced subscription
+				// still holds the params key in activeSubscriptions, and reading that here
+				// would hand this client the very subscription the creator was displaced
+				// from (MAG-5405).
 				dgm.lock.RLock()
-				existingSub, exists = dgm.activeSubscriptions[hashedParams]
+				existingSub, exists = dgm.joinableSubscriptions[hashedParams]
 				dgm.lock.RUnlock()
 				if exists && existingSub != refused {
 					ack, replies, joinErr := dgm.joinExistingSubscription(ctx, existingSub, clientKey, hashedParams)
@@ -486,7 +527,7 @@ func (dgm *DirectGRPCSubscriptionManager) checkAndAddPendingSubscription(hashedP
 	dgm.lock.Lock()
 	defer dgm.lock.Unlock()
 
-	if active, found := dgm.activeSubscriptions[hashedParams]; found && active != refused {
+	if active, found := dgm.joinableSubscriptions[hashedParams]; found && active != refused {
 		settled := make(chan bool, 1)
 		settled <- true
 		return settled, true
@@ -581,10 +622,13 @@ func (dgm *DirectGRPCSubscriptionManager) joinExistingSubscription(
 	sub.lock.Unlock()
 	chainlib.SubscriptionUpstreamFrom(ctx).Joined(dgm.endpointNames.name(endpointURL))
 
-	// Track subscription for this client. Outside sub.lock: trackClientSubscription takes
-	// dgm.lock, and dgm.lock is the outer lock of the pair everywhere else — see the
-	// ordering note on the manager's lock field.
-	dgm.trackClientSubscription(clientKey, hashedParams)
+	// Track subscription for this client, under the subscription's own key rather than the
+	// params hash the client arrived with: the two differ for a subscription registered while
+	// a displaced one held the params key, and UnsubscribeAll looks a subscription up by the
+	// key it finds here. Outside sub.lock: trackClientSubscription takes dgm.lock, and
+	// dgm.lock is the outer lock of the pair everywhere else — see the ordering note on the
+	// manager's lock field.
+	dgm.trackClientSubscription(clientKey, sub.hashedParams)
 
 	utils.FormatDebug("DirectGRPC: client joined existing subscription",
 		utils.LogAttr("clientKey", clientKey),
@@ -689,27 +733,28 @@ func (dgm *DirectGRPCSubscriptionManager) createNewSubscription(
 		methodDescriptor:     methodDesc,
 		endpointURL:          endpoint.Url,
 		routerSubscriptionID: routerSubID,
-		hashedParams:         hashedParams,
-		clientRouterIDs:      map[string]string{clientKey: clientRouterID},
-		connectedClients:     map[string]*common.SafeChannelSender[*pairingtypes.RelayReply]{clientKey: sender},
-		methodPath:           methodPath,
-		requestParams:        requestData,
-		ctx:                  subCtx,
-		cancel:               subCancel,
-		closeSubChan:         make(chan struct{}),
+		// hashedParams and paramsHash are set when the subscription is published, by
+		// registerSubscriptionLocked, which is what chooses its key.
+		clientRouterIDs:  map[string]string{clientKey: clientRouterID},
+		connectedClients: map[string]*common.SafeChannelSender[*pairingtypes.RelayReply]{clientKey: sender},
+		methodPath:       methodPath,
+		requestParams:    requestData,
+		ctx:              subCtx,
+		cancel:           subCancel,
+		closeSubChan:     make(chan struct{}),
 	}
 
 	// Store subscription
 	dgm.lock.Lock()
-	dgm.activeSubscriptions[hashedParams] = activeSub
+	subscriptionKey := dgm.registerSubscriptionLocked(hashedParams, activeSub)
 	dgm.totalSubscriptions.Add(1)
 	dgm.lock.Unlock()
 
 	// Track for client
-	dgm.trackClientSubscription(clientKey, hashedParams)
+	dgm.trackClientSubscription(clientKey, subscriptionKey)
 
 	// Start message listener
-	go dgm.listenForUpstreamMessages(subCtx, hashedParams, activeSub)
+	go dgm.listenForUpstreamMessages(subCtx, subscriptionKey, activeSub)
 
 	// Create acknowledgement as first reply
 	firstReply := dgm.createStreamAcknowledgement(clientRouterID, methodPath)
@@ -1165,6 +1210,12 @@ func (dgm *DirectGRPCSubscriptionManager) cleanupSubscription(hashedParams strin
 	if current, found := dgm.activeSubscriptions[hashedParams]; found && current == activeSub {
 		delete(dgm.activeSubscriptions, hashedParams)
 	}
+	// And no client may join it from here either. Only the entry that IS activeSub goes: a
+	// displaced subscription gave this entry up when it was displaced, and a successor may
+	// hold it now.
+	if dgm.joinableSubscriptions[activeSub.paramsHash] == activeSub {
+		delete(dgm.joinableSubscriptions, activeSub.paramsHash)
+	}
 	// Decremented per subscription object, not per map entry: createNewSubscription
 	// increments once when it registers, and the cleanedUp latch above makes this the
 	// matching decrement. Gating it on the identity check instead would strand the slot
@@ -1191,6 +1242,43 @@ func (dgm *DirectGRPCSubscriptionManager) cleanupSubscription(hashedParams strin
 
 	utils.FormatDebug("DirectGRPC: subscription cleaned up",
 		utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
+	)
+}
+
+// registerSubscriptionLocked publishes a new subscription and returns the key
+// activeSubscriptions holds it under, which is the key everything per-subscription uses: the
+// per-client tracking, the listener, the cleanup. The key is the hash of the method and params
+// it was created for, or one of its own when a displaced subscription still holds that; either
+// way this subscription becomes the one a client arriving with these params joins.
+//
+// Both entries are written here, together, so the pair cannot come apart. Mirrors the
+// WebSocket manager's registerSubscriptionLocked. Caller holds dgm.lock.
+func (dgm *DirectGRPCSubscriptionManager) registerSubscriptionLocked(hashedParams string, activeSub *grpcActiveSubscription) string {
+	key := hashedParams
+	if _, taken := dgm.activeSubscriptions[key]; taken {
+		dgm.displacedSubscriptions++
+		key = displacedSubscriptionKey(dgm.displacedSubscriptions, hashedParams)
+	}
+	activeSub.hashedParams = key
+	activeSub.paramsHash = hashedParams
+	dgm.activeSubscriptions[key] = activeSub
+	dgm.joinableSubscriptions[hashedParams] = activeSub
+	return key
+}
+
+// displaceSubscriptionLocked stops a live subscription taking new clients. The clients it has
+// stay on it, and it keeps its entry in activeSubscriptions, so it is still swept, still
+// restored, still torn down by its own key when its last client goes; it is only unreachable
+// to a client arriving with its params, which creates a subscription of its own instead.
+// Caller holds dgm.lock.
+func (dgm *DirectGRPCSubscriptionManager) displaceSubscriptionLocked(activeSub *grpcActiveSubscription) {
+	if dgm.joinableSubscriptions[activeSub.paramsHash] != activeSub {
+		return
+	}
+	delete(dgm.joinableSubscriptions, activeSub.paramsHash)
+	utils.FormatInfo("DirectGRPC: subscription is on a url out of rotation, so it takes no new clients",
+		utils.LogAttr("hashedParams", utils.ToHexString(activeSub.hashedParams)),
+		utils.LogAttr("endpoint", sanitizeEndpointURL(activeSub.endpointURL)),
 	)
 }
 

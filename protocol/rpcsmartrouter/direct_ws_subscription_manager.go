@@ -38,7 +38,18 @@ type directActiveSubscription struct {
 	// where multiple clients can share one upstream subscription while each
 	// having their own unique subscription ID for unsubscribe operations.
 	clientRouterIDs map[string]string // clientKey -> routerID
-	hashedParams    string            // Hash of subscription parameters
+
+	// hashedParams is the key activeSubscriptions holds this subscription under, fixed when it
+	// is registered. Every goroutine, deferred cleanup and watcher carries this key, so it
+	// must never change: a key that moved would leave each of them looking at whichever
+	// subscription held the key afterwards, or at none.
+	hashedParams string
+
+	// paramsHash is what a client subscribing to this method with these params hashes to, and
+	// the key of the joinableSubscriptions entry that sends such a client here. It is the same
+	// string as hashedParams, except for a subscription registered while a displaced one still
+	// held the params key (registerSubscriptionLocked).
+	paramsHash string
 
 	// Subscription params for restoration after reconnect
 	subscriptionParams []byte // Original subscription params (JSON)
@@ -204,6 +215,24 @@ type DirectWSSubscriptionManager struct {
 	// Active subscriptions keyed by hashedParams
 	activeSubscriptions map[string]*directActiveSubscription
 
+	// joinableSubscriptions is the subscription a client arriving with these params joins,
+	// keyed by the hash of the method and params it sent. It is the whole of the lookup a
+	// subscribe does; activeSubscriptions is the lifecycle record that every sweep, scan and
+	// teardown works through.
+	//
+	// They are separate because a subscription can keep serving the clients it has while
+	// taking no new ones. One whose url the router took out of rotation is dropped from here
+	// and stays in activeSubscriptions under its own key, which no arriving client can hash to
+	// (displaceSubscriptionLocked, MAG-5405). Presence in activeSubscriptions must never be
+	// read as "a client may join this": a subscription being torn down is in there too.
+	// Guarded by lock.
+	joinableSubscriptions map[string]*directActiveSubscription
+
+	// displacedSubscriptions counts how many subscriptions this manager has displaced, so a
+	// subscription registered while a displaced one holds the params key takes a key of its
+	// own. Guarded by lock.
+	displacedSubscriptions uint64
+
 	// endpointNames names each endpoint's provider for relay_end (SetEndpointNames).
 	endpointNames subscriptionEndpointNames
 
@@ -292,16 +321,17 @@ func NewDirectWSSubscriptionManager(
 	}
 
 	return &DirectWSSubscriptionManager{
-		connectedClients:     make(map[string]map[string]*common.SafeChannelSender[*pairingtypes.RelayReply]),
-		activeSubscriptions:  make(map[string]*directActiveSubscription),
-		pendingSubscriptions: make(map[string]*pendingSubscriptionsBroadcastManager),
-		slowClients:          make(map[string]struct{}),
-		upstreamPools:        make(map[string]*UpstreamWSPool),
-		idMapper:             NewSubscriptionIDMapper(),
-		metricsManager:       metrics.SafeMetrics(metricsManager),
-		connectionType:       connectionType,
-		chainID:              chainID,
-		apiInterface:         apiInterface,
+		connectedClients:      make(map[string]map[string]*common.SafeChannelSender[*pairingtypes.RelayReply]),
+		activeSubscriptions:   make(map[string]*directActiveSubscription),
+		joinableSubscriptions: make(map[string]*directActiveSubscription),
+		pendingSubscriptions:  make(map[string]*pendingSubscriptionsBroadcastManager),
+		slowClients:           make(map[string]struct{}),
+		upstreamPools:         make(map[string]*UpstreamWSPool),
+		idMapper:              NewSubscriptionIDMapper(),
+		metricsManager:        metrics.SafeMetrics(metricsManager),
+		connectionType:        connectionType,
+		chainID:               chainID,
+		apiInterface:          apiInterface,
 		subscriptionEndpoints: newSubscriptionEndpoints("DirectWS",
 			"no WebSocket endpoints available (primary and backup both exhausted)",
 			wsEndpoints, wsBackupEndpoints, optimizer),
@@ -325,10 +355,11 @@ func (dwsm *DirectWSSubscriptionManager) upstreamNameOf(activeSub *directActiveS
 	return dwsm.endpointNames.name(activeSub.upstreamPool.nodeUrl.Url)
 }
 
-// subscriptionUpstreamName names the provider of the open subscription hashedParams identifies.
+// subscriptionUpstreamName names the provider of the subscription a client with these params
+// joins, which is the one relay_end records the join against.
 func (dwsm *DirectWSSubscriptionManager) subscriptionUpstreamName(hashedParams string) string {
 	dwsm.lock.RLock()
-	activeSub := dwsm.activeSubscriptions[hashedParams]
+	activeSub := dwsm.joinableSubscriptions[hashedParams]
 	dwsm.lock.RUnlock()
 	return dwsm.upstreamNameOf(activeSub)
 }
@@ -773,30 +804,31 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 		upstreamSubscription: upstreamSub,
 		upstreamID:           upstreamID,
 		clientRouterIDs:      make(map[string]string),
-		hashedParams:         hashedParams,
-		subscriptionParams:   subscriptionParams, // Store for restoration after reconnect
-		subscribeMethod:      subscribeMethod,    // Store for restoration (eth_subscribe, subscribe, etc.)
-		isWrite:              isWrite,            // Never restore a write subscription, see above
-		unsubscribeMethod:    unsubscribeMethod,  // Resolved from the spec above, for the teardown paths
-		numericIDs:           numericIDs,         // Chain-level, so it outlives any one upstream id
-		connectedClients:     make(map[string]*common.SafeChannelSender[*pairingtypes.RelayReply]),
-		firstReply:           firstReply,
-		originalResult:       originalResult, // Store for Tendermint joining clients
-		ctx:                  subCtx,
-		cancel:               cancel,
-		closeSubChan:         make(chan struct{}),
-		messagesChan:         msgChan, // Use the channel from upstream subscription
+		// hashedParams and paramsHash are set when the subscription is published, by
+		// registerSubscriptionLocked, which is what chooses its key.
+		subscriptionParams: subscriptionParams, // Store for restoration after reconnect
+		subscribeMethod:    subscribeMethod,    // Store for restoration (eth_subscribe, subscribe, etc.)
+		isWrite:            isWrite,            // Never restore a write subscription, see above
+		unsubscribeMethod:  unsubscribeMethod,  // Resolved from the spec above, for the teardown paths
+		numericIDs:         numericIDs,         // Chain-level, so it outlives any one upstream id
+		connectedClients:   make(map[string]*common.SafeChannelSender[*pairingtypes.RelayReply]),
+		firstReply:         firstReply,
+		originalResult:     originalResult, // Store for Tendermint joining clients
+		ctx:                subCtx,
+		cancel:             cancel,
+		closeSubChan:       make(chan struct{}),
+		messagesChan:       msgChan, // Use the channel from upstream subscription
 	}
 	activeSub.attachClientLocked(clientKey, routerID, safeChannelSender)
 	// Read while this goroutine still owns activeSub exclusively, for the watcher below.
 	detached := activeSub.detachedSignal(clientKey)
 
 	dwsm.lock.Lock()
-	dwsm.activeSubscriptions[hashedParams] = activeSub
+	subscriptionKey := dwsm.registerSubscriptionLocked(hashedParams, activeSub)
 	if dwsm.connectedClients[clientKey] == nil {
 		dwsm.connectedClients[clientKey] = make(map[string]*common.SafeChannelSender[*pairingtypes.RelayReply])
 	}
-	dwsm.connectedClients[clientKey][hashedParams] = safeChannelSender
+	dwsm.connectedClients[clientKey][subscriptionKey] = safeChannelSender
 	dwsm.lock.Unlock()
 
 	// Increment global subscription counter
@@ -806,10 +838,10 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 	dwsm.settlePendingSubscription(hashedParams, true)
 
 	// Start listening for upstream messages
-	go dwsm.listenForUpstreamMessages(subCtx, hashedParams, activeSub, upstreamSub, msgChan)
+	go dwsm.listenForUpstreamMessages(subCtx, subscriptionKey, activeSub, upstreamSub, msgChan)
 
 	// Handle client disconnect
-	go dwsm.handleClientDisconnect(ctx, clientKey, hashedParams, detached)
+	go dwsm.handleClientDisconnect(ctx, clientKey, subscriptionKey, detached)
 
 	utils.FormatInfo("DirectWS: subscription started",
 		utils.LogAttr("routerID", routerID),
@@ -1213,7 +1245,7 @@ func (dwsm *DirectWSSubscriptionManager) checkForActiveSubscriptionAndConnect(
 	dwsm.lock.Lock()
 	defer dwsm.lock.Unlock()
 
-	activeSub, found := dwsm.activeSubscriptions[hashedParams]
+	activeSub, found := dwsm.joinableSubscriptions[hashedParams]
 	if !found {
 		return nil, false
 	}
@@ -1228,6 +1260,19 @@ func (dwsm *DirectWSSubscriptionManager) checkForActiveSubscriptionAndConnect(
 			return activeSub.firstReply, false
 		}
 		return &pairingtypes.RelayReply{Data: replyData}, false
+	}
+
+	// A client is not attached to a subscription on a url the router took out of rotation
+	// while a url in rotation is left: that url is one relay selection has stopped using, and
+	// this lookup runs before any url is picked, so without this the placement MAG-4161 added
+	// would almost never run for the subscriptions that matter most (MAG-5405). The clients
+	// already on it stay: moving a live subscription is separate work.
+	//
+	// After the already-connected branch above, so a client re-subscribing to something it
+	// already holds still gets its own reply rather than a second subscription.
+	if dwsm.outOfRotationWhileOneIsLeft(upstreamURLOf(activeSub)) {
+		dwsm.displaceSubscriptionLocked(activeSub)
+		return nil, false
 	}
 
 	// Generate a unique router ID for this joining client (for EVM deduplication)
@@ -1246,11 +1291,16 @@ func (dwsm *DirectWSSubscriptionManager) checkForActiveSubscriptionAndConnect(
 	// client: its reply channel stayed open and parked the ingress forwarder goroutine,
 	// it kept counting as connected, and the upstream subscription outlived every real
 	// subscriber (MAG-3722).
-	go dwsm.handleClientDisconnect(ctx, clientKey, hashedParams, activeSub.detachedSignal(clientKey))
+	//
+	// Keyed by the subscription's own key, like the creator's, not by the params hash the
+	// client arrived with: the two differ for a subscription registered while a displaced one
+	// held the params key, and every path that releases a client — the watcher, the periodic
+	// sweep, UnsubscribeAll — looks the subscription up by the key it finds here.
+	go dwsm.handleClientDisconnect(ctx, clientKey, activeSub.hashedParams, activeSub.detachedSignal(clientKey))
 	if dwsm.connectedClients[clientKey] == nil {
 		dwsm.connectedClients[clientKey] = make(map[string]*common.SafeChannelSender[*pairingtypes.RelayReply])
 	}
-	dwsm.connectedClients[clientKey][hashedParams] = safeChannelSender
+	dwsm.connectedClients[clientKey][activeSub.hashedParams] = safeChannelSender
 
 	utils.FormatTrace("DirectWS: client joined existing subscription with unique router ID",
 		utils.LogAttr("clientKey", clientKey),
@@ -1286,7 +1336,7 @@ func (dwsm *DirectWSSubscriptionManager) checkAndAddPendingSubscription(hashedPa
 	dwsm.lock.Lock()
 	defer dwsm.lock.Unlock()
 
-	if _, active := dwsm.activeSubscriptions[hashedParams]; active {
+	if _, active := dwsm.joinableSubscriptions[hashedParams]; active {
 		settled := make(chan bool, 1)
 		settled <- true
 		return settled, true
@@ -1978,7 +2028,65 @@ func (dwsm *DirectWSSubscriptionManager) retireSubscriptionLocked(hashedParams s
 	if dwsm.activeSubscriptions[hashedParams] == activeSub {
 		delete(dwsm.activeSubscriptions, hashedParams)
 	}
+	// And no client may join it from here either, which is the half of "no client can find it"
+	// that Unsubscribe relies on when it retires before calling the node (MAG-4345). Only the
+	// entry that IS activeSub goes: a displaced subscription gave this entry up when it was
+	// displaced, and a successor may hold it now.
+	if dwsm.joinableSubscriptions[activeSub.paramsHash] == activeSub {
+		delete(dwsm.joinableSubscriptions, activeSub.paramsHash)
+	}
 	dwsm.totalSubscriptions.Add(-1)
+}
+
+// registerSubscriptionLocked publishes a new subscription and returns the key
+// activeSubscriptions holds it under, which is the key everything per-subscription uses: the
+// client's entry, the listener, the watchers, the cleanup. The key is the hash of the method
+// and params it was created for, or one of its own when a displaced subscription still holds
+// that; either way this subscription becomes the one a client arriving with these params
+// joins.
+//
+// Both entries are written here, together, so the pair cannot come apart: a subscription in
+// activeSubscriptions alone would serve its clients and never be found by an arriving one, and
+// one in joinableSubscriptions alone would collect clients nothing could ever release.
+// Caller holds dwsm.lock.
+func (dwsm *DirectWSSubscriptionManager) registerSubscriptionLocked(hashedParams string, activeSub *directActiveSubscription) string {
+	key := hashedParams
+	if _, taken := dwsm.activeSubscriptions[key]; taken {
+		dwsm.displacedSubscriptions++
+		key = displacedSubscriptionKey(dwsm.displacedSubscriptions, hashedParams)
+	}
+	activeSub.hashedParams = key
+	activeSub.paramsHash = hashedParams
+	dwsm.activeSubscriptions[key] = activeSub
+	dwsm.joinableSubscriptions[hashedParams] = activeSub
+	return key
+}
+
+// displaceSubscriptionLocked stops a live subscription taking new clients. The clients it has
+// stay on it, and it keeps its entry in activeSubscriptions, so it is still swept, still
+// restored, still torn down by its own key when its last client goes; it is only unreachable
+// to a client arriving with its params, which creates a subscription of its own instead.
+// Caller holds dwsm.lock.
+func (dwsm *DirectWSSubscriptionManager) displaceSubscriptionLocked(activeSub *directActiveSubscription) {
+	if dwsm.joinableSubscriptions[activeSub.paramsHash] != activeSub {
+		return
+	}
+	delete(dwsm.joinableSubscriptions, activeSub.paramsHash)
+	utils.FormatInfo("DirectWS: subscription is on a url out of rotation, so it takes no new clients",
+		utils.LogAttr("hashedParams", utils.ToHexString(activeSub.hashedParams)),
+		utils.LogAttr("endpoint", sanitizeEndpointURL(upstreamURLOf(activeSub))),
+		utils.LogAttr("connectedClients", len(activeSub.connectedClients)),
+	)
+}
+
+// upstreamURLOf is the url activeSub's upstream subscription is open on, "" when it has no
+// pool yet. The pool is fixed when the subscription is created; a restore replaces the
+// connection inside it, never the url.
+func upstreamURLOf(activeSub *directActiveSubscription) string {
+	if activeSub == nil || activeSub.upstreamPool == nil || activeSub.upstreamPool.nodeUrl == nil {
+		return ""
+	}
+	return activeSub.upstreamPool.nodeUrl.Url
 }
 
 // endUpstreamSubscriptionLocked ends the upstream half of a subscription: the node is told
@@ -2209,6 +2317,7 @@ func (dwsm *DirectWSSubscriptionManager) Close() {
 		sub.stopUpstreamListener()
 	}
 	dwsm.activeSubscriptions = make(map[string]*directActiveSubscription)
+	dwsm.joinableSubscriptions = make(map[string]*directActiveSubscription)
 	dwsm.connectedClients = make(map[string]map[string]*common.SafeChannelSender[*pairingtypes.RelayReply])
 	dwsm.slowClients = make(map[string]struct{})
 
