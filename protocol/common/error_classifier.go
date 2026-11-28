@@ -206,6 +206,19 @@ func xrplMessageStartsWith(alternatives ...string) ErrorMatcher {
 	return MessageRegex(`^(?:HTTP \d+: )?(?:` + strings.Join(alternatives, "|") + `)\b`)
 }
 
+// familyScopedMatcher is a generic row read only on the chains of some families: one node
+// software's wording, kept in the generic table so it keeps its place in the match order.
+// ClassifyError skips it on a chain of any other family.
+type familyScopedMatcher struct {
+	ErrorMatcher
+	families []ChainFamily
+}
+
+// evmOnly scopes a generic row to EVM chains.
+func evmOnly(m ErrorMatcher) ErrorMatcher {
+	return familyScopedMatcher{ErrorMatcher: m, families: []ChainFamily{ChainFamilyEVM}}
+}
+
 // ---------------------------------------------------------------------------
 // A node's refusal of a broadcast transaction, inside an ordinary reply (MAG-5323, MAG-5451)
 // ---------------------------------------------------------------------------
@@ -479,13 +492,17 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 		{MessageContains("transaction underpriced"), RouterErrorChainTxUnderpriced},                  // Geth
 		{MessageContains("underpriced"), RouterErrorChainTxUnderpriced},                              // Erigon: bare "underpriced"
 		{MessageContains("fee too low"), RouterErrorChainTxUnderpriced},                              // Erigon: "fee too low"
-		{MessageContains("already known"), RouterErrorChainTxAlreadyKnown},                           // Geth + Erigon
-		{MessageContains("alreadyknown"), RouterErrorChainTxAlreadyKnown},                            // Nethermind PascalCase
+		// A duplicate submission, in the EVM node software's words, so read on EVM chains only
+		// (rulebook R-0.2, R-L). Read on every chain, any chain's -32000 that said "already known"
+		// was a duplicate: a read ended on the first node and the node was never blamed (MAG-5489).
+		// Another chain's duplicate is its own row (XRPL tefALREADY, Bitcoin -27, Starknet 59).
+		{evmOnly(MessageContains("already known")), RouterErrorChainTxAlreadyKnown}, // Geth + Erigon
+		{evmOnly(MessageContains("alreadyknown")), RouterErrorChainTxAlreadyKnown},  // Nethermind PascalCase
 		// Besu answers a duplicate submission with -32000 "Known transaction", which otherwise falls
 		// to the -32000 code as a retryable NODE_SERVER_ERROR and blames a healthy node for every
 		// broadcast it loses (MAG-4032). Word-bounded, so "unknown transaction ..." is not read as a
 		// duplicate.
-		{MessageRegex(`(?i)\bknown transaction\b`), RouterErrorChainTxAlreadyKnown},
+		{evmOnly(MessageRegex(`(?i)\bknown transaction\b`)), RouterErrorChainTxAlreadyKnown},
 		{MessageContains("txpool is full"), RouterErrorChainMempoolFull},
 		{MessageContains("max fee per gas less than block base fee"), RouterErrorChainMaxFeeBelowBase},
 		// Node is still catching up to the chain head. NEAR carries its own
@@ -1028,7 +1045,14 @@ func ClassifyError(connectionError *RouterError, chainFamily ChainFamily, transp
 	// Step 2: Fall back to generic semantic mappings (Tier 1), scoped by transport
 	if transportMappings, ok := genericErrorMappings[transport]; ok {
 		for _, mapping := range transportMappings {
-			if matchMapping(mapping.Matcher, errorCode, errorMessage, loweredMessage) {
+			matcher := mapping.Matcher
+			if scoped, ok := matcher.(familyScopedMatcher); ok {
+				if !slices.Contains(scoped.families, chainFamily) {
+					continue
+				}
+				matcher = scoped.ErrorMatcher
+			}
+			if matchMapping(matcher, errorCode, errorMessage, loweredMessage) {
 				return mapping.RouterError
 			}
 		}

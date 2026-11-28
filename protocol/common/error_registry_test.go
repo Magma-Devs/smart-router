@@ -1096,6 +1096,28 @@ func TestClassifyError_GenericJsonRPCMappings(t *testing.T) {
 	}
 }
 
+// The generic duplicate rows are the EVM node software's words, read on EVM chains only (rulebook
+// R-0.2, R-L). On any other chain, any -32000 that said "already known" was a duplicate: a read ended
+// on the first node and the node was never blamed (MAG-5489). There the -32000 row decides, and a
+// chain's own duplicate row still does.
+func TestClassifyError_AlreadyKnownRowsAreEVMOnly(t *testing.T) {
+	messages := []string{"already known", "AlreadyKnown", "known transaction: 0xabc"}
+	for _, message := range messages {
+		assert.Same(t, RouterErrorChainTxAlreadyKnown, ClassifyError(nil, ChainFamilyEVM, TransportJsonRPC, -32000, message), "EVM, %q", message)
+		for _, family := range []ChainFamily{
+			ChainFamilySolana, ChainFamilyBitcoin, ChainFamilyStarknet, ChainFamilyNEAR, ChainFamilyXRP,
+			ChainFamilyCosmosSDK, ChainFamilySubstrate, ChainFamilyUnknown,
+		} {
+			assert.Same(t, RouterErrorNodeServerError, ClassifyError(nil, family, TransportJsonRPC, -32000, message), "%s, %q", family, message)
+		}
+	}
+	assert.Same(t, RouterErrorChainTxAlreadyKnown, ClassifyError(nil, ChainFamilyXRP, TransportJsonRPC, 0, "tefALREADY"))
+	assert.Same(t, RouterErrorChainBitcoinAlreadyInChain, ClassifyError(nil, ChainFamilyBitcoin, TransportJsonRPC, -27, "Transaction already in block chain"))
+	assert.Same(t, RouterErrorChainStarknetDuplicateTx, ClassifyError(nil, ChainFamilyStarknet, TransportJsonRPC, 59, "A transaction with the same hash already exists in the mempool"))
+	assert.Same(t, RouterErrorChainExecutionReverted, ClassifyError(nil, ChainFamilyEVM, TransportJsonRPC, 3, "execution reverted: already known"),
+		"on EVM the rows keep their place: a revert is still read first")
+}
+
 // Besu's duplicate-submission wording is matched on whole words: "unknown transaction" is not a
 // duplicate, and reading it as one would stop the retry and pin a wallet to a node that never
 // took its transaction (MAG-4032).
@@ -1339,10 +1361,20 @@ func checkMappingsForShadows(t *testing.T, mappings []errorMapping) {
 	}
 }
 
+// unscopedMatcher is the matcher a family-scoped row wraps, or m itself.
+func unscopedMatcher(m ErrorMatcher) ErrorMatcher {
+	if scoped, ok := m.(familyScopedMatcher); ok {
+		return scoped.ErrorMatcher
+	}
+	return m
+}
+
 func checkShadow(t *testing.T, i, j int, a, b errorMapping) {
 	t.Helper()
 	// We can't generically test all possible inputs, but we can check
-	// specific known-ambiguous patterns:
+	// specific known-ambiguous patterns. A family-scoped row is checked by the
+	// matcher it wraps: on its families it shadows, and is shadowed, like any row.
+	a.Matcher, b.Matcher = unscopedMatcher(a.Matcher), unscopedMatcher(b.Matcher)
 
 	// MessageContains shadowing: if a.substring is a substring of b.substring
 	aMsg, aIsMsg := a.Matcher.(messageContainsMatcher)

@@ -308,10 +308,16 @@ func classifyLikeTheJSONRPCSender(t *testing.T, chainParser chainlib.ChainParser
 // the refuser is never asked first tests nothing.
 func newRefusalTestServer(t *testing.T, chainParser chainlib.ChainParser, logs *metrics.RPCConsumerLogs, refuser, peer refusalReply) (*[2]int64, *RPCSmartRouterServer) {
 	t.Helper()
+	return newRefusalTestServerForChain(t, "ETH1", chainParser, logs, refuser, peer)
+}
+
+// newRefusalTestServerForChain is newRefusalTestServer for another JSON-RPC chain.
+func newRefusalTestServerForChain(t *testing.T, chainID string, chainParser chainlib.ChainParser, logs *metrics.RPCConsumerLogs, refuser, peer refusalReply) (*[2]int64, *RPCSmartRouterServer) {
+	t.Helper()
 	ctx := context.Background()
 	hits := &[2]int64{}
-	rpcEndpoint := &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: spectypes.APIInterfaceJsonRPC}
-	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "ETH1")
+	rpcEndpoint := &routersession.RPCEndpoint{ChainID: chainID, ApiInterface: spectypes.APIInterfaceJsonRPC}
+	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, chainID)
 	csm := routersession.NewConsumerSessionManager(rpcEndpoint, optimizer, nil, "test-router", routersession.NewActiveSubscriptionProvidersStorage())
 
 	tiers := []map[uint64]*routersession.ConsumerSessionsWithProvider{{}, {}}
