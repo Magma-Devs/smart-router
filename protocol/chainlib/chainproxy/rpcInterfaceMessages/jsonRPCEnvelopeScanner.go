@@ -184,6 +184,13 @@ func SkipJSONWhitespace(data []byte, pos int) int {
 	return pos
 }
 
+// SkipJSONValue consumes one JSON value starting at data[pos], with leading whitespace already
+// skipped, and returns the index just past it. Shared with the router's own top-level JSON scanners,
+// beside SkipJSONWhitespace, so a batch reply can be walked element by element without a decode.
+func SkipJSONValue(data []byte, pos int) (int, error) {
+	return skipValue(data, pos)
+}
+
 // scanString consumes a JSON string starting at data[pos] (which must be
 // '"'). Returns the index of the closing quote (= end of string content)
 // and the index just past the closing quote (= start of the next token).

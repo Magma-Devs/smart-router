@@ -177,9 +177,25 @@ type GraphQLRootField struct {
 	// "foo" and escape the mutation's own compute units, stateful flag and cross-validation
 	// policy.
 	Name string
+	// Alias is the response key the caller gave the field, "" when it has none: the reply carries
+	// the field's answer under it, and an error's path starts with it. A row names fields, never
+	// aliases, so the reader reads each occurrence with its alias replaced by the name (PRD §2.2,
+	// MAG-5595); nothing else reads it.
+	Alias string
 	// Args holds the field's literal arguments with variable references already resolved from
 	// the request's `variables`, so block_parsing can read a pinned checkpoint out of the body.
 	Args map[string]interface{}
+}
+
+// Occurrences are the operation's root fields as the reply carries them: the field's name and the
+// alias it answers under, in document order, one per occurrence (the same field under two aliases
+// is two).
+func (gm GraphQLMessage) Occurrences() []common.GraphQLOccurrence {
+	occurrences := make([]common.GraphQLOccurrence, 0, len(gm.RootFields))
+	for _, rootField := range gm.RootFields {
+		occurrences = append(occurrences, common.GraphQLOccurrence{Field: rootField.Name, Alias: rootField.Alias})
+	}
+	return occurrences
 }
 
 type GraphQLMessage struct {
@@ -382,8 +398,9 @@ func graphQLRootFields(doc *ast.QueryDocument, operation *ast.OperationDefinitio
 				}
 				selections++
 				rootField := GraphQLRootField{
-					Name: typed.Name,
-					Args: graphQLArguments(typed.Arguments, variables),
+					Name:  typed.Name,
+					Alias: typed.Alias,
+					Args:  graphQLArguments(typed.Arguments, variables),
 				}
 				if skipped || graphQLSelectionIsLeftOut(typed.Directives, variables) {
 					leftOut = appendGraphQLRootField(leftOut, leftOutKeys, graphQLResponseKey(typed), rootField)

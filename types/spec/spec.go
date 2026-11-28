@@ -29,6 +29,12 @@ type Spec struct {
 	// block_distance_for_finalized_data alone decides. See Spec.FinalityField.
 	FinalityFieldPath       string `json:"finality_field_path,omitempty"`
 	FinalityFieldFinalValue string `json:"finality_field_final_value,omitempty"`
+
+	// Errors is the chain's error policy: where its errors sit in its replies and how they are
+	// classified (errors_section.go; PRD PER-CHAIN-ERROR-CLASSIFICATION §2). Nil when the spec has
+	// none; a chain may still inherit one. DoExpandSpec leaves it as written until MAG-5606 merges
+	// the parents' sections in.
+	Errors *ErrorsSection `json:"errors,omitempty"`
 }
 
 // ---------------------------------------------------------------------------

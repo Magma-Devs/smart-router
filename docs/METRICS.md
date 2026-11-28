@@ -253,6 +253,7 @@ They split into **endpoint-scoped** (`rpc_endpoint_*`) and **router-scoped**
 | `smartrouter_latest_block` | Gauge | `spec`, `apiInterface` | Latest block known to the router. |
 | `smartrouter_latest_block_regressions_total` | Counter | `spec`, `apiInterface`, `reason` | Times the router's latest block moved backwards; each one also logs `chain latest block went backwards` at ERROR. `reason="consensus"`: the tip led the endpoint majority by more than the outlier threshold and was snapped down to it. `reason="stale_tip"`: nothing re-confirmed the tip for a TTL and a lower observation was adopted. `reason="unconfirmed_start"`: the tip was taken with nothing to check it against (the first observation, or one over a stale tip with no majority) and went three block times without advancing, and a url's head far below it moved forward: a load balancer's bad backend answered first. Alert on `increase(...) > 0`. |
 | `smartrouter_chain_idle` | Gauge | `spec`, `apiInterface` | Idle mode state: `1` while the chain has served no client request within `--chain-tracker-idle-after` and its tracker polls are paused, `0` while active. Absent when idle mode is off. Published by the probe loop every cycle (5 s), not on transitions. The infra `sr-tip-frozen` alert skips a router whose every pod reads `1`. |
+| `smartrouter_spec_lock_enforced` | Gauge | `spec`, `apiInterface`, `rule` | How many of the chain's apis the router loaded under a rule the spec did not satisfy, as state since boot. `rule="stateful"`: the write methods (`eth_sendRawTransaction` and its kin on every interface, the table in `utils/keeper/write_methods_table.go`) the spec cleared or omitted `stateful` on, which the router relays stateful anyway — to every provider at once and never again (MAG-5593). Written at boot for every chain and interface, `0` included, so an alert reads the value (`> bool 0`), not `increase()`: the enforcement happens before the first scrape. Non-zero means the spec is wrong: fix the spec and restart. |
 | `smartrouter_protocol_version` | Gauge | `version` | Encoded protocol version. |
 
 #### WebSocket
@@ -409,15 +410,18 @@ Prometheus counter, so it answers on a router run without `--metrics-listen-addr
   it lost), anything on gRPC, a write, and the router's own health check. A client that hangs up
   does not end an attempt on the HTTP or WebSocket listeners: the attempt runs on, and the same
   rules decide its row.
-* `Method` is the API name the request was relayed as. A GraphQL operation with two root fields
-  is `chainIdentifier&checkpoint`, not the metric's `batch:` label. Two kinds of name are the
-  request's own text: a `Default-...` name for an api the spec does not declare, and a batch's or
-  operation's `&`-joined names. Each kind keeps its own rows only within a budget per chain and
-  interface, with the method label's numbers (32 `Default-` names, 64 joined names), and only up
-  to 512 bytes. Past that the attempt is counted on the `Default-other` or `batch:other` row, so the
-  tally stays bounded whatever a client sends. An admitted name keeps its row. The label's own
-  budget is per chain, and it counts a path's shape and a batch's set of methods rather than the
-  name, so the label and these rows can differ for the same traffic.
+* `Method` is the API name the request was relayed as, named as `relay_end` names it
+  ([RELAY-END-EVENT.md](RELAY-END-EVENT.md)): without its leading slash, capped at 256 characters,
+  and `Default-REDACTED` for an api the spec does not declare that the request named by URL (a REST
+  path, a Tendermint URI), whose name would be the caller's own path. A GraphQL operation with two
+  root fields is `chainIdentifier&checkpoint`, not the metric's `batch:` label. Two kinds of name
+  are still the request's own text: a `Default-...` name for an undeclared method named in the body
+  (JSON-RPC), and a batch's or operation's `&`-joined names. Each kind keeps its own rows only within
+  a budget per chain and interface, with the method label's numbers (32 `Default-` names, 64 joined
+  names). Past that the attempt is counted on the `Default-other` or `batch:other` row, so the tally
+  stays bounded whatever a client sends. An admitted name keeps its row. The label's own budget is
+  per chain, and it counts a path's shape and a batch's set of methods rather than the name, so the
+  label and these rows can differ for the same traffic.
 
 Both counts are per attempt: a retry that answered hides the first attempt from the caller, and
 this is where its classification shows. `chain_id`, `api_interface` and `provider` narrow the
