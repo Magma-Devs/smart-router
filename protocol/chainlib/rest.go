@@ -80,6 +80,14 @@ func (apip *RestChainParser) ParseMsg(urlPath string, data []byte, connectionTyp
 	if err != nil {
 		return nil, err
 	}
+	// The sender resolves the path's dot segments before it joins the path to the node url, plain or
+	// percent-encoded (common.JoinURLPath). The spec api, the broadcast check, the requested block and
+	// the path the message carries are all read off that resolved path, so the router handles the
+	// request as the api the node is asked for.
+	if resolved := common.ResolveDotSegments(urlObj.Path); resolved != urlObj.Path {
+		urlObj.Path, urlObj.RawPath = resolved, ""
+		urlPath = urlObj.String()
+	}
 	urlWithNoQuery := urlObj.Path
 
 	// Check api is supported and save it in nodeMsg

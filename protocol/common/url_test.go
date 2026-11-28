@@ -310,3 +310,38 @@ func TestNodeUrlRequestURL(t *testing.T) {
 		require.Error(t, err)
 	})
 }
+
+// TestResolveDotSegments pins the parser's half of the join's dot-segment rule: a path with a dot
+// segment comes back resolved as JoinURLPath resolves it, and any other path comes back as it is.
+func TestResolveDotSegments(t *testing.T) {
+	for path, want := range map[string]string{
+		"":                       "",
+		"/":                      "/",
+		"/cosmos/tx/v1beta1/txs": "/cosmos/tx/v1beta1/txs",
+		"/a//b/":                 "/a//b/",
+		"/a.b/..c/.d.":           "/a.b/..c/.d.",
+		"/a/./b":                 "/a/b",
+		"/a/../../b":             "/b",
+		"/a/b/..":                "/a/",
+		"/..":                    "/",
+		"a/../b":                 "/b",
+	} {
+		require.Equal(t, want, ResolveDotSegments(path), path)
+		if want != path {
+			joined, err := JoinURLPath("http://node/base", path)
+			require.NoError(t, err)
+			again, err := JoinURLPath("http://node/base", want)
+			require.NoError(t, err)
+			require.Equal(t, again, joined, "the node gets the same url for %q and for %q", path, want)
+		}
+	}
+	// A ".." that climbs to the root before more slashes would leave "//x", which url.Parse reads as
+	// host x: the leading slashes collapse to one, as the REST listener collapses a client's.
+	for path, want := range map[string]string{
+		"/..///x":   "/x",
+		"/a/..//x":  "/x",
+		"/./../a//": "/a//",
+	} {
+		require.Equal(t, want, ResolveDotSegments(path), path)
+	}
+}

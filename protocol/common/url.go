@@ -86,6 +86,20 @@ func joinURLPath(base, path, reservedQuery string) (string, error) {
 	return baseURL.String(), nil
 }
 
+// ResolveDotSegments is path, a decoded request path as url.URL.Path holds it, with its "." and ".."
+// segments resolved as JoinURLPath resolves them before the join, so a parser reads the request
+// off the path the node gets. A ".." that climbs to the root can leave the path starting with "//",
+// which url.Parse reads as a host, so the leading slashes are collapsed to one, as the REST listener
+// collapses a client's. A path with no dot segment is returned as it is.
+func ResolveDotSegments(path string) string {
+	for _, segment := range strings.Split(path, "/") {
+		if segment == "." || segment == ".." {
+			return "/" + strings.TrimLeft(resolveDotSegments("/"+strings.TrimPrefix(path, "/")), "/")
+		}
+	}
+	return path
+}
+
 // resolveDotSegments is p, a path with a leading "/", with its "." and ".." segments resolved against
 // p's own root the way a server resolves them (RFC 3986 section 5.2.4): "/a/./b" is "/a/b", "/a/../b"
 // is "/b", and so is "/../b", since nothing climbs above the root. Every other segment stays, an

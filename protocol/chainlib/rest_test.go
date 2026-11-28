@@ -593,3 +593,42 @@ func TestRestParseMsg_TheCosmosBroadcastPathIsABroadcast(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, strings.HasPrefix(msg.GetApi().Name, DefaultApiName), "the spec without the broadcast relays it as an unlisted read")
 }
+
+// A path with dot segments, plain or percent-encoded, is read as the path the sender asks the node
+// for once they are resolved (common.JoinURLPath): the same api, the same broadcast check, the same
+// requested block and the same message path as the resolved path. Before, the parser matched the
+// path as sent, so it could match another api than the one the node was asked for.
+func TestRestParseMsg_DotSegmentsAreReadAsTheNodeGetsThem(t *testing.T) {
+	parser := cosmosHubRESTParser(t, true)
+	body := []byte(`{"tx_bytes":"CpIB","mode":"BROADCAST_MODE_SYNC"}`)
+	for _, tc := range []struct {
+		name, method, path, resolved string
+	}{
+		{"a dot segment in a write", http.MethodPost, "/cosmos/tx/v1beta1/./txs", "/cosmos/tx/v1beta1/txs"},
+		{"a dot-dot segment in a write", http.MethodPost, "/x/../cosmos/tx/v1beta1/txs", "/cosmos/tx/v1beta1/txs"},
+		{"a percent-encoded dot segment in a write", http.MethodPost, "/cosmos/tx/v1beta1/%2e/txs", "/cosmos/tx/v1beta1/txs"},
+		{"a percent-encoded slash and dot-dot segment, with a query", http.MethodPost, "/cosmos/tx/v1beta1/simulate%2f%2E%2E/txs?x=1", "/cosmos/tx/v1beta1/txs?x=1"},
+		{"a dot-dot segment in a read with its block in the path", http.MethodGet, "/cosmos/base/tendermint/v1beta1/blocks/x/../244590", "/cosmos/base/tendermint/v1beta1/blocks/244590"},
+		{"a dot-dot segment that climbs to the root before more slashes", http.MethodPost, "/..///cosmos/tx/v1beta1/txs", "/cosmos/tx/v1beta1/txs"},
+		{"a percent-encoded one that does the same", http.MethodPost, "/x/%2E%2E///cosmos/tx/v1beta1/txs", "/cosmos/tx/v1beta1/txs"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			want, err := parser.ParseMsg(tc.resolved, body, tc.method, nil, extensionslib.ExtensionInfo{})
+			require.NoError(t, err)
+			got, err := parser.ParseMsg(tc.path, body, tc.method, nil, extensionslib.ExtensionInfo{})
+			require.NoError(t, err)
+			require.False(t, strings.HasPrefix(want.GetApi().GetName(), DefaultApiName), "the resolved path is a spec api")
+			require.Equal(t, want.GetApi().GetName(), got.GetApi().GetName())
+			require.Equal(t, want.GetApi().Category.Stateful, got.GetApi().Category.Stateful)
+			wantBlock, _ := want.RequestedBlock()
+			gotBlock, _ := got.RequestedBlock()
+			require.Equal(t, wantBlock, gotBlock)
+			wantRest, ok := want.GetRPCMessage().(*rpcInterfaceMessages.RestMessage)
+			require.True(t, ok)
+			gotRest, ok := got.GetRPCMessage().(*rpcInterfaceMessages.RestMessage)
+			require.True(t, ok)
+			require.Equal(t, wantRest.Broadcast, gotRest.Broadcast)
+			require.Equal(t, wantRest.Path, gotRest.Path)
+		})
+	}
+}
