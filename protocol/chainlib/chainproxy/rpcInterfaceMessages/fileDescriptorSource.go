@@ -119,11 +119,11 @@ func (c compositeDescriptorSource) FindSymbol(fullyQualifiedName string) (desc.D
 
 	// Both halves missed. Surface both causes: in practice one of them is the
 	// actionable one (stale protoset vs. node not serving reflection) and which
-	// it is depends on the deployment.
-	return nil, utils.FormatError("symbol not found in protoset or via reflection", nil,
+	// it is depends on the deployment. The reflection error is the cause, so a
+	// caller can still tell the node's "not found" from its being unreachable.
+	return nil, utils.FormatError("symbol not found in protoset or via reflection", serverErr,
 		utils.LogAttr("symbol", fullyQualifiedName),
-		utils.LogAttr("protoset_error", fileErr),
-		utils.LogAttr("reflection_error", serverErr))
+		utils.LogAttr("protoset_error", fileErr))
 }
 
 func (c compositeDescriptorSource) AllExtensionsForType(typeName string) ([]*desc.FieldDescriptor, error) {

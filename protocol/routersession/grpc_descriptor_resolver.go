@@ -3,16 +3,26 @@ package routersession
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
+	"github.com/fullstorydev/grpcurl"
 	"github.com/jhump/protoreflect/desc"
 	"github.com/jhump/protoreflect/grpcreflect"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/utils"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
+
+// errNotDescribed marks an answer that the node's descriptor source does not describe a service or
+// a method: the symbol is not there, it is not a service, the service lacks the method, or the node
+// does not serve reflection at all. It is what the resolver remembers (MAG-5760); any other failure
+// of a lookup (a timeout, an unreachable node, a closed connection) is not.
+var errNotDescribed = errors.New("not described by the node")
 
 // descriptorResolution is a single in-flight service-descriptor lookup, shared by
 // every relay that asks for the same service while it runs.
@@ -56,6 +66,29 @@ type GRPCDescriptorResolver struct {
 	// opening their own. resolveMu guards it.
 	resolveMu sync.Mutex
 	inflight  map[string]*descriptorResolution
+
+	// What the node does not describe, remembered for one reflection-timeout (MAG-5760). The
+	// in-flight dedup above shares a lookup's answer with everyone who asks while it runs; this
+	// shares a "not described" answer for one more lookup budget after it, so repeated requests
+	// for a method the node lacks cost it one lookup per reflection-timeout, not one per request.
+	// It is never longer: a service the node starts serving is found within one reflection-timeout.
+	// memoryMu guards every field below.
+	memoryMu sync.Mutex
+	// undescribed is when the node last said it does not describe a service.
+	undescribed map[string]time.Time
+	// described is when a service's descriptor was last read. A method it lacks is not described:
+	// cacheServiceMethods stores every method of the service at that moment.
+	described map[string]time.Time
+	// listed is the node's own service list in "reflection" mode, read at listedAt (listKnown is
+	// false when the read failed). A service the node does not list is not described, so names it
+	// has never heard of cost no lookup of their own: at most one list read per reflection-timeout.
+	// listing is closed when the running list read ends, and nil when none runs.
+	listed    map[string]struct{}
+	listedAt  time.Time
+	listKnown bool
+	listing   chan struct{}
+	// prunedAt is when expired undescribed entries were last dropped.
+	prunedAt time.Time
 }
 
 // NewGRPCDescriptorResolver builds a resolver over cache, which the owner keeps a
@@ -69,12 +102,14 @@ func NewGRPCDescriptorResolver(
 	borrow func(ctx context.Context) (*grpc.ClientConn, func(), error),
 ) *GRPCDescriptorResolver {
 	return &GRPCDescriptorResolver{
-		grpcConfig: grpcConfig,
-		url:        url,
-		lifetime:   lifetime,
-		borrow:     borrow,
-		cache:      cache,
-		inflight:   map[string]*descriptorResolution{},
+		grpcConfig:  grpcConfig,
+		url:         url,
+		lifetime:    lifetime,
+		borrow:      borrow,
+		cache:       cache,
+		inflight:    map[string]*descriptorResolution{},
+		undescribed: map[string]time.Time{},
+		described:   map[string]time.Time{},
 	}
 }
 
@@ -95,6 +130,17 @@ func (r *GRPCDescriptorResolver) MethodDescriptor(
 	// Check cache first
 	if methodDesc, found, _ := r.cache.Load(fullMethodName); found {
 		return methodDesc, nil
+	}
+
+	// What the node said it does not describe is answered without asking it again. The caller's
+	// own context still wins over that answer, for the reason given below: a relay the router has
+	// ended must keep its cancellation, and the send path adds ErrNoMethodDescriptor only to a
+	// live relay's error, so without the sentinel the answer would be scored as the endpoint's.
+	if err := r.rememberedNotDescribed(service, methodName); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, fmt.Errorf("gRPC descriptor not looked up, the relay had ended: %w", ctxErr)
+		}
+		return nil, err
 	}
 
 	resolution := r.resolveService(service)
@@ -122,7 +168,7 @@ func (r *GRPCDescriptorResolver) MethodDescriptor(
 	if finished && resolution.err == nil {
 		methodDescriptor := resolution.svc.FindMethodByName(methodName)
 		if methodDescriptor == nil {
-			return nil, utils.FormatError("method not found in service", nil,
+			return nil, utils.FormatError("method not found in service", errNotDescribed,
 				utils.LogAttr("service", service),
 				utils.LogAttr("method", methodName))
 		}
@@ -155,10 +201,14 @@ func (r *GRPCDescriptorResolver) MethodDescriptor(
 		// The lookup itself is NOT abandoned here — it runs on its own budget and
 		// caches what it finds, so the next caller on this endpoint is not cold. That
 		// is what stops one slow endpoint being permanently unusable (MAG-2860).
-		return nil, utils.FormatWarning("gRPC descriptor lookup outlived the relay, continuing in background", ctxErr,
+		//
+		// The log line names the node; the error does not, since a relay's error can
+		// reach its caller.
+		utils.FormatWarning("gRPC descriptor lookup outlived the relay, continuing in background", ctxErr,
 			utils.LogAttr("service", service),
 			utils.LogAttr("method", methodName),
 			utils.LogAttr("url", r.url))
+		return nil, fmt.Errorf("gRPC descriptor lookup outlived the relay, continuing in background: %w", ctxErr)
 	}
 
 	// Unreachable unless the lookup finished: the select above only returns on one
@@ -213,6 +263,9 @@ func (r *GRPCDescriptorResolver) publishServiceResolution(
 	err error,
 ) {
 	resolution.svc, resolution.err = serviceDescriptor, err
+	if definitelyNotDescribed(err) {
+		r.rememberNotDescribed(service)
+	}
 
 	// Drop the entry BEFORE publishing, so a caller that arrives after a failed
 	// lookup starts a fresh one instead of joining a finished one and being handed
@@ -284,9 +337,12 @@ func (r *GRPCDescriptorResolver) lookupService(service string) (*desc.ServiceDes
 		if errors.Is(err, ErrGRPCConnectionClosed) {
 			return nil, err
 		}
-		return nil, utils.FormatError("gRPC get connection failed for descriptor lookup", err,
+		// The log line names the node; the error does not, since a relay's error can reach
+		// its caller.
+		utils.FormatError("gRPC get connection failed for descriptor lookup", err,
 			utils.LogAttr("service", service),
 			utils.LogAttr("url", r.url))
+		return nil, fmt.Errorf("gRPC get connection failed for descriptor lookup of %s: %w", service, err)
 	}
 	defer release()
 
@@ -299,6 +355,16 @@ func (r *GRPCDescriptorResolver) lookupService(service string) (*desc.ServiceDes
 	descriptorSource, err := rpcInterfaceMessages.DescriptorSourceForGrpcConfig(r.grpcConfig, rpcInterfaceMessages.DescriptorSourceFromServer(cl))
 	if err != nil {
 		return nil, err
+	}
+
+	// In "reflection" mode the node's own service list says whether it describes the service at
+	// all. It is read on this same reflection stream, so a cold lookup still opens one stream, and
+	// reused for one reflection-timeout. Hybrid mode does not use it: its list can come back from
+	// the protoset alone when the node's reflection fails, which proves nothing about the node.
+	if r.grpcConfig.GetDescriptorSource() == common.GrpcDescriptorSourceReflection {
+		if listed, known := r.nodeListsService(ctx, cl, service); known && !listed {
+			return nil, fmt.Errorf("%w: service %s is not in the node's service list", errNotDescribed, service)
+		}
 	}
 
 	serviceDescriptor, err := resolveServiceFrom(descriptorSource, service)
@@ -319,4 +385,160 @@ func (r *GRPCDescriptorResolver) cacheServiceMethods(serviceDescriptor *desc.Ser
 	for _, method := range serviceDescriptor.GetMethods() {
 		r.cache.Store(service+"."+method.GetName(), method)
 	}
+
+	// After the methods, so a reader that sees the service as read finds every method it has.
+	r.memoryMu.Lock()
+	defer r.memoryMu.Unlock()
+	r.described[service] = time.Now()
+	delete(r.undescribed, service)
+}
+
+// memoryFor is how long the resolver remembers what the node does not describe: one
+// reflection-timeout, the budget of the lookup that found it out (MAG-5760).
+func (r *GRPCDescriptorResolver) memoryFor() time.Duration {
+	return r.grpcConfig.GetReflectionTimeout()
+}
+
+// rememberedNotDescribed answers, from memory, a method the node does not describe: a service it
+// said it does not describe, a method missing from a service read within the memory, or a service
+// missing from its service list read within the memory. nil when memory has no answer, and the
+// caller asks the node.
+func (r *GRPCDescriptorResolver) rememberedNotDescribed(service, methodName string) error {
+	now, memory := time.Now(), r.memoryFor()
+	r.memoryMu.Lock()
+	defer r.memoryMu.Unlock()
+
+	if at, found := r.undescribed[service]; found && now.Sub(at) < memory {
+		return fmt.Errorf("%w: service %s", errNotDescribed, service)
+	}
+	if at, found := r.described[service]; found && now.Sub(at) < memory {
+		return fmt.Errorf("%w: method %s of service %s", errNotDescribed, methodName, service)
+	}
+	if r.grpcConfig.GetDescriptorSource() == common.GrpcDescriptorSourceReflection && r.listKnown && now.Sub(r.listedAt) < memory {
+		if _, listed := r.listed[service]; !listed {
+			return fmt.Errorf("%w: service %s is not in the node's service list", errNotDescribed, service)
+		}
+	}
+	return nil
+}
+
+// rememberNotDescribed records that the node does not describe service. Entries that have lapsed
+// are dropped at most once per memory span, so the map holds the names asked for within about two
+// spans and no more.
+func (r *GRPCDescriptorResolver) rememberNotDescribed(service string) {
+	now, memory := time.Now(), r.memoryFor()
+	r.memoryMu.Lock()
+	defer r.memoryMu.Unlock()
+
+	if now.Sub(r.prunedAt) >= memory {
+		for name, at := range r.undescribed {
+			if now.Sub(at) >= memory {
+				delete(r.undescribed, name)
+			}
+		}
+		r.prunedAt = now
+	}
+	r.undescribed[service] = now
+}
+
+// noteServiceList records the node's service list, read by a lookup or by the warm-up sweep. A
+// listed service is no longer remembered as undescribed.
+func (r *GRPCDescriptorResolver) noteServiceList(services []string) {
+	listed := make(map[string]struct{}, len(services))
+	for _, service := range services {
+		listed[service] = struct{}{}
+	}
+
+	r.memoryMu.Lock()
+	defer r.memoryMu.Unlock()
+	r.listed, r.listedAt, r.listKnown = listed, time.Now(), true
+	for service := range listed {
+		delete(r.undescribed, service)
+	}
+}
+
+// nodeListsService reports whether the node's service list holds service, reading the list on cl
+// when the one held is older than the memory. One read runs at a time; a lookup that arrives while
+// it runs waits for it rather than opening its own. known is false when the list could not be read,
+// and a failed read is not retried within the memory either: the lookup then asks for the symbol
+// itself, as it did before the list was used.
+func (r *GRPCDescriptorResolver) nodeListsService(ctx context.Context, cl *grpcreflect.Client, service string) (listed, known bool) {
+	for {
+		memory := r.memoryFor()
+		r.memoryMu.Lock()
+		if !r.listedAt.IsZero() && time.Since(r.listedAt) < memory {
+			_, listed = r.listed[service]
+			known = r.listKnown
+			r.memoryMu.Unlock()
+			return listed, known
+		}
+		if running := r.listing; running != nil {
+			r.memoryMu.Unlock()
+			select {
+			case <-running:
+				continue
+			case <-ctx.Done():
+				return false, false
+			}
+		}
+		running := make(chan struct{})
+		r.listing = running
+		r.memoryMu.Unlock()
+
+		services, err := cl.ListServices()
+
+		if err == nil {
+			r.noteServiceList(services)
+		}
+		r.memoryMu.Lock()
+		if err != nil {
+			r.listed, r.listedAt, r.listKnown = nil, time.Now(), false
+		}
+		r.listing = nil
+		r.memoryMu.Unlock()
+		close(running)
+
+		if err != nil {
+			utils.FormatDebug("gRPC service list not read, looking the symbol up instead",
+				utils.LogAttr("error", err.Error()),
+				utils.LogAttr("url", r.url))
+			return false, false
+		}
+	}
+}
+
+// definitelyNotDescribed reports whether a lookup's error is the node's descriptor source saying it
+// does not describe the symbol: errNotDescribed, reflection's "not found" (a NotFound status, or
+// grpcreflect's own not-found error), or a node that does not serve reflection (an Unimplemented
+// status: a lookup makes no call but reflection's). A timeout, an unreachable node, a closed
+// connection or a borrow that failed is none of these.
+func definitelyNotDescribed(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, errNotDescribed) || errors.Is(err, grpcurl.ErrReflectionNotSupported) {
+		return true
+	}
+	pending := []error{err}
+	for len(pending) > 0 {
+		e := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+		if grpcreflect.IsElementNotFoundError(e) {
+			return true
+		}
+		if withStatus, ok := e.(interface{ GRPCStatus() *status.Status }); ok {
+			if code := withStatus.GRPCStatus().Code(); code == codes.NotFound || code == codes.Unimplemented {
+				return true
+			}
+		}
+		switch wrapped := e.(type) {
+		case interface{ Unwrap() []error }:
+			pending = append(pending, wrapped.Unwrap()...)
+		case interface{ Unwrap() error }:
+			if next := wrapped.Unwrap(); next != nil {
+				pending = append(pending, next)
+			}
+		}
+	}
+	return false
 }
