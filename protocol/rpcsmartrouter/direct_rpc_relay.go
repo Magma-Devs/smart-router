@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/fullstorydev/grpcurl"
@@ -571,6 +572,21 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 		Headers:     chainMessage.GetRPCMessage().GetHeaders(), // Preserves duplicates, empty value = delete
 		ContentType: common.JSONContentType,
 	}
+	// A client's Tendermint GET goes to the node as that GET, with the client's own path and query
+	// and no body. It used to be rewritten into a JSON-RPC POST built from the parsed method and
+	// params (MAG-5267); the router is a proxy (Part I R-0). The parsed message still drives routing
+	// and caching. CometBFT serves both forms on the same port.
+	uriGET := false
+	if tendermintMessage, ok := chainMessage.GetRPCMessage().(*rpcInterfaceMessages.TendermintrpcMessage); ok {
+		if uri, fromURI := tendermintMessage.URIRequest(); fromURI {
+			fullURL, err := tendermintURIRequestURL(nodeUrl, uri)
+			if err != nil {
+				return nil, fmt.Errorf("failed to build Tendermint RPC URL: %w", err)
+			}
+			httpParams.Method, httpParams.URL, httpParams.Body = http.MethodGet, fullURL, nil
+			uriGET = true
+		}
+	}
 
 	requestCtx, span := tracing.StartClientSpan(requestCtx, tracing.SpanSendJSONRPCRelay)
 	defer span.End()
@@ -597,8 +613,10 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 	statusCode := response.StatusCode
 	responseData := response.Body
 
-	// Handle HTTP error status codes
-	if statusCode >= 500 {
+	// Handle HTTP error status codes. A client's Tendermint GET that the node answered with its
+	// JSON-RPC error is the exception (uriServerErrorIsNodeReply): that 5xx is the node's reply, and
+	// it goes on below to be read by its body, as the same error over POST is.
+	if statusCode >= 500 && !(uriGET && uriServerErrorIsNodeReply(statusCode, responseData)) {
 		utils.FormatDebug("direct RPC request returned server error",
 			utils.LogAttr("endpoint", endpointIdentifier),
 			utils.LogAttr("status", statusCode),
@@ -690,6 +708,98 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 	}
 
 	return result, nil
+}
+
+// tendermintURIRequestURL is the URL a client's Tendermint GET goes to: the client's path under the
+// node url's own path, and the client's query after the node url's own query. A node url can name
+// its key in either, and the JSON-RPC POST goes to the node url as configured, so the GET keeps
+// both (MAG-5267). The node url's own parameters go as configured: a client pair whose name the
+// node url's query or its auth-query already sets is left out. uri is the client's path and query
+// without the leading "/" (URIRequest).
+func tendermintURIRequestURL(nodeURL *common.NodeUrl, uri string) (string, error) {
+	path, query, _ := strings.Cut(uri, "?")
+	// A leading "/" makes JoinURLPath append the path to the node url's own path. Without it the
+	// path is relative, and resolving it replaces the node url's last path segment and its query.
+	joined, err := common.JoinURLPath(nodeURL.Url, "/"+path)
+	if err != nil || query == "" {
+		return joined, err
+	}
+	joinedURL, err := url.Parse(joined)
+	if err != nil {
+		return "", err
+	}
+	query = withoutQueryNames(query, queryNames(joinedURL.RawQuery, nodeURL.AuthConfig.AuthQuery))
+	if query == "" {
+		return joined, nil
+	}
+	if joinedURL.RawQuery == "" {
+		joinedURL.RawQuery = query
+	} else {
+		joinedURL.RawQuery += "&" + query
+	}
+	return joinedURL.String(), nil
+}
+
+// queryNames lists the parameter names the raw queries set, as queryName reads them. A pair ends at
+// "&" or ";": some servers split on both.
+func queryNames(rawQueries ...string) map[string]bool {
+	names := map[string]bool{}
+	for _, rawQuery := range rawQueries {
+		for _, pair := range strings.FieldsFunc(rawQuery, func(r rune) bool { return r == '&' || r == ';' }) {
+			names[queryName(pair)] = true
+		}
+	}
+	return names
+}
+
+// queryName is a query pair's name, unescaped and lowercased, so a name a server reads the same way
+// compares equal however it is spelled.
+func queryName(pair string) string {
+	name, _, _ := strings.Cut(pair, "=")
+	if unescaped, err := url.QueryUnescape(name); err == nil {
+		name = unescaped
+	}
+	return strings.ToLower(name)
+}
+
+// withoutQueryNames is rawQuery without the pairs whose name is in names. The pairs it keeps, and
+// the separator before each, stay as they were.
+func withoutQueryNames(rawQuery string, names map[string]bool) string {
+	if len(names) == 0 {
+		return rawQuery
+	}
+	var kept strings.Builder
+	wrote := false
+	before := ""
+	for {
+		pair, after, rest, found := rawQuery, "", "", false
+		if i := strings.IndexAny(rawQuery, "&;"); i >= 0 {
+			pair, after, rest, found = rawQuery[:i], rawQuery[i:i+1], rawQuery[i+1:], true
+		}
+		if pair == "" || !names[queryName(pair)] {
+			if wrote {
+				kept.WriteString(before)
+			}
+			kept.WriteString(pair)
+			wrote = true
+		}
+		if !found {
+			return kept.String()
+		}
+		rawQuery, before = rest, after
+	}
+}
+
+// uriServerErrorIsNodeReply reports whether a 5xx that answered a client's Tendermint GET is the
+// node's own reply, to be read by its body. CometBFT answers a URI request that fails with a 500 and
+// the JSON-RPC error that a JSON-RPC POST gets with a 200 (rpc/jsonrpc/server/http_uri_handler.go):
+// the status adds nothing the body does not say. The rule is REST's, ServerErrorIsNodeReply: the
+// body is JSON, and the registry does not mark the status as one that may come from a gateway that
+// had already sent the request on, as it marks a 502, a 504 and a status it does not list. On top of
+// it, the body must be a JSON-RPC error, its error member an object. An empty, HTML or text body, or
+// JSON that is not a JSON-RPC error, stays a failure in front of the node (MAG-5267).
+func uriServerErrorIsNodeReply(statusCode int, body []byte) bool {
+	return rpcInterfaceMessages.ServerErrorIsNodeReply(statusCode, body) && gjson.GetBytes(body, "error").IsObject()
 }
 
 // classifyJSONRPCNodeError stamps the registry's verdict on a JSON-RPC or Tendermint reply that

@@ -73,6 +73,14 @@ func (apip *TendermintChainParser) CraftMessage(parsing *spectypes.ParseDirectiv
 	return apip.newChainMessage(apiCont.api, spectypes.NOT_APPLICABLE, nil, &tenderMsg, apiCollection, false), nil
 }
 
+// ErrTendermintURINamesNoMethod refuses a URI request whose path names no method: a GET of the root,
+// with or without a query, or a request with no body, which is how a POST without one parses.
+// CometBFT answers one with its HTML list of endpoints, whose links name the host the router called
+// the node by: no reply the router can pass on, and an attempt that fails and is charged to the
+// endpoint. So the router answers the request itself, before asking any provider, as it answers an
+// API the spec does not declare: with JSON-RPC's method-not-found (MAG-5267).
+var ErrTendermintURINamesNoMethod = fmt.Errorf("the request names no method: %w", common.APINotSupportedError)
+
 // ParseMsg parses message data into chain message object
 func (apip *TendermintChainParser) ParseMsg(urlPath string, data []byte, connectionType string, metadata []pairingtypes.Metadata, extensionInfo extensionslib.ExtensionInfo) (ChainMessage, error) {
 	utils.FormatTrace("[Archive Debug] TendermintChainParser.ParseMsg called", utils.LogAttr("urlPath", urlPath), utils.LogAttr("extensionInfo", extensionInfo))
@@ -98,6 +106,9 @@ func (apip *TendermintChainParser) ParseMsg(urlPath string, data []byte, connect
 		urlObj, err := url.Parse(urlPath)
 		if err != nil {
 			return nil, err
+		}
+		if strings.Trim(urlObj.Path, "/") == "" { // the root, however many slashes the client sent
+			return nil, ErrTendermintURINamesNoMethod
 		}
 		urlObj.Query()
 
@@ -236,6 +247,7 @@ func (apip *TendermintChainParser) ParseMsg(urlPath string, data []byte, connect
 		tenderMsg := rpcInterfaceMessages.TendermintrpcMessage{JsonrpcMessage: msgs[0], Path: ""}
 		if !isJsonrpc {
 			tenderMsg.Path = urlPath // add path
+			tenderMsg.FromURI = true
 		}
 		nodeMsg = apip.newChainMessage(api, latestRequestedBlock, blockHashes, &tenderMsg, apiCollection, parsedDefault)
 		// A single request has no earliest of its own unless its parsers read a range lower bound;
@@ -403,6 +415,15 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 		},
 		logModule: "tendermint http in/out",
 		noAnswer:  noAnswerJsonError,
+		// A GET that names no method is refused before any provider is asked
+		// (ErrTendermintURINamesNoMethod), and answered with the method-not-found the POST handler
+		// gives an API the spec does not declare.
+		answerError: func(_ context.Context, fiberCtx *fiber.Ctx, err error, reply *pairingtypes.RelayReply) (bool, error) {
+			if !errors.Is(err, ErrTendermintURINamesNoMethod) {
+				return false, nil
+			}
+			return answerJsonRpcMethodNotFound(fiberCtx, err, reply)
+		},
 		errorBody: func(fiberCtx *fiber.Ctx, _ *common.RelayResult, errMasking, _ string) []byte {
 			if string(fiberCtx.Body()) != "" {
 				errMasking = addAttributeToError("recommendation", "For jsonRPC use POST", errMasking)

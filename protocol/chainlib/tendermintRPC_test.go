@@ -306,6 +306,25 @@ func TestTendermintURIRPC(t *testing.T) {
 	}
 }
 
+// A URI request that names no method does not parse (MAG-5267): a GET of the root, with or without
+// a query, which the GET handler hands over as "?" and "?height=5", a GET of "//", which it hands
+// over as "/?", and a request with no url and no body, as a POST without one is. It is refused as
+// an API the spec does not declare. A URI that names a method still parses.
+func TestTendermintURIThatNamesNoMethodDoesNotParse(t *testing.T) {
+	chainParser, _, _, closeServer, _, err := CreateChainLibMocks(context.Background(), "COSMOSHUB", spectypes.APIInterfaceTendermintRPC, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), nil, "../../", nil)
+	if closeServer != nil {
+		t.Cleanup(closeServer)
+	}
+	require.NoError(t, err)
+	for _, url := range []string{"?", "?height=5", "/?", ""} {
+		_, err := chainParser.ParseMsg(url, nil, "", nil, extensionslib.ExtensionInfo{})
+		require.ErrorIs(t, err, ErrTendermintURINamesNoMethod, "url %q", url)
+		require.ErrorIs(t, err, common.APINotSupportedError, "url %q", url)
+	}
+	_, err = chainParser.ParseMsg("status?", nil, "", nil, extensionslib.ExtensionInfo{})
+	require.NoError(t, err)
+}
+
 func TestTendermintRpcChainListener_Shutdown_DrainsWSWaitGroup(t *testing.T) {
 	listener := &TendermintRpcChainListener{}
 	listener.wsWG.Add(1)
