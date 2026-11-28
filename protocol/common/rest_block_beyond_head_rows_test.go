@@ -24,6 +24,16 @@ func TestRESTBlockBeyondHeadRows(t *testing.T) {
 		{"the gateway's sentence", 400, gateway, RouterErrorChainBlockNotFound},
 		{"the sidecar's sentence, on the sender's second pass", 400, "HTTP 400: " + sidecar, RouterErrorChainBlockNotFound},
 		{"the gateway's sentence, on the sender's second pass", 400, "HTTP 400: " + gateway, RouterErrorChainBlockNotFound},
+		// A gateway that asks its gRPC service through an ABCI query (Cosmos SDK v0.45; a later node
+		// with its gRPC server off): baseapp's gRPCErrorToSDKError wraps the service's status, and
+		// the client's sdkErrorToGRPCError puts that log in the gateway's message.
+		{"the gateway's sentence through an ABCI query", 400, "rpc error: code = InvalidArgument desc = " + gateway + ": invalid request", RouterErrorChainBlockNotFound},
+		{"the gateway's sentence through an ABCI query, on the sender's second pass", 400, "HTTP 400: rpc error: code = InvalidArgument desc = " + gateway + ": invalid request", RouterErrorChainBlockNotFound},
+		{
+			"a path parameter that quotes the gateway's sentence with the status lead", 400,
+			`type mismatch, parameter: height, error: strconv.ParseInt: parsing "rpc error: code = InvalidArgument desc = requested block height is bigger then the chain length": invalid syntax`,
+			RouterErrorUserInvalidRequest,
+		},
 		{
 			"a path parameter that quotes the gateway's sentence", 400,
 			`type mismatch, parameter: height, error: strconv.ParseInt: parsing "requested block height is bigger then the chain length": invalid syntax`,

@@ -197,8 +197,13 @@ func xrplMessageStartsWith(alternatives ...string) ErrorMatcher {
 // writes it, with or without the direct-RPC sender's "HTTP <status>: " prefix. A node that quotes
 // the request in an error, as the gRPC gateway's 400 for a path parameter does, writes the quote
 // after its own words, so the sentence inside a quote is not read as the node's (MAG-5760).
+//
+// A Cosmos gateway that reaches its gRPC service through an ABCI query (Cosmos SDK v0.45, and a
+// later node with its gRPC server off) writes the service's status as grpc-go renders it, so its
+// message opens with "rpc error: code = InvalidArgument desc = " ahead of the sentence. That lead
+// is the node's own, and the sentence after it is read too.
 func restNodeSentence(sentence string) ErrorMatcher {
-	return MessageRegex(`(?i)^(?:HTTP \d+: )?` + regexp.QuoteMeta(sentence))
+	return MessageRegex(`(?i)^(?:HTTP \d+: )?(?:rpc error: code = [A-Za-z]+ desc = )?` + regexp.QuoteMeta(sentence))
 }
 
 // ---------------------------------------------------------------------------
