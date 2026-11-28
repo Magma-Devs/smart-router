@@ -1265,8 +1265,11 @@ func (g *GRPCDirectRPCConnection) SendRequest(
 		if ctx.Err() == nil {
 			err = fmt.Errorf("%w: %w", ErrNoMethodDescriptor, err)
 		}
-		return nil, utils.FormatError("failed to get method descriptor", err,
-			utils.LogAttr("method", methodPath))
+		// The lookup asks the node, so its failure can name the node: a dial that was refused, or
+		// the url of a client it could not borrow. The line logged here names it; the error, which
+		// relay_end records, does not.
+		return nil, common.WithoutNodeAddress(utils.FormatError("failed to get method descriptor", err,
+			utils.LogAttr("method", methodPath)), g.nodeUrl.Url)
 	}
 
 	// Create dynamic message factory

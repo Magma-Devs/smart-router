@@ -359,3 +359,71 @@ func TestSendRequest_ConnectionThatCannotBeSetUpIsUndelivered(t *testing.T) {
 		require.False(t, errors.As(err, &undelivered))
 	})
 }
+
+// A JSON request needs the method's definition, which the router reads from the node. When the
+// node went down after the router connected, that lookup cannot reach it either. Its error, which
+// relay_end records, carries the node's address as [address], as an undelivered call's does, and
+// it still reads as a lookup that found no definition, with the fault in its text.
+func TestSendRequest_DescriptorLookupThatCannotReachTheNodeCarriesNoAddress(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		url  func(addr string) string
+	}{
+		{"a node configured by IP", func(addr string) string { return "grpc://" + addr }},
+		{"a node configured by name", func(addr string) string {
+			_, port, _ := net.SplitHostPort(addr)
+			return "grpc://localhost:" + port
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lis, err := net.Listen("tcp", "127.0.0.1:0")
+			require.NoError(t, err)
+			srv := grpc.NewServer(grpc.ForceServerCodec(rawProtoCodec{}), grpc.UnknownServiceHandler(func(_ any, stream grpc.ServerStream) error {
+				if method, _ := grpc.MethodFromServerStream(stream); strings.HasPrefix(method, "/grpc.reflection.") {
+					return status.Error(codes.Unimplemented, "this node serves no reflection")
+				}
+				var request []byte
+				if err := stream.RecvMsg(&request); err != nil {
+					return err
+				}
+				return stream.SendMsg([]byte{0x08, 0x07})
+			}))
+			go func() { _ = srv.Serve(lis) }()
+			t.Cleanup(srv.Stop)
+
+			nodeURL := tc.url(lis.Addr().String())
+			conn, err := NewDirectRPCConnection(context.Background(), common.NodeUrl{Url: nodeURL, GrpcConfig: common.GrpcConfig{AllowInsecure: true, ReflectionTimeout: time.Second}}, 5, "")
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = conn.Close() })
+			headers := map[string]string{GRPCMethodHeader: "test.v1.Node/Call"}
+
+			// A binary call sets the connection up while the node is up; it needs no definition.
+			_, err = conn.SendRequest(context.Background(), []byte{0x08, 0x01}, headers)
+			require.NoError(t, err)
+			srv.Stop()
+
+			// The router's connection may not have seen the node go yet, and a lookup on it then fails
+			// without naming the node. A failed lookup is not kept, so the next one asks again: retry
+			// until a lookup fails where the node is named, written as [address] or not, and check
+			// every error on the way.
+			namesTheNode := func(text string) bool {
+				return strings.Contains(text, "[address]") || addressInText.MatchString(text) || strings.Contains(text, "localhost")
+			}
+			var errs []error
+			for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(50 * time.Millisecond) {
+				_, err := conn.SendRequest(context.Background(), []byte(`{"value": 1}`), headers)
+				errs = append(errs, err)
+				if err != nil && namesTheNode(err.Error()) {
+					break
+				}
+				require.True(t, time.Now().Before(deadline), "no lookup failed on the node's address: %v", err)
+			}
+			for _, err := range errs {
+				require.Error(t, err)
+				require.ErrorIs(t, err, ErrNoMethodDescriptor, "still a lookup that found no definition: %v", err)
+				require.NotRegexp(t, addressInText, err.Error(), "relay_end and the logs get the node's address as [address]")
+				require.NotContains(t, err.Error(), "localhost")
+			}
+		})
+	}
+}
