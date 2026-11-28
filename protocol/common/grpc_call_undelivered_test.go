@@ -113,6 +113,24 @@ func TestRedactNodeAddress(t *testing.T) {
 			text:    "lookup node.example.com: no such host",
 			want:    "lookup [address]: no such host",
 		},
+		{
+			name:    "a fully qualified host with its final dot, as a lookup names it",
+			nodeURL: "grpc://node.example.com.:9090",
+			text:    "dial tcp: lookup node.example.com.: no such host",
+			want:    "dial tcp: lookup [address].: no such host",
+		},
+		{
+			name:    "a fully qualified host with its final dot, in the url and before a port",
+			nodeURL: "grpc://node.example.com.:9090/node-key",
+			text:    "failed to create gRPC connector {url:grpc://node.example.com.:9090/node-key}; failed to dial gRPC node.example.com.:9090",
+			want:    "failed to create gRPC connector {url:grpc://[address]/[redacted]}; failed to dial gRPC [address]",
+		},
+		{
+			name:    "a fully qualified host configured with its final dot, written without it",
+			nodeURL: "grpcs://node.example.com.",
+			text:    "lookup node.example.com: no such host",
+			want:    "lookup [address]: no such host",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			require.Equal(t, tc.want, RedactNodeAddress(tc.text, tc.nodeURL))

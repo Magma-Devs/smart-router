@@ -1183,17 +1183,19 @@ func RedactSocketAddresses(text string) string {
 // RedactNodeAddress replaces the address of the node at nodeURL in text with "[address]": the url's
 // host, with its port when one follows, and each IP address with its port (RedactSocketAddresses),
 // which is how a dial names the address a host resolved to. A url's path, query and user info are
-// withheld first (utils.RedactSecrets).
+// withheld first (utils.RedactSecrets). A host is matched with or without the dot that ends a fully
+// qualified name, since a dial writes the name as it was configured.
 func RedactNodeAddress(text, nodeURL string) string {
 	text = utils.RedactSecrets(text)
 	if host := nodeHostName(nodeURL); host != "" {
-		text = regexp.MustCompile(`(?i)\b`+regexp.QuoteMeta(host)+`\b(?::\d+\b)?`).ReplaceAllString(text, "[address]")
+		text = regexp.MustCompile(`(?i)\b`+regexp.QuoteMeta(host)+`\b(?:\.?:\d+\b)?`).ReplaceAllString(text, "[address]")
 	}
 	return RedactSocketAddresses(text)
 }
 
 // nodeHostName is the host nodeURL names, read as utils.RedactURL reads it, with or without a
-// scheme. It is "" for an IP address, which RedactSocketAddresses replaces wherever it appears.
+// scheme, and without the dot that ends a fully qualified name. It is "" for an IP address, which
+// RedactSocketAddresses replaces wherever it appears.
 func nodeHostName(nodeURL string) string {
 	host := nodeURL
 	if i := strings.Index(host, "://"); i >= 0 {
@@ -1211,7 +1213,7 @@ func nodeHostName(nodeURL string) string {
 	if net.ParseIP(strings.Trim(host, "[]")) != nil {
 		return ""
 	}
-	return host
+	return strings.TrimSuffix(host, ".")
 }
 
 // WithoutNodeAddress returns err with its text passed through RedactNodeAddress, or err itself when
