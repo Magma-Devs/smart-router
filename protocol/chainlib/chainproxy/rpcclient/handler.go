@@ -64,6 +64,12 @@ type handler struct {
 	log            log.Logger
 	allowSubscribe bool
 
+	// subsByRequestID finds a live client subscription by the id of the request that
+	// opened it: a node can end a subscription with an error frame under that id long
+	// after the request was answered (see handleResponse). Like clientSubs, only the
+	// dispatch goroutine reads or writes it.
+	subsByRequestID map[string]*ClientSubscription
+
 	subLock    utils.Mutex
 	serverSubs map[ID]*Subscription
 }
@@ -86,6 +92,8 @@ func newHandler(connCtx context.Context, conn jsonWriter, idgen func() ID, reg *
 		allowSubscribe: true,
 		serverSubs:     make(map[ID]*Subscription),
 		log:            log.Root(),
+
+		subsByRequestID: make(map[string]*ClientSubscription),
 	}
 	if conn.remoteAddr() != "" {
 		h.log = h.log.New("conn", conn.remoteAddr())
@@ -193,6 +201,7 @@ func (h *handler) cancelAllRequests(err error, inflightReq *requestOp) {
 		delete(h.clientSubs, id)
 		sub.close(err)
 	}
+	clear(h.subsByRequestID)
 }
 
 func (h *handler) addSubscriptions(nn []*Notifier) {
@@ -384,6 +393,18 @@ func (h *handler) handleSubscriptionResultTendermint(msg *JsonrpcMessage) {
 func (h *handler) handleResponse(msg *JsonrpcMessage) {
 	op := h.respWait[string(msg.ID)]
 	if op == nil {
+		// A node can end a subscription with an error frame under the id of the request that
+		// opened it, long after that request was answered: CometBFT does when it cancels a
+		// subscription (its event buffer is out of capacity, for one), and older Tendermint
+		// uses that id plus "#event". The frame matches no pending call, so it was dropped
+		// here and the subscription stalled with nobody told (MAG-5327). It goes to that
+		// subscription instead, which then ends with the node's error.
+		if msg.Error != nil {
+			if sub := h.subscriptionOpenedBy(msg.ID); sub != nil {
+				sub.deliver(msg)
+				return
+			}
+		}
 		utils.FormatWarning("Unsolicited RPC response", nil, utils.LogAttr("req-id", idForLog{msg.ID}.String()))
 		return
 	}
@@ -402,11 +423,9 @@ func (h *handler) handleResponse(msg *JsonrpcMessage) {
 	if msg.Error != nil {
 		op.err = msg.Error
 	} else if op.subId != "" {
-		go op.sub.run()
-		h.clientSubs[op.subId] = op.sub
+		h.startClientSub(op.subId, op.sub, msg.ID)
 	} else if op.err = json.Unmarshal(msg.Result, &op.sub.subid); op.err == nil {
-		go op.sub.run()
-		h.clientSubs[op.sub.subid] = op.sub
+		h.startClientSub(op.sub.subid, op.sub, msg.ID)
 	} else {
 		// This is because StarkNet Pathfinder is returning an integer instead of a string in the result.
 		// int64 rather than int so this key cannot drift from CanonicalSubscriptionID's on a 32-bit build.
@@ -414,11 +433,48 @@ func (h *handler) handleResponse(msg *JsonrpcMessage) {
 		if json.Unmarshal(msg.Result, &integerSubId) == nil {
 			op.err = nil
 			op.sub.subid = strconv.FormatInt(integerSubId, 10)
-			go op.sub.run()
-			h.clientSubs[op.sub.subid] = op.sub
+			h.startClientSub(op.sub.subid, op.sub, msg.ID)
 		}
 	}
 	op.resp <- msg
+}
+
+// startClientSub registers sub under key, the identity its pushes carry, and under
+// requestID, the id of the subscribe request that opened it; then it starts sub's
+// forwarding loop.
+func (h *handler) startClientSub(key string, sub *ClientSubscription, requestID json.RawMessage) {
+	sub.requestID = string(requestID)
+	h.clientSubs[key] = sub
+	h.subsByRequestID[sub.requestID] = sub
+	go sub.run()
+}
+
+// tendermintEventIDSuffix is what older Tendermint appends to a subscribe request's id in the
+// frames it sends on that subscription ("1#event").
+const tendermintEventIDSuffix = "#event"
+
+// subscriptionOpenedBy returns the live subscription whose subscribe request had id, or nil.
+// It also reads older Tendermint's "<id>#event", a JSON string whatever the request id's type.
+func (h *handler) subscriptionOpenedBy(id json.RawMessage) *ClientSubscription {
+	if sub := h.subsByRequestID[string(id)]; sub != nil {
+		return sub
+	}
+	var s string
+	if json.Unmarshal(id, &s) != nil {
+		return nil
+	}
+	base, ok := strings.CutSuffix(s, tendermintEventIDSuffix)
+	if !ok {
+		return nil
+	}
+	if sub := h.subsByRequestID[base]; sub != nil { // a numeric request id: 1 → "1#event"
+		return sub
+	}
+	quoted, err := json.Marshal(base) // a string request id: "abc" → "abc#event"
+	if err != nil {
+		return nil
+	}
+	return h.subsByRequestID[string(quoted)]
 }
 
 // handleCallMsg executes a call message and returns the answer.
@@ -541,6 +597,9 @@ func (h *handler) forgetClientSub(sub *ClientSubscription) {
 	}
 	if current, ok := h.clientSubs[sub.subid]; ok && current == sub {
 		delete(h.clientSubs, sub.subid)
+	}
+	if current, ok := h.subsByRequestID[sub.requestID]; ok && current == sub {
+		delete(h.subsByRequestID, sub.requestID)
 	}
 }
 

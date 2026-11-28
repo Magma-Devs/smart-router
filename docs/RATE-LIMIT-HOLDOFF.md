@@ -59,7 +59,11 @@ another registry, and tests use `NewRegistry` or the jitter-free `NewRegistryWit
   exactly as before. Nor does it extend to a stateful batch that the upstream answered: a
   batch reply is one node error even when some of its elements executed
   (`--batch-node-error-on-any`), so only a refusal of the whole batch at the transport (HTTP
-  429) lets a batch carrying a write be sent again.
+  429) lets a batch carrying a write be sent again. Nor does it extend to a write one of whose
+  copies was answered with a slot-already-used reply ("nonce too low", "account sequence
+  mismatch" and their kin, `common.IsSlotAlreadyUsed`, MAG-5593): that copy may be this very
+  transaction, landed through another copy, so the write is not sent again even when every
+  copy also read as a rate limit.
 - **A fully capped chain answers with the node's own 429.** When every attempt was refused
   for rate, the client gets the upstream's 429 and its body as is, as for any other answer a
   node gave (MAG-4481; it was a router-made 503 before). The node's Retry-After is not passed

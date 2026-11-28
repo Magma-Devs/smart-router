@@ -835,6 +835,14 @@ func registerError(le *RouterError) *RouterError {
 	return le
 }
 
+// RouterErrorByName is the registry's error of that name ("NODE_RATE_LIMITED"), which a spec row's
+// `error` names (PRD §2.2; MAG-5597). ok is false for a name the registry does not have. Lock-free:
+// the registry is read-only after package init (see the INVARIANT above).
+func RouterErrorByName(name string) (*RouterError, bool) {
+	routerError, ok := errorRegistryName[name]
+	return routerError, ok
+}
+
 // RouterWrappedError wraps a RouterError with context, supporting errors.Is matching.
 type RouterWrappedError struct {
 	RouterErr *RouterError

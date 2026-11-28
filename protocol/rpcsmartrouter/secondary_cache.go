@@ -153,6 +153,17 @@ func (rpcss *RPCSmartRouterServer) trySecondaryCacheLookup(
 		unusable = true
 	}
 
+	// An entry that answers with nothing (a null or [] result, MAG-5249) is passed over as a miss:
+	// a foreign tier may hold one from a writer that keeps such replies, and this router serves
+	// none. The request proceeds to a node, whose answer is backfilled in the entry's place.
+	if hit && emptyResultReason(apiInterface, copyReply.Data) != "" {
+		utils.FormatDebug("secondary cache hit passed over: the entry answers with nothing",
+			utils.LogAttr("GUID", ctx),
+			utils.LogAttr("why", emptyResultReason(apiInterface, copyReply.Data)),
+		)
+		hit = false
+	}
+
 	outcome := metrics.ClassifyCacheLookupOutcome(cacheError, hit)
 	if copyFailed || unusable {
 		outcome = metrics.CacheOutcomeError

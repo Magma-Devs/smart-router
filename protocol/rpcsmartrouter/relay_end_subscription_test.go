@@ -71,6 +71,19 @@ func relayEndSubscriptionID(t *testing.T, ack string) string {
 	return reply.Result
 }
 
+// requestBytesPlaceholder checks that event's request_bytes is want, the length of the frame
+// the test sent, and replaces it with "<bytes>" for a golden whose frame length varies.
+func requestBytesPlaceholder(t *testing.T, event string, want int) string {
+	t.Helper()
+	var fields map[string]any
+	require.NoError(t, json.Unmarshal([]byte(event), &fields), event)
+	require.EqualValues(t, want, fields["request_bytes"], "request_bytes is the frame the client sent")
+	fields["request_bytes"] = "<bytes>"
+	out, err := json.Marshal(fields)
+	require.NoError(t, err)
+	return string(out)
+}
+
 // requireSubscriptionGoldens compares a socket's events, in order, with their golden files.
 func requireSubscriptionGoldens(t *testing.T, events []string, names ...string) {
 	t.Helper()
@@ -116,7 +129,14 @@ func TestRelayEnd_WebSocketSubscriptions(t *testing.T) {
 	relayEndExchange(t, second, unsubscribe(secondID))
 	relayEndExchange(t, first, unsubscribe(firstID))
 
-	requireSubscriptionGoldens(t, newRelayEndsSince(read, seen),
+	events := newRelayEndsSince(read, seen)
+	require.Len(t, events, 4, "one relay_end per subscription request")
+	// An unsubscribe frame carries the router's rs_ id, whose counter moves by a random step
+	// (MAG-5438), so the frame's length varies from run to run: each unsubscribe's
+	// request_bytes is checked against the frame sent, and the goldens hold a placeholder.
+	events[2] = requestBytesPlaceholder(t, events[2], len(unsubscribe(secondID)))
+	events[3] = requestBytesPlaceholder(t, events[3], len(unsubscribe(firstID)))
+	requireSubscriptionGoldens(t, events,
 		"ws_subscribe", "ws_subscribe_joined", "ws_unsubscribe_answered_by_router", "ws_unsubscribe_last_client")
 	require.Equal(t, []string{"eth_subscribe", "eth_unsubscribe"}, node.ObservedMethods(),
 		"the join and the router's own answer sent the node nothing")

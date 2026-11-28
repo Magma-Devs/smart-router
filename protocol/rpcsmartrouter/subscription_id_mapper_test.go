@@ -1,6 +1,8 @@
 package rpcsmartrouter
 
 import (
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -8,6 +10,19 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// routerIDShape is the rs_ id format: a 6-character hex hash of the client, then a counter
+// of at least 5 digits.
+var routerIDShape = regexp.MustCompile(`^rs_[0-9a-f]{6}_[0-9]{5,}$`)
+
+// routerIDCounter returns the counter part of an rs_ id.
+func routerIDCounter(t *testing.T, id string) uint64 {
+	t.Helper()
+	require.Regexp(t, routerIDShape, id)
+	counter, err := strconv.ParseUint(id[strings.LastIndex(id, "_")+1:], 10, 64)
+	require.NoError(t, err)
+	return counter
+}
 
 func TestSubscriptionIDMapper_GenerateRouterID(t *testing.T) {
 	mapper := NewSubscriptionIDMapper()
@@ -17,18 +32,16 @@ func TestSubscriptionIDMapper_GenerateRouterID(t *testing.T) {
 	id2 := mapper.GenerateRouterID(clientKey)
 	id3 := mapper.GenerateRouterID(clientKey)
 
-	// Check format: rs_{hash}_{counter}
-	assert.True(t, strings.HasPrefix(id1, "rs_"), "should have rs_ prefix")
-	assert.Len(t, strings.Split(id1, "_"), 3, "should have 3 parts separated by _")
+	// Format: rs_{hash}_{counter}, one hash per client
+	for _, id := range []string{id1, id2, id3} {
+		assert.Regexp(t, routerIDShape, id)
+		assert.Equal(t, strings.Split(id1, "_")[1], strings.Split(id, "_")[1], "one client keeps one hash")
+	}
 
-	// Check uniqueness
-	assert.NotEqual(t, id1, id2, "IDs should be unique")
-	assert.NotEqual(t, id2, id3, "IDs should be unique")
-
-	// Check monotonic counter
-	assert.Contains(t, id1, "_00001", "first ID should have counter 00001")
-	assert.Contains(t, id2, "_00002", "second ID should have counter 00002")
-	assert.Contains(t, id3, "_00003", "third ID should have counter 00003")
+	// Unique, and the counter only grows
+	c1, c2, c3 := routerIDCounter(t, id1), routerIDCounter(t, id2), routerIDCounter(t, id3)
+	assert.Less(t, c1, c2, "the counter must grow")
+	assert.Less(t, c2, c3, "the counter must grow")
 }
 
 func TestSubscriptionIDMapper_GenerateRouterID_DifferentClients(t *testing.T) {
@@ -44,15 +57,38 @@ func TestSubscriptionIDMapper_GenerateRouterID_DifferentClients(t *testing.T) {
 
 	// One counter numbers every id the mapper issues, so no two clients can ever be
 	// handed the same id and nothing per client has to be released (MAG-3722).
-	assert.Contains(t, id1a, "_00001")
-	assert.Contains(t, id1b, "_00002")
-	assert.Contains(t, id2a, "_00003")
-	assert.Contains(t, id2b, "_00004")
+	counters := []uint64{
+		routerIDCounter(t, id1a), routerIDCounter(t, id1b),
+		routerIDCounter(t, id2a), routerIDCounter(t, id2b),
+	}
+	for i := 1; i < len(counters); i++ {
+		assert.Less(t, counters[i-1], counters[i], "one counter grows across clients")
+	}
 
 	// Different hash prefixes for different clients
 	parts1 := strings.Split(id1a, "_")
 	parts2 := strings.Split(id2a, "_")
 	assert.NotEqual(t, parts1[1], parts2[1], "different clients should have different hash")
+}
+
+// TestSubscriptionIDMapper_GenerateRouterID_StepIsNotACount is MAG-5438's regression. The
+// counter is shared by every client, so with a +1 step a client that subscribes, waits while
+// one other client subscribes, then subscribes again always sees its counter move by 2: the
+// step tells it how many ids went to others in between. With a random step the move varies.
+func TestSubscriptionIDMapper_GenerateRouterID_StepIsNotACount(t *testing.T) {
+	mapper := NewSubscriptionIDMapper()
+
+	moves := make(map[uint64]struct{})
+	for i := 0; i < 20; i++ {
+		first := routerIDCounter(t, mapper.GenerateRouterID("watcher"))
+		mapper.GenerateRouterID("someone-else")
+		second := routerIDCounter(t, mapper.GenerateRouterID("watcher"))
+		require.Greater(t, second, first, "the counter must grow")
+		moves[second-first] = struct{}{}
+	}
+
+	assert.Greater(t, len(moves), 1,
+		"20 rounds of one id in between moved the counter by the same amount every time, so the move counts other clients' ids")
 }
 
 func TestSubscriptionIDMapper_RegisterAndGetMapping(t *testing.T) {

@@ -34,7 +34,8 @@ type SubscriptionIDMapper struct {
 	// the whole mapper rather than one per client: a per-client counter needed a map
 	// entry per connection that ever subscribed, which nothing removed (MAG-3722), and
 	// an id only has to be unique, which a single counter guarantees for the life of the
-	// process without any per-client state to release.
+	// process without any per-client state to release. Being shared by every client, it
+	// advances by randomIDStride, as numericCounter does.
 	routerCounter atomic.Uint64
 
 	// numericCounter backs GenerateNumericRouterID. A numeric id is handed to the client
@@ -70,9 +71,10 @@ func NewSubscriptionIDMapper() *SubscriptionIDMapper {
 // GenerateRouterID creates a new router subscription ID for a client.
 // Format: "rs_{clientHash6}_{counter}" - e.g., "rs_a1b2c3_00042". The hash names the
 // client for log correlation; the counter is mapper-wide, so an id is never reused
-// for the life of the process, by any client.
+// for the life of the process, by any client. The counter advances by randomIDStride,
+// so it has at least 5 digits but is not consecutive.
 func (m *SubscriptionIDMapper) GenerateRouterID(clientKey string) string {
-	return fmt.Sprintf("rs_%s_%05d", sha256Short(clientKey), m.routerCounter.Add(1))
+	return fmt.Sprintf("rs_%s_%05d", sha256Short(clientKey), m.routerCounter.Add(randomIDStride()))
 }
 
 // GenerateNumericRouterID creates a router subscription ID for chains that number their
@@ -80,7 +82,7 @@ func (m *SubscriptionIDMapper) GenerateRouterID(clientKey string) string {
 // decimal-string form as every other id here — every map in this type stays string-keyed —
 // and is rendered as a JSON number only where it reaches the wire.
 //
-// Unlike GenerateRouterID the counter is not per-client: the value is visible to the client
+// Like GenerateRouterID's, the counter is mapper-wide: the value is visible to the client
 // and is matched against upstream ids on unsubscribe, so it must be unique across every
 // client this mapper serves.
 func (m *SubscriptionIDMapper) GenerateNumericRouterID() string {
@@ -92,13 +94,13 @@ func (m *SubscriptionIDMapper) GenerateNumericRouterID() string {
 // stride, which no process will approach.
 const maxIDStride = 1 << 20
 
-// randomIDStride returns how far the counter advances for the next numeric id.
+// randomIDStride returns how far a counter advances for the next id, rs_ or numeric.
 //
 // A fixed +1 would make these ids a public counter: any client can subscribe twice and read
-// off exactly how many subscriptions the manager issued to everyone else in between. The
-// string path avoids that by namespacing per client (rs_{clientHash}_{counter}); a bare
-// number cannot. Seeding the counter randomly at construction would hide the absolute total
-// but NOT that delta, so the stride itself is what has to vary.
+// off exactly how many subscriptions the manager issued to everyone else in between. Both
+// counters are mapper-wide, so the client hash in an rs_ id does not prevent that. Seeding
+// a counter randomly at construction would hide the absolute total but NOT that delta, so
+// the stride itself is what has to vary.
 //
 // It stays monotonic, so uniqueness remains structural rather than probabilistic.
 func randomIDStride() uint64 {

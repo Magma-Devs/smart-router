@@ -18,10 +18,53 @@ import (
 
 // transportFromProtocolMessage derives the TransportType from the protocol message's API collection.
 func transportFromProtocolMessage(pm chainlib.ProtocolMessage) common.TransportType {
+	return common.ApiInterfaceToTransport(apiInterfaceOf(pm))
+}
+
+// apiInterfaceOf is the protocol message's api interface, "" when it has no collection.
+func apiInterfaceOf(pm chainlib.ProtocolMessage) string {
 	if collection := pm.GetApiCollection(); collection != nil {
-		return common.ApiInterfaceToTransport(collection.CollectionData.ApiInterface)
+		return collection.CollectionData.ApiInterface
 	}
-	return common.TransportJsonRPC
+	return ""
+}
+
+// apiNameOf is the api identity the rows filter by (methods), "" when the message has no api.
+func apiNameOf(pm chainlib.ProtocolMessage) string {
+	if pm == nil || pm.GetApi() == nil {
+		return ""
+	}
+	return pm.GetApi().Name
+}
+
+// firstRecord is the record the prefix reads (common.ClassifyPrefix): the first of the reply's
+// records, which share its status (a batch's elements, a GraphQL reply's errors), or a bare record of
+// the status when the reader built none.
+func firstRecord(result common.RelayResult, apiInterface string) common.ErrorRecord {
+	if len(result.ErrorRecords) > 0 {
+		return result.ErrorRecords[0]
+	}
+	return common.ErrorRecord{Interface: apiInterface, Status: result.StatusCode}
+}
+
+// isWrite reports whether protocolMessage is a stateful request: a write, relayed to every provider
+// at once and never again.
+func isWrite(protocolMessage chainlib.ProtocolMessage) bool {
+	return protocolMessage != nil && chainlib.GetStateful(protocolMessage) == common.CONSISTENCY_SELECT_ALL_PROVIDERS
+}
+
+// upstreamAnswerBody is the body an upstream answered a failed attempt with: the one the attempt's
+// error carries (routersession.HTTPStatusError, a 429 or 5xx the sender failed the attempt on), else
+// the result's own reply; nil when the attempt got no answer.
+func upstreamAnswerBody(response *RelayResponse) []byte {
+	var httpErr *routersession.HTTPStatusError
+	if errors.As(response.Err, &httpErr) && len(httpErr.Body) > 0 {
+		return httpErr.Body
+	}
+	if reply := response.RelayResult.Reply; reply != nil {
+		return reply.Data
+	}
+	return nil
 }
 
 // replyStatusClassifier is a request message whose interface answers its errors inside a 2xx and
@@ -38,6 +81,13 @@ type replyStatusClassifier interface {
 // chainRowVerdictReader is a request whose chain's list files some node errors under a verdict of its
 // own (rpcInterfaceMessages.GrpcMessage, a copy of the chain's write: MAG-5186). The sender applied
 // the same verdict to the attempt, so the record and the endpoint's health agree.
+// graphQLOccurrences is a GraphQL request's root fields with the aliases its reply answers under
+// (rpcInterfaceMessages.GraphQLMessage): an error's path starts at an alias, and the record reads it
+// at the field's name (common.ReadGraphQLPathsAsFields).
+type graphQLOccurrences interface {
+	Occurrences() []common.GraphQLOccurrence
+}
+
 type chainRowVerdictReader interface {
 	ChainRowVerdict(data []byte) *common.RouterError
 }
@@ -94,6 +144,23 @@ func (rp *ResultsManagerInst) setErrorResponse(response *RelayResponse, protocol
 		classified = common.ClassifyError(common.DetectConnectionError(response.Err), common.ChainFamilyUnknown, common.TransportGRPC, 0, response.Err.Error())
 		if status, ok := restUpstreamStatus(response.Err, protocolMessage); ok && classified == common.RouterErrorUnknown {
 			classified = common.ClassifyError(nil, common.GetChainFamilyOrDefault(rp.chainID), common.TransportREST, status, "")
+		}
+	}
+	// A write's copy the sender failed on an upstream's status still carries the upstream's answer,
+	// and that answer is read for the slot-already-used signatures (PRD §5.2, MAG-5593): a gateway's
+	// 503 or a 429 can wrap the node's own "nonce too low", which says this very transaction may have
+	// landed. The code is the body's JSON-RPC error code when it has one; the text rows read the body
+	// wherever the words sit.
+	// An upstream's answer the attempt failed on (a 429 or 5xx the sender kept on the error) as the
+	// rows see it (PRD §3.1, MAG-5595): the status it failed on and the error the body carries, a
+	// JSON-RPC 5xx body read as the node's error. A transport failure has no answer and no record.
+	var httpErr *routersession.HTTPStatusError
+	if errors.As(response.Err, &httpErr) && len(httpErr.Body) > 0 && protocolMessage != nil {
+		response.RelayResult.ErrorRecords = chainlib.RecordsFromUpstreamBody(nil, apiInterfaceOf(protocolMessage), apiNameOf(protocolMessage), httpErr.StatusCode, httpErr.Body)
+	}
+	if isWrite(protocolMessage) {
+		if body := upstreamAnswerBody(response); len(body) > 0 {
+			response.RelayResult.IsSlotAlreadyUsed = common.IsSlotAlreadyUsed(common.GetChainFamilyOrDefault(rp.chainID), apiInterfaceOf(protocolMessage), common.ExtractJSONRPCErrorCode(body), string(body))
 		}
 	}
 	// This is a protocol-layer error (session not found, consumer blocked, etc.),
@@ -178,6 +245,10 @@ func (rp *ResultsManagerInst) setValidResponse(response *RelayResponse, protocol
 	// check response error
 	foundError, errorMessage := protocolMessage.CheckResponseError(response.RelayResult.Reply.Data, response.RelayResult.StatusCode)
 	if foundError {
+		// The checker's own words, before the fallbacks below stand the body in for a missing message:
+		// the record reads the body itself, so a body is never its text. A gRPC checker names no
+		// message, and the body is then the router's JSON rendering of the node's status, not the node's.
+		checkerMessage := errorMessage
 		// this is a node error, meaning we still didn't get a good response.
 		// we may choose to wait until there will be a response or timeout happens
 		// if we decide to wait and timeout happens we will take the majority of response messages
@@ -245,13 +316,44 @@ func (rp *ResultsManagerInst) setValidResponse(response *RelayResponse, protocol
 		// through the JSON-RPC generic bucket as NODE_METHOD_NOT_SUPPORTED
 		// (zero CU, no retry) — a silent retry-starvation bug.
 		chainFamily := common.GetChainFamilyOrDefault(rp.chainID)
-		// err is the node's reply text, so the transport-only rows stay out of it (MAG-4242).
+		// The reply as the rows see it (common.ErrorRecord, PRD §3.1; MAG-5595): one record per batch
+		// element or GraphQL error, from the same body and status the verdict below is read from. The
+		// spec rows (MAG-5606) match these.
+		response.RelayResult.ErrorRecords = chainlib.RecordsFromReply(nil, apiInterfaceOf(protocolMessage), apiNameOf(protocolMessage), response.RelayResult.StatusCode, response.RelayResult.Reply.Data, checkerMessage)
+		if request, ok := protocolMessage.GetRPCMessage().(graphQLOccurrences); ok {
+			common.ReadGraphQLPathsAsFields(response.RelayResult.ErrorRecords, request.Occurrences())
+		}
+		// The order (PRD §3.2; MAG-5597). The interface's own rows (OwnClassification, MAG-5121) decide
+		// first, as today. Then the prefix, steps 1 to 3, reads the record ahead of every row: a
+		// connection fault in the reply's text is no reply, a 429 is a rate limit whatever the body (no
+		// direct sender files a 429 as a node error, MAG-3030, so this is the verdict those replies get
+		// already). Then the router's rows, with the inputs they read today: err is the node's reply
+		// text, so the transport-only rows stay out of it (MAG-4242); giving them the record instead is
+		// MAG-5248's (JSON-RPC), MAG-5254's (REST) and MAG-5132's (gRPC). The chain's policy (nil here)
+		// arrives with MAG-5606 and MAG-5609.
 		nodeClassified := ownClassification
 		if rowReader, ok := protocolMessage.GetRPCMessage().(chainRowVerdictReader); ok && nodeClassified == nil {
 			nodeClassified = rowReader.ChainRowVerdict(response.RelayResult.Reply.Data)
 		}
 		if nodeClassified == nil {
-			nodeClassified = common.ClassifyError(common.DetectConnectionErrorInReplyText(errorMessage), chainFamily, transport, errorCode, err.Error())
+			replyContext := common.ReplyContext{
+				Method:          apiNameOf(protocolMessage),
+				IsWrite:         isWrite(protocolMessage),
+				Body:            response.RelayResult.Reply.Data,
+				ConnectionError: common.DetectConnectionErrorInReplyText(errorMessage),
+			}
+			if verdict, ok := common.ClassifyPrefix(nil, chainFamily, firstRecord(response.RelayResult, apiInterfaceOf(protocolMessage)), replyContext); ok {
+				nodeClassified = verdict.Classified()
+			} else {
+				nodeClassified = common.ClassifyError(nil, chainFamily, transport, errorCode, err.Error())
+			}
+		}
+		// A write's copy whose reply says the slot is already used may be this very transaction landed
+		// (PRD §5.2, MAG-5593). Read beside the row, not from it: whatever the row says, the copy is
+		// never refused and the write is not sent again (relaypolicy.Decide). The client still gets the
+		// node's reply as it came: a match never by itself makes the router speak (PRD §5.2).
+		if isWrite(protocolMessage) {
+			response.RelayResult.IsSlotAlreadyUsed = common.IsSlotAlreadyUsed(chainFamily, apiInterfaceOf(protocolMessage), errorCode, err.Error())
 		}
 		// ERROR only when the endpoint is to blame. A not-found, a pruned height, a rejected
 		// transaction is the node answering the question it was asked, and on REST those are

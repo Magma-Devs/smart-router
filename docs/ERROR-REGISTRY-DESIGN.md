@@ -651,7 +651,7 @@ _Blocked on protocol upgrade: sdkerrors carry ABCI codes used in the gRPC wire f
 
 10. **Retryable is the primary retry signal, not SubCategory.** The consumer and smart-router retry state machines short-circuit on `RouterError.Retryable=false` via `RelayResult.IsNonRetryable`, populated at classification time on both paths (consumer: `rpcconsumer_server.go`; smart-router: `direct_rpc_relay.go` / `rpcsmartrouter_server.go`). This covers every terminal classification — `CHAIN_EXECUTION_REVERTED`, `CHAIN_OUT_OF_GAS`, `CHAIN_DOUBLE_SPEND`, `CHAIN_INVALID_SIGNATURE`, all of 3000-range — not only unsupported methods. SubCategory continues to govern adjacent policy: `SubCategoryUnsupportedMethod` triggers the zero-CU carve-out and caching, and `SubCategoryRateLimit` drives backoff without marking the endpoint unhealthy. `SubCategoryDataScope` is the third such axis and the one Retryable cannot express: the errors are retryable (a pruned endpoint's miss may be another endpoint's hit; the retry no longer adds the archive extension, so it reaches an archive endpoint only if selection picks one or the caller sent `router-extension: archive`, which MAG-4142 settled as the supported route) yet must stay out of the availability signal, because the endpoint answered truthfully about its own data scope. `rpcsmartrouter.shouldFailSessionForResult` reads all three. Layer D user-input errors are non-retryable but charge normal CU — the provider does real work because responses are not cached. `relay_processor.HasNonRetryableUserFacingErrors` keys off the `IsNonRetryable` flag rather than re-classifying, so adding a new non-retryable error type requires no state-machine changes.
 
-11. **A node's refusal of its own is retried on another provider (MAG-2771).** A refusal ends the request only if it is a fact about the chain. A `NODE_*` refusal is a claim the node makes about itself — the methods it serves, the routes its front end knows, the credentials it was given — so it is provider-local until a peer confirms it. `NODE_METHOD_NOT_FOUND` (2001), `NODE_UNIMPLEMENTED` (2008), `NODE_ENDPOINT_NOT_FOUND` (2009), `NODE_METHOD_NOT_ALLOWED` (2010) and `NODE_UNAUTHORIZED` (2016) are therefore `Retryable: true` with `SubCategoryNodeCapability`, alongside 2002 and 2018: the request goes to another provider, and the endpoint that refused is neither blamed nor scored. `NODE_LIMIT_EXCEEDED` (2011) is left out for now: a `-32005` is usually a cap on the request that every provider shares, and its `SubCategoryRateLimit` hold-off would spread to every provider a retry reached, so retrying it needs its own hold-off design. On the wire a method a provider's plan disables cannot be told apart from one that does not exist (MAG-2735: one provider answered `-32601` for `net_listening` while its peer served it). With two providers, being wrong in the retry direction costs one extra call on a request that was already failing; being wrong in the other is a customer-visible failure. `CHAIN_*` and `USER_*` codes are the same answer from every node and stay non-retryable. Writes are unchanged: a stateful relay is already delivered to every upstream at once, and `relaypolicy` never re-sends one except after a rate limit. Two rules keep the retry honest. A method the spec does not list (a `Default-` API: a typo, a scanner, another chain's method) is forwarded only because the spec cannot rule it out, so its refusal stays final (`relaypolicy`, `UnlistedMethodRefused`). And when a peer ends the request with a non-retryable answer, that answer is what the caller gets, not the refusal that came first (`relaycore.processNonCrossValidationResult`).
+11. **A node's refusal of its own is retried on another provider (MAG-2771).** A refusal ends the request only if it is a fact about the chain. A `NODE_*` refusal is a claim the node makes about itself — the methods it serves, the routes its front end knows, the credentials it was given — so it is provider-local until a peer confirms it. `NODE_METHOD_NOT_FOUND` (2001), `NODE_UNIMPLEMENTED` (2008), `NODE_ENDPOINT_NOT_FOUND` (2009), `NODE_METHOD_NOT_ALLOWED` (2010) and `NODE_UNAUTHORIZED` (2016) are therefore `Retryable: true` with `SubCategoryNodeCapability`, alongside 2002 and 2018: the request goes to another provider, and the endpoint that refused is neither blamed nor scored. `NODE_LIMIT_EXCEEDED` (2011) is left out for now: a `-32005` is usually a cap on the request that every provider shares, and its `SubCategoryRateLimit` hold-off would spread to every provider a retry reached, so retrying it needs its own hold-off design. On the wire a method a provider's plan disables cannot be told apart from one that does not exist (MAG-2735: one provider answered `-32601` for `net_listening` while its peer served it). With two providers, being wrong in the retry direction costs one extra call on a request that was already failing; being wrong in the other is a customer-visible failure. `CHAIN_*` and `USER_*` codes are the same answer from every node and stay non-retryable. Writes are unchanged: a stateful relay is already delivered to every upstream at once, and `relaypolicy` never re-sends one except after a rate limit — and not even then when a copy's reply says the write's nonce or sequence is already used (`common.IsSlotAlreadyUsed`, read beside the rows: that copy may be this very transaction landed, MAG-5593). Two rules keep the retry honest. A method the spec does not list (a `Default-` API: a typo, a scanner, another chain's method) is forwarded only because the spec cannot rule it out, so its refusal stays final (`relaypolicy`, `UnlistedMethodRefused`). And when a peer ends the request with a non-retryable answer, that answer is what the caller gets, not the refusal that came first (`relaycore.processNonCrossValidationResult`).
 
 ## 8. Chains Analyzed
 
@@ -881,3 +881,110 @@ A Cosmos REST `POST /cosmos/tx/v1beta1/txs` refusal was already a node error to 
 empty on some refusals (MAG-5451). A GET of a transaction that was included and failed answers the
 same shape. It is the answer, an error to neither the relay processor nor the sender (§9, MAG-5326).
 
+## 11. The error record, shapes and answer rows (MAG-5595, PRD §2.2, §2.4, §3.1)
+
+Step 0 of the per-chain error classification epic (MAG-5592; `PER-CHAIN-ERROR-CLASSIFICATION-PRD.md`)
+gives every reader of a failed or refused reply one thing to build and one thing for a spec row to
+match: the **error record**, `common.ErrorRecord`.
+
+| Field | Content |
+|---|---|
+| `Interface` | the api's interface, one of five; the router's rows still read the transport it folds into (`ApiInterfaceToTransport`) |
+| `Status` | the HTTP status as received, on GraphQL too (an extension code never makes a status); the gRPC status code on grpc; 0 on a WebSocket frame |
+| `Code` | the chain's code: a `json.Number` (a JSON-RPC `error.code`, a shape's integer), a string (a GraphQL `extensions.code`, a shape's `<space>/<code>`), nil for none |
+| `Text` | `error.message`; on REST the shape's message, else the body's `message`, `error` or `error.message`, else the body; a GraphQL error's `message`; the gRPC status message. Never prefixed with the status |
+| `Detail` | JSON as received: `error.data`, a GraphQL error's `extensions`, gRPC status details once MAG-5129 carries them |
+| `Path` | a GraphQL error's path |
+| `InSuccess` | a shape, or a chain's reply check in router code, found the error inside a 2xx |
+
+**Where it is built.** `chainlib.RecordsFromReply` reads a reply through the interface's standard
+place for an error (`common.ReadJSONRPCReply`, `ReadGraphQLReply`, `ReadRESTReply`, `ReadGRPCReply`)
+and through the chain's **shapes** (`common.ApplyErrorShapes`, PRD §2.4: JSON pointers to where a
+chain's code, codespace and message sit, with a `when` check for an error inside a success; the
+first shape that applies wins, a missing or wrong-type `code` pointer leaves it unapplied, a missing
+`message` pointer leaves the interface's standard text). One record per batch element and per GraphQL
+error. The results manager builds them for every node error it files and for every upstream answer a
+protocol error carries (`routersession.HTTPStatusError`'s body), the cache tiers for a cached node
+error they serve; they ride on `RelayResult.ErrorRecords`. Where a chain's reply check is still router
+code (XRPL's engine result, Tendermint's response code, Cosmos' `tx_response` on REST), the record's
+text is what the check found, and the shape Step 1 writes for it will give it its code.
+
+**What it changes today: nothing.** The record is built beside the inputs the router's rows read,
+not in their place: `common.ClassifyRecord` gives those rows the same inputs from the record (the
+body code or the status, the status put back ahead of the text on a JSON-RPC non-2xx), and
+`TestClassifyRecordKeepsTheLegacyFixturesVerdicts` holds every legacy fixture to it. The spec rows
+that match the record are MAG-5606's; the switch that lets them classify is MAG-5609's. The spec's
+`errors` section (`spectypes.ErrorsSection`: rows, shapes, `write_rows`, `plain_text`, `inherit`) is
+decoded and carried on `Spec.Errors`, not yet inherited or validated (MAG-5606, MAG-5604).
+
+**Answer rows** (`common.MatchAnswerRow`, PRD §2.2 `answer: true`) read a reply's answer rather than
+an error: a success row (`write: took_it`) or a not-found row (`C3 not_found`) names its methods and
+matches the value `at` a JSON pointer by `code` (JSON type and value, null included) or `present`. A
+success row with `at` reads a write copy's body under any status; a row without `at` reads a 2xx
+only. On GraphQL a row names fields, never aliases: `GraphQLMessage.Occurrences` lists each root
+field with the alias the reply carries it under, and `MatchAnswerRowPerOccurrence` reads each
+occurrence with the alias replaced by the field's name, so `{ tx: transaction(digest) }` answering
+`{"data": {"tx": null}}` matches a row's `/data/transaction`, and the same field asked twice under two
+aliases is read twice.
+
+**Fixtures per interface.** `protocol/chainlib/testdata/reply_fixtures.json` holds replies as nodes
+send them, one per interface at least, each with the node software and version it came from; each
+runs through its interface's reader, the fixture's shapes and the record, and the record's verdict
+through `ClassifyRecord`. The two contract fixtures the ticket asks for are there: a GraphQL reply
+with a `data` object and `errors: []` is an answer (`{"data": null}` without errors and `errors: []`
+without data are bare, `C5`), and a shape whose `code` resolves and whose `message` pointer is missing
+applies with the interface's standard text.
+
+One finding for MAG-5254: the REST rows give a 404 two verdicts by which input carries it — the status
+as the code reads `NODE_DATA_NOT_HELD` (`httpStatusCodeMappings`), the status in the text reads
+`NODE_ENDPOINT_NOT_FOUND` (`httpStatusMessageMappings`). The record carries the status in its own
+field and so reads the first, as the live REST sender does.
+
+## 11. The matching order: the prefix ahead of spec rows, and the XRP rows that stay in code (MAG-5597, PRD §3.2, §5.1, §5.5)
+
+`common.ClassifyInOrder` runs the PRD's order on a reply's record, first match wins, and says which
+stage decided (`Verdict.Stage`):
+
+| Stage | PRD step | What decides |
+|---|---|---|
+| `no_reply` | 1 | a connection-level fault the caller found (`DetectConnectionError`, `DetectConnectionErrorInReplyText`) |
+| `write_row` | 2 | on a write copy, once the chain's `write_rows` names the interface, its success and duplicate rows (`write: took_it`); a success row with `at` reads the body under any status, a plain success beats a duplicate; `Verdict.TookIt` |
+| `status` | 3 | HTTP 429 → `NODE_RATE_LIMITED`, whatever the body, on every interface; on gRPC RESOURCE_EXHAUSTED the chain's over-limit row (`class: C2, reason: over_limit`) first |
+| `xrp_first` | 4.1 | the router-owned XRP rows that come first: `tooBusy`/`slowDown`, `tefALREADY`, `noPermission`/`forbidden` (`xrpFirstRows`) |
+| `spec_row` | 4.2 | the chain's rows (`common.MatchErrorRow`), filtered by interface, method and scope, every match key holding |
+| `router_rows` | 4.3, 6 | the router's own tables through `ClassifyRecord`: the XRP catch-all and the family rows, then the transport rows with their status rows |
+
+**The prefix** (steps 1 to 3, §5.1) is router code ahead of every spec row, whatever a row's text says,
+with the two exceptions the rulebook sets as hooks: the write rows at step 2 and the over-limit row at
+step 3. `common.ClassifyPrefix` is the prefix alone; the results manager runs it on every node error
+and then, when it leaves the reply to the rows, today's `ClassifyError` with the inputs those rows
+read today. What the prefix decides today is main's verdict: no direct sender files a 429 as a node
+error (MAG-3030: the attempt fails on the status alone), so a 429 reaching the rows is a rate limit on
+every interface already. The rulebook's other status rules, 401, 402 and 403 and gRPC
+PERMISSION_DENIED and UNAUTHENTICATED as `C6` whatever the body, are MAG-5248 item 1's (JSON-RPC),
+MAG-5254 item 3's (REST) and MAG-5132's (gRPC) to add to `ClassifyPrefix`; until they land those
+replies reach the rows, text first, as on main. The status a stage reads is the record's `Status`,
+never a number in the body: the `HTTPStatusContains` text rows (`httpStatusMessageMappings`) are
+transport rows at `router_rows`, where `evm_http_429` and `evm_http_503` keep their verdicts, and a
+body text beginning `HTTP 503: ` under a 200 is read there, not at `status`.
+
+**Error rows** (`MatchErrorRow`) match the record: `status` as a number is the HTTP status (on gRPC
+only a gateway's, D12), as a name the gRPC status (`GRPCStatusCodeNamed`); `code` by JSON type and
+value; `contains` case-insensitively and `regex` (RE2) on the text, or on the detail with `field:
+detail` (a null or absent detail matches nothing); `path` on GraphQL as false, true or a root field.
+A row with no match key is inert. A row's `error` names a registry error (`RouterErrorByName`); a row
+with only a class leaves `Verdict.RouterError` nil (`Classified()` says `UNKNOWN_ERROR`), and what the
+router does with a chain's own class is MAG-5606's.
+
+**The XRP rows** (§5.5): `xrpFirstRows` run ahead of the family table in `ClassifyError` and at
+`xrp_first` in `ClassifyInOrder`; the `te[fmlr]…` catch-all stays in the family table, after the spec
+rows, so a spec row for `tefPAST_SEQ` or `terPRE_SEQ` decides before it. Each first row's token is its
+own, so the split changes no verdict. With no policy at all (reduced coverage, whole-source fallback,
+PRD §8.3) `tefPAST_SEQ` still reaches the family row and the §5.2 signature, and `tooBusy` the rate
+limit.
+
+**Tests.** `TestClassificationOrder` is the PRD §8.2 "Order" table, each case tagged `rulebook` where
+main already gives that verdict or with the ticket that changes it and the case asserted in main's
+form; `TestClassificationOrderKeepsTodaysVerdicts` holds Bitcoin's `-26` fee text, Agave's
+`-32005` "behind by 429 slots" and a rate-limit phrase inside gRPC 3/5/10/11/12 to their code rows;
+`TestClassificationOrderXRPRows` the XRP rows at their stages.
