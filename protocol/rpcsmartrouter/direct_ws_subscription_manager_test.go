@@ -80,6 +80,9 @@ type mockSubscriptionServer struct {
 	// rejectSubscribes makes the node answer every subscribe with a JSON-RPC error, which is
 	// a failed subscribe rather than a subscription that ends later (MAG-2685).
 	rejectSubscribes atomic.Bool
+	// rejectWith is the error object a rejected subscribe is answered with; nil keeps the
+	// default, -32601 naming the method.
+	rejectWith atomic.Pointer[map[string]interface{}]
 }
 
 // setRefusing turns the node's outage on or off.
@@ -166,10 +169,14 @@ func (ms *mockSubscriptionServer) handleWS(w http.ResponseWriter, r *http.Reques
 		}
 
 		if ms.rejectSubscribes.Load() {
+			errorObject := map[string]interface{}{"code": -32601, "message": "the method " + req.Method + " does not exist"}
+			if with := ms.rejectWith.Load(); with != nil {
+				errorObject = *with
+			}
 			response := map[string]interface{}{
 				"jsonrpc": "2.0",
 				"id":      req.ID,
-				"error":   map[string]interface{}{"code": -32601, "message": "the method " + req.Method + " does not exist"},
+				"error":   errorObject,
 			}
 			respBytes, _ := json.Marshal(response)
 			ms.safeWriteMessage(conn, websocket.TextMessage, respBytes)

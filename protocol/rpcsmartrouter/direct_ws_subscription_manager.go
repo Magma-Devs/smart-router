@@ -467,22 +467,53 @@ func (dwsm *DirectWSSubscriptionManager) performCleanup() {
 // noteSubscribeFailure applies a failed connect/subscribe attempt's consequences. A
 // rate-limited attempt is held off instead of scored — the endpoint is busy, not broken,
 // and an availability sample of 0 is the demotion the rate-limit contract forbids
-// (docs/RATE-LIMIT-HOLDOFF.md). Anything else penalizes the optimizer as before. The WS
+// (docs/RATE-LIMIT-HOLDOFF.md). A node that answered the subscribe with a JSON-RPC error
+// refused it: that is its answer, read by the registry like any node error
+// (subscribeRefusalVerdict), and scored only when the registry puts the endpoint at fault.
+// Any other failure, where no answer came back, penalizes the optimizer as before. The WS
 // path works on bare node URLs with no provider name in scope, so the URL keys both
 // registry tiers — WS hold-offs are per-URL and do not escalate across a vendor.
 func (dwsm *DirectWSSubscriptionManager) noteSubscribeFailure(url string, err error) {
 	if errors.Is(err, common.StatusCodeError429) {
 		retryAfter, _ := common.RetryAfterFrom(err)
-		heldFor := dwsm.holdoffs().RecordRateLimit(url, url, retryAfter)
-		utils.FormatDebug("DirectWS: subscribe rate-limited by upstream, holding endpoint off",
-			utils.LogAttr("endpoint", sanitizeEndpointURL(url)),
-			utils.LogAttr("holdoff", heldFor.String()),
-		)
+		dwsm.holdOffSubscribeEndpoint(url, retryAfter)
+		return
+	}
+	if verdict, refused := dwsm.subscribeRefusalVerdict(err); refused {
+		switch {
+		case verdict.IsRateLimited():
+			dwsm.holdOffSubscribeEndpoint(url, 0)
+		case verdict.EndpointAtFault() && dwsm.optimizer != nil:
+			dwsm.optimizer.AppendRelayFailure(url)
+		}
 		return
 	}
 	if dwsm.optimizer != nil {
 		dwsm.optimizer.AppendRelayFailure(url)
 	}
+}
+
+// subscribeRefusalVerdict classifies a subscribe the node answered with a JSON-RPC error, as the
+// relay path classifies a node error: by the chain's family, on the JSON-RPC table, from the
+// error's code and its text (common.JSONRPCErrorText, which reads a CometBFT -32603's data).
+// refused is false for a failure that carries no such answer.
+func (dwsm *DirectWSSubscriptionManager) subscribeRefusalVerdict(err error) (verdict *common.RouterError, refused bool) {
+	var nodeError *rpcclient.JsonError
+	if !errors.As(err, &nodeError) {
+		return nil, false
+	}
+	text := common.JSONRPCErrorText(nodeError.Code, nodeError.Message, nodeError.Data)
+	return common.ClassifyError(nil, common.GetChainFamilyOrDefault(dwsm.chainID), common.TransportJsonRPC, nodeError.Code, text), true
+}
+
+// holdOffSubscribeEndpoint holds url off for subscriptions after a rate-limited subscribe,
+// for at least retryAfter when the node named one.
+func (dwsm *DirectWSSubscriptionManager) holdOffSubscribeEndpoint(url string, retryAfter time.Duration) {
+	heldFor := dwsm.holdoffs().RecordRateLimit(url, url, retryAfter)
+	utils.FormatDebug("DirectWS: subscribe rate-limited by upstream, holding endpoint off",
+		utils.LogAttr("endpoint", sanitizeEndpointURL(url)),
+		utils.LogAttr("holdoff", heldFor.String()),
+	)
 }
 
 // CreateWebSocketConnectionUniqueKey creates a unique key for a WebSocket connection
