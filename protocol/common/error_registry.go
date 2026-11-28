@@ -371,8 +371,8 @@ var rootChainFamilies = map[string]ChainFamily{
 	"IBC": ChainFamilyCosmosSDK, "TENDERMINT": ChainFamilyCosmosSDK, "ETHERMINT": ChainFamilyCosmosSDK,
 	"COSMOSWASM": ChainFamilyCosmosSDK, "COSMOSSDK45DEP": ChainFamilyCosmosSDK,
 
-	// Starknet — starknet.json declares its testnet without importing the mainnet
-	"STRK": ChainFamilyStarknet, "STRKS": ChainFamilyStarknet,
+	// Starknet — STRKS imports STRK, so it is Starknet through its import
+	"STRK": ChainFamilyStarknet,
 
 	// Aptos
 	"APT1": ChainFamilyAptos,
