@@ -87,7 +87,7 @@ func TestRESTRelay_UnlistedServerError_IsRecordedAsAProviderFault_MAG5490(t *tes
 	rand.InitRandomSeed()
 	var metricMu sync.Mutex
 	metricCounts := map[string]int{}
-	common.SetErrorMetricsCallback(func(_ uint32, name, _ string, _ bool, _ string) {
+	common.SetErrorMetricsCallback(func(_ uint32, name, _ string, _ bool, _, _ string, _ common.ErrorSource) {
 		metricMu.Lock()
 		defer metricMu.Unlock()
 		metricCounts[name]++
