@@ -806,9 +806,10 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 	// Extract headers as Metadata (preserves delete semantics)
 	headers := restMessage.GetHeaders()
 
-	// Robust URL joining
-	baseURL := d.directConnection.GetURL()
-	fullURL, err := common.JoinURLPath(baseURL, restPath)
+	// The client's path goes under the node url's own path and its query after the node url's own,
+	// with the node url's parameters, auth-query included, as configured (MAG-5699). DoHTTPRequest
+	// adds the auth-query itself.
+	fullURL, err := nodeUrl.RequestURL(restPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build REST URL: %w", err)
 	}
@@ -913,7 +914,7 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 		IsNodeError: isNodeError, // Correct transport-level classification
 	}
 	if hasError {
-		result.ApplyNodeErrorClassification(d.chainFamily, common.TransportREST, response.StatusCode, errorMessage)
+		result.ApplyNodeErrorClassificationForInterface(d.chainFamily, spectypes.APIInterfaceRest, response.StatusCode, errorMessage)
 	}
 
 	utils.FormatTrace("REST request completed",
@@ -1047,7 +1048,7 @@ func (d *DirectRPCRelaySender) sendGraphQLRelay(
 	case hasError:
 		// A write is still filed by the shared rows under the status its verdict stands for (a
 		// caller's error as a 400), until the write verdicts land (MAG-5122).
-		result.ApplyNodeErrorClassification(d.chainFamily, common.TransportREST, classificationStatus, errorMessage)
+		result.ApplyNodeErrorClassificationForInterface(d.chainFamily, spectypes.APIInterfaceGraphQL, classificationStatus, errorMessage)
 	}
 
 	utils.FormatTrace("GraphQL request completed",
@@ -1213,7 +1214,7 @@ func (d *DirectRPCRelaySender) sendGRPCRelay(
 			// IsUnsupportedMethod is what gates the zero-CU carve-out — setting only
 			// IsNonRetryable is how both ended up classified but never assigned before.
 			if hasError {
-				result.ApplyNodeErrorClassification(d.chainFamily, common.TransportGRPC, response.StatusCode, errorMessage)
+				result.ApplyNodeErrorClassificationForInterface(d.chainFamily, spectypes.APIInterfaceGrpc, response.StatusCode, errorMessage)
 				// The wait the node asked for rides on err, which this branch does not return, so the
 				// hold-off read 0 and held the endpoint off for its default whatever was asked: a vendor
 				// that asked for ten minutes was asked again after about 30 s (MAG-4914).
@@ -1229,7 +1230,7 @@ func (d *DirectRPCRelaySender) sendGRPCRelay(
 				//     it the reply was UNKNOWN_ERROR and scored against the endpoint (MAG-4278 item 5).
 				asksForAWait := grpcErr.Code == uint32(codes.ResourceExhausted) && result.RetryAfter > 0
 				if grpcErr.RateLimited() && (asksForAWait ||
-					common.ClassifyError(nil, d.chainFamily, common.TransportGRPC, response.StatusCode, errorMessage) == common.RouterErrorUnknown) {
+					common.ClassifyReply(d.chainFamily, spectypes.APIInterfaceGrpc, response.StatusCode, errorMessage) == common.RouterErrorUnknown) {
 					result.ApplyRouterErrorClassification(common.RouterErrorNodeRateLimited)
 				}
 				// A copy of the chain's write is read by the chain's own list (MAG-5186), which files

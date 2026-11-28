@@ -18,18 +18,23 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// MAG-4124: a lagging node answers eth_getBlockByNumber(N) with {"result":null} and HTTP 200 for a
-// block the chain already has. That is a successful JSON-RPC reply, so it was written to the cache
-// and replayed to the next caller of block N, on every replica sharing the cache, as a false gap.
-// A null is not written when the request names a concrete block at or below the router's tip. The
-// same null for a block ahead of the tip may be the truth and is written as before, and so is
-// every answer that is not a null, an empty list included.
-func TestCacheWriteSkipsANullForABlockTheRouterKnowsExists(t *testing.T) {
+// MAG-5249 (rulebook Part IV sections 3.4 and 6, Part I R-F): a result of null or [] can come from a
+// node that has not seen the data yet, so it is never written to the cache, on any block. Before,
+// a null was refused only for a concrete block at or below the router's tip (MAG-4124), and an
+// empty list was always written. Every value that is not null or [] is written as before, and so is
+// a REST or GraphQL body, which have their own rules.
+func TestCacheWriteNeverKeepsAnEmptyJSONRPCResult(t *testing.T) {
 	const tip = int64(20000000)
 	const nullReply = `{"jsonrpc":"2.0","id":1,"result":null}`
-	getBlock := func(block int64) string {
-		return fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":["0x%x",false]}`, block)
+	const emptyList = `{"jsonrpc":"2.0","id":1,"result":[]}`
+	getBlock := func(block string) string {
+		return fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":["%s",false]}`, block)
 	}
+	getLogs := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"eth_getLogs","params":[{"fromBlock":"0x%x","toBlock":"0x%x"}]}`, tip-1, tip-1)
+	getBalance := func(id int, address string) string {
+		return fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"eth_getBalance","params":["%s","0x%x"]}`, id, address, tip-1)
+	}
+	batchRequest := "[" + getBalance(1, "0x0000000000000000000000000000000000000001") + "," + getBalance(2, "0x0000000000000000000000000000000000000002") + "]"
 	cases := []struct {
 		name        string
 		request     string
@@ -37,16 +42,23 @@ func TestCacheWriteSkipsANullForABlockTheRouterKnowsExists(t *testing.T) {
 		knownTip    int64
 		wantWritten bool
 	}{
-		{"a null for a block below the tip", getBlock(tip - 1), nullReply, tip, false},
-		{"a null for the tip block itself", getBlock(tip), nullReply, tip, false},
-		{"a null for a block ahead of the router's tip", getBlock(tip + 1), nullReply, tip, true},
-		{"a null while the router knows no tip", getBlock(tip - 1), nullReply, 0, true},
-		{"a block for a block below the tip", getBlock(tip - 1), fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"result":{"number":"0x%x","transactions":[]}}`, tip-1), tip, true},
-		{
-			"an empty list of logs up to a block below the tip",
-			fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"eth_getLogs","params":[{"fromBlock":"0x%x","toBlock":"0x%x"}]}`, tip-1, tip-1),
-			`{"jsonrpc":"2.0","id":1,"result":[]}`, tip, true,
-		},
+		{"a null for a block below the tip", getBlock(fmt.Sprintf("0x%x", tip-1)), nullReply, tip, false},
+		{"a null for the tip block itself", getBlock(fmt.Sprintf("0x%x", tip)), nullReply, tip, false},
+		{"a null for a block ahead of the router's tip", getBlock(fmt.Sprintf("0x%x", tip+1)), nullReply, tip, false},
+		{"a null while the router knows no tip", getBlock(fmt.Sprintf("0x%x", tip-1)), nullReply, 0, false},
+		{"a null for the latest block", getBlock("latest"), nullReply, tip, false},
+		{"a null for a receipt looked up by hash", `{"jsonrpc":"2.0","id":1,"method":"eth_getTransactionReceipt","params":["0x0000000000000000000000000000000000000000000000000000000000000001"]}`, nullReply, tip, false},
+		{"an empty list of logs", getLogs, emptyList, tip, false},
+		{"a batch with one element answering null", batchRequest, `[{"jsonrpc":"2.0","id":1,"result":"0x5"},{"jsonrpc":"2.0","id":2,"result":null}]`, tip, false},
+		{"a batch with one element answering an empty list", batchRequest, `[{"jsonrpc":"2.0","id":1,"result":[]},{"jsonrpc":"2.0","id":2,"result":"0x5"}]`, tip, false},
+		{"a null behind a member that holds an object", getBlock(fmt.Sprintf("0x%x", tip-1)), `{"jsonrpc":"2.0","id":1,"meta":{"node":"a"},"result":null}`, tip, false},
+		{"an empty list behind a member that holds a list", getLogs, `{"jsonrpc":"2.0","id":1,"warnings":["slow"],"result":[]}`, tip, false},
+		{"a batch whose null element has a member that holds an object", batchRequest, `[{"jsonrpc":"2.0","id":1,"result":"0x5"},{"jsonrpc":"2.0","id":2,"meta":{"node":"a"},"result":null}]`, tip, false},
+		{"a block for a block below the tip", getBlock(fmt.Sprintf("0x%x", tip-1)), fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"result":{"number":"0x%x","transactions":[]}}`, tip-1), tip, true},
+		{"a list with one log", getLogs, fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"result":[{"blockNumber":"0x%x","data":"0x"}]}`, tip-1), tip, true},
+		{"an empty object", getBlock(fmt.Sprintf("0x%x", tip-1)), `{"jsonrpc":"2.0","id":1,"result":{}}`, tip, true},
+		{"a batch whose elements all answer", batchRequest, `[{"jsonrpc":"2.0","id":1,"result":"0x5"},{"jsonrpc":"2.0","id":2,"result":"0x0"}]`, tip, true},
+		{"a block behind a member that holds an object", getBlock(fmt.Sprintf("0x%x", tip-1)), fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"meta":{"result":null},"result":{"number":"0x%x","transactions":[]}}`, tip-1), tip, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -60,8 +72,6 @@ func TestCacheWriteSkipsANullForABlockTheRouterKnowsExists(t *testing.T) {
 				rpcss.chainState = withTip
 			}
 			msg := ethProtocolMessage(t, chainParser, tc.request, tc.knownTip)
-			requested, _ := msg.RequestedBlock()
-			require.GreaterOrEqual(t, requested, int64(0), "precondition: the request names a concrete block")
 
 			rpcss.tryCacheWrite(context.Background(), msg, &common.RelayResult{
 				Reply:      &pairingtypes.RelayReply{Data: []byte(tc.reply), LatestBlock: tip},
@@ -73,30 +83,53 @@ func TestCacheWriteSkipsANullForABlockTheRouterKnowsExists(t *testing.T) {
 				return
 			}
 			require.Never(t, func() bool { return len(backend.recorded()) > 0 }, capTestNoWriteWindow, 20*time.Millisecond,
-				"a null for a block the router knows exists must not reach the cache")
+				"a result of null or [] must not reach the cache")
 		})
 	}
 }
 
-// resultIsNull answers true only for a single reply whose result member is the literal null, and
-// reads no further than that member.
-func TestResultIsNull(t *testing.T) {
+// emptyResultReason names a null or [] result, in a single reply or in any element of a batch, on
+// JSON-RPC and Tendermint RPC only, and reads no further than the result member.
+func TestEmptyResultReason(t *testing.T) {
 	for _, tc := range []struct {
-		reply string
-		want  bool
+		apiInterface string
+		reply        string
+		want         string
 	}{
-		{`{"jsonrpc":"2.0","id":1,"result":null}`, true},
-		{`{"id":1,"jsonrpc":"2.0","result":null}`, true}, // id first, as tatum writes it
-		{" { \"jsonrpc\" : \"2.0\" , \"id\" : \"a\" , \"result\" : null }\n", true},
-		{`{"jsonrpc":"2.0","id":1,"result":"null"}`, false},
-		{`{"jsonrpc":"2.0","id":1,"result":{"hash":null}}`, false},
-		{`{"jsonrpc":"2.0","id":1,"result":[]}`, false},
-		{`{"jsonrpc":"2.0","id":1,"result":"0x0"}`, false},
-		{`[{"jsonrpc":"2.0","id":1,"result":null}]`, false}, // a batch has no single result
-		{`{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"header not found"}}`, false},
-		{``, false},
+		{spectypes.APIInterfaceJsonRPC, `{"jsonrpc":"2.0","id":1,"result":null}`, "the result is null"},
+		{spectypes.APIInterfaceJsonRPC, `{"id":1,"jsonrpc":"2.0","result":null}`, "the result is null"}, // id first, as tatum writes it
+		{spectypes.APIInterfaceJsonRPC, " { \"jsonrpc\" : \"2.0\" , \"id\" : \"a\" , \"result\" : null }\n", "the result is null"},
+		{spectypes.APIInterfaceJsonRPC, `{"jsonrpc":"2.0","id":1,"result":[]}`, "the result is an empty list"},
+		{spectypes.APIInterfaceJsonRPC, `{"jsonrpc":"2.0","id":1,"result": [ ] }`, "the result is an empty list"},
+		{spectypes.APIInterfaceTendermintRPC, `{"jsonrpc":"2.0","id":-1,"result":null}`, "the result is null"},
+		{spectypes.APIInterfaceJsonRPC, `[{"jsonrpc":"2.0","id":1,"result":"0x1"},{"jsonrpc":"2.0","id":2,"result":null}]`, "element 2's result is null"},
+		{spectypes.APIInterfaceJsonRPC, `[{"jsonrpc":"2.0","id":1,"result":[]},{"jsonrpc":"2.0","id":2,"result":null}]`, "element 1's result is an empty list"},
+		{spectypes.APIInterfaceJsonRPC, "[\n {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"a\":[1,2]}} ,\n {\"jsonrpc\":\"2.0\",\"id\":\"x]\",\"result\":null}\n]", "element 2's result is null"},
+		// A member in front of result that is not a scalar, or has an escaped name, is beyond the
+		// cheap read (resultValueIndex), so the full read finds result.
+		{spectypes.APIInterfaceJsonRPC, `{"jsonrpc":"2.0","id":1,"meta":{"node":"a"},"result":null}`, "the result is null"},
+		{spectypes.APIInterfaceJsonRPC, `{"jsonrpc":"2.0","id":1,"warnings":["slow"],"result":[]}`, "the result is an empty list"},
+		{spectypes.APIInterfaceJsonRPC, `{"jsonrpc":"2.0","\u0069d":1,"result":null}`, "the result is null"},
+		{spectypes.APIInterfaceTendermintRPC, `{"jsonrpc":"2.0","id":-1,"meta":{"node":"a"},"result":null}`, "the result is null"},
+		{spectypes.APIInterfaceJsonRPC, `[{"jsonrpc":"2.0","id":1,"result":"0x1"},{"jsonrpc":"2.0","id":2,"meta":{"node":"a"},"result":[]}]`, "element 2's result is an empty list"},
+		{spectypes.APIInterfaceJsonRPC, `{"jsonrpc":"2.0","id":1,"meta":{"result":null},"result":"0x1"}`, ""},
+		{spectypes.APIInterfaceJsonRPC, `{"jsonrpc":"2.0","id":1,"meta":{"node":"a"},"error":{"code":-32000,"message":"header not found"}}`, ""},
+		{spectypes.APIInterfaceJsonRPC, `{"jsonrpc":"2.0","id":1,"result":"null"}`, ""},
+		{spectypes.APIInterfaceJsonRPC, `{"jsonrpc":"2.0","id":1,"result":{"hash":null}}`, ""},
+		{spectypes.APIInterfaceJsonRPC, `{"jsonrpc":"2.0","id":1,"result":{}}`, ""},
+		{spectypes.APIInterfaceJsonRPC, `{"jsonrpc":"2.0","id":1,"result":[null]}`, ""},
+		{spectypes.APIInterfaceJsonRPC, `{"jsonrpc":"2.0","id":1,"result":"0x0"}`, ""},
+		{spectypes.APIInterfaceJsonRPC, `{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"header not found"}}`, ""},
+		{spectypes.APIInterfaceJsonRPC, `[{"jsonrpc":"2.0","id":1,"result":"0x1"},{"jsonrpc":"2.0","id":2,"result":{"b":[]}}]`, ""},
+		{spectypes.APIInterfaceJsonRPC, `[{"jsonrpc":"2.0","id":1,"result":"0x1"},{"jsonrpc":"2.0","id":2,"result":null`, ""}, // truncated: not this rule's call
+		{spectypes.APIInterfaceJsonRPC, `[]`, ""},
+		{spectypes.APIInterfaceJsonRPC, `null`, ""},
+		{spectypes.APIInterfaceJsonRPC, ``, ""},
+		{spectypes.APIInterfaceRest, `{"jsonrpc":"2.0","id":1,"result":null}`, ""},
+		{spectypes.APIInterfaceRest, `[]`, ""},
+		{spectypes.APIInterfaceGraphQL, `{"data":{"transaction":null}}`, ""},
 	} {
-		require.Equal(t, tc.want, resultIsNull([]byte(tc.reply)), "%s", tc.reply)
+		require.Equal(t, tc.want, emptyResultReason(tc.apiInterface, []byte(tc.reply)), "%s %s", tc.apiInterface, tc.reply)
 	}
 }
 
@@ -131,7 +164,7 @@ func trxLikeCacheParser(t *testing.T) chainlib.ChainParser {
 // replies below are TronGrid's own, captured 2026-11-17: {} for a block it does not have, and an
 // error document from a node without balance history, both with HTTP 200. Neither is written for a
 // block at or below the router's tip. {"count": 0} is an empty block's true answer as well as a
-// missing one's, as an empty list is on JSON-RPC, and is written as before.
+// missing one's, and is written as before.
 func TestCacheWriteSkipsARestNoAnswerForABlockTheRouterKnowsExists(t *testing.T) {
 	const tip = int64(88081220)
 	const missingBlock = `{}`

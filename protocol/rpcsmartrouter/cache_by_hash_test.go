@@ -120,13 +120,16 @@ func TestByHashAnswerSettlesOnceItsBlockIsFinal(t *testing.T) {
 		write("a transaction in the newest block",
 			`{"jsonrpc":"2.0","id":1,"method":"eth_getTransactionByHash","params":["`+otherHash+`"]}`,
 			`{"jsonrpc":"2.0","id":1,"result":{"hash":"`+otherHash+`","blockNumber":"0x1312d00"}}`, false),
-		write("a transaction the chain does not know yet",
-			`{"jsonrpc":"2.0","id":1,"method":"eth_getTransactionByHash","params":["`+thirdHash+`"]}`,
-			`{"jsonrpc":"2.0","id":1,"result":null}`, false),
 		write("a count by block hash, whose answer carries no block",
 			`{"jsonrpc":"2.0","id":1,"method":"eth_getBlockTransactionCountByHash","params":["`+txHash+`"]}`,
 			`{"jsonrpc":"2.0","id":1,"result":"0x5"}`, false),
 	}
+
+	// A transaction the chain does not know yet answers null, and a null is never written, under
+	// any key (MAG-5249): a lagging node answers the same for a transaction it has not indexed.
+	unknown := write("a transaction the chain does not know yet",
+		`{"jsonrpc":"2.0","id":1,"method":"eth_getTransactionByHash","params":["`+thirdHash+`"]}`,
+		`{"jsonrpc":"2.0","id":1,"result":null}`, false)
 
 	for _, e := range entries {
 		require.Eventually(t, func() bool {
@@ -134,6 +137,7 @@ func TestByHashAnswerSettlesOnceItsBlockIsFinal(t *testing.T) {
 		}, 3*time.Second, 20*time.Millisecond, "%s: found under the identity key by a lookup that carries the tip", e.name)
 		require.Nil(t, directGetOn(rcs, "ETH1", e.key, tip, tip).GetReply(), "%s: not under the tip", e.name)
 	}
+	require.Nil(t, directGetOn(rcs, "ETH1", unknown.key, identityKeyBlock, tip).GetReply(), "%s: never written", unknown.name)
 
 	// The temp store empties within two seconds; what survives is what settled.
 	require.Eventually(t, func() bool {
