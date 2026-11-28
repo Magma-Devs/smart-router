@@ -67,6 +67,7 @@ require (
 	github.com/jhump/protoreflect/v2 v2.0.0-beta.1 // indirect
 	github.com/kylelemons/godebug v1.1.0 // indirect
 	github.com/mattn/go-runewidth v0.0.31 // indirect
+	github.com/molecule-man/go-brrr v1.3.1 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/pelletier/go-toml/v2 v2.2.4 // indirect
 	github.com/planetscale/vtprotobuf v0.6.1-0.20240319094008-0393e58bdf10 // indirect
@@ -99,7 +100,6 @@ require (
 
 require (
 	github.com/StackExchange/wmi v1.2.1 // indirect
-	github.com/andybalholm/brotli v1.2.8 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/desertbit/timer v0.0.0-20180107155436-c41aec40b27f // indirect
@@ -129,8 +129,7 @@ require (
 	github.com/tklauser/go-sysconf v0.3.12 // indirect
 	github.com/tklauser/numcpus v0.6.1 // indirect
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
-	github.com/valyala/fasthttp v1.51.0 // indirect
-	github.com/valyala/tcplisten v1.0.0 // indirect
+	github.com/valyala/fasthttp v1.80.0 // indirect
 	golang.org/x/net v0.63.0
 	golang.org/x/sync v0.25.0 // indirect
 	golang.org/x/sys v0.50.0 // indirect
