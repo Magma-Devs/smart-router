@@ -68,3 +68,24 @@ func TestCometBFTRequestRows_ReadTheSentenceWhereCometBFTWritesIt(t *testing.T) 
 	revert := "execution reverted: Internal error: height must be greater than 0, but got 0"
 	require.Equal(t, RouterErrorChainExecutionReverted, ClassifyError(nil, ChainFamilyEVM, TransportJsonRPC, 500, "HTTP 500: "+revert))
 }
+
+// Two more requests every node answers the same under -32603: a tx_search whose tx.hash is
+// not hex (CometBFT's kv indexer decodes it before it searches), and a genesis_chunked chunk past the
+// last one. Both are the caller's, as a single reply, under the URI GET's 500 and in a batch.
+func TestCometBFTRequestRows_AHashThatIsNotHexAndAChunkPastTheLast(t *testing.T) {
+	for _, data := range []string{
+		"error during searching for a hash in the query: encoding/hex: invalid byte: U+007A 'z'",
+		"error during searching for a hash in the query: encoding/hex: odd length hex string",
+		"there are 4 chunks, 9 is invalid",
+		"there are 4 chunks, -1 is invalid",
+	} {
+		text := "Internal error: " + data
+		for _, family := range []ChainFamily{ChainFamilyCosmosSDK, ChainFamilyUnknown, ChainFamilyEVM} {
+			require.Same(t, RouterErrorUserInvalidParams, ClassifyError(nil, family, TransportJsonRPC, JSONRPCInternalErrorCode, text), "%q", data)
+			require.Same(t, RouterErrorUserInvalidParams, ClassifyError(nil, family, TransportJsonRPC, JSONRPCInternalErrorCode, "HTTP 500: "+text), "%q under a 500", data)
+			require.Same(t, RouterErrorUserInvalidParams, ClassifyError(nil, family, TransportJsonRPC, 200, "Internal error: odd,-,"+text), "%q in a batch", data)
+		}
+	}
+	// The indexer failing to read what it found is the node's own fault, as before.
+	require.Same(t, RouterErrorNodeInternalError, ClassifyError(nil, ChainFamilyCosmosSDK, TransportJsonRPC, JSONRPCInternalErrorCode, "Internal error: error while retrieving the result: leveldb: closed"))
+}

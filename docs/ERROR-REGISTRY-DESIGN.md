@@ -361,7 +361,7 @@ An open stream is not enough on its own: grpc-go also writes `UNAVAILABLE` when 
    | `height N must be less than or equal to the current blockchain height M` | 3201 `CHAIN_BLOCK_NOT_FOUND` |
    | `tx (HASH) not found` | 3202 `CHAIN_TX_NOT_FOUND` |
    | `timed out waiting for tx to be included in a block` | 2019 `NODE_ABORTED` |
-   | `height must be greater than 0, but got N`, `heights must be non-negative`, `page should be within [1, N] range, given M` with M below 1, an `order_by` error, `maximum query length exceeded`, a search query that does not parse or compile, `no evidence was provided`, `evidence.ValidateBasic failed: …`, `failed to add evidence: Invalid evidence: …` | 4003 `USER_INVALID_PARAMS`: the first node's answer, no retry (MAG-5760) |
+   | `height must be greater than 0, but got N`, `heights must be non-negative`, `page should be within [1, N] range, given M` with M below 1, an `order_by` error, `maximum query length exceeded`, a search query that does not parse or compile, `no evidence was provided`, `evidence.ValidateBasic failed: …`, `failed to add evidence: Invalid evidence: …`, `error during searching for a hash in the query: encoding/hex: …` (a `tx.hash` that is not hex), `there are N chunks, M is invalid` | 4003 `USER_INVALID_PARAMS`: the first node's answer, no retry (MAG-5760) |
    | `min height N can't be greater than max height M`, `page should be within [1, N] range, given M` with M of 1 or more | 3205 `CHAIN_DATA_NOT_AVAILABLE`: retried, not at fault. CometBFT clamps a range to the node's own base and height, and counts pages from its own index (MAG-5760) |
    | anything else | 2003 `NODE_INTERNAL_ERROR`, as before |
 

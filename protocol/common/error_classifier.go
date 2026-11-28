@@ -382,6 +382,10 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 		{cometBFTInternalError(`(?:failed to parse query: )?(?:offset \d+: |invalid input (?s:.) at offset \d+)`), RouterErrorUserInvalidParams},
 		{cometBFTInternalError(`compile .*: (?:missing argument for|unknown argument type|invalid op/arg combination)`), RouterErrorUserInvalidParams},
 		{cometBFTInternalError(`(?:no evidence was provided|evidence\.ValidateBasic failed: |failed to add evidence: Invalid evidence: )`), RouterErrorUserInvalidParams},
+		// A tx_search whose tx.hash is not hex (state/txindex/kv lookForHash), and a genesis_chunked
+		// chunk past the last one: every node of the chain answers both the same.
+		{cometBFTInternalError(`error during searching for a hash in the query: encoding/hex: `), RouterErrorUserInvalidParams},
+		{cometBFTInternalError(`there are \d+ chunks, -?\d+ is invalid`), RouterErrorUserInvalidParams},
 		{cometBFTInternalError(`min height \d+ can't be greater than max height \d+`), RouterErrorChainDataNotAvailable},
 		{cometBFTInternalError(`page should be within \[1, \d+\] range, given \d+`), RouterErrorChainDataNotAvailable},
 		// A batch is classified with its HTTP status for a code, so the -32603 row below never
