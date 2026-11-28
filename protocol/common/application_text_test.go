@@ -49,3 +49,20 @@ func TestABCIQueryFailureMessage(t *testing.T) {
 	require.Equal(t, "abci query failed: code 6, codespace sdk: unknown request", ABCIQueryFailureMessage("sdk", 6, "unknown request"))
 	require.Equal(t, "abci query failed: code 1: internal", ABCIQueryFailureMessage("", 1, "internal"))
 }
+
+// The results manager reads a reply's text for a connection fault ahead of ClassifyError.
+// A failed abci_query's log is the application's text, so it names no connection fault there either,
+// alone or as a batch element. The node's own words still do.
+func TestApplicationTextNamesNoConnectionFault(t *testing.T) {
+	for _, log := range []string{
+		"unknown query: [app connection refused]: unknown request",
+		"unknown query: [app context deadline exceeded]: unknown request",
+		"unknown query: [app connection reset by peer]: unknown request",
+		"unknown query: [app no route to host]: unknown request",
+	} {
+		failed := ABCIQueryFailureMessage("sdk", 6, log)
+		require.Nil(t, DetectConnectionErrorInReplyText(failed), "%q", failed)
+		require.Nil(t, DetectConnectionErrorInReplyText("Internal error: height must be greater than 0, but got 0,-,"+failed), "batch element %q", failed)
+	}
+	require.Same(t, RouterErrorConnectionRefused, DetectConnectionErrorInReplyText("upstream connect error or disconnect/reset before headers. reset reason: connection refused"))
+}

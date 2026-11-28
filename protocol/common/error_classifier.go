@@ -1347,7 +1347,15 @@ func detectConnectionErrorFromString(msg string) *RouterError {
 // the transportOnly rows. The reply arrived, so the connection to the node worked; a reply is
 // only ever read as a connection fault through the rows that predate MAG-4242 item 5, exactly
 // as the results manager read it before those rows existed.
+//
+// An application's own text (applicationText) is never read as a connection fault: a failed
+// abci_query's log can say anything, and the results manager reads this ahead of ClassifyError, so
+// a log that names a connection fault would name the endpoint's connection in relay_end and in the
+// node-error log while the sender's verdict blames nobody.
 func DetectConnectionErrorInReplyText(text string) *RouterError {
+	if applicationText(text) {
+		return nil
+	}
 	msg := strings.ToLower(text)
 	for _, row := range stringConnectionFallbacks {
 		if !row.transportOnly && row.matches(msg) {
