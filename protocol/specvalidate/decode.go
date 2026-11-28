@@ -21,16 +21,22 @@ type Loaded struct {
 	Strict *Finding
 }
 
+// strictSection is ErrorsSection without its UnmarshalJSON. That method never fails, so a section
+// the router can't read drops whole and its spec still loads (PRD §5.6), and a decoder hands it the
+// bytes without DisallowUnknownFields; here an unknown key has to fail.
+type strictSection spectypes.ErrorsSection
+
 // DecodeSectionStrict decodes an `errors` section, refusing a key this router version doesn't know
 // (PRD §4.1: "any value the router version doesn't know (schema mismatch)").
 func DecodeSectionStrict(raw json.RawMessage) (*spectypes.ErrorsSection, error) {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
-	var section spectypes.ErrorsSection
+	var section strictSection
 	if err := decoder.Decode(&section); err != nil {
 		return nil, err
 	}
-	return &section, nil
+	decoded := spectypes.ErrorsSection(section)
+	return &decoded, nil
 }
 
 // LoadPath reads every spec in path, a proposal file or a directory of them (its top-level *.json
