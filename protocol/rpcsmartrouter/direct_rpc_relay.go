@@ -881,12 +881,17 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 	// A 2xx that is the node refusing the broadcast transaction the request sent (Tron's, MAG-5323;
 	// a Cosmos tx_response.code, MAG-5451) is a node error, as on JSON-RPC and gRPC: the reply says
 	// the node answered with an error, and it is no proof the endpoint is healthy.
+	//
+	// A 2xx that is java-tron's servlet-error shape (restMessage.IsTronServletError, MAG-5449) is
+	// a node error at the transport level too: unlike the Cosmos carve-out for a read, it is never
+	// the chain's answer about anything, on a read or a write, so the broadcast waits for a sibling
+	// and the reply never reaches the cache (tryCacheWriteResolved's node-error gate).
 	var isNodeError bool
 	switch {
 	case response.StatusCode == 429:
 		isNodeError = false
 	case response.StatusCode == 0 || (response.StatusCode >= 200 && response.StatusCode < 300):
-		isNodeError = hasError && restMessage.RefusesTransaction(response.Body)
+		isNodeError = hasError && (restMessage.RefusesTransaction(response.Body) || restMessage.IsTronServletError(response.Body))
 	default:
 		isNodeError = hasError
 	}

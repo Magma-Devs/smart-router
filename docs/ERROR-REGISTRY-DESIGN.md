@@ -59,7 +59,7 @@ Errors returned by the blockchain node itself (not execution/state errors).
 | 2002 | `NODE_METHOD_NOT_SUPPORTED` | Method exists but is DISABLED on this specific node (provider tier / policy / admin config), or a part of it is, such as the pending block tag (MAG-5021). Retryable on a different provider (SubCategoryNodeCapability) | Yes | JSON-RPC -32004 / MessageContains("method not supported" / "pending state is not supported") |
 | 2003 | `NODE_INTERNAL_ERROR` | Internal node error. CometBFT's -32603 is read with its `data` first, and the reasons rule 3 below names get their own codes (MAG-5325) | Yes | JSON-RPC -32603 |
 | 2004 | `NODE_SERVER_ERROR` | Generic server error | Yes | JSON-RPC -32000 |
-| 2005 | `NODE_RATE_LIMITED` | Rate limited by node (SubCategoryRateLimit) | Yes | HTTP 429 / JSON-RPC code 429 / MessageContains("rate limit", "too many requests") |
+| 2005 | `NODE_RATE_LIMITED` | Rate limited by node (SubCategoryRateLimit) | Yes | HTTP 429 / JSON-RPC code 429 / MessageContains("rate limit", "too many requests") / Tron: the rate limiter's whole servlet-error message (§9.4) |
 | 2006 | `NODE_SERVICE_UNAVAILABLE` | Node temporarily unavailable | Yes | HTTP 503 |
 | 2007 | `NODE_SYNCING` | Node is syncing/catching up | Yes | MessageContains("node is syncing" / "catching up to the chain") |
 | 2008 | `NODE_UNIMPLEMENTED` | Method not implemented on this node; another provider may serve it (SubCategoryNodeCapability, MAG-2771) | Yes | gRPC 12, HTTP 501 |
@@ -74,7 +74,7 @@ Errors returned by the blockchain node itself (not execution/state errors).
 | 2018 | `NODE_ACCESS_DENIED` | Endpoint refused the router itself — credentials, plan or quota, WAF or IP rule, proxy auth, protocol, region | Yes | REST HTTP 401, 402, 403, 407, 426, 451 |
 | 2017 | `NODE_DATA_NOT_HELD` | Endpoint does not hold the requested data — pruned or never existed (SubCategoryDataScope) | Yes | gRPC 5, gRPC 11 |
 | 2019 | `NODE_ABORTED` | Node aborted the operation. On Sui, the validators' answer to a submitted transaction: consensus rejection, expired status, an input object that does not exist yet, already finalized under other signatures, or another transient processing failure. Sui's own message calls it retriable with another submission, which is the client's call; not evidence against the endpoint, so not scored. CometBFT's `broadcast_tx_commit` answers the same kind with -32603 "timed out waiting for tx to be included in a block": the transaction passed CheckTx and may still land (MAG-5325) | No | gRPC 10; CometBFT -32603 commit timeout |
-| 2020 | `NODE_UNRECOGNIZED_ERROR` | GraphQL only (MAG-5121): an error the router has no row for, an error with no code or an unknown code inside a 200, or a 4xx status GraphQL's status table does not name (400, 409, 410, 413, 415, 422, ...). The router cannot tell whose mistake it is, so it asks another provider and does not blame this one; when every provider says the same, a provider's reply is served as is | Yes | GraphQL |
+| 2020 | `NODE_UNRECOGNIZED_ERROR` | An error the router has no row for. On GraphQL (MAG-5121): an error with no code or an unknown code inside a 200, or a 4xx status GraphQL's status table does not name (400, 409, 410, 413, 415, 422, ...). On Tron (MAG-5449): a java-tron servlet error whose exception class no Tron row names (§9.4). The router cannot tell whose mistake it is, so it asks another provider and does not blame this one; when every provider says the same, a provider's reply is served as is | Yes | GraphQL; Tron servlet error |
 | 2021 | `NODE_URL_REFUSED` | GraphQL only (MAG-5121): HTTP 404, 405 or a redirect on GraphQL's one url. Says the configured url is wrong, so every request to it fails the same way: retried and blamed on the endpoint | Yes | HTTP 404, 405, 3xx (GraphQL) |
 | 2022 | `NODE_UNLISTED_SERVER_ERROR` | REST (MAG-5490): a 5xx no status row names. A provider fault: retried and blamed. May have reached the node, like a 502 or 504 | Yes | HTTP 505–511, 528, 529, 531–599 (REST) |
 
@@ -685,8 +685,8 @@ So `RestMessage.CheckResponseError` treats **every status outside 2xx as a node 
 keeps its rate-limit handling; a 2xx is a success unless it answers a stateful write, or a
 `POST /cosmos/tx/v1beta1/txs` that the chain's spec does not list, with a Cosmos transaction error —
 a read's `tx_response.code`, such as a GET of a transaction that ran out of gas, is the
-transaction's record and not a node error (MAG-5326); a status of 0 is "not set" and reads as a
-success). The body travels to the caller
+transaction's record and not a node error (MAG-5326) — or, on java-tron's HTTP API paths, it is
+java-tron's servlet error (9.4); a status of 0 is "not set" and reads as a success). The body travels to the caller
 unchanged. What "node error" changes is the same as on JSON-RPC:
 
 - A write broadcast keeps waiting for a sibling's success instead of taking the first refusal
@@ -809,8 +809,24 @@ reading was the wrong one.
 - Tron and TON report errors inside a 200 body (`{"Error":…}`, `{"code":"SIGERROR"}`,
   `{"ok":false}`) and need a body check per chain family — §5 step 2, a separate decision. Tron's
   broadcast refusal (`{"code":"SIGERROR"}` on `/wallet/broadcasttransaction` and
-  `/wallet/broadcasthex`) is read since MAG-5323 (§10); `{"Error":…}` and TON's `{"ok":false}` are
-  not. TON's `/sendBoc` refuses with a 500, which this section already reads.
+  `/wallet/broadcasthex`) is read since MAG-5323 (§10). Tron's
+  `{"Error": "<class> : <message>"}`, which java-tron's servlets answer every exception with, is
+  read since MAG-5449, on java-tron's HTTP API paths only (`/wallet/`, `/walletsolidity/`,
+  `/walletpbft/`): elsewhere a 2xx object whose one member is `Error` is that endpoint's answer.
+  It is a node error. The rate limiter's whole message,
+  `class java.lang.IllegalAccessException : lack of computing resources`, is `NODE_RATE_LIMITED`
+  (held off, not scored). Every other message is read by the exception class java-tron writes
+  first, never by the message after it, which often holds the request's own text:
+
+  | Exception class | Code |
+  | --- | --- |
+  | `org.tron.core.services.http.JsonFormat$ParseException`, `org.tron.json.JSONException`, `com.alibaba.fastjson.JSONException` | 4001 `USER_PARSE_ERROR` |
+  | `com.google.protobuf.InvalidProtocolBufferException`, `java.lang.NumberFormatException`, `org.bouncycastle.util.encoders.DecoderException`, `java.security.InvalidParameterException`, `java.lang.IllegalArgumentException` | 4003 `USER_INVALID_PARAMS` |
+  | `org.tron.core.exception.ContractValidateException` | 3014 `CHAIN_TX_REJECTED` |
+  | any other class (a `NullPointerException`, a store failure, ...) | 2020 `NODE_UNRECOGNIZED_ERROR`: another provider is asked, none is blamed or scored |
+
+  The request's own mistake ends at the first node, since every node answers it the same. TON's
+  `{"ok":false}` is not read. TON's `/sendBoc` refuses with a 500, which this section already reads.
 - An empty or non-JSON **2xx** is still served as the answer and still ends a broadcast
   (MAG-3971). The fix site is the sender's existing malformed-2xx guard, not
   `CheckResponseError`, which cannot see whether the request is a write.

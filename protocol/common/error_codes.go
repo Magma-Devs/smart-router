@@ -409,8 +409,9 @@ var (
 	})
 
 	// NODE_UNRECOGNIZED_ERROR (MAG-5121): the node answered with an error the router has no row
-	// for, on GraphQL, which reads its replies by its own rows only: an error with no code or an
-	// unknown code inside a 200, or a 4xx status no row names (400, 413, 415, 422, ...). The router
+	// for. On GraphQL, which reads its replies by its own rows only: an error with no code or an
+	// unknown code inside a 200, or a 4xx status no row names (400, 413, 415, 422, ...). On Tron
+	// (MAG-5449): a java-tron servlet error whose exception class no Tron row names. The router
 	// cannot tell whether the caller or this provider is wrong, so it asks another provider and
 	// does not blame this one: when unsure, retry without blame. The not-at-fault part rides on
 	// SubCategoryNodeCapability; UNKNOWN_ERROR cannot carry it, because the availability gate still
@@ -418,7 +419,7 @@ var (
 	RouterErrorNodeUnrecognizedError = registerError(&RouterError{
 		Code: 2020, Name: "NODE_UNRECOGNIZED_ERROR", Category: CategoryExternal,
 		SubCategory: SubCategoryNodeCapability,
-		Description: "Node answered an error the router has no row for (GraphQL); another provider may serve it", Retryable: true,
+		Description: "Node answered an error the router has no row for (GraphQL, a Tron servlet error); another provider may serve it", Retryable: true,
 	})
 	// NODE_URL_REFUSED (MAG-5121): the endpoint's url does not serve the interface. GraphQL sends
 	// every request to one url, so an HTTP 404 or 405 there, or a redirect, says the url is wrong

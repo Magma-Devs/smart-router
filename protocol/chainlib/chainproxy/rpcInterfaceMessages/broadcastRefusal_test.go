@@ -162,6 +162,7 @@ func TestTronBroadcastRefusal(t *testing.T) {
 		name, specPath, path, reply string
 		wantError                   bool
 		wantMessage                 string
+		servletError                bool
 	}{
 		{name: "accepted", specPath: tx, reply: `{"result":true,"txid":"77dd"}`},
 		{name: "broadcasthex accepted", specPath: hex, reply: `{"result":true,"code":"SUCCESS","message":"","txid":"77dd"}`},
@@ -186,7 +187,12 @@ func TestTronBroadcastRefusal(t *testing.T) {
 		},
 		{name: "a read of the same shape", specPath: "/wallet/getnowblock", reply: `{"code":"OTHER_ERROR","message":"x"}`},
 		{name: "a read on /walletsolidity", specPath: "/walletsolidity/broadcasttransaction", reply: `{"code":"OTHER_ERROR","message":"x"}`},
-		{name: "the servlet's own error", specPath: tx, reply: `{"Error":"class java.lang.NullPointerException : null"}`},
+		{
+			// java-tron's servlet error is a node error since MAG-5449 (checkTronServletError, read on
+			// java-tron's paths), not a refusal: RefusesTransaction stays false.
+			name: "the servlet's own error", specPath: tx, reply: `{"Error":"class java.lang.NullPointerException : null"}`,
+			wantError: true, wantMessage: "class java.lang.NullPointerException : null", servletError: true,
+		},
 		{name: "result true wins", specPath: tx, reply: `{"result":true,"code":"OTHER_ERROR"}`},
 		{name: "code SUCCESS without result true", specPath: hex, reply: `{"code":"SUCCESS","message":"","txid":"77dd"}`},
 		{name: "a code that is not a name", specPath: tx, reply: `{"code":5,"txid":"77dd"}`},
@@ -196,7 +202,7 @@ func TestTronBroadcastRefusal(t *testing.T) {
 			hasError, message := msg.CheckResponseError([]byte(tc.reply), http.StatusOK)
 			require.Equal(t, tc.wantError, hasError)
 			require.Equal(t, tc.wantMessage, message)
-			require.Equal(t, tc.wantError, msg.RefusesTransaction([]byte(tc.reply)))
+			require.Equal(t, tc.wantError && !tc.servletError, msg.RefusesTransaction([]byte(tc.reply)))
 		})
 	}
 	// The Cosmos REST broadcast is a refusal too (MAG-5451): the code-prefixed message, and flagged.

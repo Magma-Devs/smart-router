@@ -302,8 +302,8 @@ func CreateMockCosmosBroadcastSpec(index, apiInterface string) spectypes.Spec {
 
 // CreateMockTronSpec returns the part of a Tron spec a transaction broadcast needs: the REST POST
 // collection holding /wallet/broadcasttransaction and /wallet/broadcasthex, stateful as in the
-// catalog's tron.json, beside one read (/wallet/getnowblock). The chain imports TRX, so it is a Tron
-// chain.
+// catalog's tron.json, beside two reads (/wallet/getnowblock, /wallet/getaccount); java-tron serves
+// them all as POST. The chain imports TRX, so it is a Tron chain.
 func CreateMockTronSpec(index string) spectypes.Spec {
 	common.RegisterChainFamilies(map[string]spectypes.Spec{
 		"TRX": {Index: "TRX"},
@@ -315,6 +315,7 @@ func CreateMockTronSpec(index string) spectypes.Spec {
 		mockSpecApi("/wallet/broadcasttransaction", write),
 		mockSpecApi("/wallet/broadcasthex", write),
 		mockSpecApi("/wallet/getnowblock", spectypes.SpecCategory{}),
+		mockSpecApi("/wallet/getaccount", spectypes.SpecCategory{}),
 	)
 	spec.AverageBlockTime = 3000
 	return spec
