@@ -806,9 +806,10 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 	// Extract headers as Metadata (preserves delete semantics)
 	headers := restMessage.GetHeaders()
 
-	// Robust URL joining
-	baseURL := d.directConnection.GetURL()
-	fullURL, err := common.JoinURLPath(baseURL, restPath)
+	// The client's path goes under the node url's own path and its query after the node url's own,
+	// with the node url's parameters, auth-query included, as configured (MAG-5699). DoHTTPRequest
+	// adds the auth-query itself.
+	fullURL, err := nodeUrl.RequestURL(restPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build REST URL: %w", err)
 	}
