@@ -237,7 +237,7 @@ A chain's family comes from its spec's imports. `protocol/common/error_registry.
 | `Cardano` | CARDANO |
 | `Tezos` | TEZOS |
 | `Substrate` | POLKADOT, POLKADOTASSETHUB, KUSAMA, KUSAMAASSETHUB, POLYMESH, ACA, AVT, BITTENSOR, BSX, ENJ, ENJIN, HYDRATION, LIT, TRAC, XRT |
-| One chain each | ALEO, ALGORAND, ARWEAVE, AVALANCHEP, CANTON, CASPER, CONCORDIUM, DCR, FUELNETWORK, ICP, ION, IOTA, KASPA, MINA, MONERO, MORALIS, MULTIVERSX, QUAI, SC, SQDSUBGRAPH, STACKS, VECHAIN — no rows yet |
+| One chain each | ALEO, ALGORAND, ARWEAVE, AVALANCHEP, CANTON, CASPER, CONCORDIUM, DCR, FUELNETWORK, ICP, ION, IOTA, KASPA, MINA, MONERO, MORALIS, MULTIVERSX, QUAI, SC, SQDSUBGRAPH, STACKS, VECHAIN — no rows yet, except MULTIVERSX's one REST row (§9.1) |
 | `PolygonZkEVM` | (no chain IDs currently map to this family — matchers live in Tier-1 EVM) |
 | `Unknown` | sentinel — Tier-2 lookups miss and fall through to Tier-1 |
 
@@ -257,6 +257,14 @@ func ClassifyError(connectionError *RouterError, chainFamily ChainFamily, transp
             if mapping.Matcher.Matches(errorCode, errorMessage) {
                 return mapping.RouterError
             }
+        }
+    }
+
+    // Step 1b: Chain rows true on one interface only, keyed by family then transport: what the
+    // node software behind a chain's REST interface writes in its error body (§9.1)
+    for _, mapping := range ChainInterfaceErrorMappings[chainFamily][transport] {
+        if mapping.Matcher.Matches(errorCode, errorMessage) {
+            return mapping.RouterError
         }
     }
 
@@ -712,15 +720,32 @@ reclassified anything whose body carried a specific message under a generic stat
 "method not allowed" or "route not found" lost its route-refusal verdict and was returned as the
 caller's bad request instead of going to another provider.
 
+**What one node software writes is a chain row.** The Substrate sidecar, the Cosmos gRPC-gateway,
+nodeos and MultiversX each word their errors their own way, so their rows are keyed by chain family
+and transport (`chainInterfaceErrorMappings`) and run after the family's own rows and before the
+generic table (MAG-5253). Each family's list opens with the broadcast-refusal rows (§10), as the
+generic table does, so a refused transaction's log is never read by a chain row. They classify the
+chains that run that software, on REST only; the same body from any other chain is read by the
+generic rows below, which means by its status. CANTO
+imports ETH1 before the Cosmos SDK specs and EOS imports ETH1, so both are `EVM` and the `EVM` REST
+rows are the gateway's and nodeos's.
+
+| chains | matched on | code | retried | at fault |
+| --- | --- | --- | --- | --- |
+| Substrate (sidecar) | body: "larger than the current largest block" | `CHAIN_BLOCK_NOT_FOUND` | yes | no (data-scope) |
+| Substrate (sidecar) | `500` + "unable to retrieve header and parent" | `CHAIN_BLOCK_NOT_FOUND` | yes | no (data-scope) |
+| CosmosSDK, EVM (CANTO's gateway) | body: "requested block height is bigger then the chain length" | `CHAIN_BLOCK_NOT_FOUND` | yes | no (data-scope) |
+| CosmosSDK, EVM (CANTO's gateway) | `500` + "is not available, lowest height" | `CHAIN_STATE_PRUNED` | yes | no (data-scope) |
+| CosmosSDK, EVM (CANTO's gateway) | `500` + "decoding bech32 failed" | `USER_INVALID_PARAMS` | no | no |
+| EVM (EOS's nodeos) | `400` + "unknown block" | `CHAIN_BLOCK_NOT_FOUND` | yes | no (data-scope) |
+| MultiversX | `500` + "transaction not found" | `CHAIN_TX_NOT_FOUND` | yes | no (data-scope) |
+
+The generic REST rows, for every chain:
+
 | matched on | code | retried | at fault |
 | --- | --- | --- | --- |
 | body: "endpoint/route/path not found" | `NODE_ENDPOINT_NOT_FOUND` | yes | no (node-capability) |
 | body: "method not allowed" | `NODE_METHOD_NOT_ALLOWED` | yes | no (node-capability) |
-| body: sidecar/gateway "block beyond head"; `400` + "unknown block" | `CHAIN_BLOCK_NOT_FOUND` | yes | no (data-scope) |
-| `500` + "is not available, lowest height" (Cosmos) | `CHAIN_STATE_PRUNED` | yes | no (data-scope) |
-| `500` + "decoding bech32 failed" (Cosmos) | `USER_INVALID_PARAMS` | no | no |
-| `500` + "unable to retrieve header and parent" (sidecar) | `CHAIN_BLOCK_NOT_FOUND` | yes | no (data-scope) |
-| `500` + "transaction not found" (MultiversX) | `CHAIN_TX_NOT_FOUND` | yes | no (data-scope) |
 | `400` `406` `411` `412` `414`–`417` `428` `431` | `USER_INVALID_REQUEST` | no | no |
 | `401` `402` `403` `407` `426` `451` | `NODE_ACCESS_DENIED` (2018) | yes | no (node-capability) |
 | `404` | `NODE_DATA_NOT_HELD` | yes | no (data-scope) |
@@ -744,8 +769,8 @@ Two rules hold the "at fault" column together:
   serve (`401`–`451`), and neither is evidence it cannot serve. Blaming it walks the refusal
   counter and disables the URL for *every* path, which is how a vendor gating one path behind a
   plan, or one wrong shared credential, could take an endpoint out.
-- **A 5xx the router cannot read as the caller's answer still is.** The four `500` rows above are
-  gated on bodies probed live on 2026-09-27, so an empty, HTML or unexplained 500 stays
+- **A 5xx the router cannot read as the caller's answer still is.** The four `500` chain rows above
+  are gated on bodies probed live on 2026-09-27, so an empty, HTML or unexplained 500 stays
   `NODE_INTERNAL_ERROR` and at fault. Four families answer a caller's mistake with a 500 (finding
   3 of the research doc), and excusing *every* 500 to cover them would have thrown away the signal
   for a genuinely broken node.

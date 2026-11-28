@@ -2,6 +2,8 @@ package common
 
 import (
 	"fmt"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -105,21 +107,26 @@ func TestRESTStatusRowsDoNotReachOtherTransports(t *testing.T) {
 
 // TestRESTBeyondHeadIsRetryable: a 400 that says "the block you asked for is beyond my head" is a
 // lagging node, not a bad request. The three real bodies (probed 2026-09-27) must classify as
-// block-not-found — retryable, data-scope — while every other 400 stays a user error.
+// block-not-found — retryable, data-scope — on the chains whose node software sends them, while
+// every other 400 stays a user error.
 func TestRESTBeyondHeadIsRetryable(t *testing.T) {
-	for _, msg := range []string{
-		"Specified block number is larger than the current largest block. The largest known block number is 21144972.", // Substrate sidecar
-		"requested block height is bigger then the chain length",                                                       // Cosmos gRPC-gateway
-		"Unknown Block", // nodeos unknown_block_exception
+	for _, tc := range []struct {
+		family ChainFamily
+		body   string
+	}{
+		{ChainFamilySubstrate, "Specified block number is larger than the current largest block. The largest known block number is 21144972."}, // Substrate sidecar
+		{ChainFamilyCosmosSDK, "requested block height is bigger then the chain length"},                                                       // Cosmos gRPC-gateway
+		{ChainFamilyEVM, "requested block height is bigger then the chain length"},                                                             // CANTO's Cosmos gRPC-gateway
+		{ChainFamilyEVM, "Unknown Block"}, // EOS: nodeos unknown_block_exception
 	} {
-		got := ClassifyError(nil, ChainFamilyUnknown, TransportREST, 400, msg)
-		require.Same(t, RouterErrorChainBlockNotFound, got, msg)
+		got := ClassifyError(nil, tc.family, TransportREST, 400, tc.body)
+		require.Same(t, RouterErrorChainBlockNotFound, got, "%s: %s", tc.family, tc.body)
 		require.True(t, got.Retryable)
 		require.False(t, got.EndpointAtFault())
 		require.True(t, got.SubCategory.IsDataScope())
 	}
 	require.Same(t, RouterErrorUserInvalidRequest,
-		ClassifyError(nil, ChainFamilyUnknown, TransportREST, 400, "The request you sent was invalid in some way."),
+		ClassifyError(nil, ChainFamilySubstrate, TransportREST, 400, "The request you sent was invalid in some way."),
 		"any other 400 stays a user error")
 }
 
@@ -148,7 +155,8 @@ func TestRESTUnlistedServerErrorMayHaveReachedTheNode(t *testing.T) {
 		require.True(t, got.MayHaveReachedNode, "REST %d", status)
 	}
 	require.Same(t, RouterErrorNodeUnimplemented, ClassifyError(nil, ChainFamilyUnknown, TransportREST, 501, ""))
-	require.Same(t, RouterErrorChainStatePruned, ClassifyError(nil, ChainFamilyUnknown, TransportREST, 500, "height 5 is not available, lowest height is 10"),
+	// The pruned-height row is the Cosmos gateway's, so it reads a Cosmos chain's reply (MAG-5253).
+	require.Same(t, RouterErrorChainStatePruned, ClassifyError(nil, ChainFamilyCosmosSDK, TransportREST, 500, "height 5 is not available, lowest height is 10"),
 		"a row on the body still decides before the status")
 }
 
@@ -181,21 +189,22 @@ func TestRESTMessageRowsBeatTheStatusRow(t *testing.T) {
 // TestRESTUnknownBlockIsGatedOnThe400: "unknown block" is two common English words, and on REST the
 // matcher is fed the raw response body, so ungated it classified anything containing them as
 // block-not-found — retryable, data-scope, endpoint never scored. A multi-chain gateway answering
-// 500 "unknown blockchain id" was never blamed for it.
+// 500 "unknown blockchain id" was never blamed for it. The row is EOS's, which imports ETH1 and so
+// is EVM.
 func TestRESTUnknownBlockIsGatedOnThe400(t *testing.T) {
 	// nodeos's own 400 still classifies.
-	got := ClassifyError(nil, ChainFamilyUnknown, TransportREST, 400, "Unknown Block")
+	got := ClassifyError(nil, ChainFamilyEVM, TransportREST, 400, "Unknown Block")
 	require.Same(t, RouterErrorChainBlockNotFound, got)
 	require.True(t, got.SubCategory.IsDataScope())
 
 	// the same words under any other status do not.
 	for _, status := range []int{200, 404, 500, 503} {
-		got := ClassifyError(nil, ChainFamilyUnknown, TransportREST, status, `{"error":"unknown blockchain id"}`)
+		got := ClassifyError(nil, ChainFamilyEVM, TransportREST, status, `{"error":"unknown blockchain id"}`)
 		require.NotSame(t, RouterErrorChainBlockNotFound, got,
 			"REST %d must not be read as block-not-found just because the body says \"unknown block\"", status)
 	}
 	// and a 500 with those words stays the endpoint's fault.
-	require.True(t, ClassifyError(nil, ChainFamilyUnknown, TransportREST, 500, `{"error":"unknown blockchain id"}`).EndpointAtFault())
+	require.True(t, ClassifyError(nil, ChainFamilyEVM, TransportREST, 500, `{"error":"unknown blockchain id"}`).EndpointAtFault())
 }
 
 // TestREST500ThatIsReallyTheCallersAnswer: Cosmos, nodeos, MultiversX and the Substrate sidecar all
@@ -205,18 +214,19 @@ func TestRESTUnknownBlockIsGatedOnThe400(t *testing.T) {
 // consecutive-refusal counter to the disable threshold. Bodies are the live probes of 2026-09-27.
 func TestREST500ThatIsReallyTheCallersAnswer(t *testing.T) {
 	cases := []struct {
-		name string
-		body string
-		want *RouterError
+		name   string
+		family ChainFamily
+		body   string
+		want   *RouterError
 	}{
-		{"Cosmos pruned height", `{"code":2,"message":"height 1 is not available, lowest height is 25280088","details":[]}`, RouterErrorChainStatePruned},
-		{"Cosmos malformed address", `{"code":2,"message":"decoding bech32 failed: invalid character not part of charset: 111","details":[]}`, RouterErrorUserInvalidParams},
-		{"Sidecar unknown block hash", `{"code":500,"message":"Unable to retrieve header and parent from supplied hash"}`, RouterErrorChainBlockNotFound},
-		{"MultiversX tx not found", `{"data":null,"error":"transaction not found","code":"internal_issue"}`, RouterErrorChainTxNotFound},
+		{"Cosmos pruned height", ChainFamilyCosmosSDK, `{"code":2,"message":"height 1 is not available, lowest height is 25280088","details":[]}`, RouterErrorChainStatePruned},
+		{"Cosmos malformed address", ChainFamilyCosmosSDK, `{"code":2,"message":"decoding bech32 failed: invalid character not part of charset: 111","details":[]}`, RouterErrorUserInvalidParams},
+		{"Sidecar unknown block hash", ChainFamilySubstrate, `{"code":500,"message":"Unable to retrieve header and parent from supplied hash"}`, RouterErrorChainBlockNotFound},
+		{"MultiversX tx not found", ChainFamilyMultiversX, `{"data":null,"error":"transaction not found","code":"internal_issue"}`, RouterErrorChainTxNotFound},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := ClassifyError(nil, ChainFamilyUnknown, TransportREST, 500, tc.body)
+			got := ClassifyError(nil, tc.family, TransportREST, 500, tc.body)
 			require.Same(t, tc.want, got)
 			require.False(t, got.EndpointAtFault(), "the caller's mistake is not the endpoint's fault")
 		})
@@ -224,10 +234,134 @@ func TestREST500ThatIsReallyTheCallersAnswer(t *testing.T) {
 
 	// A 500 the router cannot read as the caller's answer STAYS the endpoint's fault — the point of
 	// gating each row on a probed body rather than excusing every 500.
-	for _, body := range []string{"", "<html>500 Internal Server Error</html>", `{"message":"database connection lost"}`} {
-		got := ClassifyError(nil, ChainFamilyUnknown, TransportREST, 500, body)
-		require.Same(t, RouterErrorNodeInternalError, got, "body %q", body)
-		require.True(t, got.EndpointAtFault(), "body %q", body)
+	for _, family := range []ChainFamily{ChainFamilyCosmosSDK, ChainFamilySubstrate, ChainFamilyEVM, ChainFamilyMultiversX, ChainFamilyUnknown} {
+		for _, body := range []string{"", "<html>500 Internal Server Error</html>", `{"message":"database connection lost"}`} {
+			got := ClassifyError(nil, family, TransportREST, 500, body)
+			require.Same(t, RouterErrorNodeInternalError, got, "%s, body %q", family, body)
+			require.True(t, got.EndpointAtFault(), "%s, body %q", family, body)
+		}
+	}
+}
+
+// TestRESTNodeSoftwareRowsStayWithTheirChains: what one node software writes in a REST error body
+// classifies the chains that run it, and no other (MAG-5253). Every other chain's REST reply with
+// the same body is read by the generic table, which no longer carries the row, and the owning
+// family's JSON-RPC and gRPC errors are read exactly as any chain's are.
+func TestRESTNodeSoftwareRowsStayWithTheirChains(t *testing.T) {
+	// CANTO's REST interface is a Cosmos gRPC-gateway and EOS's is nodeos; both import ETH1 first,
+	// so both are EVM.
+	cosmosGateway := []ChainFamily{ChainFamilyCosmosSDK, ChainFamilyEVM}
+	cases := []struct {
+		name   string
+		owners []ChainFamily
+		status int
+		body   string
+		want   *RouterError
+	}{
+		{"Sidecar beyond head", []ChainFamily{ChainFamilySubstrate}, 400, `{"code":400,"message":"Specified block number is larger than the current largest block. The largest known block number is 21144972."}`, RouterErrorChainBlockNotFound},
+		{"Sidecar unknown block hash", []ChainFamily{ChainFamilySubstrate}, 500, `{"code":500,"message":"Unable to retrieve header and parent from supplied hash"}`, RouterErrorChainBlockNotFound},
+		{"Cosmos gateway beyond head", cosmosGateway, 400, "requested block height is bigger then the chain length", RouterErrorChainBlockNotFound},
+		{"Cosmos gateway pruned height", cosmosGateway, 500, `{"code":2,"message":"height 1 is not available, lowest height is 25280088","details":[]}`, RouterErrorChainStatePruned},
+		{"Cosmos gateway malformed address", cosmosGateway, 500, `{"code":2,"message":"decoding bech32 failed: invalid character not part of charset: 111","details":[]}`, RouterErrorUserInvalidParams},
+		{"nodeos unknown block", []ChainFamily{ChainFamilyEVM}, 400, "Unknown Block", RouterErrorChainBlockNotFound},
+		{"MultiversX tx not found", []ChainFamily{ChainFamilyMultiversX}, 500, `{"data":null,"error":"transaction not found","code":"internal_issue"}`, RouterErrorChainTxNotFound},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			generic := ClassifyError(nil, ChainFamilyUnknown, TransportREST, tc.status, tc.body)
+			require.NotSame(t, tc.want, generic, "the generic REST table no longer carries the row")
+
+			// Every family, from the chain with none through the last one declared.
+			for family := ChainFamilyUnknown; family <= ChainFamilyVeChain; family++ {
+				got := ClassifyError(nil, family, TransportREST, tc.status, tc.body)
+				if slices.Contains(tc.owners, family) {
+					require.Same(t, tc.want, got, "%s's REST interface runs this node software", family)
+					for _, transport := range []TransportType{TransportJsonRPC, TransportGRPC} {
+						require.Same(t, ClassifyError(nil, ChainFamilyUnknown, transport, tc.status, tc.body),
+							ClassifyError(nil, family, transport, tc.status, tc.body),
+							"%s's %s errors do not see a REST body's row", family, transport)
+					}
+				} else {
+					require.Same(t, generic, got, "%s's REST interface is read by the generic table", family)
+				}
+			}
+		})
+	}
+}
+
+// TestRESTChainRowsByChain is MAG-5253's two tests, by chain id as the router resolves it. A sidecar
+// "beyond head" reply on Polkadot Asset Hub is still read as behind after the move. CANTO's gateway
+// and EOS's nodeos keep their rows through ETH1, which makes both EVM. And an EVM row written for a
+// JSON-RPC reply does not read Hedera's REST reply, though Hedera is EVM too.
+func TestRESTChainRowsByChain(t *testing.T) {
+	// Imports as lava-specs (main cdc2c91) declares them.
+	RegisterChainFamilies(specsImporting(map[string][]string{
+		"ETH1": nil, "IBC": nil, "TENDERMINT": nil, "COSMOSSDK45DEP": nil, "POLKADOTASSETHUB": nil,
+		"COSMOSSDK": {"IBC", "TENDERMINT"},
+		"CANTO":     {"ETH1", "COSMOSSDK", "COSMOSSDK45DEP"},
+		"EOS":       {"ETH1"}, "EOST": {"EOS"},
+		"HEDERA": {"ETH1"},
+	}))
+	classify := func(chainID string, status int, body string) *RouterError {
+		return ClassifyError(nil, GetChainFamilyOrDefault(chainID), TransportREST, status, body)
+	}
+
+	sidecarBehind := `{"code":400,"message":"Specified block number is larger than the current largest block. The largest known block number is 21144972."}`
+	require.Same(t, RouterErrorChainBlockNotFound, classify("POLKADOTASSETHUB", 400, sidecarBehind))
+
+	cosmosPruned := `{"code":2,"message":"height 1 is not available, lowest height is 25280088","details":[]}`
+	require.Same(t, RouterErrorChainStatePruned, classify("CANTO", 500, cosmosPruned))
+	for _, chainID := range []string{"EOS", "EOST"} {
+		require.Same(t, RouterErrorChainBlockNotFound, classify(chainID, 400, "Unknown Block"), chainID)
+	}
+
+	hedera := GetChainFamilyOrDefault("HEDERA")
+	require.Equal(t, ChainFamilyEVM, hedera)
+	evmJSONRPCRow := map[ChainFamily]map[TransportType][]errorMapping{
+		ChainFamilyEVM: {TransportJsonRPC: {{MessageContains("not found"), RouterErrorChainTxNotFound}}},
+	}
+	mirrorNodeNotFound := `{"_status":{"messages":[{"message":"Not found"}]}}`
+	lowered := strings.ToLower(mirrorNodeNotFound)
+	require.Same(t, RouterErrorChainTxNotFound,
+		chainInterfaceVerdict(evmJSONRPCRow, hedera, TransportJsonRPC, -32000, mirrorNodeNotFound, lowered),
+		"the row reads the interface it was written for")
+	require.Nil(t, chainInterfaceVerdict(evmJSONRPCRow, hedera, TransportREST, 404, mirrorNodeNotFound, lowered),
+		"and not Hedera's REST reply")
+}
+
+// TestRESTChainRowsLeaveARefusedBroadcastToItsCode: a refused broadcast's message carries the
+// node's log, which is free text. The broadcast-refusal rows read it before any row that reads
+// words, at the head of the generic REST table. The REST chain rows run before that table, so they
+// must not read it either: on every family that has them, the refusal is decided as on a chain with
+// none (MAG-5253). CANTO is EVM and serves the Cosmos REST broadcast, so the gateway's beyond-head
+// row read its refused broadcast's log as block-not-found.
+func TestRESTChainRowsLeaveARefusedBroadcastToItsCode(t *testing.T) {
+	// What the REST chain rows read.
+	words := []string{
+		"Specified block number is larger than the current largest block.",
+		"Unable to retrieve header and parent from supplied hash",
+		"requested block height is bigger then the chain length",
+		"height 1 is not available, lowest height is 25280088",
+		"decoding bech32 failed: invalid character not part of charset: 111",
+		"Unknown Block",
+		"transaction not found",
+	}
+	for family, transports := range chainInterfaceErrorMappings {
+		if len(transports[TransportREST]) == 0 {
+			continue
+		}
+		for _, text := range words {
+			for _, message := range []string{CosmosTxRefusalMessage("sdk", 2, text), TronTxRefusalMessage("SIGERROR", text)} {
+				// 0 and 200 are how a refusal reaches the REST rows; 400 and 500 cover the gated rows.
+				for _, status := range []int{0, 200, 400, 500} {
+					want := ClassifyError(nil, ChainFamilyUnknown, TransportREST, status, message)
+					require.Contains(t, []*RouterError{RouterErrorChainTxRejected, RouterErrorChainInvalidSignature}, want,
+						"the refusal rows decide %q", message)
+					require.Same(t, want, ClassifyError(nil, family, TransportREST, status, message),
+						"%s, status %d: %q", family, status, message)
+				}
+			}
+		}
 	}
 }
 
