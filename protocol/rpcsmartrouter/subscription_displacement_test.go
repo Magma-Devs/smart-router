@@ -318,6 +318,44 @@ func TestWSJoin_NewClientDoesNotJoinASubscriptionOnAUrlThatLeftTheTiers(t *testi
 	requirePush(t, second.replies, "the arriving client")
 }
 
+// TestWSJoin_ClientJoiningTheSuccessorIsReleased: the subscription the arriving client creates
+// takes a key of its own, because the displaced one still holds the params key. A further client
+// that joins it must be tracked under that key, or both ways a client leaves would look up the
+// displaced subscription instead and leave it attached for good: the socket closing
+// (UnsubscribeAll reads the client's entry) and the client's context ending (its watcher).
+func TestWSJoin_ClientJoiningTheSuccessorIsReleased(t *testing.T) {
+	h := newDisplacementHarness(t)
+
+	first := h.subscribe("ws-first")
+	t.Cleanup(first.disconnect)
+	h.takeOutOfRotation(h.first)
+	second := h.subscribe("ws-second")
+	t.Cleanup(second.disconnect)
+	third := h.subscribe("ws-third")
+	t.Cleanup(third.disconnect)
+	fourth := h.subscribe("ws-fourth")
+	t.Cleanup(fourth.disconnect)
+	require.Equal(t, 1, subscribeCalls(h.second), "the third and fourth clients joined the successor")
+	require.Equal(t, h.second.URL(), h.urlOfSubscriptionFor(third.clientKey))
+	require.Equal(t, h.second.URL(), h.urlOfSubscriptionFor(fourth.clientKey))
+
+	h.connectionClosed(third)
+	require.False(t, h.attached(third.clientKey), "a client on the successor was not released when its socket closed")
+
+	fourth.disconnect()
+	require.Eventually(t, func() bool { return !h.attached(fourth.clientKey) },
+		5*time.Second, 10*time.Millisecond, "a client on the successor was not released when its context ended")
+
+	// The successor's last client leaves: its node is told, and the displaced one is all that is left.
+	h.connectionClosed(second)
+	require.Eventually(t, func() bool { return h.second.liveSubscriptions() == 0 },
+		5*time.Second, 10*time.Millisecond, "the node in rotation was never told to stop publishing")
+	require.Equal(t, 1, h.activeSubscriptionCountLocked())
+	require.Equal(t, int64(1), h.manager.totalSubscriptions.Load())
+	require.True(t, h.attached(first.clientKey))
+	requirePush(t, first.replies, "the client on the displaced subscription")
+}
+
 // TestWSJoin_StillJoinsWhenNoUrlIsInRotation keeps the last chance: with every url out of
 // rotation there is nowhere better to put a new subscription, so joining the live one — a node
 // behind the chain, or one that kept failing — beats refusing the client.
@@ -633,4 +671,44 @@ func TestGRPCJoin_WaiterDoesNotJoinADisplacedStream(t *testing.T) {
 	active := len(manager.activeSubscriptions)
 	manager.lock.RUnlock()
 	require.Equal(t, 2, active, "the waiter opened a stream of its own on the url in rotation")
+}
+
+// TestGRPCJoin_ClientJoiningTheSuccessorIsReleased is the gRPC half: a client that joins the
+// stream the arriving client created is tracked under that stream's own key, so UnsubscribeAll
+// releases it from that stream and not from the displaced one that holds the params key.
+func TestGRPCJoin_ClientJoiningTheSuccessorIsReleased(t *testing.T) {
+	firstNode, secondNode := startFakeStreamingUpstream(t), startFakeStreamingUpstream(t)
+	manager, endpoints := newGRPCManagerAgainstUpstreams(t, firstNode.addr, secondNode.addr)
+	defer manager.Stop()
+
+	ctx := context.Background()
+	message := newGrpcSubscriptionMessage(t)
+
+	_, _, err := manager.StartSubscription(ctx, message, "dapp", "1.1.1.1", "stream-1", nil)
+	require.NoError(t, err)
+	requireUpstreamStreamOpened(t, firstNode)
+
+	ranks := map[string]int{endpoints[0].Url: 2}
+	manager.SetURLLendRank(func(url string) int { return ranks[url] })
+
+	_, _, err = manager.StartSubscription(ctx, message, "dapp", "2.2.2.2", "stream-2", nil)
+	require.NoError(t, err)
+	requireUpstreamStreamOpened(t, secondNode)
+
+	thirdKey := manager.ClientKey("dapp", "3.3.3.3", "stream-3")
+	_, thirdReplies, err := manager.StartSubscription(ctx, message, "dapp", "3.3.3.3", "stream-3", nil)
+	require.NoError(t, err)
+	manager.lock.RLock()
+	active := len(manager.activeSubscriptions)
+	manager.lock.RUnlock()
+	require.Equal(t, 2, active, "the third client joined the successor")
+
+	require.NoError(t, manager.UnsubscribeAll(ctx, thirdKey))
+	require.Equal(t, 0, manager.GetClientSubscriptionCount(thirdKey))
+	select {
+	case _, open := <-thirdReplies:
+		require.False(t, open, "the third client's stream must end with its release")
+	case <-time.After(5 * time.Second):
+		t.Fatal("the client on the successor was never released from it")
+	}
 }
