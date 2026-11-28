@@ -36,7 +36,7 @@ func (rpcss *RPCSmartRouterServer) buildSubscriptionRelayEnd(ctx context.Context
 	end.selection = relayEndSelectionSubscription
 	upstream := chainlib.SubscriptionUpstreamFrom(ctx).Record()
 	if upstream.Sent {
-		end.attempts = relayEndAttempts{rpcss.subscriptionAttempt(upstream, start, err == nil)}
+		end.attempts = relayEndAttempts{rpcss.subscriptionAttempt(upstream, start, err == nil, protocolMessage)}
 	}
 	if err == nil {
 		end.outcome = relayOutcomeOK
@@ -61,8 +61,10 @@ func (rpcss *RPCSmartRouterServer) buildSubscriptionRelayEnd(ctx context.Context
 }
 
 // subscriptionAttempt is the one attempt of a subscription request the manager sent upstream. A node
-// that answers with a JSON-RPC error refused the request; any other failure is the transport's.
-func (rpcss *RPCSmartRouterServer) subscriptionAttempt(upstream chainlib.SubscriptionUpstreamRecord, start time.Time, returned bool) relayEndAttempt {
+// that answers with a JSON-RPC error refused the request, and its verdict is the one the error
+// counter recorded for it (subscriptionNodeErrorVerdict, MAG-5598); any other failure is the
+// transport's.
+func (rpcss *RPCSmartRouterServer) subscriptionAttempt(upstream chainlib.SubscriptionUpstreamRecord, start time.Time, returned bool, protocolMessage chainlib.ProtocolMessage) relayEndAttempt {
 	attempt := relayEndAttempt{
 		upstream:         upstream.Upstream,
 		outcome:          attemptOutcomeOK,
@@ -85,7 +87,17 @@ func (rpcss *RPCSmartRouterServer) subscriptionAttempt(upstream chainlib.Subscri
 	if errors.As(upstream.Err, &nodeError) {
 		attempt.outcome = attemptOutcomeNodeError
 		attempt.nodeCode = nodeError.Code
-		attempt.routerError = common.ClassifyError(nil, family, transport, nodeError.Code, nodeError.Message)
+		chainID, apiInterface, method, isWrite := "", spectypes.APIInterfaceJsonRPC, "", false
+		if rpcss.listenEndpoint != nil {
+			chainID, apiInterface = rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface
+		}
+		if protocolMessage != nil {
+			if api := protocolMessage.GetApi(); api != nil {
+				method = api.Name
+			}
+			isWrite = chainlib.GetStateful(protocolMessage) == common.CONSISTENCY_SELECT_ALL_PROVIDERS
+		}
+		attempt.routerError = subscriptionNodeErrorVerdict(chainID, apiInterface, method, isWrite, nodeError)
 		attempt.message = relayEndText(nodeError.Message)
 	} else {
 		attempt.transport = true

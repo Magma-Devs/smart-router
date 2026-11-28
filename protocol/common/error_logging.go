@@ -8,8 +8,9 @@ import (
 )
 
 // ErrorMetricsCallback is a function that gets called on every classified error for metrics tracking.
-// Registered via SetErrorMetricsCallback from the metrics package during initialization.
-type ErrorMetricsCallback func(errorCode uint32, errorName string, errorCategory string, retryable bool, chainID string)
+// Registered via SetErrorMetricsCallback from the metrics package during initialization. apiInterface
+// and source are the error's ErrorOrigin (MAG-5598).
+type ErrorMetricsCallback func(errorCode uint32, errorName string, errorCategory string, retryable bool, chainID string, apiInterface string, source ErrorSource)
 
 // errorMetricsCallbackPtr holds the registered metrics callback. It is loaded on
 // every classified error (high-QPS path) and stored only at init / in tests, so
@@ -54,12 +55,18 @@ func buildCodedAttrs(routerError *RouterError, chainID string, chainErrorCode in
 // the Prometheus counter is still incremented exactly once.
 //
 // Uses an atomic pointer load — no locks on the hot classification path.
-func EmitErrorMetric(routerError *RouterError, chainID string) {
+func EmitErrorMetric(routerError *RouterError, chainID string, origin ErrorOrigin) {
 	cb := errorMetricsCallbackPtr.Load()
 	if cb == nil {
 		return
 	}
-	(*cb)(routerError.Code, routerError.Name, routerError.Category.String(), routerError.Retryable, chainID)
+	source := origin.Source
+	if source == "" {
+		// An empty source would read as a pre-label series, which the SLA's source=~"client|"
+		// counts as a client's: say so rather than leave it empty.
+		source = ErrorSourceClient
+	}
+	(*cb)(routerError.Code, routerError.Name, routerError.Category.String(), routerError.Retryable, chainID, origin.APIInterface, source)
 }
 
 // LogCodedError logs an error at Error level with a classified RouterError, auto-populating
@@ -70,14 +77,15 @@ func EmitErrorMetric(routerError *RouterError, chainID string) {
 //   - err: the original error
 //   - routerError: the classified RouterError (nil defaults to RouterErrorUnknown)
 //   - chainID: the chain ID for metrics labels (may be empty)
+//   - origin: the attempt's interface and who sent it, for metrics labels
 //   - chainErrorCode: the original error code from the node (0 if not applicable)
 //   - chainErrorMessage: the original error message from the node (may be empty)
 //   - attributes: additional structured log attributes
-func LogCodedError(description string, err error, routerError *RouterError, chainID string, chainErrorCode int, chainErrorMessage string, attributes ...utils.Attribute) error {
+func LogCodedError(description string, err error, routerError *RouterError, chainID string, origin ErrorOrigin, chainErrorCode int, chainErrorMessage string, attributes ...utils.Attribute) error {
 	if routerError == nil {
 		routerError = RouterErrorUnknown
 	}
-	EmitErrorMetric(routerError, chainID)
+	EmitErrorMetric(routerError, chainID, origin)
 	return utils.FormatError(description, err, buildCodedAttrs(routerError, chainID, chainErrorCode, chainErrorMessage, attributes...)...)
 }
 
@@ -93,11 +101,11 @@ func LogCodedError(description string, err error, routerError *RouterError, chai
 //
 // Callers choose between this and LogCodedError on RouterError.EndpointAtFault: if the endpoint is
 // to blame, the line stays at ERROR.
-func LogCodedNodeAnswer(description string, err error, routerError *RouterError, chainID string, chainErrorCode int, chainErrorMessage string, attributes ...utils.Attribute) {
+func LogCodedNodeAnswer(description string, err error, routerError *RouterError, chainID string, origin ErrorOrigin, chainErrorCode int, chainErrorMessage string, attributes ...utils.Attribute) {
 	if routerError == nil {
 		routerError = RouterErrorUnknown
 	}
-	EmitErrorMetric(routerError, chainID)
+	EmitErrorMetric(routerError, chainID, origin)
 	attrs := buildCodedAttrs(routerError, chainID, chainErrorCode, chainErrorMessage, attributes...)
 	if err != nil {
 		attrs = append(attrs, utils.Attribute{Key: "error", Value: err.Error()})

@@ -33,7 +33,7 @@ func TestConnectionShapes_AreDecidedByDetectConnectionError(t *testing.T) {
 			connError := common.DetectConnectionError(shape)
 			require.NotNil(t, connError, "the shared detector names this shape")
 
-			result := handleAndClassify(context.Background(), shape, common.TransportJsonRPC, common.ChainFamilyEVM, "ETH1", &genericErrorHandler{})
+			result := handleAndClassify(context.Background(), shape, common.TransportJsonRPC, common.ChainFamilyEVM, "ETH1", "jsonrpc", &genericErrorHandler{})
 			assert.ErrorIs(t, result, connError, "classified centrally, never reworded by handleConnectionError")
 		})
 	}

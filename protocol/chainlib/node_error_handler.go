@@ -363,12 +363,12 @@ func TryRecoverNodeErrorFromClientError(nodeErr error) *rpcclient.JsonrpcMessage
 //
 // Passing alreadyLoggedElsewhere=true is the "metric-only" path; passing
 // false is the "log + metric" path.
-func emitClassificationTelemetry(nodeError error, classified *common.RouterError, chainID string, errorCode int, errorMessage string, alreadyLoggedElsewhere bool) {
+func emitClassificationTelemetry(nodeError error, classified *common.RouterError, chainID string, origin common.ErrorOrigin, errorCode int, errorMessage string, alreadyLoggedElsewhere bool) {
 	if alreadyLoggedElsewhere {
-		common.EmitErrorMetric(classified, chainID)
+		common.EmitErrorMetric(classified, chainID, origin)
 		return
 	}
-	_ = common.LogCodedError("provider node error", nodeError, classified, chainID, errorCode, errorMessage)
+	_ = common.LogCodedError("provider node error", nodeError, classified, chainID, origin, errorCode, errorMessage)
 }
 
 // handleAndClassify is the shared error handling path for all transports.
@@ -386,15 +386,17 @@ func emitClassificationTelemetry(nodeError error, classified *common.RouterError
 // value controls whether the caller falls back to the raw error. Callers
 // of HandleNodeError treat a nil return as "fall back to raw err" — see
 // jsonRPC.go: `if parsedError != nil { return parsedError } return err`.
-func handleAndClassify(ctx context.Context, nodeError error, transport common.TransportType, chainFamily common.ChainFamily, chainID string, geh *genericErrorHandler) error {
+func handleAndClassify(ctx context.Context, nodeError error, transport common.TransportType, chainFamily common.ChainFamily, chainID string, apiInterface string, geh *genericErrorHandler) error {
 	// Step 1: classify. Use the details variant so log/metric carries the
 	// real JSON-RPC / gRPC / HTTP code and the inner error message.
 	classified, errorCode, errorMessage := ClassifyNodeErrorWithDetails(nodeError, chainFamily, transport)
+	// Who sent the attempt is the ctx's tag: the router's own checks tag theirs (MAG-5598).
+	origin := common.ErrorOriginOf(ctx, apiInterface)
 
 	// Step 2 + 3 (classified path): log + metric here, wrap, return.
 	// handleGenericErrors is not reached on this branch.
 	if classified != common.RouterErrorUnknown {
-		emitClassificationTelemetry(nodeError, classified, chainID, errorCode, errorMessage, false /* not already logged */)
+		emitClassificationTelemetry(nodeError, classified, chainID, origin, errorCode, errorMessage, false /* not already logged */)
 		return common.NewRouterError(classified, nodeError.Error())
 	}
 
@@ -407,25 +409,28 @@ func handleAndClassify(ctx context.Context, nodeError error, transport common.Tr
 	// Step 3 (Unknown path): emit telemetry once. If handleGenericErrors
 	// logged, we take the metric-only path to preserve the single-log
 	// invariant; otherwise we emit our structured log as the sole entry.
-	emitClassificationTelemetry(nodeError, classified, chainID, errorCode, errorMessage, parsed != nil)
+	emitClassificationTelemetry(nodeError, classified, chainID, origin, errorCode, errorMessage, parsed != nil)
 	return parsed
 }
 
 // nodeErrorHandler classifies a node's error by the transport its proxy speaks: REST and
-// GraphQL classify as REST, JSON-RPC and Tendermint as JSON-RPC, gRPC as gRPC.
+// GraphQL classify as REST, JSON-RPC and Tendermint as JSON-RPC, gRPC as gRPC. apiInterface is
+// the proxy's own interface, which the error counter records: the transport is not one-to-one
+// with it (MAG-5598).
 type nodeErrorHandler struct {
 	genericErrorHandler
-	transport   common.TransportType
-	chainFamily common.ChainFamily
-	chainID     string
+	transport    common.TransportType
+	chainFamily  common.ChainFamily
+	chainID      string
+	apiInterface string
 }
 
-func newNodeErrorHandler(transport common.TransportType, chainID string) *nodeErrorHandler {
-	return &nodeErrorHandler{transport: transport, chainFamily: common.GetChainFamilyOrDefault(chainID), chainID: chainID}
+func newNodeErrorHandler(transport common.TransportType, chainID string, apiInterface string) *nodeErrorHandler {
+	return &nodeErrorHandler{transport: transport, chainFamily: common.GetChainFamilyOrDefault(chainID), chainID: chainID, apiInterface: apiInterface}
 }
 
 func (neh *nodeErrorHandler) HandleNodeError(ctx context.Context, nodeError error) error {
-	return handleAndClassify(ctx, nodeError, neh.transport, neh.chainFamily, neh.chainID, &neh.genericErrorHandler)
+	return handleAndClassify(ctx, nodeError, neh.transport, neh.chainFamily, neh.chainID, neh.apiInterface, &neh.genericErrorHandler)
 }
 
 type ErrorHandler interface {

@@ -359,7 +359,7 @@ func NewRestChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint rou
 	nodeUrl := rpcProviderEndpoint.NodeUrls[0]
 	nodeUrl.Url = strings.TrimSuffix(rpcProviderEndpoint.NodeUrls[0].Url, "/")
 	rcp := &RestChainProxy{
-		BaseChainProxy: BaseChainProxy{averageBlockTime: averageBlockTime, NodeUrl: rpcProviderEndpoint.NodeUrls[0], HashedNodeUrl: chainproxy.HashURL(nodeUrl.Url), ErrorHandler: newNodeErrorHandler(common.TransportREST, rpcProviderEndpoint.ChainID), ChainID: rpcProviderEndpoint.ChainID},
+		BaseChainProxy: BaseChainProxy{averageBlockTime: averageBlockTime, NodeUrl: rpcProviderEndpoint.NodeUrls[0], HashedNodeUrl: chainproxy.HashURL(nodeUrl.Url), ErrorHandler: newNodeErrorHandler(common.TransportREST, rpcProviderEndpoint.ChainID, rpcProviderEndpoint.ApiInterface), ChainID: rpcProviderEndpoint.ChainID},
 	}
 	return rcp, nil
 }

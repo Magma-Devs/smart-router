@@ -731,4 +731,4 @@ Defined in [`error_metrics.go`](../protocol/metrics/error_metrics.go).
 
 | Metric | Type | Labels | Description |
 | --- | --- | --- | --- |
-| `smartrouter_errors_total` | Counter | `error_name`, `error_category`, `retryable`, `chain_id` | Errors classified by name, category, retryability, and chain. |
+| `smartrouter_errors_total` | Counter | `error_name`, `error_category`, `retryable`, `chain_id`, `apiInterface`, `source` | Errors classified by name, category, retryability, chain, interface and who sent the attempt. `apiInterface` is the attempt's interface (`jsonrpc`, `tendermintrpc`, `rest`, `grpc`, `graphql`), as on `smartrouter_node_errors_total`. `source` is `client` for a client's request; `boot` for the checks and first crafted relays before an endpoint serves; `probe` for the probe loop and the relays monitor's later relays; `reverify` for a provider verified again; `poll` for the endpoint pollers; `subscription` for a subscribe the node refused or an error frame it sent on an open subscription. A client-facing number reads `source=~"client\|"`: the empty value matches a router from before the label. |

@@ -114,15 +114,34 @@ type ResultsManagerInst struct {
 	lock                   sync.RWMutex
 	guid                   uint64
 	chainID                string
+	// source is who sent the relay these attempts serve, the error counter's source (MAG-5598).
+	source common.ErrorSource
 }
 
 func NewResultsManager(guid uint64, chainID string) ResultsManager {
+	return newResultsManager(guid, chainID, common.ErrorSourceClient)
+}
+
+// newResultsManager is NewResultsManager for a relay source sent: the relay processor passes the
+// source its ctx was tagged with.
+func newResultsManager(guid uint64, chainID string, source common.ErrorSource) *ResultsManagerInst {
 	return &ResultsManagerInst{
 		guid:                   guid,
 		chainID:                chainID,
+		source:                 source,
 		nodeResponseErrors:     RelayErrors{RelayErrors: []RelayError{}},
 		protocolResponseErrors: RelayErrors{RelayErrors: []RelayError{}, OnFailureMergeAll: true},
 	}
+}
+
+// origin is what the error counter records about an attempt of this relay: the interface of the
+// message's collection and who sent the relay.
+func (rp *ResultsManagerInst) origin(protocolMessage chainlib.ProtocolMessage) common.ErrorOrigin {
+	origin := common.ErrorOrigin{Source: rp.source}
+	if protocolMessage != nil {
+		origin.APIInterface = apiInterfaceOf(protocolMessage)
+	}
+	return origin
 }
 
 func (rp *ResultsManagerInst) setErrorResponse(response *RelayResponse, protocolMessage chainlib.ProtocolMessage) {
@@ -167,7 +186,7 @@ func (rp *ResultsManagerInst) setErrorResponse(response *RelayResponse, protocol
 	// not a node-side error. Pass "" as chainErrorMessage so the chain_error_message
 	// structured field doesn't get polluted with sdkerrors strings. The full
 	// error still surfaces via the err argument.
-	common.LogCodedError("could not send relay to provider", response.Err, classified, rp.chainID, 0, "",
+	common.LogCodedError("could not send relay to provider", response.Err, classified, rp.chainID, rp.origin(protocolMessage), 0, "",
 		utils.Attribute{Key: "GUID", Value: rp.guid},
 		utils.Attribute{Key: "provider", Value: response.RelayResult.ProviderInfo.ProviderAddress},
 		utils.Attribute{Key: "statusCode", Value: response.RelayResult.StatusCode},
@@ -360,11 +379,11 @@ func (rp *ResultsManagerInst) setValidResponse(response *RelayResponse, protocol
 		// routine — see LogCodedNodeAnswer. The metric fires either way.
 		logNodeError := common.LogCodedNodeAnswer
 		if nodeClassified.EndpointAtFault() {
-			logNodeError = func(description string, err error, routerError *common.RouterError, chainID string, chainErrorCode int, chainErrorMessage string, attributes ...utils.Attribute) {
-				common.LogCodedError(description, err, routerError, chainID, chainErrorCode, chainErrorMessage, attributes...)
+			logNodeError = func(description string, err error, routerError *common.RouterError, chainID string, origin common.ErrorOrigin, chainErrorCode int, chainErrorMessage string, attributes ...utils.Attribute) {
+				common.LogCodedError(description, err, routerError, chainID, origin, chainErrorCode, chainErrorMessage, attributes...)
 			}
 		}
-		logNodeError("received node error reply from provider", err, nodeClassified, rp.chainID, errorCode, err.Error(),
+		logNodeError("received node error reply from provider", err, nodeClassified, rp.chainID, rp.origin(protocolMessage), errorCode, err.Error(),
 			utils.LogAttr("GUID", rp.guid),
 			utils.LogAttr("provider", response.RelayResult.ProviderInfo),
 			utils.LogAttr("statusCode", response.RelayResult.StatusCode),

@@ -206,6 +206,9 @@ type DirectWSSubscriptionManager struct {
 
 	// endpointNames names each endpoint's provider for relay_end (SetEndpointNames).
 	endpointNames subscriptionEndpointNames
+	// errorFrameReporter writes the relay_end of an error frame a node sends on an open
+	// subscription (SetErrorFrameReporter; PRD §5.7, MAG-5598). Nil until the server sets it.
+	errorFrameReporter atomic.Pointer[subscriptionErrorFrameReporter]
 
 	// Pending subscriptions for deduplication
 	pendingSubscriptions map[string]*pendingSubscriptionsBroadcastManager
@@ -315,6 +318,39 @@ func NewDirectWSSubscriptionManager(
 // for the upstream a subscription request went to.
 func (dwsm *DirectWSSubscriptionManager) SetEndpointNames(names map[string]string) {
 	dwsm.endpointNames.set(names)
+}
+
+// SetErrorFrameReporter gives the manager what writes the relay_end of an error frame a node sends
+// on an open subscription.
+func (dwsm *DirectWSSubscriptionManager) SetErrorFrameReporter(reporter subscriptionErrorFrameReporter) {
+	if reporter == nil {
+		dwsm.errorFrameReporter.Store(nil)
+		return
+	}
+	dwsm.errorFrameReporter.Store(&reporter)
+}
+
+// countRefusedSubscribe counts a subscribe the node refused with a JSON-RPC error (PRD §5.7). A
+// transport failure is the connection's and is not counted here.
+func (dwsm *DirectWSSubscriptionManager) countRefusedSubscribe(method string, isWrite bool, err error) {
+	var nodeErr *rpcclient.JsonError
+	if errors.As(err, &nodeErr) {
+		countSubscriptionNodeError(dwsm.chainID, dwsm.apiInterface, method, isWrite, nodeErr)
+	}
+}
+
+// countErrorFrame counts an error frame the node sent on activeSub, and writes its relay_end
+// (PRD §5.7). The subscription still ends as before.
+func (dwsm *DirectWSSubscriptionManager) countErrorFrame(activeSub *directActiveSubscription, nodeErr *rpcclient.JsonError) {
+	routerError := countSubscriptionNodeError(dwsm.chainID, dwsm.apiInterface, activeSub.subscribeMethod, activeSub.isWrite, nodeErr)
+	reporter := dwsm.errorFrameReporter.Load()
+	if reporter == nil {
+		return
+	}
+	dwsm.lock.RLock()
+	upstream := dwsm.upstreamNameOf(activeSub)
+	dwsm.lock.RUnlock()
+	(*reporter)(activeSub.subscribeMethod, upstream, nodeErr, routerError)
 }
 
 // upstreamNameOf names the provider of activeSub's upstream.
@@ -697,6 +733,7 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 	chainlib.SubscriptionUpstreamFrom(ctx).Sent(dwsm.endpointNames.name(selectedEndpoint.Url), startTime, time.Since(startTime), err)
 	if err != nil {
 		pool.NotifySubscriptionRemoved(conn)
+		dwsm.countRefusedSubscribe(subscribeMethod, isWrite, err)
 		dwsm.noteSubscribeFailure(selectedEndpoint.Url, err)
 		dwsm.settlePendingSubscription(hashedParams, false)
 		dwsm.metricsManager.SetFailedWsSubscriptionRequestMetric(dwsm.chainID, dwsm.apiInterface)
@@ -1439,6 +1476,7 @@ func (dwsm *DirectWSSubscriptionManager) listenForUpstreamMessages(
 					utils.FormatWarning("DirectWS: upstream ended the subscription with an error", err,
 						utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
 					)
+					dwsm.countErrorFrame(activeSub, nodeErr)
 					return
 				}
 				utils.FormatWarning("DirectWS: upstream subscription error",

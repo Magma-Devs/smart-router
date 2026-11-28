@@ -79,7 +79,7 @@ func graphQLNodeErrorResponse(provider, reply string) *RelayResponse {
 func captureNodeErrorReplies(t *testing.T, fn func()) (levels, metricNames []string) {
 	t.Helper()
 	var metricMu sync.Mutex
-	common.SetErrorMetricsCallback(func(_ uint32, errorName string, _ string, _ bool, _ string) {
+	common.SetErrorMetricsCallback(func(_ uint32, errorName string, _ string, _ bool, _ string, _ string, _ common.ErrorSource) {
 		metricMu.Lock()
 		defer metricMu.Unlock()
 		metricNames = append(metricNames, errorName)

@@ -22,7 +22,7 @@ func TestHandleAndClassify_MethodNotFoundIsRetryable(t *testing.T) {
 	// THEN it is wrapped as NODE_METHOD_NOT_FOUND, which since MAG-2771 is a claim about this node:
 	// retryable on another provider, not a router-terminal unsupported method
 	err := errors.New("method not found")
-	result := handleAndClassify(context.Background(), err, common.TransportJsonRPC, common.ChainFamilyEVM, "", &genericErrorHandler{})
+	result := handleAndClassify(context.Background(), err, common.TransportJsonRPC, common.ChainFamilyEVM, "", "jsonrpc", &genericErrorHandler{})
 	require.NotNil(t, result)
 	assert.True(t, errors.Is(result, common.RouterErrorNodeMethodNotFound))
 	assert.False(t, IsUnsupportedMethodErrorType(result))
@@ -34,7 +34,7 @@ func TestHandleAndClassify_NonRetryableError(t *testing.T) {
 	// WHEN handleAndClassify processes it
 	// THEN it returns a SolanaNonRetryableError wrapper (non-retryable indicator)
 	err := errors.New("nonce too low")
-	result := handleAndClassify(context.Background(), err, common.TransportJsonRPC, common.ChainFamilyEVM, "", &genericErrorHandler{})
+	result := handleAndClassify(context.Background(), err, common.TransportJsonRPC, common.ChainFamilyEVM, "", "jsonrpc", &genericErrorHandler{})
 	require.NotNil(t, result)
 	assert.True(t, IsSolanaNonRetryableErrorType(result))
 }
@@ -44,7 +44,7 @@ func TestHandleAndClassify_RetryableError(t *testing.T) {
 	// WHEN handleAndClassify processes it
 	// THEN it is wrapped (classified) but not as unsupported-method or non-retryable
 	err := errors.New("rate limit exceeded")
-	result := handleAndClassify(context.Background(), err, common.TransportJsonRPC, common.ChainFamilyEVM, "", &genericErrorHandler{})
+	result := handleAndClassify(context.Background(), err, common.TransportJsonRPC, common.ChainFamilyEVM, "", "jsonrpc", &genericErrorHandler{})
 	require.NotNil(t, result)
 	assert.True(t, errors.Is(result, common.RouterErrorNodeRateLimited))
 	assert.False(t, IsUnsupportedMethodErrorType(result))
@@ -56,7 +56,7 @@ func TestHandleAndClassify_UnknownError(t *testing.T) {
 	// WHEN handleAndClassify processes it
 	// THEN it falls through to handleGenericErrors (no special wrapping)
 	err := errors.New("something completely unexpected")
-	result := handleAndClassify(context.Background(), err, common.TransportJsonRPC, common.ChainFamilyEVM, "", &genericErrorHandler{})
+	result := handleAndClassify(context.Background(), err, common.TransportJsonRPC, common.ChainFamilyEVM, "", "jsonrpc", &genericErrorHandler{})
 	assert.False(t, IsUnsupportedMethodErrorType(result))
 	assert.False(t, IsSolanaNonRetryableErrorType(result))
 }
@@ -166,7 +166,7 @@ func TestHandleAndClassify_JsonRPCMethodNotFound(t *testing.T) {
 	// WHEN classified with TransportJsonRPC
 	// THEN its SubCategory is node-capability: the node answered about itself (MAG-2771)
 	err := errors.New("method not found")
-	result := handleAndClassify(context.Background(), err, common.TransportJsonRPC, common.ChainFamilyEVM, "", &genericErrorHandler{})
+	result := handleAndClassify(context.Background(), err, common.TransportJsonRPC, common.ChainFamilyEVM, "", "jsonrpc", &genericErrorHandler{})
 	require.NotNil(t, result)
 	routerErr := common.AsRouterError(result)
 	require.NotNil(t, routerErr)
@@ -179,7 +179,7 @@ func TestHandleAndClassify_MethodNotSupported(t *testing.T) {
 	// WHEN handleAndClassify processes it
 	// THEN it is wrapped so callers can observe the Retryable=true signal via errors.Is
 	err := errors.New("method not supported")
-	result := handleAndClassify(context.Background(), err, common.TransportJsonRPC, common.ChainFamilyEVM, "", &genericErrorHandler{})
+	result := handleAndClassify(context.Background(), err, common.TransportJsonRPC, common.ChainFamilyEVM, "", "jsonrpc", &genericErrorHandler{})
 	require.NotNil(t, result, "retryable classified errors must be wrapped, not silently dropped")
 	assert.True(t, errors.Is(result, common.RouterErrorNodeMethodNotSupported))
 	assert.False(t, IsUnsupportedMethodErrorType(result), "method not supported is retryable, not a hard unsupported-method")
@@ -192,20 +192,24 @@ type metricCounter struct {
 	mu    sync.Mutex
 	count int
 	last  struct {
-		code     uint32
-		name     string
-		category string
+		code         uint32
+		name         string
+		category     string
+		apiInterface string
+		source       common.ErrorSource
 	}
 }
 
 func (m *metricCounter) callback() common.ErrorMetricsCallback {
-	return func(code uint32, name string, category string, retryable bool, chainID string) {
+	return func(code uint32, name string, category string, retryable bool, chainID string, apiInterface string, source common.ErrorSource) {
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		m.count++
 		m.last.code = code
 		m.last.name = name
 		m.last.category = category
+		m.last.apiInterface = apiInterface
+		m.last.source = source
 	}
 }
 
@@ -263,10 +267,29 @@ func TestHandleAndClassify_SingleMetricPerCall(t *testing.T) {
 			common.SetErrorMetricsCallback(mc.callback())
 			defer common.SetErrorMetricsCallback(nil)
 
-			handleAndClassify(context.Background(), tt.err, common.TransportJsonRPC, common.ChainFamilyEVM, "ETH1", &genericErrorHandler{})
+			handleAndClassify(context.Background(), tt.err, common.TransportJsonRPC, common.ChainFamilyEVM, "ETH1", "jsonrpc", &genericErrorHandler{})
 
 			assert.Equal(t, 1, mc.snapshot(), "exactly one metric must fire per handleAndClassify call")
 			assert.Equal(t, tt.expectedCode, mc.last.code, "metric must reflect the final classification")
 		})
 	}
+}
+
+// The counter records the proxy's own interface, not the transport its errors classify by (GraphQL
+// classifies as REST), and the source the ctx was tagged with (MAG-5598).
+func TestHandleAndClassify_CountsTheProxysInterfaceAndTheCtxsSource(t *testing.T) {
+	m := &metricCounter{}
+	common.SetErrorMetricsCallback(m.callback())
+	t.Cleanup(func() { common.SetErrorMetricsCallback(nil) })
+
+	boot := common.WithErrorSource(context.Background(), common.ErrorSourceBoot)
+	_ = newNodeErrorHandler(common.TransportREST, "ETH1", "graphql").HandleNodeError(boot, errors.New("connection refused"))
+	require.Equal(t, 1, m.count)
+	require.Equal(t, "graphql", m.last.apiInterface)
+	require.Equal(t, common.ErrorSourceBoot, m.last.source)
+
+	_ = newNodeErrorHandler(common.TransportJsonRPC, "ETH1", "tendermintrpc").HandleNodeError(context.Background(), errors.New("connection refused"))
+	require.Equal(t, 2, m.count)
+	require.Equal(t, "tendermintrpc", m.last.apiInterface)
+	require.Equal(t, common.ErrorSourceClient, m.last.source, "an untagged ctx is a client's")
 }

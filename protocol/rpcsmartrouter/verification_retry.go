@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
+	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/holdoff"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/magma-Devs/smart-router/utils"
@@ -409,8 +410,9 @@ func (rpsr *RPCSmartRouter) retryPaired(ctx context.Context, chainKey string, st
 	if inputs == nil {
 		return
 	}
-	probedStatic := probeReverification(ctx, inputs, static, due.of(reverifyTierStatic), lastStatic)
-	probedBackup := probeReverification(ctx, inputs, backup, due.of(reverifyTierBackup), lastBackup)
+	reverifyCtx := common.WithErrorSource(ctx, common.ErrorSourceReverify)
+	probedStatic := probeReverification(reverifyCtx, inputs, static, due.of(reverifyTierStatic), lastStatic)
+	probedBackup := probeReverification(reverifyCtx, inputs, backup, due.of(reverifyTierBackup), lastBackup)
 
 	rpsr.mu.Lock()
 	if inputs.epochPassSince(passes) {
@@ -567,8 +569,9 @@ func (rpsr *RPCSmartRouter) retryOutOfPairing(
 		utils.LogAttr("failedStatic", len(static)),
 		utils.LogAttr("failedBackup", len(backup)),
 	)
-	recoveredStatic, _ := rpsr.revalidateTier(ctx, static, chainParser, rpcEndpoint, reverifyTierStatic, due.of(reverifyTierStatic), countAttempt)
-	recoveredBackup, _ := rpsr.revalidateTier(ctx, backup, chainParser, rpcEndpoint, reverifyTierBackup, due.of(reverifyTierBackup), countAttempt)
+	reverifyCtx := common.WithErrorSource(ctx, common.ErrorSourceReverify)
+	recoveredStatic, _ := rpsr.revalidateTier(reverifyCtx, static, chainParser, rpcEndpoint, reverifyTierStatic, due.of(reverifyTierStatic), countAttempt)
+	recoveredBackup, _ := rpsr.revalidateTier(reverifyCtx, backup, chainParser, rpcEndpoint, reverifyTierBackup, due.of(reverifyTierBackup), countAttempt)
 	rpsr.readmitRecoveredProviders(chainKey, rpcEndpoint, convertProvidersToSessions, recoveredStatic, recoveredBackup)
 }
 

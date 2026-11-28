@@ -471,6 +471,8 @@ func (ecf *EndpointPoller) ObserveLatestBlockPoll(block int64, transportLatency 
 // For REST/POST requests, requestData is the JSON body and apiName is the URL path.
 // For JSON-RPC/POST requests, requestData is the JSON body.
 func (ecf *EndpointPoller) sendRawRequest(ctx context.Context, requestData []byte, connectionType string, apiName string, kind string) (reply []byte, err error) {
+	// A poll's errors are the router's own (MAG-5598); one the probe loop asked for stays a probe.
+	ctx = common.WithDefaultErrorSource(ctx, common.ErrorSourcePoll)
 	// Both pollers (JSON-RPC and REST) pass here. An upstream's error answer reaches the caller as
 	// an HTTPStatusError whose Error() is canonical, so its own status line and body are logged
 	// here, as fields (MAG-4481).

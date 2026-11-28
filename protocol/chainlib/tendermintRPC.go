@@ -445,7 +445,7 @@ func NewtendermintRpcChainProxy(ctx context.Context, nConns uint, rpcProviderEnd
 			BaseChainProxy: BaseChainProxy{
 				averageBlockTime: averageBlockTime,
 				NodeUrl:          nodeUrl,
-				ErrorHandler:     newNodeErrorHandler(common.TransportJsonRPC, rpcProviderEndpoint.ChainID),
+				ErrorHandler:     newNodeErrorHandler(common.TransportJsonRPC, rpcProviderEndpoint.ChainID, rpcProviderEndpoint.ApiInterface),
 				ChainID:          rpcProviderEndpoint.ChainID,
 			},
 			conn: nil,

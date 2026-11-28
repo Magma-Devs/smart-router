@@ -3079,10 +3079,12 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	// either tier boots but reports unhealthy on its health endpoint (see the
 	// relaysMonitor seeding below), so it is pulled from rotation rather than
 	// silently accepting traffic it cannot serve.
+	// The boot checks' errors are the router's own, counted with source="boot" (MAG-5598).
+	bootCtx := common.WithErrorSource(ctx, common.ErrorSourceBoot)
 	failedStaticSet, failedStaticEndpoints := validateProviderTier(
-		ctx, relevantStaticProviderList, rpcEndpoint, chainParser, reverifyTierStatic, nil, recordAdmission)
+		bootCtx, relevantStaticProviderList, rpcEndpoint, chainParser, reverifyTierStatic, nil, recordAdmission)
 	failedBackupSet, failedBackupEndpoints := validateProviderTier(
-		ctx, relevantBackupProviderList, rpcEndpoint, chainParser, reverifyTierBackup, nil, recordAdmission)
+		bootCtx, relevantBackupProviderList, rpcEndpoint, chainParser, reverifyTierBackup, nil, recordAdmission)
 
 	healthyStaticCount := len(relevantStaticProviderList) - len(failedStaticSet)
 	healthyBackupCount := len(relevantBackupProviderList) - len(failedBackupSet)
@@ -4124,8 +4126,9 @@ func (rpsr *RPCSmartRouter) updateEpoch(ctx context.Context, epoch uint64) {
 		var probedStatic, probedBackup []reverifyProbe
 		if inputs != nil {
 			reverifyStart := time.Now()
-			probedStatic = probeReverification(ctx, inputs, inputs.configuredStatic, nil, nil)
-			probedBackup = probeReverification(ctx, inputs, inputs.configuredBackup, nil, nil)
+			reverifyCtx := common.WithErrorSource(ctx, common.ErrorSourceReverify)
+			probedStatic = probeReverification(reverifyCtx, inputs, inputs.configuredStatic, nil, nil)
+			probedBackup = probeReverification(reverifyCtx, inputs, inputs.configuredBackup, nil, nil)
 			// Per-chain re-verify is internally bounded by SpecReVerifyConcurrency,
 			// but updateEpoch iterates chains serially. Surfacing per-chain duration
 			// gives operators a signal when total tick time approaches epoch length —
