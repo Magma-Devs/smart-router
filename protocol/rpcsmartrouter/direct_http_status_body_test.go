@@ -48,7 +48,8 @@ func TestClassifyDirectRPCError_A5xxWithoutABodyKeepsItsStatusVerdict(t *testing
 
 // A 5xx whose body is the node's JSON-RPC error is judged by that body for endpoint health: a
 // gateway's 503 around "method not found" is not a reason to count against the endpoint, one around
-// a rate limit is a rate limit, and one with no JSON-RPC body is judged by its status.
+// a mirrored 429 is a rate limit, and one with no JSON-RPC body is judged by its status. "rate limit"
+// wording under -32000 is no rate limit (MAG-5487): it is the -32000 row's, a fault, as the 503 is.
 func TestEndpointHealth_A5xxWithAJSONRPCBodyIsJudgedByItsBody(t *testing.T) {
 	cases := []struct {
 		name            string
@@ -57,7 +58,8 @@ func TestEndpointHealth_A5xxWithAJSONRPCBodyIsJudgedByItsBody(t *testing.T) {
 		wantRateLimited bool
 	}{
 		{"method not found", `{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"the method eth_foo does not exist/is not available"}}`, false, false},
-		{"rate limit", `{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"rate limit exceeded"}}`, false, true},
+		{"rate limit", `{"jsonrpc":"2.0","id":1,"error":{"code":429,"message":"Too Many Requests"}}`, false, true},
+		{"rate limit wording", `{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"rate limit exceeded"}}`, true, false},
 		{"internal error", `{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"internal error"}}`, true, false},
 		{"no JSON-RPC body", `<html>Service Unavailable</html>`, true, false},
 	}

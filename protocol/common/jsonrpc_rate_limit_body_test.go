@@ -20,7 +20,6 @@ func TestJSONRPC_RateLimitBodyIsRateLimited(t *testing.T) {
 		{"mirrored HTTP code with a vendor message", 429, "Your app has exceeded its capacity"},
 		{"reason phrase under a generic server code", -32000, "Too many requests, please slow down"},
 		{"reason phrase, mixed case, no code", 0, "TOO MANY REQUESTS"},
-		{"rate limit text, pre-existing row", -32000, "rate limit exceeded"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -42,4 +41,29 @@ func TestJSONRPC_RateLimitBodyRowsStayNarrow(t *testing.T) {
 	require.Same(t, RouterErrorNodeInternalError, ClassifyError(nil, ChainFamilyEVM, TransportJsonRPC, -32603, "Too Many Requests"))
 	require.Same(t, RouterErrorNodeServerError, ClassifyError(nil, ChainFamilyEVM, TransportJsonRPC, -32000, "request limit reached"))
 	require.Same(t, RouterErrorNodeRateLimited, ClassifyError(nil, ChainFamilyUnknown, TransportJsonRPC, 429, "Too Many Requests"))
+}
+
+// "rate limit" and "enhance_your_calm" in a JSON-RPC error are no rate limit on any chain: wording
+// decides only through a chain row (rulebook Part IV 3.3), and a rate limit is an HTTP 429 or a
+// chain's own rate-limit or quota row. Read on every chain, a write whose every copy said so was
+// sent again (MAG-5487). Under -32000 the error is the -32000 row's; with no code it is unknown.
+func TestJSONRPC_RateLimitWordingIsNoRateLimit(t *testing.T) {
+	families := []ChainFamily{ChainFamilyEVM, ChainFamilySolana, ChainFamilyBitcoin, ChainFamilyUnknown}
+	messages := []string{"rate limit exceeded", "Rate limit reached for requests", "enhance_your_calm"}
+	want := map[int]*RouterError{-32000: RouterErrorNodeServerError, 0: RouterErrorUnknown}
+	for _, family := range families {
+		for code, verdict := range want {
+			for _, message := range messages {
+				got := ClassifyError(nil, family, TransportJsonRPC, code, message)
+				require.Same(t, verdict, got, "family %d, code %d, %q", family, code, message)
+				require.False(t, got.SubCategory.IsRateLimit(), "family %d, code %d, %q", family, code, message)
+			}
+		}
+	}
+}
+
+// What still decides a rate limit on JSON-RPC: a chain's own row (XRPL tooBusy) and the HTTP status.
+func TestJSONRPC_RateLimitStillDecidedByChainRowAndStatus(t *testing.T) {
+	require.Same(t, RouterErrorNodeRateLimited, ClassifyError(nil, ChainFamilyXRP, TransportJsonRPC, 0, "tooBusy"))
+	require.Same(t, RouterErrorNodeRateLimited, ClassifyError(nil, ChainFamilyEVM, TransportJsonRPC, 0, "HTTP 429: rate limit exceeded"))
 }

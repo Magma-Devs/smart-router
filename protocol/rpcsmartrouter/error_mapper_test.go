@@ -101,11 +101,13 @@ func TestClassifyDirectRPCError_UnknownError(t *testing.T) {
 	assert.Equal(t, common.CategoryExternal, routerErr.Category)
 }
 
-func TestClassifyDirectRPCError_RateLimitByMessage(t *testing.T) {
+// "rate limit" wording is no rate limit on JSON-RPC: a rate limit is an HTTP 429 or a chain's own
+// row (MAG-5487).
+func TestClassifyDirectRPCError_RateLimitWordingIsNoRateLimit(t *testing.T) {
 	err := errors.New("rate limit exceeded for this endpoint")
 	routerErr, _ := classifyDirectRPCError(err, -1, common.TransportJsonRPC)
 	require.NotNil(t, routerErr)
-	assert.Equal(t, common.RouterErrorNodeRateLimited, routerErr)
+	assert.Equal(t, common.RouterErrorUnknown, routerErr)
 }
 
 func TestClassifyDirectRPCError_InternalVsExternal(t *testing.T) {
@@ -121,7 +123,7 @@ func TestClassifyDirectRPCError_InternalVsExternal(t *testing.T) {
 }
 
 func TestClassifyError_MatchOrdering(t *testing.T) {
-	// "rate limit" message should match before HTTP 429 status
+	// No row reads "rate limit" (MAG-5487); the 429 in the text is the status row's
 	err := "rate limit 429"
 	result := common.ClassifyError(nil, common.ChainFamilyEVM, common.TransportJsonRPC, 0, err)
 	assert.Equal(t, common.RouterErrorNodeRateLimited, result)

@@ -144,7 +144,7 @@ func TestNodeErrorProviderIsDemoted_MAG2156(t *testing.T) {
 			why:     "NODE_METHOD_NOT_FOUND is node-capability (MAG-2771): the endpoint answered truthfully about what it serves, so the request goes to another provider and nobody is scored",
 		},
 		{
-			fixture: nodeErrorFixture{name: "rate limited", code: -32000, message: "rate limit exceeded, please slow down"},
+			fixture: nodeErrorFixture{name: "rate limited", code: 429, message: "Too Many Requests"},
 			why:     "NODE_RATE_LIMITED is RETRYABLE, so retryability alone would have scored it — SubCategoryRateLimit is 'healthy but busy, do not mark unhealthy'",
 		},
 	} {
@@ -173,7 +173,7 @@ func TestNodeErrorProviderIsDemoted_MAG2156(t *testing.T) {
 // answers. If these two ever collapse onto the same axis, the gate silently starts scoring
 // rate limits against availability again.
 func TestRateLimitCarveOutIsIndependentOfRetryability_MAG2156(t *testing.T) {
-	retryable := common.ClassifyNodeErrorForRetry(common.ChainFamilyEVM, common.TransportJsonRPC, -32000, "rate limit exceeded, please slow down")
+	retryable := common.ClassifyNodeErrorForRetry(common.ChainFamilyEVM, common.TransportJsonRPC, 429, "Too Many Requests")
 	require.True(t, retryable.IsRateLimited, "NODE_RATE_LIMITED must carry SubCategoryRateLimit")
 	require.False(t, retryable.IsNonRetryable, "NODE_RATE_LIMITED is Retryable=true — the whole reason IsNonRetryable cannot carve it out")
 
