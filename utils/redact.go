@@ -31,7 +31,12 @@ const (
 // (MAG-5698). A value holds no space, because a url holds no raw space; a quote that never closes
 // still ends the url. The quoted form is the first alternative because the match is leftmost-first:
 // the single-character form would take the "=" alone, and the quote would end the match.
-const queryChar = `(?:="[^"\s]*"|[^` + queryStop + `])`
+//
+// A quoted value holds none of ",{}[]" either. A url at the end of a JSON string whose query ends
+// in "=" (an empty value, base64 padding) is followed by the string's closing quote, and the next
+// quote is the next key's: read as a quoted value, the match took ",\"b" with it, and a redacted
+// JSON body lost the key and was no longer JSON.
+const queryChar = `(?:="[^"\s,{}\[\]]*"|[^` + queryStop + `])`
 
 // urlInText matches a scheme-qualified url inside arbitrary text. Anchoring on
 // "://" keeps prose and scheme-less identifiers — a host:port listen address, a
