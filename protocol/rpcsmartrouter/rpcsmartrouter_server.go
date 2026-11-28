@@ -2179,9 +2179,10 @@ func (rpcss *RPCSmartRouterServer) GetChainIdAndApiInterface() (string, string) 
 }
 
 // RecordNodeError is relaycore.NodeErrorRecorder: the relay processor counts each node error it
-// meters into the router's own tally (MAG-4718).
-func (rpcss *RPCSmartRouterServer) RecordNodeError(chainID, apiInterface, providerAddress, method string) {
-	rpcss.relayErrors.RecordNodeError(chainID, apiInterface, providerAddress, method)
+// meters into the router's own tally (MAG-4718), under the request's name as relay_end gives it
+// (relayAnswerMethod, MAG-5422).
+func (rpcss *RPCSmartRouterServer) RecordNodeError(chainID, apiInterface, providerAddress string, protocolMessage chainlib.ProtocolMessage) {
+	rpcss.relayErrors.RecordNodeError(chainID, apiInterface, providerAddress, relayAnswerMethod(protocolMessage, apiInterface))
 }
 
 func (rpcss *RPCSmartRouterServer) ProcessRelaySend(ctx context.Context, protocolMessage chainlib.ProtocolMessage, analytics *metrics.RelayMetrics) (*relaycore.RelayProcessor, error) {
@@ -2420,6 +2421,9 @@ func (rpcss *RPCSmartRouterServer) classifyCachedNodeError(protocolMessage chain
 		return
 	}
 	classifyJSONRPCNodeError(result, rpcss.directRelayChainFamily(), statusCode, result.Reply.Data, errorMessage)
+	// A cached node error is served without the results manager, so its record is built here, from
+	// the same bytes and status the verdict above read (PRD §3.1, MAG-5595).
+	result.ErrorRecords = chainlib.RecordsFromReply(nil, apiCollection.CollectionData.ApiInterface, protocolMessage.GetApi().GetName(), statusCode, result.Reply.Data, errorMessage)
 }
 
 // primaryLookupVerdict classifies the primary tier's answer the way the secondary tier
@@ -5625,23 +5629,25 @@ func (rpcss *RPCSmartRouterServer) cachedReplyDirectives(protocolMessage chainli
 // resolvePinDirectives returns the router-select-provider and router-stickiness directives for one
 // attempt.
 //
-// A strict pin (relaycore.PinnedByDirectives: router-stickiness, or router-select-provider with
-// router-select-provider-strict: true) is honoured on every attempt. Such a request is answered by
-// the pinned upstream or fails with that upstream's error: the retry policy never retries or
-// hedges it (Policy.Decide, "Pinned"), so a second batch cannot normally exist. Should one ever be
-// sent, the pin still applies and selection refuses the already-tried upstream loudly
+// A strict pin (relaycore.PinnedByDirectives: router-stickiness, or router-select-provider without
+// router-select-provider-allow-retry: true) is honoured on every attempt. Such a request is
+// answered by the pinned upstream or fails with that upstream's error: the retry policy never
+// retries or hedges it (Policy.Decide, "Pinned"), so a second batch cannot normally exist. Should
+// one ever be sent, the pin still applies and selection refuses the already-tried upstream loudly
 // (SelectedProviderAlreadyFailedError) rather than quietly serving the request elsewhere.
 //
-// A plain router-select-provider pins the first attempt only, its documented behaviour (MAG-2228):
-// once a batch has been dispatched (firstAttempt false) no pin is read, so a retry or hedge may
-// reach the rest of the pool instead of re-pinning the upstream that just failed. firstAttempt
-// stays true while nothing has been dispatched, so a resend after a selection failure keeps it.
+// A router-select-provider sent with router-select-provider-allow-retry: true pins the first
+// attempt only (the MAG-2228 rule): once a batch has been dispatched (firstAttempt false) no pin
+// is read, so a retry or hedge may reach the rest of the pool instead of re-pinning the upstream
+// that just failed. firstAttempt stays true while nothing has been dispatched, so a resend after a
+// selection failure keeps it.
 //
-// MAG-2228 used to apply the first-attempt rule to router-stickiness too. That made a sticky session
-// straddle two nodes mid-sequence: for the head-then-fetch pattern the header exists for, the
-// exact false gap it was meant to prevent, since the peer is not checked to have reached the
-// block. MAG-2280 made sticky strict, MAG-4123 is the same rule for the router's own consistency
-// gate, and MAG-4826 keeps router-select-provider's failover with strict selection as an opt-in.
+// MAG-2228 used to apply the first-attempt rule to every pin. For router-stickiness that made a
+// session straddle two nodes mid-sequence: for the head-then-fetch pattern the header exists for,
+// the exact false gap it was meant to prevent, since the peer is not checked to have reached the
+// block. MAG-2280 made sticky strict, and MAG-4123 is the same rule for the router's own
+// consistency gate. MAG-5711 made router-select-provider strict too, because a header that names
+// one upstream should not be answered by another, and left the first-attempt rule as an opt-in.
 func resolvePinDirectives(ctx context.Context, directiveHeaders map[string]string, firstAttempt bool) (selectedProvider, stickiness string) {
 	if !firstAttempt && !relaycore.PinnedByDirectives(directiveHeaders) {
 		return "", ""
@@ -6007,9 +6013,10 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 	usedProviders := relayProcessor.GetUsedProviders()
 	directiveHeaders := protocolMessage.GetDirectiveHeaders()
 
-	// A strict pin (router-stickiness, or router-select-provider with router-select-provider-strict: true)
-	// applies to every attempt and is never served by another provider (MAG-2280, MAG-4123); a plain
-	// router-select-provider pins the first attempt only (MAG-4826). See resolvePinDirectives.
+	// A strict pin (router-stickiness, or router-select-provider without
+	// router-select-provider-allow-retry: true) applies to every attempt and is never served by
+	// another provider (MAG-2280, MAG-4123, MAG-5711); with the allow-retry header
+	// router-select-provider pins the first attempt only. See resolvePinDirectives.
 	selectedProvider, stickiness := resolvePinDirectives(ctx, directiveHeaders, usedProviders.BatchNumber() == 0)
 
 	// Dropped here rather than inside routersession so the rest of this call stays coherent: the
@@ -6069,7 +6076,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 	// served prefers the upstream that accepted the write. A preference, not a pin: selection falls
 	// back on its own when that upstream cannot take the read (GetSessionsOptions.PreferredProvider).
 	// The caller's own directives outrank it, cross-validation needs more than one upstream, and
-	// like the directives it holds for the first attempt only.
+	// it holds for the first attempt only.
 	if selectedProvider == "" && stickiness == "" && selection != relaycore.CrossValidation && usedProviders.BatchNumber() == 0 {
 		if pin := rpcss.readYourWrites.pinFor(protocolMessage); pin != "" {
 			sessionOpts.PreferredProvider = pin
@@ -6389,7 +6396,8 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		silentThroughWindow := relayTimeout > 0 && relayLatency >= relayTimeout
 		if !routerHealthCheck && chainlib.GetStateful(chainMessage) != common.CONSISTENCY_SELECT_ALL_PROVIDERS &&
 			isProtocolFailure(rpcss.directRelayTransport(directConnection), err, isClientCancel, budgetExpired, silentThroughWindow) {
-			rpcss.relayErrors.RecordProtocolError(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointName, chainMessage.GetApi().Name)
+			rpcss.relayErrors.RecordProtocolError(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointName,
+				relayEndMethod(chainMessage.GetApi().Name, requestNamedByURL(rpcss.listenEndpoint.ApiInterface, originalRequestData)))
 		}
 
 		// Apply health tracking based on error classification.
@@ -6831,7 +6839,7 @@ func (rpcss *RPCSmartRouterServer) watchCrossValidationStragglers(ctx context.Co
 			ChainID:         chainId,
 			ApiInterface:    apiInterface,
 			RequestID:       crossValidationRequestID(ctx),
-			Method:          apiName,
+			Method:          relayEndMethod(apiName, relayEndNamedByURL(protocolMessage, apiInterface)),
 			ProviderAddress: straggler.ProviderAddress,
 			ProviderGroup:   group,
 			Outcome:         straggler.Outcome,
@@ -7008,7 +7016,7 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 					ChainID:         chainId,
 					ApiInterface:    apiInterface,
 					RequestID:       requestID,
-					Method:          apiName,
+					Method:          relayEndMethod(apiName, relayEndNamedByURL(protocolMessage, apiInterface)),
 					ProviderAddress: outlier.ProviderInfo.ProviderAddress,
 					ProviderGroup:   group,
 					// A reply-time content outlier is by construction a dissent: crossValidationSuccessOutliers

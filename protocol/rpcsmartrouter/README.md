@@ -336,7 +336,7 @@ One row per recorded comparison outcome, oldest first:
 | `Source` | `reply-time` (seen before the reply → in `disagreeing-providers`) or `straggler` (resolved after it → was in `pending-providers`) |
 | `ChainID`, `ApiInterface` | the row's own chain identity, as on every other `/debug` row |
 | `RequestID` | the `Router-Guid` response header value — **not** `/debug/logs`' `request_id`, which is the caller's `X-Request-Id` |
-| `Method`, `ProviderAddress`, `ProviderGroup`, `Finality` | who dissented, on what, in which group, at which finality |
+| `Method`, `ProviderAddress`, `ProviderGroup`, `Finality` | who dissented, on what, in which group, at which finality. `Method` is named as `relay_end` names it: without its leading slash, capped at 256 characters, and `Default-REDACTED` for an unlisted api the request named by URL |
 | `Outcome` | `disagreed` at reply time; any straggler outcome on the async path |
 | `ConsensusHash`, `OutlierHash` | full 32-byte hex; the log's short form is a prefix. `OutlierHash` is the provider's own hash — equal to `ConsensusHash` on an agreed straggler, and `""` when nothing was hashed (`node-error` / `protocol-error` / `not-received`) |
 | `MismatchCounted` | whether **this** row is the one that incremented `smartrouter_cross_validation_mismatch_total`, making the counter's once-per-distinct-group dedup visible rather than implicit |
