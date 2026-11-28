@@ -427,3 +427,20 @@ func TestSendRequest_DescriptorLookupThatCannotReachTheNodeCarriesNoAddress(t *t
 		})
 	}
 }
+
+// A pooled client that cannot be checked out: the error, which relay_end records, carries the
+// node's url as [address]. The line logged at the checkout names the node.
+func TestSendRequest_FailedCheckoutCarriesNoAddress(t *testing.T) {
+	for _, nodeURL := range []string{"grpc://10.0.0.7:9090", "grpc://node.example.com:9090"} {
+		t.Run(nodeURL, func(t *testing.T) {
+			g := newInitializedGRPCConn(newFakeGRPCConnector())
+			g.nodeUrl.Url = nodeURL
+			_, err := g.SendRequest(context.Background(), []byte{0x08, 0x01}, map[string]string{GRPCMethodHeader: "test.v1.Node/Call"})
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "gRPC get connection failed")
+			require.NotRegexp(t, addressInText, err.Error(), "relay_end and the logs get the node's address as [address]")
+			require.NotContains(t, err.Error(), "node.example.com")
+			require.Contains(t, err.Error(), "[address]")
+		})
+	}
+}
